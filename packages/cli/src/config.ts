@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 import { BetterDBConfig, DEFAULT_CONFIG } from './types';
@@ -33,19 +33,56 @@ export function configExists(): boolean {
 }
 
 /**
- * Ensure all required directories exist
+ * Best-effort owner-only permissions. The config holds the database password
+ * (plaintext unless ENCRYPTION_KEY is set) and the license key. POSIX modes
+ * don't apply on Windows, and a chmod failure must never stop the CLI.
+ */
+function restrictPermissions(path: string, mode: number): void {
+  if (process.platform === 'win32') {
+    return;
+  }
+  try {
+    chmodSync(path, mode);
+  } catch {
+    // ignore: e.g. a directory owned by another user
+  }
+}
+
+/**
+ * Write `data` so it is never readable by other users, even for an instant:
+ * write a fresh 0600 temp file in the same directory, then rename it over the
+ * target. rename is atomic on the same filesystem and replaces the old file
+ * (and its old 0644 mode). Also avoids a half-written config on crash.
+ */
+function writeFileOwnerOnly(path: string, data: string): void {
+  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    writeFileSync(tmp, data, { mode: 0o600, flag: 'wx' });
+    restrictPermissions(tmp, 0o600); // umask can't widen it, but be explicit
+    renameSync(tmp, path);
+  } catch (err) {
+    try { unlinkSync(tmp); } catch { /* temp may not exist */ }
+    throw err;
+  }
+}
+
+/**
+ * Ensure all required directories exist, readable only by the current user
  */
 export function ensureDirectories(): void {
   const configDir = getConfigDir();
   const dataDir = getDataDir();
 
   if (!existsSync(configDir)) {
-    mkdirSync(configDir, { recursive: true });
+    mkdirSync(configDir, { recursive: true, mode: 0o700 });
   }
+  // mkdir's mode is ignored for existing dirs, so tighten them on every run
+  restrictPermissions(configDir, 0o700);
 
   if (!existsSync(dataDir)) {
-    mkdirSync(dataDir, { recursive: true });
+    mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   }
+  restrictPermissions(dataDir, 0o700);
 }
 
 /**
@@ -57,6 +94,10 @@ export function loadConfig(): BetterDBConfig {
   if (!existsSync(configPath)) {
     return DEFAULT_CONFIG;
   }
+  // Tighten installs written by older versions, which used the default modes
+  restrictPermissions(getConfigDir(), 0o700);
+  restrictPermissions(getDataDir(), 0o700);
+  restrictPermissions(configPath, 0o600);
 
   let parsed: Partial<BetterDBConfig>;
   try {
@@ -88,7 +129,7 @@ export function saveConfig(config: BetterDBConfig): void {
     ...config,
     security: { ...config.security, encryptionKey: undefined },
   });
-  writeFileSync(configPath, JSON.stringify(configToSave, null, 2));
+  writeFileOwnerOnly(configPath, JSON.stringify(configToSave, null, 2));
 }
 
 /**

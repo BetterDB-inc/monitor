@@ -1,15 +1,20 @@
 import Valkey from 'iovalkey';
+import { nodeClientAuthOptions } from './execution/client-factory';
+import type { DatabaseAuthMode, TlsConfig } from '@betterdb/shared';
 import {
   probeSourceFunctions,
   aggregateFunctionPresence,
   FunctionPresence,
   FunctionProbeClient,
 } from './fork-compat';
+import { connectWithin, NODE_CONNECT_OPTIONS, NODE_CONNECT_TIMEOUT_MS } from './node-connect';
 
 /** The bits of a cluster node this module needs (subset of ClusterNode). */
 interface ClusterNodeLike {
   flags: string[];
+  slots: number[][];
   address?: string; // host:port@bus
+  hostname?: string; // announced hostname (cluster-announce-hostname), when any
 }
 
 /** The bits of a source adapter this module needs. */
@@ -23,6 +28,15 @@ interface ClusterProbeConfig {
   username?: string;
   password?: string;
   tls?: boolean;
+  tlsConfig?: TlsConfig;
+  authMode?: DatabaseAuthMode;
+}
+
+const UNREACHABLE_FLAGS = ['fail', 'noaddr', 'handshake'];
+
+export function isScannableMaster(node: { flags: string[]; slots: number[][] }): boolean {
+  if (node.slots.length > 0) return true;
+  return !node.flags.some((flag) => UNREACHABLE_FLAGS.includes(flag));
 }
 
 /** Parse a cluster-bus address ("host:port@bus", IPv6-aware) into host/port. */
@@ -56,7 +70,7 @@ export async function probeSourceFunctionsClusterAware(
   let masters: ClusterNodeLike[];
   try {
     const nodes = await adapter.getClusterNodes();
-    masters = nodes.filter((n) => n.flags.includes('master'));
+    masters = nodes.filter((n) => n.flags.includes('master') && isScannableMaster(n));
   } catch {
     return 'unknown';
   }
@@ -77,17 +91,13 @@ export async function probeSourceFunctionsClusterAware(
         client = new Valkey({
           host,
           port,
-          username: config.username || undefined,
-          password: config.password || undefined,
-          tls: config.tls ? {} : undefined,
-          lazyConnect: true,
-          // A dead master must not spawn an endless 2s reconnect loop for the life of
-          // the process. With no retry, a failed connect() rejects immediately and the
-          // client is disposable.
-          retryStrategy: () => null,
+          // CLUSTER NODES reports IPs; verify against the hostname the node
+          // announces so a DNS-only certificate still validates.
+          ...nodeClientAuthOptions(config, host, master.hostname),
+          ...NODE_CONNECT_OPTIONS,
           maxRetriesPerRequest: 1,
         });
-        await client.connect();
+        await connectWithin(client, NODE_CONNECT_TIMEOUT_MS);
         return await probeSourceFunctions(client);
       } catch {
         return 'unknown';

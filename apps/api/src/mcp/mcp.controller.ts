@@ -337,7 +337,12 @@ export class McpController {
           ? (orderBy as 'key-count' | 'cpu-usec')
           : 'key-count';
       const parsedLimit = safeLimit(limit, 20);
-      return await this.metricsService.getClusterSlotStats(parsedOrderBy, parsedLimit, id);
+      const { stats, failedNodes } = await this.metricsService.getClusterSlotStatsResult(
+        parsedOrderBy,
+        parsedLimit,
+        id,
+      );
+      return { slots: stats, failedNodes };
     } catch (error) {
       const msg = error instanceof Error ? error.message : '';
       if (msg.includes('not supported')) {

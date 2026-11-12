@@ -33,6 +33,7 @@ def _make_cache(
     embedding_cache_enabled: bool = False,
     use_default_cost_table: bool = True,
     cost_table: dict | None = None,
+    name: str = "test",
 ) -> tuple[SemanticCache, MagicMock]:
     client = make_client(search_result=search_result)
     embed_fn = AsyncMock(return_value=[0.5, 0.5])
@@ -40,7 +41,7 @@ def _make_cache(
     opts = SemanticCacheOptions(
         client=client,
         embed_fn=embed_fn,
-        name="test",
+        name=name,
         default_threshold=default_threshold,
         default_ttl=default_ttl,
         uncertainty_band=uncertainty_band,
@@ -315,6 +316,45 @@ async def test_flush_drops_index_and_deletes_keys():
         if c.args and c.args[0] == "FT.DROPINDEX"
     ]
     assert len(drop_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_flush_escapes_glob_chars_in_name():
+    """A cache named "app?" must not delete keys that belong to cache "appX"."""
+    import fnmatch
+
+    cache, client = _make_cache(name="app?")
+    keys = ["app?:entry:1", "app?:embed:m:1", "appX:entry:1", "appX:embed:m:1"]
+    patterns: list[str] = []
+    deleted: list[str] = []
+
+    def _glob(pattern: str) -> str:
+        # Valkey honours backslash escapes; fnmatch uses [?]-style escapes instead.
+        out, i = "", 0
+        while i < len(pattern):
+            if pattern[i] == "\\" and i + 1 < len(pattern):
+                out += "[" + pattern[i + 1] + "]"
+                i += 2
+            else:
+                out += pattern[i]
+                i += 1
+        return out
+
+    async def _scan(cursor, match=None, count=None, **_kw):
+        patterns.append(match)
+        return 0, [k for k in keys if fnmatch.fnmatchcase(k, _glob(match))]
+
+    pipe = MagicMock()
+    pipe.delete = MagicMock(side_effect=deleted.append)
+    pipe.execute = AsyncMock(return_value=[])
+    client.scan = AsyncMock(side_effect=_scan)
+    client.pipeline = MagicMock(return_value=pipe)
+
+    await cache.initialize()
+    await cache.flush()
+
+    assert patterns == ["app\\?:entry:*", "app\\?:embed:*"]
+    assert sorted(deleted) == ["app?:embed:m:1", "app?:entry:1"]
 
 
 # ── check_batch TTL refresh ───────────────────────────────────────────────────

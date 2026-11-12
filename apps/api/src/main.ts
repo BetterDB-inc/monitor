@@ -9,7 +9,7 @@ import { readFileSync } from 'fs';
 import fastifyStatic from '@fastify/static';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { validateEnv } from './config/env.schema';
-import { resolveTrustProxy } from './config/trust-proxy';
+import { fastifyAdapterOptions } from './config/fastify-options';
 import { categorizeError } from './common/utils/error-categorizer';
 import { CliGateway } from './cli/cli.gateway';
 import { TailGateway } from './monitor/tail.gateway';
@@ -17,6 +17,7 @@ import { createUpgradeRouter } from './common/websocket/upgrade-router';
 import { resolveWorkspaceConfig } from './auth/workspace-config';
 import { resolveAgentGateway } from './agent/resolve-agent-gateway';
 import { registerOtlpBodyParsing } from './ai-observability/otlp-body-parsing';
+import { SLOT_STATS_FAILED_NODES_HEADER } from './metrics/metrics.service';
 
 async function bootstrap(): Promise<void> {
   // Validate environment variables before anything else
@@ -31,7 +32,7 @@ async function bootstrap(): Promise<void> {
 
   const isProduction = process.env.NODE_ENV === 'production';
 
-  const fastifyAdapter = new FastifyAdapter({ trustProxy: resolveTrustProxy(process.env) });
+  const fastifyAdapter = new FastifyAdapter(fastifyAdapterOptions(process.env));
 
   // Compute publicPath once to avoid divergence between SPA fallback and static file serving
   const publicPath = isProduction
@@ -178,6 +179,7 @@ async function bootstrap(): Promise<void> {
         callback(new Error('Not allowed by CORS'), false);
       },
       methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+      exposedHeaders: [SLOT_STATS_FAILED_NODES_HEADER],
       credentials: true,
     });
   }

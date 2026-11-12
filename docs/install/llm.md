@@ -14,7 +14,7 @@ plain language.
 
 ```bash
 claude mcp add betterdb -- \
-  npx @betterdb/mcp betterdb-mcp \
+  npx -y @betterdb/mcp@1.6.0 \
   --autostart --persist
 ```
 
@@ -24,7 +24,7 @@ ask Claude about your database health, slow queries, or memory usage.
 ## Any MCP client (stdio)
 
 ```bash
-npx @betterdb/mcp
+npx -y @betterdb/mcp@1.6.0
 ```
 
 Create a token under **Settings → MCP Tokens** in the dashboard and pass it as

@@ -2,10 +2,20 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createRequire } from 'node:module';
 import { z } from 'zod';
 import { TTL_SECONDS_MAX, TTL_SECONDS_MIN } from './constants.js';
-import { initTelemetry, trackToolCall, stopTelemetry } from './telemetry.js';
+import {
+  initTelemetry,
+  trackToolCall,
+  stopTelemetry,
+  flushTelemetry,
+  dropTelemetry,
+  type TelemetryEvent,
+} from './telemetry.js';
+import type { MonitorTarget } from './monitor-target.js';
+import { MonitorSession, isSameMonitor } from './session.js';
 
 const require = createRequire(import.meta.url);
 const packageJson = require('../package.json') as { version: string };
@@ -16,6 +26,7 @@ const args = process.argv.slice(2);
 const AUTOSTART = args.includes('--autostart');
 const PERSIST = args.includes('--persist');
 const STOP = args.includes('--stop');
+const MONITOR_TOOLS = !args.includes('--no-monitor-tools');
 
 function getArgValue(flag: string, fallback: string): string {
   const i = args.indexOf(flag);
@@ -47,26 +58,30 @@ if (STOP) {
   process.exit(0);
 }
 
-let BETTERDB_URL = (process.env.BETTERDB_URL || 'http://localhost:3001').replace(/\/+$/, '');
-const BETTERDB_TOKEN = process.env.BETTERDB_TOKEN;
-const BETTERDB_INSTANCE_ID = process.env.BETTERDB_INSTANCE_ID || null;
-
-let activeInstanceId: string | null = BETTERDB_INSTANCE_ID;
-
-// Auto-detect whether the API lives at /api/* (production) or /* (local dev).
-// Probe once on first request, then cache the result.
-let detectedPrefix: string | null = null;
 const API_PREFIXES = ['/api', ''];
+const session = new MonitorSession(process.env);
 
-async function rawFetch(prefix: string, path: string): Promise<Response> {
-  const url = `${BETTERDB_URL}${prefix}${path}`;
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
-  if (BETTERDB_TOKEN) {
-    headers['Authorization'] = `Bearer ${BETTERDB_TOKEN}`;
+function authHeaders(to: MonitorTarget, json: boolean): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (json) {
+    headers['Content-Type'] = 'application/json';
   }
-  return fetch(url, { headers, signal: AbortSignal.timeout(30_000) });
+  if (to.token) {
+    headers['Authorization'] = `Bearer ${to.token}`;
+  }
+  return headers;
+}
+
+async function rawFetch(
+  to: MonitorTarget,
+  prefix: string,
+  path: string,
+  timeoutMs: number,
+): Promise<Response> {
+  return fetch(`${to.url}${prefix}${path}`, {
+    headers: authHeaders(to, true),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
 }
 
 function isJsonResponse(res: Response): boolean {
@@ -74,18 +89,29 @@ function isJsonResponse(res: Response): boolean {
   return ct.includes('application/json');
 }
 
-async function detectPrefix(): Promise<string> {
+const PREFIX_RETRY_MS = 10_000;
+const prefixRetryAt = new WeakMap<MonitorTarget, number>();
+
+async function detectPrefix(to: MonitorTarget, timeoutMs: number): Promise<string> {
+  const retryAt = prefixRetryAt.get(to) ?? 0;
+  if (retryAt > Date.now()) {
+    const seconds = Math.ceil((retryAt - Date.now()) / 1000);
+    throw new Error(`Cannot reach BetterDB at ${to.url}; retrying in ${seconds}s`);
+  }
   for (const prefix of API_PREFIXES) {
     try {
-      const res = await rawFetch(prefix, '/mcp/instances');
+      const res = await rawFetch(to, prefix, '/mcp/instances', timeoutMs);
       if (res.ok && isJsonResponse(res)) {
+        to.prefix = prefix;
         return prefix;
       }
-    } catch {
-      // network error — try next prefix
+    } catch (err) {
+      prefixRetryAt.set(to, Date.now() + PREFIX_RETRY_MS);
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new Error(`Cannot reach BetterDB at ${to.url}: ${reason}`);
     }
   }
-  // Fall back to /api if detection fails entirely
+  to.prefix = '/api';
   return '/api';
 }
 
@@ -98,23 +124,29 @@ class ApiHttpError extends Error {
   }
 }
 
+function sendTelemetry(to: MonitorTarget, events: TelemetryEvent[]): Promise<unknown> {
+  return requestTo(to, 'POST', '/mcp/telemetry', { events }, 5_000);
+}
+
+const callTargets = new AsyncLocalStorage<MonitorTarget>();
+
 async function apiRequest(method: string, path: string, body?: unknown): Promise<unknown> {
-  if (detectedPrefix === null) {
-    detectedPrefix = await detectPrefix();
-  }
-  const url = `${BETTERDB_URL}${detectedPrefix}${path}`;
-  const headers: Record<string, string> = {};
-  if (body !== undefined) {
-    headers['Content-Type'] = 'application/json';
-  }
-  if (BETTERDB_TOKEN) {
-    headers['Authorization'] = `Bearer ${BETTERDB_TOKEN}`;
-  }
-  const res = await fetch(url, {
+  return requestTo(callTargets.getStore() ?? session.target, method, path, body);
+}
+
+async function requestTo(
+  to: MonitorTarget,
+  method: string,
+  path: string,
+  body?: unknown,
+  timeoutMs = 30_000,
+): Promise<unknown> {
+  const prefix = to.prefix ?? (await detectPrefix(to, timeoutMs));
+  const res = await fetch(`${to.url}${prefix}${path}`, {
     method,
-    headers,
+    headers: authHeaders(to, body !== undefined),
     body: body !== undefined ? JSON.stringify(body) : undefined,
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
 
   if (res.status === 402) {
@@ -183,10 +215,37 @@ function unavailableResult(
   };
 }
 
+function instanceNotFoundResult(instanceId: string): {
+  content: Array<{ type: 'text'; text: string }>;
+  isError: true;
+} {
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: `Instance '${instanceId}' not found. Use list_instances to see available instances.`,
+      },
+    ],
+    isError: true,
+  };
+}
+
+async function unavailableOrNotFoundResult(
+  instanceId: string,
+  feature: string,
+): Promise<ReturnType<typeof unavailableResult> | ReturnType<typeof instanceNotFoundResult>> {
+  const { instances } = (await apiFetch('/mcp/instances')) as {
+    instances: Array<{ id: string }>;
+  };
+  return instances.some((inst) => inst.id === instanceId)
+    ? unavailableResult(feature)
+    : instanceNotFoundResult(instanceId);
+}
+
 const INSTANCE_ID_RE = /^[a-zA-Z0-9_-]+$/;
 
 function resolveInstanceId(overrideId?: string): string {
-  const id = overrideId || activeInstanceId;
+  const id = overrideId || session.instanceId;
   if (!id) {
     throw new Error('No instance selected. Call list_instances then select_instance first.');
   }
@@ -198,12 +257,17 @@ function resolveInstanceId(overrideId?: string): string {
 
 type ToolResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean };
 
-async function withTelemetry(toolName: string, fn: () => Promise<ToolResult>): Promise<ToolResult> {
+async function withTelemetry(
+  toolName: string,
+  fn: () => Promise<ToolResult>,
+  credit: 'call' | 'switched' = 'call',
+): Promise<ToolResult> {
+  const callTarget = session.target;
   const start = Date.now();
   let success = true;
   let error: string | undefined;
   try {
-    const result = await fn();
+    const result = await callTargets.run(callTarget, fn);
     if (result.isError) {
       success = false;
       error = result.content[0]?.text?.slice(0, 200);
@@ -214,7 +278,8 @@ async function withTelemetry(toolName: string, fn: () => Promise<ToolResult>): P
     error = (err instanceof Error ? err.message : String(err)).slice(0, 200);
     throw err;
   } finally {
-    trackToolCall({ toolName, success, durationMs: Date.now() - start, error });
+    const creditTarget = credit === 'switched' ? session.target : callTarget;
+    trackToolCall(creditTarget, { toolName, success, durationMs: Date.now() - start, error });
   }
 }
 
@@ -229,6 +294,7 @@ server.tool(
   {},
   async () =>
     withTelemetry('list_instances', async () => {
+      const selectedId = session.instanceId;
       const data = (await apiFetch('/mcp/instances')) as {
         instances: Array<{
           id: string;
@@ -239,7 +305,7 @@ server.tool(
         }>;
       };
       const lines = data.instances.map((inst) => {
-        const active = inst.id === activeInstanceId ? ' [ACTIVE]' : '';
+        const active = inst.id === selectedId ? ' [ACTIVE]' : '';
         const status = inst.isConnected ? 'connected' : 'disconnected';
         return `${inst.id} - ${inst.name} (${status})${inst.isDefault ? ' [default]' : ''}${active}`;
       });
@@ -265,17 +331,20 @@ server.tool(
       };
       const found = data.instances.find((inst) => inst.id === instanceId);
       if (!found) {
+        return instanceNotFoundResult(instanceId);
+      }
+      if (session.target !== callTargets.getStore()) {
         return {
           content: [
             {
               type: 'text' as const,
-              text: `Instance '${instanceId}' not found. Use list_instances to see available instances.`,
+              text: 'The monitor changed while selecting the instance. Call list_instances again.',
             },
           ],
           isError: true,
         };
       }
-      activeInstanceId = instanceId;
+      session.instanceId = instanceId;
       return {
         content: [
           { type: 'text' as const, text: `Selected instance: ${found.name} (${instanceId})` },
@@ -662,6 +731,33 @@ server.tool(
 );
 
 server.tool(
+  'get_retry_amplification',
+  'Get the live retry-amplification detector state: whether its baseline is armed, whether a candidate or amplifying episode is open (load per client rising with latency, errors or churn while the client count stays flat), the last episode and its trigger, and the clients whose command rate or reconnects grew most. On a cluster or Sentinel group, `nodes` holds the same state for each other primary it reads. Use when an incident looks like a self-sustaining retry storm rather than real traffic growth.',
+  {
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ instanceId }) =>
+    withTelemetry('get_retry_amplification', async () => {
+      const id = resolveInstanceId(instanceId);
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/anomalies/retry-amplification`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return unavailableOrNotFoundResult(id, 'Anomaly detection');
+        }
+        throw err;
+      }
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
+);
+
+server.tool(
   'get_client_activity',
   'Get time-bucketed client activity from persisted snapshots. Shows connection counts, command distribution, and buffer usage over time. Use startTime/endTime to focus on a specific incident window.',
   {
@@ -713,7 +809,7 @@ server.tool(
 
 server.tool(
   'get_cluster_nodes',
-  'Discover all nodes in the Valkey cluster — role (master/replica), address, health status, and slot ranges. Returns an error message if this instance is not running in cluster mode.',
+  'Discover all nodes in the Valkey cluster — role (master/replica), address, health status, and slot ranges. On Valkey 9.1+ each node also carries shardId, and availabilityZone when the node has one configured. On older versions availabilityZone comes from the zone map set on the connection, if any. Returns an error message if this instance is not running in cluster mode.',
   { instanceId: z.string().optional().describe('Optional instance ID override') },
   async ({ instanceId }) =>
     withTelemetry('get_cluster_nodes', async () => {
@@ -759,7 +855,7 @@ server.tool(
 
 server.tool(
   'get_slot_stats',
-  "Get per-slot key counts and CPU usage (Valkey 8.0+ only). Use orderBy='cpu-usec' to find hot slots, or 'key-count' to find the most populated slots. Returns an error message if not supported.",
+  "Get per-slot key counts and CPU usage (Valkey 8.0+ only). Use orderBy='cpu-usec' to find hot slots, or 'key-count' to find the most populated slots. Returns { slots, failedNodes }; failedNodes lists cluster primaries that did not answer, whose slots are missing. Returns an error message if not supported.",
   {
     orderBy: z
       .enum(['key-count', 'cpu-usec'])
@@ -829,47 +925,50 @@ server.tool(
 
 // --- Monitor lifecycle tools ---
 
-server.tool(
-  'start_monitor',
-  'Start the BetterDB monitor as a persistent background process. If already running, returns the existing URL. The monitor persists across MCP sessions and must be stopped explicitly with stop_monitor.',
-  {
-    port: z
-      .number()
-      .int()
-      .min(1)
-      .max(65535)
-      .default(3001)
-      .describe('Port for the monitor API (default 3001)'),
-    storage: z
-      .enum(['sqlite', 'memory'])
-      .default('sqlite')
-      .describe('Storage backend (default sqlite)'),
-  },
-  async ({ port, storage }) =>
-    withTelemetry('start_monitor', async () => {
-      try {
-        const { startMonitor } = await import('./autostart.js');
-        const result = await startMonitor({ persist: true, port, storage });
-        BETTERDB_URL = result.url;
-        process.env.BETTERDB_URL = result.url;
-        detectedPrefix = null;
-        const status = result.alreadyRunning ? 'Monitor already running' : 'Monitor started';
-        return {
-          content: [{ type: 'text' as const, text: `${status} at ${result.url}` }],
-        };
-      } catch (err) {
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: `Failed to start monitor: ${err instanceof Error ? err.message : String(err)}`,
-            },
-          ],
-          isError: true,
-        };
-      }
-    }),
-);
+if (MONITOR_TOOLS) {
+  server.tool(
+    'start_monitor',
+    'Start the BetterDB monitor as a persistent background process. If already running, returns the existing URL. The monitor persists across MCP sessions and must be stopped explicitly with stop_monitor.',
+    {
+      port: z
+        .number()
+        .int()
+        .min(1)
+        .max(65535)
+        .default(3001)
+        .describe('Port for the monitor API (default 3001)'),
+      storage: z
+        .enum(['sqlite', 'memory'])
+        .default('sqlite')
+        .describe('Storage backend (default sqlite)'),
+    },
+    async ({ port, storage }) =>
+      withTelemetry('start_monitor', async () => {
+        try {
+          const { startMonitor } = await import('./autostart.js');
+          const result = await startMonitor({ persist: true, port, storage });
+          session.switchTo(result.url, true);
+          const status = result.alreadyRunning ? 'Monitor already running' : 'Monitor started';
+          const note = result.owned
+            ? ''
+            : ' It was not started by this server, so stop_monitor will not stop it.';
+          return {
+            content: [{ type: 'text' as const, text: `${status} at ${result.url}.${note}` }],
+          };
+        } catch (err) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: `Failed to start monitor: ${err instanceof Error ? err.message : String(err)}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+      }, 'switched'),
+  );
+}
 
 const CACHE_NAME_DESC =
   "Cache name as registered in __betterdb:caches (e.g. 'betterdb_scache_prod').";
@@ -1565,31 +1664,42 @@ function formatProposalText(data: {
   };
 }
 
-server.tool(
-  'stop_monitor',
-  'Stop a persistent BetterDB monitor process that was previously started with start_monitor or --autostart --persist.',
-  {},
-  async () =>
-    withTelemetry('stop_monitor', async () => {
-      try {
-        const { stopMonitor } = await import('./autostart.js');
-        const result = await stopMonitor();
-        return {
-          content: [{ type: 'text' as const, text: result.message }],
-        };
-      } catch (err) {
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: `Failed to stop monitor: ${err instanceof Error ? err.message : String(err)}`,
-            },
-          ],
-          isError: true,
-        };
-      }
-    }),
-);
+if (MONITOR_TOOLS) {
+  server.tool(
+    'stop_monitor',
+    'Stop a persistent BetterDB monitor process that was previously started with start_monitor or --autostart --persist.',
+    {},
+    async () =>
+      withTelemetry('stop_monitor', async () => {
+        try {
+          const { stopMonitor } = await import('./autostart.js');
+          await flushTelemetry(session.target);
+          const result = await stopMonitor();
+          let text = result.message;
+          const stopped = result.identified ? session.restoreAfterStop() : null;
+          if (stopped) {
+            dropTelemetry(stopped);
+            text += ` Switched back to ${session.target.url}.`;
+          } else if (result.identified && result.url && isSameMonitor(session.target.url, result.url)) {
+            text += ` This session still points at ${session.target.url}, which is no longer running. Call start_monitor before using other tools.`;
+          }
+          return {
+            content: [{ type: 'text' as const, text }],
+          };
+        } catch (err) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: `Failed to stop monitor: ${err instanceof Error ? err.message : String(err)}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+      }, 'switched'),
+  );
+}
 
 // --- Memory tools ---
 server.tool(
@@ -1989,6 +2099,65 @@ server.tool(
 );
 
 server.tool(
+  'get_incident_timeline',
+  'Get anomaly incidents as ordered timelines. Anomalies on one instance or topology that follow each other closely are grouped into one incident, in the order they happened, with any matched multi-step sequence pattern and a recovery status (active, recovering, recovered, degraded when signals stay open long after the incident went quiet, or unknown when recovery can no longer be measured, with those metrics in recovery.unknownSignals). A sequence match can carry `values`: the settings its recommendations name, each with the current value and a target computed from the instance (setting, current, target, unit, and nodeAddr when the value is for one node). A hard output-buffer target includes the soft limit when that buffer is already past it. Use to answer "what happened, in what order, and has it recovered".',
+  {
+    limit: z.number().optional().describe('Max incidents to return, newest first (default 20)'),
+    startTime: z.number().optional().describe('Start time (Unix timestamp ms, default 24h ago)'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ limit, startTime, instanceId }) =>
+    withTelemetry('get_incident_timeline', async () => {
+      const id = resolveInstanceId(instanceId);
+      const qs = buildQuery({ limit, startTime });
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/history/incidents${qs}`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return unavailableResult('Anomaly detection');
+        }
+        throw err;
+      }
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    }),
+);
+
+server.tool(
+  'get_replication_divergence',
+  'Get replication divergence for a primary: the per-replica offset gap series (bytes behind as the primary sees it, write rate, seconds behind, `replicaGapBytes` as the replica reports it with `replicaView` saying whether it could be read (`ok`, `unreachable`, `replid_mismatch`, `not_replica`, or null when it was not sampled), live alert level, `behind` when it lags under the alert thresholds or has an event left open by a restart, or `unobserved` when the replica is not connected) and the divergence events from the anomaly store; `eventsUnavailable: true` means the events could not be read, not that there are none. Use when a replica is falling behind under write load, to see whether the gap is growing, at a ceiling, or not closing after the burst, and whether the replica agrees with the primary on how far behind it is. Companion to get_anomalies.',
+  {
+    limit: z.number().optional().describe('Max divergence events to return (default 100)'),
+    startTime: z
+      .number()
+      .optional()
+      .describe('Start time (Unix timestamp ms; default 1h ago for the gap series, 24h ago for events)'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ limit, startTime, instanceId }) =>
+    withTelemetry('get_replication_divergence', async () => {
+      const id = resolveInstanceId(instanceId);
+      const qs = buildQuery({ limit, startTime });
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/history/replication-divergence${qs}`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return unavailableOrNotFoundResult(id, 'Replication divergence detection');
+        }
+        throw err;
+      }
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    }),
+);
+
+server.tool(
   'get_largest_keys',
   'Get the largest keys from key analytics snapshots, ranked by measured memory usage. Coverage note: snapshots track the biggest collections by element count, so a memory-heavy key with few elements may not be tracked. Companion to get_hot_keys, which ranks by access frequency. Use to find memory hogs, bloated hashes/sets, or candidates for TTL/eviction. Requires BetterDB Pro (keyAnalytics).',
   {
@@ -2059,21 +2228,6 @@ server.tool(
 );
 
 try {
-  if (AUTOSTART) {
-    const { startMonitor } = await import('./autostart.js');
-    const result = await startMonitor({
-      persist: PERSIST,
-      port: MONITOR_PORT,
-      storage: MONITOR_STORAGE,
-    });
-    // Always update URL/prefix to target the monitor (whether freshly started or already running)
-    BETTERDB_URL = result.url;
-    process.env.BETTERDB_URL = result.url;
-    detectedPrefix = null;
-  }
-
-  initTelemetry(apiRequest);
-
   let shuttingDown = false;
   const shutdown = async () => {
     if (shuttingDown) return;
@@ -2084,6 +2238,18 @@ try {
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
   process.stdin.on('end', shutdown);
+
+  if (AUTOSTART) {
+    const { startMonitor } = await import('./autostart.js');
+    const result = await startMonitor({
+      persist: PERSIST,
+      port: MONITOR_PORT,
+      storage: MONITOR_STORAGE,
+    });
+    session.switchTo(result.url, true);
+  }
+
+  initTelemetry(sendTelemetry);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

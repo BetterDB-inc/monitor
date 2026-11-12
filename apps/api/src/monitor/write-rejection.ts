@@ -1,3 +1,4 @@
+import { isReadOnlyReplicaRole } from '../database/parsers/replication-info.parser';
 import type { ErrorStatsInfo, PersistenceInfo } from '../common/types/metrics.types';
 
 /**
@@ -111,7 +112,10 @@ function countOf(errorstats: ErrorStatsInfo, code: WriteRejectionCode): number |
  * status visible (often a host that hides INFO persistence), so the quiet
  * window is the only evidence recovery can ever get.
  */
-const PERSISTENCE_CAUSES: readonly WriteRejectionCause[] = ['rdb_bgsave_failed', 'aof_write_failed'];
+const PERSISTENCE_CAUSES: readonly WriteRejectionCause[] = [
+  'rdb_bgsave_failed',
+  'aof_write_failed',
+];
 
 /**
  * Persistence gate for recovery, applied only to edges that include a
@@ -164,7 +168,7 @@ export function evaluateWriteRejection(
   const { persistence, errorstats, now } = input;
   const causes = new Set<WriteRejectionCause>();
   const rejectedSinceLastPoll: Partial<Record<WriteRejectionCode, number>> = {};
-  const isReplica = input.role === 'slave' || input.role === 'replica';
+  const isReplica = isReadOnlyReplicaRole(input.role);
 
   if (persistence?.rdb_last_bgsave_status === 'err' && input.rdbStopsWrites !== false) {
     causes.add('rdb_bgsave_failed');

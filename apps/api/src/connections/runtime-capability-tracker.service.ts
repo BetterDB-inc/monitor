@@ -44,7 +44,7 @@ const BLOCKED_COMMAND_PATTERNS = [
   /cluster support disabled/i,
 ];
 
-function isBlockedCommandError(error: Error | string): boolean {
+export function isBlockedCommandError(error: Error | string): boolean {
   const message = typeof error === 'string' ? error : error.message;
   return BLOCKED_COMMAND_PATTERNS.some((pattern) => {
     return pattern.test(message);

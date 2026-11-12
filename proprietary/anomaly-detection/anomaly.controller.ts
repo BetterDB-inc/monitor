@@ -1,16 +1,55 @@
-import { Controller, Get, Post, Query, Param, HttpCode, HttpStatus, UseGuards } from '@nestjs/common';
+import {
+  BadRequestException,
+  Controller,
+  Get,
+  Post,
+  Query,
+  Param,
+  HttpCode,
+  HttpStatus,
+  UseGuards,
+  NotFoundException,
+} from '@nestjs/common';
 import { ApiHeader } from '@nestjs/swagger';
 import { AnomalyService } from './anomaly.service';
+import { IncidentTimeline } from './incident-timeline';
 import {
   AnomalyEvent,
   CorrelatedAnomalyGroup,
   BufferStats,
   AnomalySummary,
+  FanoutCoverage,
   MetricType,
   AnomalyPattern,
 } from './types';
+import { ReplicaDivergenceHistory } from './replication-divergence-detector';
+import { HotShardDetail } from './hot-shard-detector';
 import { LicenseGuard, RequiresFeature, Feature } from '@proprietary/licenses';
 import { ConnectionId, CONNECTION_ID_HEADER } from '../../apps/api/src/common/decorators';
+import { parseOptionalInt } from '../../apps/api/src/common/utils/parse-query-param';
+
+function parseTimeRange(
+  startTime: string | undefined,
+  endTime: string | undefined,
+): { parsedStartTime: number | undefined; parsedEndTime: number | undefined } {
+  const parsedStartTime = parseOptionalInt(startTime, 'startTime');
+  const parsedEndTime = parseOptionalInt(endTime, 'endTime');
+  if (parsedStartTime !== undefined && parsedEndTime !== undefined && parsedStartTime > parsedEndTime) {
+    throw new BadRequestException('startTime must not be after endTime');
+  }
+  return { parsedStartTime, parsedEndTime };
+}
+
+const MAX_INCIDENT_LIMIT = 1000;
+
+function parseLimit(value: string | undefined, fallback: number): number {
+  if (!value) return fallback;
+  const parsed = Number(value);
+  if (value.trim() === '' || !Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new BadRequestException('limit must be a positive integer');
+  }
+  return Math.min(parsed, MAX_INCIDENT_LIMIT);
+}
 
 @Controller('anomaly')
 export class AnomalyController {
@@ -29,8 +68,7 @@ export class AnomalyController {
     @Query('activeOnly') activeOnly?: string,
   ): Promise<AnomalyEvent[]> {
     const parsedLimit = limit ? parseInt(limit, 10) : 100;
-    const parsedStartTime = startTime ? parseInt(startTime, 10) : undefined;
-    const parsedEndTime = endTime ? parseInt(endTime, 10) : undefined;
+    const { parsedStartTime, parsedEndTime } = parseTimeRange(startTime, endTime);
     // Active-incident feed (data-loss banner): return open incidents of any age,
     // so the 24h default window must NOT apply — an unresolved incident older
     // than 24h would otherwise be filtered out and the banner would go silent.
@@ -66,8 +104,7 @@ export class AnomalyController {
     @Query('endTime') endTime?: string,
   ): Promise<CorrelatedAnomalyGroup[]> {
     const parsedLimit = limit ? parseInt(limit, 10) : 50;
-    const parsedStartTime = startTime ? parseInt(startTime, 10) : undefined;
-    const parsedEndTime = endTime ? parseInt(endTime, 10) : undefined;
+    const { parsedStartTime, parsedEndTime } = parseTimeRange(startTime, endTime);
 
     // If no time range specified, default to last 24 hours to include persisted data
     const defaultStartTime = parsedStartTime || (Date.now() - 24 * 60 * 60 * 1000);
@@ -90,8 +127,7 @@ export class AnomalyController {
     @Query('startTime') startTime?: string,
     @Query('endTime') endTime?: string,
   ): Promise<AnomalySummary> {
-    const parsedStartTime = startTime ? parseInt(startTime, 10) : undefined;
-    const parsedEndTime = endTime ? parseInt(endTime, 10) : undefined;
+    const { parsedStartTime, parsedEndTime } = parseTimeRange(startTime, endTime);
 
     // Default to last 24 hours to include persisted data
     const defaultStartTime = parsedStartTime || (Date.now() - 24 * 60 * 60 * 1000);
@@ -105,6 +141,37 @@ export class AnomalyController {
   @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
   getBuffers(@ConnectionId() connectionId?: string): BufferStats[] {
     return this.anomalyService.getBufferStats(connectionId);
+  }
+
+  @Get('coverage')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
+  getCoverage(@ConnectionId() connectionId?: string): FanoutCoverage[] {
+    return this.anomalyService.getFanoutCoverage(connectionId);
+  }
+
+  @Get('replication-divergence')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: true, description: 'Connection ID of the primary' })
+  getReplicationDivergence(
+    @ConnectionId({ required: true }) connectionId: string,
+    @Query('startTime') startTime?: string,
+    @Query('endTime') endTime?: string,
+  ): Promise<ReplicaDivergenceHistory[]> {
+    const { parsedStartTime, parsedEndTime } = parseTimeRange(startTime, endTime);
+    const rangeEnd = parsedEndTime ?? Date.now();
+    const rangeStart = parsedStartTime ?? rangeEnd - 60 * 60 * 1000;
+    return this.anomalyService.getReplicationDivergenceHistory(connectionId, rangeStart, rangeEnd);
+  }
+
+  @Get('hot-shards')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: true, description: 'Connection ID of the cluster' })
+  getHotShards(@ConnectionId({ required: true }) connectionId: string): HotShardDetail[] {
+    return this.anomalyService.getHotShards(connectionId);
   }
 
   @Post('events/:id/resolve')
@@ -132,5 +199,62 @@ export class AnomalyController {
   clearResolved(): { cleared: number } {
     const cleared = this.anomalyService.clearResolved();
     return { cleared };
+  }
+
+  @Get('incidents')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
+  async getIncidents(
+    @ConnectionId() connectionId?: string,
+    @Query('limit') limit?: string,
+    @Query('startTime') startTime?: string,
+    @Query('endTime') endTime?: string,
+  ): Promise<IncidentTimeline[]> {
+    const { parsedStartTime, parsedEndTime } = parseTimeRange(startTime, endTime);
+    return this.anomalyService.getIncidentTimelines(
+      connectionId,
+      parsedStartTime,
+      parsedEndTime,
+      parseLimit(limit, 50),
+    );
+  }
+
+  @Get('incidents/by-event/:anomalyId')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
+  async getIncidentByEvent(
+    @Param('anomalyId') anomalyId: string,
+    @ConnectionId() connectionId?: string,
+    @Query('at') at?: string,
+  ): Promise<{ incidentId: string | null }> {
+    const eventTime = parseOptionalInt(at, 'at');
+    if (eventTime === undefined) throw new BadRequestException('at is required');
+    return {
+      incidentId: await this.anomalyService.findIncidentIdByEvent(
+        anomalyId,
+        eventTime,
+        connectionId,
+      ),
+    };
+  }
+
+  @Get('incidents/:incidentId')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
+  async getIncident(
+    @Param('incidentId') incidentId: string,
+    @ConnectionId() connectionId?: string,
+    @Query('startTime') startTime?: string,
+  ): Promise<IncidentTimeline> {
+    const incident = await this.anomalyService.getIncidentTimeline(
+      incidentId,
+      connectionId,
+      parseOptionalInt(startTime, 'startTime'),
+    );
+    if (!incident) throw new NotFoundException(`Incident ${incidentId} not found`);
+    return incident;
   }
 }

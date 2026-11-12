@@ -17,7 +17,7 @@ describe('MonitorController', () => {
     stopSession: jest.Mock;
     getSession: jest.Mock;
   };
-  let healthGateService: { evaluate: jest.Mock };
+  let healthGateService: { evaluateAdvisory: jest.Mock };
   let preflightService: { run: jest.Mock };
   let storage: { getCaptureChunks: jest.Mock };
   let crossReferenceEngine: { compute: jest.Mock; computeCaptureDiff: jest.Mock };
@@ -41,7 +41,7 @@ describe('MonitorController', () => {
       getSession: jest.fn().mockResolvedValue({ id: 'sess-1', status: 'running' }),
     };
     healthGateService = {
-      evaluate: jest.fn().mockResolvedValue({ allow: true, signals: {}, thresholds: {} }),
+      evaluateAdvisory: jest.fn().mockResolvedValue({ allow: true, signals: {}, thresholds: {} }),
     };
     preflightService = {
       run: jest.fn().mockResolvedValue({
@@ -146,14 +146,14 @@ describe('MonitorController', () => {
   describe('evaluateHealthGate', () => {
     it('forwards connectionId to the service', async () => {
       await controller.evaluateHealthGate('conn-1');
-      expect(healthGateService.evaluate).toHaveBeenCalledWith('conn-1');
+      expect(healthGateService.evaluateAdvisory).toHaveBeenCalledWith('conn-1');
     });
 
     it('throws BadRequest when connectionId is missing', async () => {
       await expect(controller.evaluateHealthGate(undefined)).rejects.toBeInstanceOf(
         BadRequestException,
       );
-      expect(healthGateService.evaluate).not.toHaveBeenCalled();
+      expect(healthGateService.evaluateAdvisory).not.toHaveBeenCalled();
     });
   });
 

@@ -153,6 +153,17 @@ describe('validateForm', () => {
     expect(validateForm(form, connections).warningZScore).toBe('Must be between 0.5 and 10');
   });
 
+  it('names the hidden limit on a warning z-score at or above it', () => {
+    const form = { ...emptyForm(), warningZScore: '5' };
+    const errors = validateForm(form, { ...connections, criticalZScore: 5 }, 'error_replies');
+    expect(errors).toEqual({ warningZScore: 'Must be below 5' });
+  });
+
+  it('accepts a warning z-score under the hidden limit', () => {
+    const form = { ...emptyForm(), warningZScore: '4.9' };
+    expect(validateForm(form, { ...connections, criticalZScore: 5 }, 'error_replies')).toEqual({});
+  });
+
   it('rejects a critical z-score not above warning', () => {
     const form = { ...emptyForm(), warningZScore: '4', criticalZScore: '3' };
     expect(validateForm(form, connections).criticalZScore).toBe(

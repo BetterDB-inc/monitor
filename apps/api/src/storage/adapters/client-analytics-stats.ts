@@ -4,6 +4,10 @@ import type {
   ClientRollupGroupStat,
   ClientRollupPairStat,
   ClientRollupUserStat,
+  ClientCaptureGroupRow,
+  ClientCaptureSummary,
+  ClientConnectionRow,
+  StoredClientSnapshot,
 } from '@betterdb/shared';
 import { clientPairKey, clientPairStatsByDisplayKey, emptyClientAnalyticsStats } from '@betterdb/shared';
 import type { SqlDialect } from './base-sql.adapter';
@@ -150,6 +154,180 @@ export function foldClientAnalyticsStats(
  */
 export function clientAddrIp(addr: string): string {
   return addr.replace(/:\d+$/, '');
+}
+
+/**
+ * Key of one connection across CLIENT LIST captures. A server numbers clients
+ * from 1 again after a restart, so an id alone can name two connections; the
+ * address tells them apart.
+ */
+export function clientConnectionKey(clientId: string, addr: string): string {
+  return `${clientId} ${addr}`;
+}
+
+/**
+ * How far apart, at most, two opening estimates (`captured_at - age * 1000`)
+ * of one (client_id, addr) are for the same connection. A Unix socket gives
+ * every client the same addr, so after a server restart a new connection can
+ * carry the id and addr of one from before it; it opened later, by more than
+ * this. The SQL adapters use the same value as their RANGE frame.
+ */
+export const CLIENT_REOPEN_TOLERANCE_MS = 30_000;
+
+/**
+ * The opening of the connection behind `estimate`, among the ascending opening
+ * estimates of one (client_id, addr): the earliest within
+ * CLIENT_REOPEN_TOLERANCE_MS of it, as the SQL adapters' MIN over
+ * `RANGE BETWEEN CLIENT_REOPEN_TOLERANCE_MS PRECEDING AND ... FOLLOWING`.
+ */
+export function connectionOpenedAt(sortedEstimates: readonly number[], estimate: number): number {
+  let low = 0;
+  let high = sortedEstimates.length;
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    if (sortedEstimates[mid] < estimate - CLIENT_REOPEN_TOLERANCE_MS) low = mid + 1;
+    else high = mid;
+  }
+  return sortedEstimates[low] ?? estimate;
+}
+
+/** The client_snapshots columns retry attribution aggregates. */
+export type ClientCaptureRow = Pick<
+  StoredClientSnapshot,
+  'capturedAt' | 'clientId' | 'addr' | 'age' | 'name' | 'user'
+>;
+
+/**
+ * A row of the SQL adapters' getClientCaptureSummary statement: one (name,
+ * user, ip) group of one capture (`kind` 'group'), one connection with its
+ * first capture in `captured_at` (`kind` 'connection'), or the only row of a
+ * read past its row bound (`kind` 'truncated'). pg returns BIGINT as a string.
+ */
+export interface ClientCaptureSqlRow {
+  kind: 'group' | 'connection' | 'truncated';
+  captured_at: number | string;
+  client_id: string | null;
+  addr: string | null;
+  name: string;
+  user_name: string;
+  ip: string;
+  count: number | string | null;
+  oldest_age: number | string | null;
+  max_client_id: number | string | null;
+  opened_at: number | string | null;
+}
+
+/** Maps the rows of the SQL adapters' getClientCaptureSummary statement. */
+export function clientCaptureSummaryFromSql(rows: ClientCaptureSqlRow[]): ClientCaptureSummary {
+  const summary: ClientCaptureSummary = { captures: [], connections: [], truncated: false };
+  for (const row of rows) {
+    if (row.kind === 'truncated') return { captures: [], connections: [], truncated: true };
+    const { name, user_name: user, ip } = row;
+    if (row.kind === 'connection') {
+      summary.connections.push({
+        clientId: String(row.client_id),
+        addr: String(row.addr),
+        name,
+        user,
+        ip,
+        openedAt: Number(row.opened_at),
+        firstCapturedAt: Number(row.captured_at),
+      });
+    } else {
+      summary.captures.push({
+        capturedAt: Number(row.captured_at),
+        name,
+        user,
+        ip,
+        count: Number(row.count),
+        oldestAge: Number(row.oldest_age),
+        maxClientId: Number(row.max_client_id ?? 0),
+      });
+    }
+  }
+  return summary;
+}
+
+/**
+ * The memory adapter's getClientCaptureSummary: the aggregation the SQL
+ * adapters run in SQL, over rows already narrowed to one connection, the range
+ * and no replica or master links, in insertion order. A connection is a
+ * (clientId, addr) and its opening (connectionOpenedAt); it takes the name and
+ * user of its newest row, the later insert on a tie. A (clientId, addr) listed
+ * twice in one capture (two polls stored with the same timestamp) counts once
+ * in its group, as the SQL adapters' COUNT(DISTINCT).
+ */
+export function summarizeClientCaptures(rows: readonly ClientCaptureRow[]): ClientCaptureSummary {
+  const estimates = new Map<string, number[]>();
+  for (const row of rows) {
+    const key = clientConnectionKey(row.clientId, row.addr);
+    const known = estimates.get(key);
+    if (known === undefined) estimates.set(key, [row.capturedAt - row.age * 1000]);
+    else known.push(row.capturedAt - row.age * 1000);
+  }
+  for (const known of estimates.values()) known.sort((a, b) => a - b);
+  const openedAtOf = (row: ClientCaptureRow) =>
+    connectionOpenedAt(
+      estimates.get(clientConnectionKey(row.clientId, row.addr))!,
+      row.capturedAt - row.age * 1000,
+    );
+  const connectionOf = (row: ClientCaptureRow) =>
+    `${clientConnectionKey(row.clientId, row.addr)} ${openedAtOf(row)}`;
+  const newest = new Map<string, ClientCaptureRow>();
+  for (const row of rows) {
+    const key = connectionOf(row);
+    const known = newest.get(key);
+    if (known === undefined || row.capturedAt >= known.capturedAt) newest.set(key, row);
+  }
+  const groups = new Map<string, ClientCaptureGroupRow>();
+  const members = new Map<string, Set<string>>();
+  const connections = new Map<string, ClientConnectionRow>();
+  for (const row of rows) {
+    const key = connectionOf(row);
+    const { name, user } = newest.get(key)!;
+    const ip = clientAddrIp(row.addr);
+    // Ids are decimal; anything else has no bearing on the growth.
+    const clientId = /^\d+$/.test(row.clientId) ? Number(row.clientId) : 0;
+    const groupKey = JSON.stringify([row.capturedAt, name, user, ip]);
+    const group = groups.get(groupKey);
+    if (group === undefined) {
+      groups.set(groupKey, {
+        capturedAt: row.capturedAt,
+        name,
+        user,
+        ip,
+        count: 1,
+        oldestAge: row.age,
+        maxClientId: clientId,
+      });
+      members.set(groupKey, new Set([clientConnectionKey(row.clientId, row.addr)]));
+    } else {
+      const listed = members.get(groupKey)!;
+      listed.add(clientConnectionKey(row.clientId, row.addr));
+      group.count = listed.size;
+      group.oldestAge = Math.max(group.oldestAge, row.age);
+      group.maxClientId = Math.max(group.maxClientId, clientId);
+    }
+    const connection = connections.get(key);
+    if (connection === undefined) {
+      connections.set(key, {
+        clientId: row.clientId,
+        addr: row.addr,
+        name,
+        user,
+        ip,
+        openedAt: openedAtOf(row),
+        firstCapturedAt: row.capturedAt,
+      });
+    } else {
+      connection.firstCapturedAt = Math.min(connection.firstCapturedAt, row.capturedAt);
+    }
+  }
+  return {
+    captures: [...groups.values()],
+    connections: [...connections.values()],
+    truncated: false,
+  };
 }
 
 /**

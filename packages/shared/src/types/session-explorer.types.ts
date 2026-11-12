@@ -71,6 +71,7 @@ export interface SessionSummary {
   sessionId: string;
   keyCount: number;
   memoryBytes: number;
+  unmeasuredKeys: number;
   idleSeconds: number | null;
   ttlMs: number | null;
 }
@@ -81,6 +82,7 @@ export interface SessionListResponse {
   truncated: boolean;
   partial: boolean;
   failedNodes: number;
+  idleUntracked: boolean;
 }
 
 export interface ParsedMessage {
@@ -103,12 +105,54 @@ export type KeyView = {
   | { parsed: false; reason: string }
 );
 
+export interface PendingInterrupt {
+  value?: JsonValue;
+}
+
 export interface SessionDetail {
   sessionId: string;
   preset: PresetId;
   keys: KeyView[];
   messages: ParsedMessage[];
+  interrupts: PendingInterrupt[];
   estimatedTokens: number;
   ttlMs: number | null;
   memoryBytes: number;
+  totalKeys: number;
+  skippedKeys: number;
+  totalMemoryBytes: number;
+  unmeasuredKeys: number;
+  selection: string | null;
+  complete: boolean;
+  unparsedKeys: number;
+  truncated: boolean;
+  failedNodes: number;
+  missingKeys: number;
+  erroredKeys: number;
+  touchesKeys: boolean;
+}
+
+export interface SessionOversizeResponse {
+  thresholdBytes: number;
+  sessionIds: string[];
+  unmeasuredSessionIds: string[];
+  truncated: boolean;
+  partial: boolean;
+  failedNodes: number;
+}
+
+export interface SessionPreview {
+  sampleKey: string | null;
+  view: KeyView | null;
+  exhausted: boolean;
+  failedNodes: number;
+  touchesKeys: boolean;
+}
+
+export interface SessionExport {
+  exportedAt: string;
+  namespace: Pick<SessionNamespace, 'name' | 'pattern' | 'preset'>;
+  sessionId: string;
+  keys: CapturedKey[];
+  parsed: SessionDetail;
 }

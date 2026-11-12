@@ -12,6 +12,7 @@ import { metricsApi } from '../api/metrics';
 import { LineChart, Line, AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 import type { VectorIndexInfo, VectorIndexField, VectorSearchResult, VectorIndexSnapshot, TextSearchResult, FieldDistribution, ProfileResult, ProfileIterator } from '../types/metrics';
 import { copyToClipboard } from '../lib/clipboard';
+import { CollapsibleText } from '../components/ui/collapsible-text';
 
 interface PollingData {
   indexes: string[];
@@ -965,7 +966,7 @@ function FieldGrid({ fields, fieldMeta, docKey }: { fields: Record<string, strin
             <div key={k} className="min-w-0">
               <span className="text-xs text-gray-400 dark:text-gray-500">{humanizeFieldName(k)}</span>
               {v.length > 200 ? (
-                <LongValue value={v} />
+                <CollapsibleText text={v} previewChars={200} className="text-xs font-mono break-all" />
               ) : (
                 <p className="text-xs font-mono truncate" title={v}>{v}</p>
               )}
@@ -1014,21 +1015,6 @@ function FieldGrid({ fields, fieldMeta, docKey }: { fields: Record<string, strin
           </div>
         );
       })}
-    </div>
-  );
-}
-
-function LongValue({ value }: { value: string }) {
-  const [expanded, setExpanded] = useState(false);
-  return (
-    <div className="text-xs font-mono break-all">
-      {expanded ? value : value.slice(0, 200) + '\u2026'}
-      <button
-        onClick={() => setExpanded(prev => !prev)}
-        className="text-primary ml-1 text-[10px]"
-      >
-        {expanded ? 'Show less' : 'Show more'}
-      </button>
     </div>
   );
 }

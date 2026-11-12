@@ -7,6 +7,7 @@ export interface KvCacheModelFootprint {
   dtype: string;
   chunksEst: number;
   bytesEst: number | null;
+  layout?: KvCacheLayout;
 }
 
 export interface KvCacheFootprintSnapshot {
@@ -101,6 +102,9 @@ export interface KvCacheStatus {
   footprintIntervalMs: number;
   sampleKey: string | null;
   engines: KvCacheEngine[];
+  lastScanAttemptAt: number | null;
+  lastScanError: string | null;
+  scanCooldownUntil: number | null;
 }
 
 export interface KvCacheSettings {

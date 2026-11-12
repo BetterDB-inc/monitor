@@ -146,9 +146,9 @@ export class RowMappers {
       username: row.username,
       ageSeconds: row.age_seconds,
       clientInfo: row.client_info,
-      timestampCreated: row.timestamp_created,
-      timestampLastUpdated: row.timestamp_last_updated,
-      capturedAt: row.captured_at,
+      timestampCreated: Number(row.timestamp_created),
+      timestampLastUpdated: Number(row.timestamp_last_updated),
+      capturedAt: Number(row.captured_at),
       sourceHost: row.source_host,
       sourcePort: row.source_port,
       connectionId: row.connection_id,
@@ -202,12 +202,20 @@ export class RowMappers {
       message: row.message,
       correlationId: row.correlation_id,
       relatedMetrics: this.dialect.fromArray(row.related_metrics),
+      replicaAddr: row.replica_addr ?? undefined,
+      nodeAddr: row.node_addr ?? undefined,
+      dedupeKey: row.dedupe_key ?? undefined,
+      kind: row.kind ?? undefined,
+      retryTrigger: row.retry_trigger ?? undefined,
+      commands: row.commands ? this.dialect.fromArray(row.commands) : undefined,
+      eventSequence: row.event_sequence == null ? undefined : Number(row.event_sequence),
       resolved: this.dialect.fromBoolean(row.resolved),
       resolvedAt: row.resolved_at ? (typeof row.resolved_at === 'string' ? parseInt(row.resolved_at, 10) : row.resolved_at) : undefined,
       durationMs: row.duration_ms ? (typeof row.duration_ms === 'string' ? parseInt(row.duration_ms, 10) : row.duration_ms) : undefined,
       sourceHost: row.source_host,
       sourcePort: row.source_port,
       connectionId: row.connection_id,
+      scopeId: row.scope_id ?? undefined,
     };
   }
 
@@ -227,6 +235,8 @@ export class RowMappers {
       sourceHost: row.source_host,
       sourcePort: row.source_port,
       connectionId: row.connection_id,
+      anomalyIds: row.anomaly_ids ? this.dialect.fromArray(row.anomaly_ids) : undefined,
+      scopeId: row.scope_id ?? undefined,
     };
   }
 
@@ -340,6 +350,7 @@ export class RowMappers {
       capturedAt: typeof row.captured_at === 'string' ? parseInt(row.captured_at, 10) : row.captured_at,
       sourceHost: row.source_host,
       sourcePort: row.source_port,
+      sourceRunId: row.source_run_id ?? '',
       connectionId: row.connection_id,
     };
   }
@@ -359,6 +370,7 @@ export class RowMappers {
       capturedAt: typeof row.captured_at === 'string' ? parseInt(row.captured_at, 10) : row.captured_at,
       sourceHost: row.source_host,
       sourcePort: row.source_port,
+      sourceRunId: row.source_run_id ?? '',
       connectionId: row.connection_id,
     };
   }

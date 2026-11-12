@@ -26,7 +26,7 @@ function aclEntry(overrides: Partial<StoredAclEntry> = {}): StoredAclEntry {
     clientInfo: 'addr=10.0.0.1:53124 laddr=10.0.0.9:6379 name=',
     timestampCreated: CREATED_AT,
     timestampLastUpdated: CREATED_AT,
-    capturedAt: CREATED_AT * 1000,
+    capturedAt: CREATED_AT,
     sourceHost: 'localhost',
     sourcePort: 6379,
     ...overrides,

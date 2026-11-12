@@ -2,13 +2,12 @@ import { Client, ClientBase, ClientConfig, Pool, PoolConfig } from 'pg';
 import { KV_CACHE_SAMPLE_COUNTER_COLUMNS } from './kv-cache-sample-columns';
 import { isTrueFlag } from '../../config/env-normalize';
 import { chunkedPostgresDelete } from './postgres-chunked-delete';
-import {
-  otelSpanCap,
-  otelSpanCapCheckInterval,
-  otelSpanLowWaterMark,
-} from '../otel-span-cap';
+import { LOG_RUN_ID_UNIQUE_INDEXES } from './log-run-id-indexes';
+import { POSTGRES_LEGACY_ANOMALY_BACKFILL } from './anomaly-kind-backfill';
+import { toIncidentBoundary } from './incident-boundary-row';
+import { otelSpanCap, otelSpanCapCheckInterval, otelSpanLowWaterMark } from '../otel-span-cap';
 import { randomUUID } from 'crypto';
-import { parseSshTunnel, parseMembership } from '@betterdb/shared';
+import { parseSshTunnel, parseMembership, parseTlsConfig, parseNodeAvailabilityZones } from '@betterdb/shared';
 import type {
   StoredScalingReadinessScore,
   ScalingReadinessScoreQuery,
@@ -17,6 +16,7 @@ import type {
   KvCacheFootprintQuery,
   KvCacheSampleQuery,
   KvCacheSampleTotals,
+  LogSource,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   ReadinessDimension,
@@ -25,16 +25,23 @@ import type {
   KvCacheFootprintSnapshot,
   KvCacheModelFootprint,
   KvCacheSettings,
+  SessionNamespace,
 } from '@betterdb/shared';
 import type { RawDatabaseHandle, RawDatabaseHandleProvider } from '../raw-database-handle';
 import {
   AnomalyQueryOptions,
+  IncidentBoundaryQuery,
+  StoredIncidentBoundary,
+  CorrelatedGroupQueryOptions,
   AnomalyStats,
   AppSettings,
   AuditQueryOptions,
   AuditStats,
   ClientAnalyticsStats,
   ClientSnapshotQueryOptions,
+  ClientCaptureReadBounds,
+  ClientCaptureRowCount,
+  ClientCaptureSummary,
   ClientTimeSeriesPoint,
   CommandLogQueryOptions,
   CommandLogType,
@@ -57,6 +64,8 @@ import {
   StoredCommandLogEntry,
   StoredCommandStatsSample,
   StoredLatencyStatsSample,
+  StoredReplicationDivergenceWindow,
+  ReplicationDivergenceWindowQueryOptions,
   LatencyStatsHistoryQueryOptions,
   StoredAiCacheSample,
   AiCacheHistoryQueryOptions,
@@ -78,6 +87,7 @@ import {
   StoredCaptureTrigger,
   CaptureTriggerQueryOptions,
   CaptureTriggerPatch,
+  CaptureTriggerStatus,
   StoredScheduledCapture,
   ScheduledCaptureQueryOptions,
   ScheduledCapturePatch,
@@ -127,7 +137,14 @@ import type {
 } from '@betterdb/shared';
 import { PostgresDialect, RowMappers } from './base-sql.adapter';
 import type { ClientAnalyticsRollup, ClientSnapshotGroupRow } from '@betterdb/shared';
-import { clientAddrIp, foldClientAnalyticsStats, mapClientAnalyticsRollupRow } from './client-analytics-stats';
+import {
+  CLIENT_REOPEN_TOLERANCE_MS,
+  clientAddrIp,
+  clientCaptureSummaryFromSql,
+  foldClientAnalyticsStats,
+  mapClientAnalyticsRollupRow,
+  type ClientCaptureSqlRow,
+} from './client-analytics-stats';
 import { WebhookPostgresRepository } from './repositories/webhook.postgres.repository';
 import { SlowLogPostgresRepository } from './repositories/slowlog.postgres.repository';
 import { InvitationPostgresRepository } from './repositories/invitation.postgres.repository';
@@ -515,7 +532,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         try {
           await this.migrateConnectionId();
           await this.createSchema();
+          if (!(await this.hasAnomalyKindColumn())) await this.addAnomalyKindColumn();
           await this.ensureOtelIngestedIndex();
+          await this.migrateLogSourceKeys();
           await this.backfillMemoryProposalDiscriminators();
         } finally {
           await lockClient.query('SELECT pg_advisory_unlock($1)', [lockKey]);
@@ -537,7 +556,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
             // close() ending the build connection is expected, not a failure.
             if (this.closing) return;
             console.warn(
-              `Building the client analytics indexes failed: ${
+              `Building the background indexes failed: ${
                 error instanceof Error ? error.message : String(error)
               }`,
             );
@@ -842,19 +861,21 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     };
   }
 
-  async pruneOldEntries(olderThanTimestamp: number, connectionId?: string): Promise<number> {
+  async pruneOldEntries(olderThanSeconds: number, connectionId?: string): Promise<number> {
     if (!this.pool) {
       throw new Error('Database not initialized');
     }
 
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'acl_audit', 'captured_at < $1 AND connection_id = $2', [
-        olderThanTimestamp,
-        connectionId,
-      ]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'acl_audit',
+        'captured_at < $1 AND connection_id = $2',
+        [olderThanSeconds, connectionId],
+      );
     }
 
-    return chunkedPostgresDelete(this.pool, 'acl_audit', 'captured_at < $1', [olderThanTimestamp]);
+    return chunkedPostgresDelete(this.pool, 'acl_audit', 'captured_at < $1', [olderThanSeconds]);
   }
 
   async saveClientSnapshot(clients: StoredClientSnapshot[], connectionId: string): Promise<number> {
@@ -971,6 +992,100 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     const result = await this.pool.query(query, params);
     return result.rows.map((row) => this.mappers.mapClientRow(row));
+  }
+
+  // One statement over idx_client_connection_captured, as in the SQLite
+  // adapter: `bounded` reads the range as two index ranges around the skipped
+  // captures and stops after maxRows + 1 rows, past which only a 'truncated'
+  // row comes back; a connection is a (client_id, addr) and its opening, the
+  // earliest opening estimate within CLIENT_REOPEN_TOLERANCE_MS of each row;
+  // the second window gives each connection the name and user of its newest
+  // row in the range, then the rows are grouped per capture and (name, user,
+  // ip), each (client_id, addr) once, and per connection.
+  async getClientCaptureSummary(
+    connectionId: string,
+    since: number,
+    until: number,
+    bounds: ClientCaptureReadBounds,
+  ): Promise<ClientCaptureSummary> {
+    if (!this.pool) {
+      throw new Error('Database not initialized');
+    }
+    const result = await this.pool.query<ClientCaptureSqlRow>(
+      `WITH bounded AS (
+         SELECT id, captured_at, client_id, addr, age, name, user_name
+           FROM client_snapshots
+          WHERE connection_id = $1 AND captured_at >= $2 AND captured_at < $4 AND captured_at <= $3
+            AND COALESCE(flags, '') !~ '[SM]'
+         UNION ALL
+         SELECT id, captured_at, client_id, addr, age, name, user_name
+           FROM client_snapshots
+          WHERE connection_id = $1 AND captured_at >= GREATEST($4::bigint, $5::bigint)
+            AND captured_at >= $2 AND captured_at <= $3
+            AND COALESCE(flags, '') !~ '[SM]'
+          LIMIT $6::bigint + 1
+       ), readings AS (
+         SELECT id, captured_at, client_id, addr, age, name, user_name,
+                MIN(captured_at - age::bigint * 1000) OVER (
+                  PARTITION BY client_id, addr ORDER BY captured_at - age::bigint * 1000
+                  RANGE BETWEEN ${CLIENT_REOPEN_TOLERANCE_MS}::bigint PRECEDING
+                    AND ${CLIENT_REOPEN_TOLERANCE_MS}::bigint FOLLOWING
+                ) AS opened_at
+           FROM bounded
+          WHERE (SELECT COUNT(*) FROM bounded) <= $6::bigint
+       ), resolved AS (
+         SELECT captured_at, client_id, addr, age, opened_at,
+                FIRST_VALUE(COALESCE(name, '')) OVER w AS name,
+                FIRST_VALUE(COALESCE(user_name, '')) OVER w AS user_name,
+                ${PG_CLIENT_IP_EXPR} AS ip
+           FROM readings
+         WINDOW w AS (PARTITION BY client_id, addr, opened_at ORDER BY captured_at DESC, id DESC)
+       )
+       SELECT 'group' AS kind, captured_at, NULL AS client_id, NULL AS addr, name, user_name, ip,
+              COUNT(DISTINCT client_id || ' ' || addr) AS count, MAX(age) AS oldest_age,
+              MAX(CASE WHEN client_id ~ '^[0-9]+$' THEN client_id::bigint END) AS max_client_id,
+              NULL::bigint AS opened_at
+         FROM resolved
+        GROUP BY captured_at, name, user_name, ip
+       UNION ALL
+       SELECT 'connection', MIN(captured_at), client_id, addr, name, user_name, ip,
+              NULL, NULL, NULL, opened_at
+         FROM resolved
+        GROUP BY client_id, addr, opened_at, name, user_name, ip
+       UNION ALL
+       SELECT 'truncated', NULL, NULL, NULL, '', '', '', NULL, NULL, NULL, NULL
+        WHERE (SELECT COUNT(*) FROM bounded) > $6::bigint`,
+      [connectionId, since, until, bounds.skipFrom, bounds.skipTo, bounds.maxRows],
+    );
+    return clientCaptureSummaryFromSql(result.rows);
+  }
+
+  // The same two index ranges as getClientCaptureSummary, counted per capture
+  // from idx_client_connection_captured alone.
+  async getClientCaptureRowCounts(
+    connectionId: string,
+    since: number,
+    until: number,
+    skip: Pick<ClientCaptureReadBounds, 'skipFrom' | 'skipTo'>,
+  ): Promise<ClientCaptureRowCount[]> {
+    if (!this.pool) {
+      throw new Error('Database not initialized');
+    }
+    const result = await this.pool.query(
+      `SELECT captured_at, COUNT(*) AS row_count
+         FROM client_snapshots
+        WHERE connection_id = $1 AND captured_at >= $2 AND captured_at < $4 AND captured_at <= $3
+        GROUP BY captured_at
+       UNION ALL
+       SELECT captured_at, COUNT(*)
+         FROM client_snapshots
+        WHERE connection_id = $1 AND captured_at >= GREATEST($4::bigint, $5::bigint)
+          AND captured_at >= $2 AND captured_at <= $3
+        GROUP BY captured_at
+        ORDER BY captured_at`,
+      [connectionId, since, until, skip.skipFrom, skip.skipTo],
+    );
+    return result.rows.map((row) => ({ capturedAt: Number(row.captured_at), rows: Number(row.row_count) }));
   }
 
   async getClientTimeSeries(
@@ -1158,13 +1273,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
 
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'client_snapshots', 'captured_at < $1 AND connection_id = $2', [
-        olderThanTimestamp,
-        connectionId,
-      ]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'client_snapshots',
+        'captured_at < $1 AND connection_id = $2',
+        [olderThanTimestamp, connectionId],
+      );
     }
 
-    return chunkedPostgresDelete(this.pool, 'client_snapshots', 'captured_at < $1', [olderThanTimestamp]);
+    return chunkedPostgresDelete(this.pool, 'client_snapshots', 'captured_at < $1', [
+      olderThanTimestamp,
+    ]);
   }
 
   async getClientSnapshotBounds(
@@ -1185,7 +1304,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return { earliest: Number(row.earliest), latest: Number(row.latest) };
   }
 
-  async getClientSnapshotNextCapturedAt(connectionId: string, afterExclusive: number): Promise<number | null> {
+  async getClientSnapshotNextCapturedAt(
+    connectionId: string,
+    afterExclusive: number,
+  ): Promise<number | null> {
     if (!this.pool) {
       throw new Error('Database not initialized');
     }
@@ -1369,7 +1491,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       [connectionId, sinceBucket],
     );
     const row = result.rows[0];
-    return row ? { peak: Number(row.peak_connections), capturedAt: Number(row.peak_captured_at) } : null;
+    return row
+      ? { peak: Number(row.peak_connections), capturedAt: Number(row.peak_captured_at) }
+      : null;
   }
 
   async pruneOldClientAnalyticsRollups(
@@ -1427,6 +1551,33 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
    * one target cannot have all of them keyed, so the first keeps the
    * discriminator and the rest stay NULL, outside the partial index.
    */
+  private async hasAnomalyKindColumn(): Promise<boolean> {
+    if (!this.pool) return false;
+    const { rows } = await this.pool.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = current_schema() AND table_name = 'anomaly_events' AND column_name = 'kind'`,
+    );
+    return rows.length > 0;
+  }
+
+  private async addAnomalyKindColumn(): Promise<void> {
+    if (!this.pool) return;
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS kind TEXT');
+      for (const sql of POSTGRES_LEGACY_ANOMALY_BACKFILL) {
+        await client.query(sql);
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   private async backfillMemoryProposalDiscriminators(): Promise<void> {
     if (!this.pool) {
       return;
@@ -1617,6 +1768,13 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
 
+      ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS replica_addr TEXT;
+      ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS node_addr TEXT;
+      ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS dedupe_key TEXT;
+      ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS commands TEXT[];
+      ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS event_sequence BIGINT;
+      ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS retry_trigger TEXT;
+
       CREATE INDEX IF NOT EXISTS idx_anomaly_events_timestamp ON anomaly_events(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_anomaly_events_severity ON anomaly_events(severity, timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_anomaly_events_metric ON anomaly_events(metric_type, timestamp DESC);
@@ -1664,6 +1822,18 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         connection_id TEXT NOT NULL DEFAULT 'env-default',
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
+
+      ALTER TABLE correlated_anomaly_groups ADD COLUMN IF NOT EXISTS anomaly_ids TEXT[];
+      CREATE TABLE IF NOT EXISTS incident_boundaries (
+        scope_id TEXT NOT NULL,
+        started_at BIGINT NOT NULL,
+        anomaly_id TEXT NOT NULL,
+        PRIMARY KEY (scope_id, started_at, anomaly_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_incident_boundaries_started_at ON incident_boundaries(started_at);
+
+      ALTER TABLE correlated_anomaly_groups ADD COLUMN IF NOT EXISTS scope_id TEXT;
+      ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS scope_id TEXT;
 
       CREATE INDEX IF NOT EXISTS idx_correlated_groups_timestamp ON correlated_anomaly_groups(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_correlated_groups_pattern ON correlated_anomaly_groups(pattern, timestamp DESC);
@@ -1858,6 +2028,19 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         eviction_alert_enabled BOOLEAN NOT NULL DEFAULT TRUE,
         updated_at BIGINT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS session_explorer_namespaces (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        pattern TEXT NOT NULL,
+        preset TEXT NOT NULL,
+        custom_schema JSONB,
+        oversize_threshold_bytes BIGINT NOT NULL DEFAULT 1048576,
+        created_at BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_session_explorer_namespaces_conn
+        ON session_explorer_namespaces(connection_id);
 
       CREATE TABLE IF NOT EXISTS webhooks (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1918,8 +2101,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         captured_at BIGINT NOT NULL,
         source_host TEXT NOT NULL,
         source_port INTEGER NOT NULL,
+        source_run_id TEXT NOT NULL DEFAULT '',
         connection_id TEXT NOT NULL DEFAULT 'env-default',
-        UNIQUE(slowlog_id, source_host, source_port, connection_id)
+        UNIQUE(slowlog_id, source_host, source_port, source_run_id, connection_id)
       );
 
       CREATE INDEX IF NOT EXISTS idx_slowlog_timestamp ON slow_log_entries(timestamp DESC);
@@ -1929,43 +2113,13 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       CREATE INDEX IF NOT EXISTS idx_slowlog_captured_at ON slow_log_entries(captured_at DESC);
       CREATE INDEX IF NOT EXISTS idx_slowlog_connection_id ON slow_log_entries(connection_id);
 
-      -- Drop old unique constraint without connection_id if it exists
-      DO $$
-      BEGIN
-        ALTER TABLE slow_log_entries
-        DROP CONSTRAINT IF EXISTS slow_log_entries_slowlog_id_source_host_source_port_key;
-      EXCEPTION WHEN undefined_object THEN
-        -- Constraint doesn't exist, ignore
-      END $$;
-
-      -- Add unique constraint if missing (for tables created before this constraint was added)
-      DO $$
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM pg_constraint c
-          JOIN pg_class t ON c.conrelid = t.oid
-          WHERE t.relname = 'slow_log_entries'
-            AND c.contype = 'u'
-            AND c.conkey @> ARRAY(
-              SELECT attnum FROM pg_attribute
-              WHERE attrelid = t.oid AND attname IN ('slowlog_id', 'source_host', 'source_port', 'connection_id')
-            )
-        ) THEN
-          -- Remove duplicates first (keep the one with highest pk)
-          DELETE FROM slow_log_entries a USING slow_log_entries b
-          WHERE a.pk < b.pk
-            AND a.slowlog_id = b.slowlog_id
-            AND a.source_host = b.source_host
-            AND a.source_port = b.source_port
-            AND a.connection_id = b.connection_id;
-
-          ALTER TABLE slow_log_entries
-          ADD CONSTRAINT slow_log_entries_slowlog_id_source_host_source_port_conn_key
-          UNIQUE (slowlog_id, source_host, source_port, connection_id);
-        END IF;
-      EXCEPTION WHEN duplicate_object THEN
-        -- Constraint already exists, ignore
-      END $$;
+      -- Log IDs are per server process: source_run_id (INFO server run_id) joins
+      -- the unique key, so the same id from two processes behind one address
+      -- (a restart, a reused pod IP) is kept. Legacy rows keep source_run_id = ''.
+      -- The widened key and the lookup indexes are built CONCURRENTLY after this
+      -- batch, and the narrower legacy keys dropped, see migrateLogSourceKeys()
+      -- and ensureAnalyticsIndexes().
+      ALTER TABLE slow_log_entries ADD COLUMN IF NOT EXISTS source_run_id TEXT NOT NULL DEFAULT '';
 
       -- Command Log Entries Table (Valkey-specific)
       CREATE TABLE IF NOT EXISTS command_log_entries (
@@ -1980,8 +2134,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         captured_at BIGINT NOT NULL,
         source_host TEXT NOT NULL,
         source_port INTEGER NOT NULL,
+        source_run_id TEXT NOT NULL DEFAULT '',
         connection_id TEXT NOT NULL DEFAULT 'env-default',
-        UNIQUE(commandlog_id, log_type, source_host, source_port, connection_id)
+        UNIQUE(commandlog_id, log_type, source_host, source_port, source_run_id, connection_id)
       );
 
       CREATE INDEX IF NOT EXISTS idx_commandlog_timestamp ON command_log_entries(timestamp DESC);
@@ -1991,44 +2146,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       CREATE INDEX IF NOT EXISTS idx_commandlog_captured_at ON command_log_entries(captured_at DESC);
       CREATE INDEX IF NOT EXISTS idx_commandlog_connection_id ON command_log_entries(connection_id);
 
-      -- Drop old unique constraint without connection_id if it exists
-      DO $$
-      BEGIN
-        ALTER TABLE command_log_entries
-        DROP CONSTRAINT IF EXISTS command_log_entries_commandlog_id_log_type_source_host_sour_key;
-      EXCEPTION WHEN undefined_object THEN
-        -- Constraint doesn't exist, ignore
-      END $$;
-
-      -- Add unique constraint if missing (for tables created before this constraint was added)
-      DO $$
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM pg_constraint c
-          JOIN pg_class t ON c.conrelid = t.oid
-          WHERE t.relname = 'command_log_entries'
-            AND c.contype = 'u'
-            AND c.conkey @> ARRAY(
-              SELECT attnum FROM pg_attribute
-              WHERE attrelid = t.oid AND attname IN ('commandlog_id', 'log_type', 'source_host', 'source_port', 'connection_id')
-            )
-        ) THEN
-          -- Remove duplicates first (keep the one with highest pk)
-          DELETE FROM command_log_entries a USING command_log_entries b
-          WHERE a.pk < b.pk
-            AND a.commandlog_id = b.commandlog_id
-            AND a.log_type = b.log_type
-            AND a.source_host = b.source_host
-            AND a.source_port = b.source_port
-            AND a.connection_id = b.connection_id;
-
-          ALTER TABLE command_log_entries
-          ADD CONSTRAINT command_log_entries_cmdlog_id_type_host_port_conn_key
-          UNIQUE (commandlog_id, log_type, source_host, source_port, connection_id);
-        END IF;
-      EXCEPTION WHEN duplicate_object THEN
-        -- Constraint already exists, ignore
-      END $$;
+      -- See slow_log_entries: the widened key is built by migrateLogSourceKeys().
+      ALTER TABLE command_log_entries ADD COLUMN IF NOT EXISTS source_run_id TEXT NOT NULL DEFAULT '';
 
       -- Latency Snapshots Table
       CREATE TABLE IF NOT EXISTS latency_snapshots (
@@ -2113,6 +2232,26 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         ON latency_stats_samples(connection_id, captured_at);
       CREATE INDEX IF NOT EXISTS idx_latstat_captured_at_global
         ON latency_stats_samples(captured_at);
+
+      CREATE TABLE IF NOT EXISTS replication_divergence_windows (
+        id UUID PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        replica_addr TEXT NOT NULL,
+        window_start BIGINT NOT NULL,
+        window_end BIGINT NOT NULL,
+        gap_bytes DOUBLE PRECISION NOT NULL,
+        bytes_per_sec DOUBLE PRECISION,
+        seconds_behind DOUBLE PRECISION
+      );
+      ALTER TABLE replication_divergence_windows ADD COLUMN IF NOT EXISTS replica_gap_bytes DOUBLE PRECISION;
+      ALTER TABLE replication_divergence_windows ADD COLUMN IF NOT EXISTS replica_view TEXT;
+
+      CREATE INDEX IF NOT EXISTS idx_repl_div_replica_end
+        ON replication_divergence_windows(connection_id, replica_addr, window_end);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_repl_div_window
+        ON replication_divergence_windows(connection_id, replica_addr, window_start, window_end);
+      CREATE INDEX IF NOT EXISTS idx_repl_div_end
+        ON replication_divergence_windows(window_end);
 
       CREATE TABLE IF NOT EXISTS ai_cache_samples (
         id UUID PRIMARY KEY,
@@ -2295,9 +2434,13 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
       ALTER TABLE connections ADD COLUMN IF NOT EXISTS auto_register_nodes BOOLEAN;
       ALTER TABLE connections ADD COLUMN IF NOT EXISTS membership TEXT;
+      ALTER TABLE connections ADD COLUMN IF NOT EXISTS node_availability_zones TEXT;
       ALTER TABLE connections ADD COLUMN IF NOT EXISTS node_username TEXT;
       ALTER TABLE connections ADD COLUMN IF NOT EXISTS node_password TEXT;
       ALTER TABLE connections ADD COLUMN IF NOT EXISTS node_password_encrypted BOOLEAN;
+      -- Migration: custom CA / client certificate material and auth mode (mTLS).
+      ALTER TABLE connections ADD COLUMN IF NOT EXISTS tls_config TEXT;
+      ALTER TABLE connections ADD COLUMN IF NOT EXISTS auth_mode TEXT;
 
       CREATE INDEX IF NOT EXISTS idx_connections_is_default ON connections(is_default);
 
@@ -2694,16 +2837,24 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `INSERT INTO anomaly_events (
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics,
-        resolved, resolved_at, duration_ms,
-        source_host, source_port, connection_id
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+        message, correlation_id, related_metrics, replica_addr, node_addr, dedupe_key, commands, event_sequence,
+        kind, retry_trigger, resolved, resolved_at, duration_ms,
+        source_host, source_port, connection_id, scope_id
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
       ON CONFLICT (id) DO UPDATE SET
         correlation_id = COALESCE(EXCLUDED.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(EXCLUDED.related_metrics, anomaly_events.related_metrics),
-        resolved = EXCLUDED.resolved,
-        resolved_at = EXCLUDED.resolved_at,
-        duration_ms = EXCLUDED.duration_ms`,
+        scope_id = COALESCE(anomaly_events.scope_id, EXCLUDED.scope_id),
+        replica_addr = COALESCE(EXCLUDED.replica_addr, anomaly_events.replica_addr),
+        node_addr = COALESCE(EXCLUDED.node_addr, anomaly_events.node_addr),
+        dedupe_key = COALESCE(EXCLUDED.dedupe_key, anomaly_events.dedupe_key),
+        commands = COALESCE(anomaly_events.commands, EXCLUDED.commands),
+        event_sequence = COALESCE(anomaly_events.event_sequence, EXCLUDED.event_sequence),
+        kind = COALESCE(anomaly_events.kind, EXCLUDED.kind),
+        retry_trigger = COALESCE(anomaly_events.retry_trigger, EXCLUDED.retry_trigger),
+        resolved = anomaly_events.resolved OR EXCLUDED.resolved,
+        resolved_at = COALESCE(anomaly_events.resolved_at, EXCLUDED.resolved_at),
+        duration_ms = COALESCE(anomaly_events.duration_ms, EXCLUDED.duration_ms)`,
       [
         event.id,
         event.timestamp,
@@ -2717,13 +2868,21 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         event.threshold,
         event.message,
         event.correlationId || null,
-        event.relatedMetrics || [],
+        event.relatedMetrics ?? null,
+        event.replicaAddr ?? null,
+        event.nodeAddr ?? null,
+        event.dedupeKey ?? null,
+        event.commands ?? null,
+        event.eventSequence ?? null,
+        event.kind ?? null,
+        event.retryTrigger ?? null,
         event.resolved,
         event.resolvedAt || null,
         event.durationMs || null,
         event.sourceHost || null,
         event.sourcePort || null,
         connectionId,
+        event.scopeId ?? null,
       ],
     );
 
@@ -2742,7 +2901,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
-        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}
+        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
+        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
+        $${paramIndex++}, $${paramIndex++}
       )`);
       values.push(
         event.id,
@@ -2757,13 +2918,21 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         event.threshold,
         event.message,
         event.correlationId || null,
-        event.relatedMetrics || [],
+        event.relatedMetrics ?? null,
+        event.replicaAddr ?? null,
+        event.nodeAddr ?? null,
+        event.dedupeKey ?? null,
+        event.commands ?? null,
+        event.eventSequence ?? null,
+        event.kind ?? null,
+        event.retryTrigger ?? null,
         event.resolved,
         event.resolvedAt || null,
         event.durationMs || null,
         event.sourceHost || null,
         event.sourcePort || null,
         connectionId,
+        event.scopeId ?? null,
       );
     }
 
@@ -2771,16 +2940,24 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `INSERT INTO anomaly_events (
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics,
-        resolved, resolved_at, duration_ms,
-        source_host, source_port, connection_id
+        message, correlation_id, related_metrics, replica_addr, node_addr, dedupe_key, commands, event_sequence,
+        kind, retry_trigger, resolved, resolved_at, duration_ms,
+        source_host, source_port, connection_id, scope_id
       ) VALUES ${placeholders.join(', ')}
       ON CONFLICT (id) DO UPDATE SET
         correlation_id = COALESCE(EXCLUDED.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(EXCLUDED.related_metrics, anomaly_events.related_metrics),
-        resolved = EXCLUDED.resolved,
-        resolved_at = EXCLUDED.resolved_at,
-        duration_ms = EXCLUDED.duration_ms`,
+        scope_id = COALESCE(anomaly_events.scope_id, EXCLUDED.scope_id),
+        replica_addr = COALESCE(EXCLUDED.replica_addr, anomaly_events.replica_addr),
+        node_addr = COALESCE(EXCLUDED.node_addr, anomaly_events.node_addr),
+        dedupe_key = COALESCE(EXCLUDED.dedupe_key, anomaly_events.dedupe_key),
+        commands = COALESCE(anomaly_events.commands, EXCLUDED.commands),
+        event_sequence = COALESCE(anomaly_events.event_sequence, EXCLUDED.event_sequence),
+        kind = COALESCE(anomaly_events.kind, EXCLUDED.kind),
+        retry_trigger = COALESCE(anomaly_events.retry_trigger, EXCLUDED.retry_trigger),
+        resolved = anomaly_events.resolved OR EXCLUDED.resolved,
+        resolved_at = COALESCE(anomaly_events.resolved_at, EXCLUDED.resolved_at),
+        duration_ms = COALESCE(anomaly_events.duration_ms, EXCLUDED.duration_ms)`,
       values,
     );
 
@@ -2818,6 +2995,31 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push(`resolved = $${paramIndex++}`);
       params.push(options.resolved);
     }
+    if (options.scope) {
+      conditions.push(`(scope_id = $${paramIndex++} OR connection_id = ANY($${paramIndex++}))`);
+      params.push(options.scope.id, options.scope.connectionIds);
+    }
+    if (options.nodeAddr) {
+      conditions.push(`node_addr = $${paramIndex++}`);
+      params.push(options.nodeAddr);
+    } else if (options.nodeAddr !== undefined) {
+      conditions.push("(node_addr IS NULL OR node_addr = '')");
+    }
+    if (options.commands?.length) {
+      conditions.push(`commands = $${paramIndex++}::text[]`);
+      params.push(options.commands);
+    } else if (options.commands !== undefined) {
+      conditions.push('(commands IS NULL OR cardinality(commands) = 0)');
+    }
+    const direction = options.order === 'asc' ? 'ASC' : 'DESC';
+    if (options.after) {
+      const past = direction === 'ASC' ? '>' : '<';
+      const time = paramIndex++;
+      conditions.push(
+        `(timestamp ${past} $${time} OR (timestamp = $${time} AND id ${past} $${paramIndex++}))`,
+      );
+      params.push(options.after.timestamp, options.after.id);
+    }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const limit = options.limit ?? 100;
@@ -2827,12 +3029,12 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `SELECT
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics,
-        resolved, resolved_at, duration_ms,
-        source_host, source_port, connection_id
+        message, correlation_id, related_metrics, replica_addr, node_addr, dedupe_key, commands, event_sequence,
+        kind, retry_trigger, resolved, resolved_at, duration_ms,
+        source_host, source_port, connection_id, scope_id
       FROM anomaly_events
       ${whereClause}
-      ORDER BY timestamp DESC
+      ORDER BY timestamp ${direction}, id ${direction}
       LIMIT $${paramIndex++} OFFSET $${paramIndex++}`,
       [...params, limit, offset],
     );
@@ -2930,15 +3132,29 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const existing = await this.pool.query('SELECT 1 FROM anomaly_events WHERE id = $1', [id]);
     return (existing.rowCount ?? 0) > 0;
   }
+  async resolveOpenAnomaly(id: string, resolvedAt: number): Promise<boolean> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const result = await this.pool.query(
+      `UPDATE anomaly_events
+       SET resolved = true, resolved_at = $2, duration_ms = $2 - timestamp
+       WHERE id = $1 AND resolved = false`,
+      [id, resolvedAt],
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
 
   async pruneOldAnomalyEvents(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'anomaly_events', 'timestamp < $1 AND connection_id = $2', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'anomaly_events',
+        'timestamp < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
     return chunkedPostgresDelete(this.pool, 'anomaly_events', 'timestamp < $1', [cutoffTimestamp]);
@@ -2951,12 +3167,14 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `INSERT INTO correlated_anomaly_groups (
         correlation_id, timestamp, pattern, severity,
         diagnosis, recommendations, anomaly_count, metric_types,
-        source_host, source_port, connection_id
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        source_host, source_port, connection_id, anomaly_ids, scope_id
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       ON CONFLICT (correlation_id) DO UPDATE SET
         diagnosis = EXCLUDED.diagnosis,
         recommendations = EXCLUDED.recommendations,
-        anomaly_count = EXCLUDED.anomaly_count`,
+        anomaly_count = EXCLUDED.anomaly_count,
+        anomaly_ids = COALESCE(EXCLUDED.anomaly_ids, correlated_anomaly_groups.anomaly_ids),
+        scope_id = COALESCE(correlated_anomaly_groups.scope_id, EXCLUDED.scope_id)`,
       [
         group.correlationId,
         group.timestamp,
@@ -2969,13 +3187,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         group.sourceHost || null,
         group.sourcePort || null,
         connectionId,
+        group.anomalyIds ?? null,
+        group.scopeId ?? null,
       ],
     );
 
     return group.correlationId;
   }
 
-  async getCorrelatedGroups(options: AnomalyQueryOptions = {}): Promise<StoredCorrelatedGroup[]> {
+  async getCorrelatedGroups(
+    options: CorrelatedGroupQueryOptions = {},
+  ): Promise<StoredCorrelatedGroup[]> {
     if (!this.pool) throw new Error('Database not initialized');
 
     const conditions: string[] = [];
@@ -3002,6 +3224,23 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push(`pattern = $${paramIndex++}`);
       params.push(options.pattern);
     }
+    if (options.scope) {
+      conditions.push(`(scope_id = $${paramIndex++} OR connection_id = ANY($${paramIndex++}))`);
+      params.push(options.scope.id, options.scope.connectionIds);
+    }
+    if (options.patterns) {
+      conditions.push(`pattern = ANY($${paramIndex++})`);
+      params.push(options.patterns);
+    }
+    if (options.involvingConnectionId) {
+      const caller = paramIndex++;
+      conditions.push(`(connection_id = $${caller} OR EXISTS (
+        SELECT 1 FROM anomaly_events member
+        WHERE member.correlation_id = correlated_anomaly_groups.correlation_id
+          AND member.connection_id = $${caller}
+      ))`);
+      params.push(options.involvingConnectionId);
+    }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const limit = options.limit ?? 50;
@@ -3011,10 +3250,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `SELECT
         correlation_id, timestamp, pattern, severity,
         diagnosis, recommendations, anomaly_count, metric_types,
-        source_host, source_port, connection_id
+        source_host, source_port, connection_id, anomaly_ids, scope_id
       FROM correlated_anomaly_groups
       ${whereClause}
-      ORDER BY timestamp DESC
+      ORDER BY timestamp DESC, correlation_id DESC
       LIMIT $${paramIndex++} OFFSET $${paramIndex++}`,
       [...params, limit, offset],
     );
@@ -3022,17 +3261,109 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return result.rows.map((row) => this.mappers.mapCorrelatedGroupRow(row));
   }
 
+  async getCorrelatedGroupMembers(
+    correlationIds: string[],
+    anomalyIds: string[],
+    maxPerGroup: number,
+    maxRows: number,
+  ): Promise<StoredAnomalyEvent[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    if (correlationIds.length === 0 && anomalyIds.length === 0) return [];
+
+    const isUuid = (id: string) => /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id);
+    const result = await this.pool.query(
+      `SELECT
+        id, timestamp, metric_type, anomaly_type, severity,
+        value, baseline, std_dev, z_score, threshold,
+        message, correlation_id, related_metrics, replica_addr, node_addr, dedupe_key, commands, event_sequence,
+        kind, retry_trigger, resolved, resolved_at, duration_ms,
+        source_host, source_port, connection_id, scope_id
+      FROM (
+        SELECT *, ROW_NUMBER() OVER (
+          PARTITION BY COALESCE(correlation_id::text, id::text) ORDER BY timestamp DESC, id DESC
+        ) AS group_rank
+        FROM anomaly_events
+        WHERE correlation_id = ANY($1::uuid[]) OR id = ANY($2::uuid[])
+      ) ranked
+      WHERE group_rank <= $3
+      ORDER BY timestamp DESC, id DESC
+      LIMIT $4`,
+      [correlationIds, anomalyIds.filter(isUuid), maxPerGroup, maxRows],
+    );
+
+    return result.rows.map((row) => this.mappers.mapAnomalyEventRow(row)).reverse();
+  }
+
+  async saveIncidentBoundaries(boundaries: StoredIncidentBoundary[]): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+    if (boundaries.length === 0) return 0;
+
+    const result = await this.pool.query(
+      `INSERT INTO incident_boundaries (scope_id, started_at, anomaly_id)
+       SELECT * FROM UNNEST($1::text[], $2::bigint[], $3::text[])
+       ON CONFLICT DO NOTHING`,
+      [
+        boundaries.map((b) => b.scopeId),
+        boundaries.map((b) => b.startedAt),
+        boundaries.map((b) => b.anomalyId),
+      ],
+    );
+    return result.rowCount ?? 0;
+  }
+
+  async getIncidentBoundaries(query: IncidentBoundaryQuery): Promise<StoredIncidentBoundary[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    if (query.scopeIds?.length === 0) return [];
+
+    const result = await this.pool.query(
+      `SELECT boundary.scope_id, boundary.started_at, boundary.anomaly_id,
+              e.metric_type, e.connection_id
+       FROM (
+         SELECT scope_id, started_at, anomaly_id FROM incident_boundaries
+         WHERE ($1::text[] IS NULL OR scope_id = ANY($1))
+           AND started_at >= $2
+           AND ($3::bigint IS NULL OR started_at <= $3)
+         UNION ALL
+         SELECT b.scope_id, b.started_at, b.anomaly_id
+         FROM incident_boundaries b
+         JOIN (
+           SELECT scope_id, MAX(started_at) AS started_at FROM incident_boundaries
+           WHERE ($1::text[] IS NULL OR scope_id = ANY($1)) AND started_at < $2
+           GROUP BY scope_id
+         ) latest ON b.scope_id = latest.scope_id AND b.started_at = latest.started_at
+       ) boundary
+       LEFT JOIN anomaly_events e ON e.id = CASE
+         WHEN boundary.anomaly_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+         THEN boundary.anomaly_id::uuid
+       END
+       ORDER BY boundary.started_at ASC, boundary.anomaly_id ASC`,
+      [query.scopeIds ?? null, query.startTime, query.endTime ?? null],
+    );
+    return result.rows.map(toIncidentBoundary);
+  }
+
+  async pruneOldIncidentBoundaries(cutoffTimestamp: number): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+    return chunkedPostgresDelete(this.pool, 'incident_boundaries', 'started_at < $1', [
+      cutoffTimestamp,
+    ]);
+  }
+
   async pruneOldCorrelatedGroups(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'correlated_anomaly_groups', 'timestamp < $1 AND connection_id = $2', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'correlated_anomaly_groups',
+        'timestamp < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
-    return chunkedPostgresDelete(this.pool, 'correlated_anomaly_groups', 'timestamp < $1', [cutoffTimestamp]);
+    return chunkedPostgresDelete(this.pool, 'correlated_anomaly_groups', 'timestamp < $1', [
+      cutoffTimestamp,
+    ]);
   }
 
   async saveKeyPatternSnapshots(
@@ -3371,13 +3702,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'key_pattern_snapshots', 'timestamp < $1 AND connection_id = $2', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'key_pattern_snapshots',
+        'timestamp < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
-    return chunkedPostgresDelete(this.pool, 'key_pattern_snapshots', 'timestamp < $1', [cutoffTimestamp]);
+    return chunkedPostgresDelete(this.pool, 'key_pattern_snapshots', 'timestamp < $1', [
+      cutoffTimestamp,
+    ]);
   }
 
   async saveHotKeys(entries: HotKeyEntry[], connectionId: string): Promise<number> {
@@ -3549,10 +3884,12 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'hot_key_stats', 'captured_at < $1 AND connection_id = $2', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'hot_key_stats',
+        'captured_at < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
     return chunkedPostgresDelete(this.pool, 'hot_key_stats', 'captured_at < $1', [cutoffTimestamp]);
@@ -3722,9 +4059,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return this.slowlogRepo.getSlowLogEntries(options);
   }
 
-  async getLatestSlowLogId(connectionId?: string): Promise<number | null> {
+  async getLatestSlowLogId(connectionId?: string, source?: LogSource): Promise<number | null> {
     if (!this.pool) throw new Error('Database not initialized');
-    return this.slowlogRepo.getLatestSlowLogId(connectionId);
+    return this.slowlogRepo.getLatestSlowLogId(connectionId, source);
   }
 
   async pruneOldSlowLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
@@ -3747,7 +4084,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       placeholders.push(`(
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
-        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}
+        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}
       )`);
       values.push(
         entry.id,
@@ -3760,6 +4097,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         entry.capturedAt,
         entry.sourceHost,
         entry.sourcePort,
+        entry.sourceRunId ?? '',
         connectionId,
       );
     }
@@ -3767,9 +4105,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const query = `
       INSERT INTO command_log_entries (
         commandlog_id, timestamp, duration, command,
-        client_address, client_name, log_type, captured_at, source_host, source_port, connection_id
+        client_address, client_name, log_type, captured_at, source_host, source_port, source_run_id, connection_id
       ) VALUES ${placeholders.join(', ')}
-      ON CONFLICT (commandlog_id, log_type, source_host, source_port, connection_id) DO NOTHING
+      ON CONFLICT DO NOTHING
     `;
 
     const result = await this.pool.query(query, values);
@@ -3827,7 +4165,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const result = await this.pool.query(
       `SELECT
         commandlog_id, timestamp, duration, command,
-        client_address, client_name, log_type, captured_at, source_host, source_port, connection_id
+        client_address, client_name, log_type, captured_at, source_host, source_port, source_run_id, connection_id
       FROM command_log_entries
       ${whereClause}
       ${orderBy}
@@ -3838,38 +4176,58 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return result.rows.map((row) => this.mappers.mapCommandLogEntryRow(row));
   }
 
-  async getLatestCommandLogId(type: CommandLogType, connectionId?: string): Promise<number | null> {
+  async getLatestCommandLogId(type: CommandLogType, connectionId?: string, source?: LogSource): Promise<number | null> {
     if (!this.pool) throw new Error('Database not initialized');
 
-    if (connectionId) {
-      const result = await this.pool.query(
-        'SELECT MAX(commandlog_id) as max_id FROM command_log_entries WHERE log_type = $1 AND connection_id = $2',
-        [type, connectionId],
-      );
-      const maxId = result.rows[0]?.max_id;
-      return maxId !== null && maxId !== undefined ? Number(maxId) : null;
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    const add = (sql: string, value: unknown) => {
+      params.push(value);
+      conditions.push(sql.replace('?', `$${params.length}`));
+    };
+    add('log_type = ?', type);
+    if (connectionId) add('connection_id = ?', connectionId);
+    if (source) {
+      add('source_run_id = ?', source.runId ?? '');
+      if (!source.runId) {
+        add('source_host = ?', source.host);
+        add('source_port = ?', source.port);
+      }
     }
-
+    const where = conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : '';
     const result = await this.pool.query(
-      'SELECT MAX(commandlog_id) as max_id FROM command_log_entries WHERE log_type = $1',
-      [type],
+      `SELECT MAX(commandlog_id) as max_id FROM command_log_entries${where}`,
+      params,
     );
-
     const maxId = result.rows[0]?.max_id;
     return maxId !== null && maxId !== undefined ? Number(maxId) : null;
+  }
+
+  async hasRunIdLogEntries(connectionId: string): Promise<boolean> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      `SELECT EXISTS (SELECT 1 FROM slow_log_entries WHERE connection_id = $1 AND source_run_id <> '')
+           OR EXISTS (SELECT 1 FROM command_log_entries WHERE connection_id = $1 AND source_run_id <> '') AS found`,
+      [connectionId],
+    );
+    return result.rows[0]?.found === true;
   }
 
   async pruneOldCommandLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'command_log_entries', 'captured_at < $1 AND connection_id = $2', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'command_log_entries',
+        'captured_at < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
-    return chunkedPostgresDelete(this.pool, 'command_log_entries', 'captured_at < $1', [cutoffTimestamp]);
+    return chunkedPostgresDelete(this.pool, 'command_log_entries', 'captured_at < $1', [
+      cutoffTimestamp,
+    ]);
   }
 
   // Latency Snapshot Methods
@@ -3957,13 +4315,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'latency_snapshots', 'timestamp < $1 AND connection_id = $2', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'latency_snapshots',
+        'timestamp < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
-    return chunkedPostgresDelete(this.pool, 'latency_snapshots', 'timestamp < $1', [cutoffTimestamp]);
+    return chunkedPostgresDelete(this.pool, 'latency_snapshots', 'timestamp < $1', [
+      cutoffTimestamp,
+    ]);
   }
 
   // Latency Histogram Methods
@@ -4031,13 +4393,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'latency_histograms', 'timestamp < $1 AND connection_id = $2', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'latency_histograms',
+        'timestamp < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
-    return chunkedPostgresDelete(this.pool, 'latency_histograms', 'timestamp < $1', [cutoffTimestamp]);
+    return chunkedPostgresDelete(this.pool, 'latency_histograms', 'timestamp < $1', [
+      cutoffTimestamp,
+    ]);
   }
 
   // Memory Snapshot Methods
@@ -4159,13 +4525,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'memory_snapshots', 'timestamp < $1 AND connection_id = $2', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'memory_snapshots',
+        'timestamp < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
-    return chunkedPostgresDelete(this.pool, 'memory_snapshots', 'timestamp < $1', [cutoffTimestamp]);
+    return chunkedPostgresDelete(this.pool, 'memory_snapshots', 'timestamp < $1', [
+      cutoffTimestamp,
+    ]);
   }
 
   async saveScalingReadinessScore(score: StoredScalingReadinessScore): Promise<void> {
@@ -4270,10 +4640,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return settings;
   }
 
-
   private kvCacheSnapshotFromRow(r: Record<string, any>): KvCacheFootprintSnapshot {
     const json = <T>(v: unknown): T => (typeof v === 'string' ? JSON.parse(v) : v) as T;
-    const nullableNumber = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
+    const nullableNumber = (v: unknown): number | null =>
+      v === null || v === undefined ? null : Number(v);
     return {
       connectionId: r.connection_id,
       timestamp: Number(r.timestamp),
@@ -4345,17 +4715,42 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
          other_dbs, per_model)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)`,
       [
-        s.connectionId, s.timestamp, s.detected, s.layout, s.scannedKeys, s.matchedKeys,
-        s.sampledKeys, s.scanComplete, s.primariesScanned, s.primariesTotal, s.chunksEst, s.bytesEst, s.usedMemory, s.maxmemory,
-        s.maxmemoryPolicy, s.lmcacheMemoryShare, s.noTtlRatio, s.orphanRatio, s.evictedKeysDelta, s.evictedKeysIntervalMs,
-        JSON.stringify(s.otherDbs), JSON.stringify(s.perModel),
+        s.connectionId,
+        s.timestamp,
+        s.detected,
+        s.layout,
+        s.scannedKeys,
+        s.matchedKeys,
+        s.sampledKeys,
+        s.scanComplete,
+        s.primariesScanned,
+        s.primariesTotal,
+        s.chunksEst,
+        s.bytesEst,
+        s.usedMemory,
+        s.maxmemory,
+        s.maxmemoryPolicy,
+        s.lmcacheMemoryShare,
+        s.noTtlRatio,
+        s.orphanRatio,
+        s.evictedKeysDelta,
+        s.evictedKeysIntervalMs,
+        JSON.stringify(s.otherDbs),
+        JSON.stringify(s.perModel),
       ],
     );
   }
 
-  async getKvCacheFootprintSnapshots(query: KvCacheFootprintQuery): Promise<KvCacheFootprintSnapshot[]> {
+  async getKvCacheFootprintSnapshots(
+    query: KvCacheFootprintQuery,
+  ): Promise<KvCacheFootprintSnapshot[]> {
     if (!this.pool) throw new Error('Database not initialized');
-    const params = [query.connectionId, query.from ?? 0, query.to ?? Number.MAX_SAFE_INTEGER, query.limit ?? 2000];
+    const params = [
+      query.connectionId,
+      query.from ?? 0,
+      query.to ?? Number.MAX_SAFE_INTEGER,
+      query.limit ?? 2000,
+    ];
     const result = query.bucketMs
       ? await this.pool.query(
           `SELECT * FROM (
@@ -4381,12 +4776,22 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return result.rows.map((r) => this.kvCacheSnapshotFromRow(r));
   }
 
-  async pruneOldKvCacheFootprintSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+  async pruneOldKvCacheFootprintSnapshots(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
     if (!this.pool) throw new Error('Database not initialized');
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'kv_cache_footprint_snapshots', 'timestamp < $1 AND connection_id = $2', [cutoffTimestamp, connectionId]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'kv_cache_footprint_snapshots',
+        'timestamp < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
     }
-    return chunkedPostgresDelete(this.pool, 'kv_cache_footprint_snapshots', 'timestamp < $1', [cutoffTimestamp]);
+    return chunkedPostgresDelete(this.pool, 'kv_cache_footprint_snapshots', 'timestamp < $1', [
+      cutoffTimestamp,
+    ]);
   }
 
   async saveKvCacheEngineSamples(samples: KvCacheEngineSample[]): Promise<void> {
@@ -4398,9 +4803,19 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       const values: unknown[] = [];
       const placeholders = chunk.map((s, i) => {
         values.push(
-          s.engineId, s.connectionId, s.modelName, s.timestamp, s.requestedTokens, s.hitTokens,
-          s.lookupTokens, s.lookupHits, s.remoteReadBytes, s.remoteWriteBytes, s.remoteReadRequests,
-          s.remoteWriteRequests, s.remotePingErrors,
+          s.engineId,
+          s.connectionId,
+          s.modelName,
+          s.timestamp,
+          s.requestedTokens,
+          s.hitTokens,
+          s.lookupTokens,
+          s.lookupHits,
+          s.remoteReadBytes,
+          s.remoteWriteBytes,
+          s.remoteReadRequests,
+          s.remoteWriteRequests,
+          s.remotePingErrors,
         );
         const base = i * columns;
         return `(${Array.from({ length: columns }, (_, c) => `$${base + c + 1}`).join(', ')})`;
@@ -4418,7 +4833,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async getKvCacheEngineSamples(query: KvCacheSampleQuery): Promise<KvCacheEngineSample[]> {
     if (!this.pool) throw new Error('Database not initialized');
-    if (query.bucketMs) return this.getBucketedKvCacheEngineSamples(query, Math.ceil(query.bucketMs));
+    if (query.bucketMs)
+      return this.getBucketedKvCacheEngineSamples(query, Math.ceil(query.bucketMs));
     const { where, params } = this.kvCacheSampleFilter(query);
     params.push(query.limit ?? 50_000);
     const result = await this.pool.query(
@@ -4431,12 +4847,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return result.rows.map((r) => this.kvCacheSampleFromRow(r));
   }
 
-  private async getBucketedKvCacheEngineSamples(query: KvCacheSampleQuery, bucketMs: number): Promise<KvCacheEngineSample[]> {
+  private async getBucketedKvCacheEngineSamples(
+    query: KvCacheSampleQuery,
+    bucketMs: number,
+  ): Promise<KvCacheEngineSample[]> {
     const { where, params } = this.kvCacheSampleFilter(query);
     params.push(bucketMs);
     const bucket = `$${params.length}::bigint`;
     params.push(query.limit ?? 50_000);
-    const sums = KV_CACHE_SAMPLE_COUNTER_COLUMNS.map((column) => `SUM(${column}) AS ${column}`).join(', ');
+    const sums = KV_CACHE_SAMPLE_COUNTER_COLUMNS.map(
+      (column) => `SUM(${column}) AS ${column}`,
+    ).join(', ');
     const result = await this.pool!.query(
       `SELECT * FROM (
          SELECT engine_id, connection_id, model_name, (timestamp / ${bucket}) * ${bucket} AS bucket_ts, ${sums}
@@ -4449,7 +4870,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return result.rows.map((r) => this.kvCacheSampleFromRow({ ...r, timestamp: r.bucket_ts }));
   }
 
-  async getKvCacheSampleTotals(query: Omit<KvCacheSampleQuery, 'limit' | 'bucketMs'>): Promise<KvCacheSampleTotals> {
+  async getKvCacheSampleTotals(
+    query: Omit<KvCacheSampleQuery, 'limit' | 'bucketMs'>,
+  ): Promise<KvCacheSampleTotals> {
     if (!this.pool) throw new Error('Database not initialized');
     const { where, params } = this.kvCacheSampleFilter(query);
     const result = await this.pool.query(
@@ -4457,11 +4880,21 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
        FROM kv_cache_engine_samples WHERE ${where.join(' AND ')}`,
       params,
     );
-    return { requestedTokens: Number(result.rows[0].requested), hitTokens: Number(result.rows[0].hit) };
+    return {
+      requestedTokens: Number(result.rows[0].requested),
+      hitTokens: Number(result.rows[0].hit),
+    };
   }
 
-  private kvCacheSampleFilter(query: Omit<KvCacheSampleQuery, 'limit' | 'bucketMs'>): { where: string[]; params: unknown[] } {
-    const params: unknown[] = [query.connectionId, query.from ?? 0, query.to ?? Number.MAX_SAFE_INTEGER];
+  private kvCacheSampleFilter(query: Omit<KvCacheSampleQuery, 'limit' | 'bucketMs'>): {
+    where: string[];
+    params: unknown[];
+  } {
+    const params: unknown[] = [
+      query.connectionId,
+      query.from ?? 0,
+      query.to ?? Number.MAX_SAFE_INTEGER,
+    ];
     const where = ['connection_id = $1', 'timestamp >= $2', 'timestamp <= $3'];
     if (query.engineId !== undefined) {
       params.push(query.engineId);
@@ -4474,12 +4907,22 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return { where, params };
   }
 
-  async pruneOldKvCacheEngineSamples(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+  async pruneOldKvCacheEngineSamples(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
     if (!this.pool) throw new Error('Database not initialized');
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'kv_cache_engine_samples', 'timestamp < $1 AND connection_id = $2', [cutoffTimestamp, connectionId]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'kv_cache_engine_samples',
+        'timestamp < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
     }
-    return chunkedPostgresDelete(this.pool, 'kv_cache_engine_samples', 'timestamp < $1', [cutoffTimestamp]);
+    return chunkedPostgresDelete(this.pool, 'kv_cache_engine_samples', 'timestamp < $1', [
+      cutoffTimestamp,
+    ]);
   }
 
   async deleteKvCacheEngineSamples(engineId: string): Promise<void> {
@@ -4505,8 +4948,18 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
          last_error = EXCLUDED.last_error
        RETURNING *`,
       [
-        e.id, e.connectionId, e.name, e.source, e.scrapeUrl, e.scrapeAuthHeader,
-        e.scrapeAuthEncrypted, e.otlpEngineId, e.enabled, e.createdAt, e.lastSeenAt, e.lastError,
+        e.id,
+        e.connectionId,
+        e.name,
+        e.source,
+        e.scrapeUrl,
+        e.scrapeAuthHeader,
+        e.scrapeAuthEncrypted,
+        e.otlpEngineId,
+        e.enabled,
+        e.createdAt,
+        e.lastSeenAt,
+        e.lastError,
       ],
     );
     return this.kvCacheEngineFromRow(result.rows[0]);
@@ -4517,7 +4970,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const result =
       connectionId === undefined
         ? await this.pool.query('SELECT * FROM kv_cache_engines ORDER BY created_at ASC')
-        : await this.pool.query('SELECT * FROM kv_cache_engines WHERE connection_id = $1 ORDER BY created_at ASC', [connectionId]);
+        : await this.pool.query(
+            'SELECT * FROM kv_cache_engines WHERE connection_id = $1 ORDER BY created_at ASC',
+            [connectionId],
+          );
     return result.rows.map((r) => this.kvCacheEngineFromRow(r));
   }
 
@@ -4535,7 +4991,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async getKvCacheSettings(connectionId: string): Promise<KvCacheSettings | null> {
     if (!this.pool) throw new Error('Database not initialized');
-    const result = await this.pool.query('SELECT * FROM kv_cache_settings WHERE connection_id = $1', [connectionId]);
+    const result = await this.pool.query(
+      'SELECT * FROM kv_cache_settings WHERE connection_id = $1',
+      [connectionId],
+    );
     if (result.rows.length === 0) return null;
     const row = result.rows[0];
     return {
@@ -4557,16 +5016,99 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
          hit_rate_threshold = EXCLUDED.hit_rate_threshold,
          eviction_alert_enabled = EXCLUDED.eviction_alert_enabled,
          updated_at = EXCLUDED.updated_at`,
-      [settings.connectionId, settings.hitRateAlertEnabled, settings.hitRateThreshold, settings.evictionAlertEnabled, settings.updatedAt],
+      [
+        settings.connectionId,
+        settings.hitRateAlertEnabled,
+        settings.hitRateThreshold,
+        settings.evictionAlertEnabled,
+        settings.updatedAt,
+      ],
     );
     return settings;
   }
 
   async deleteKvCacheConnectionData(connectionId: string): Promise<void> {
     if (!this.pool) throw new Error('Database not initialized');
-    for (const table of ['kv_cache_footprint_snapshots', 'kv_cache_engine_samples', 'kv_cache_engines', 'kv_cache_settings']) {
+    for (const table of [
+      'kv_cache_footprint_snapshots',
+      'kv_cache_engine_samples',
+      'kv_cache_engines',
+      'kv_cache_settings',
+    ]) {
       await chunkedPostgresDelete(this.pool, table, 'connection_id = $1', [connectionId]);
     }
+  }
+
+  private mapSessionNamespaceRow(row: any): SessionNamespace {
+    return {
+      id: row.id,
+      connectionId: row.connection_id,
+      name: row.name,
+      pattern: row.pattern,
+      preset: row.preset,
+      customSchema: row.custom_schema ?? null,
+      oversizeThresholdBytes: Number(row.oversize_threshold_bytes),
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  async listSessionNamespaces(connectionId: string): Promise<SessionNamespace[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      'SELECT * FROM session_explorer_namespaces WHERE connection_id = $1 ORDER BY created_at ASC, id ASC',
+      [connectionId],
+    );
+    return result.rows.map((row) => this.mapSessionNamespaceRow(row));
+  }
+
+  async getSessionNamespace(connectionId: string, id: string): Promise<SessionNamespace | null> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      'SELECT * FROM session_explorer_namespaces WHERE connection_id = $1 AND id = $2',
+      [connectionId, id],
+    );
+    return result.rows.length > 0 ? this.mapSessionNamespaceRow(result.rows[0]) : null;
+  }
+
+  async saveSessionNamespace(ns: SessionNamespace): Promise<SessionNamespace> {
+    if (!this.pool) throw new Error('Database not initialized');
+    await this.pool.query(
+      `INSERT INTO session_explorer_namespaces
+         (id, connection_id, name, pattern, preset, custom_schema, oversize_threshold_bytes, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       ON CONFLICT (id) DO UPDATE SET
+         name = EXCLUDED.name,
+         pattern = EXCLUDED.pattern,
+         preset = EXCLUDED.preset,
+         custom_schema = EXCLUDED.custom_schema,
+         oversize_threshold_bytes = EXCLUDED.oversize_threshold_bytes,
+         updated_at = EXCLUDED.updated_at
+       WHERE session_explorer_namespaces.connection_id = EXCLUDED.connection_id`,
+      [
+        ns.id,
+        ns.connectionId,
+        ns.name,
+        ns.pattern,
+        ns.preset,
+        ns.customSchema ? JSON.stringify(ns.customSchema) : null,
+        ns.oversizeThresholdBytes,
+        ns.createdAt,
+        ns.updatedAt,
+      ],
+    );
+    const saved = await this.getSessionNamespace(ns.connectionId, ns.id);
+    if (!saved) throw new Error('Session namespace id belongs to another connection');
+    return saved;
+  }
+
+  async deleteSessionNamespace(connectionId: string, id: string): Promise<boolean> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      'DELETE FROM session_explorer_namespaces WHERE connection_id = $1 AND id = $2',
+      [connectionId, id],
+    );
+    return (result.rowCount ?? 0) > 0;
   }
 
   // Command Stats Sample Methods
@@ -4658,13 +5200,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'command_stats_samples', 'captured_at < $1 AND connection_id = $2', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'command_stats_samples',
+        'captured_at < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
-    return chunkedPostgresDelete(this.pool, 'command_stats_samples', 'captured_at < $1', [cutoffTimestamp]);
+    return chunkedPostgresDelete(this.pool, 'command_stats_samples', 'captured_at < $1', [
+      cutoffTimestamp,
+    ]);
   }
 
   // Latency Stats Sample Methods (INFO latencystats)
@@ -4756,13 +5302,114 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'latency_stats_samples', 'captured_at < $1 AND connection_id = $2', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'latency_stats_samples',
+        'captured_at < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
-    return chunkedPostgresDelete(this.pool, 'latency_stats_samples', 'captured_at < $1', [cutoffTimestamp]);
+    return chunkedPostgresDelete(this.pool, 'latency_stats_samples', 'captured_at < $1', [
+      cutoffTimestamp,
+    ]);
+  }
+
+  async saveReplicationDivergenceWindows(
+    windows: Omit<StoredReplicationDivergenceWindow, 'id' | 'connectionId'>[],
+    connectionId: string,
+  ): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+    if (windows.length === 0) return 0;
+
+    const values: unknown[] = [];
+    const placeholders: string[] = [];
+    for (const w of windows) {
+      const base = values.length;
+      placeholders.push(`(${Array.from({ length: 10 }, (_, i) => `$${base + i + 1}`).join(', ')})`);
+      values.push(
+        randomUUID(),
+        connectionId,
+        w.replicaAddr,
+        w.windowStart,
+        w.windowEnd,
+        w.gapBytes,
+        w.bytesPerSec,
+        w.secondsBehind,
+        w.replicaGapBytes,
+        w.replicaView,
+      );
+    }
+
+    const result = await this.pool.query(
+      `INSERT INTO replication_divergence_windows
+         (id, connection_id, replica_addr, window_start, window_end, gap_bytes, bytes_per_sec, seconds_behind,
+          replica_gap_bytes, replica_view)
+       VALUES ${placeholders.join(', ')}
+       ON CONFLICT (connection_id, replica_addr, window_start, window_end) DO NOTHING`,
+      values,
+    );
+    return result.rowCount ?? 0;
+  }
+
+  async getReplicationDivergenceWindows(
+    options: ReplicationDivergenceWindowQueryOptions,
+  ): Promise<StoredReplicationDivergenceWindow[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const params: (string | number)[] = [options.connectionId];
+    let replicaFilter = '';
+    if (options.replicaAddr) {
+      params.push(options.replicaAddr);
+      replicaFilter = `AND replica_addr = $${params.length}`;
+    }
+    params.push(options.startTime, options.endTime, options.limit ?? 10_000);
+    const startIdx = params.length - 2;
+
+    const result = await this.pool.query(
+      `SELECT id, connection_id, replica_addr, window_start, window_end, gap_bytes, bytes_per_sec, seconds_behind,
+              replica_gap_bytes, replica_view
+       FROM (
+         SELECT *, ROW_NUMBER() OVER (PARTITION BY replica_addr ORDER BY window_end DESC) AS rn
+         FROM replication_divergence_windows
+         WHERE connection_id = $1 ${replicaFilter} AND window_end >= $${startIdx} AND window_end <= $${startIdx + 1}
+       ) ranked
+       WHERE rn <= $${startIdx + 2}
+       ORDER BY window_end ASC`,
+      params,
+    );
+    const rows = result.rows;
+
+    return rows.map((row: any) => ({
+      id: row.id,
+      connectionId: row.connection_id,
+      replicaAddr: row.replica_addr,
+      windowStart: Number(row.window_start),
+      windowEnd: Number(row.window_end),
+      gapBytes: Number(row.gap_bytes),
+      bytesPerSec: row.bytes_per_sec === null ? null : Number(row.bytes_per_sec),
+      secondsBehind: row.seconds_behind === null ? null : Number(row.seconds_behind),
+      replicaGapBytes: row.replica_gap_bytes === null ? null : Number(row.replica_gap_bytes),
+      replicaView: row.replica_view ?? null,
+    }));
+  }
+
+  async pruneOldReplicationDivergenceWindows(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      return chunkedPostgresDelete(
+        this.pool,
+        'replication_divergence_windows',
+        'window_end < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
+    }
+
+    return chunkedPostgresDelete(this.pool, 'replication_divergence_windows', 'window_end < $1', [cutoffTimestamp]);
   }
 
   // AI Cache/Memory Sample Methods
@@ -4811,9 +5458,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return result.rowCount ?? 0;
   }
 
-  async getAiCacheHistory(
-    options: AiCacheHistoryQueryOptions,
-  ): Promise<StoredAiCacheSample[]> {
+  async getAiCacheHistory(options: AiCacheHistoryQueryOptions): Promise<StoredAiCacheSample[]> {
     if (!this.pool) throw new Error('Database not initialized');
 
     const filters: string[] = [];
@@ -4875,20 +5520,21 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     }));
   }
 
-  async pruneOldAiCacheSamples(
-    cutoffTimestamp: number,
-    connectionId?: string,
-  ): Promise<number> {
+  async pruneOldAiCacheSamples(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'ai_cache_samples', 'timestamp < $1 AND connection_id = $2', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'ai_cache_samples',
+        'timestamp < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
-    return chunkedPostgresDelete(this.pool, 'ai_cache_samples', 'timestamp < $1', [cutoffTimestamp]);
+    return chunkedPostgresDelete(this.pool, 'ai_cache_samples', 'timestamp < $1', [
+      cutoffTimestamp,
+    ]);
   }
 
   // OTLP Trace Methods
@@ -5114,6 +5760,102 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   /**
+   * Move the slow/command log tables to their run-id keys without blocking
+   * writers on a large table: the widened unique key is built CONCURRENTLY and
+   * attached as a constraint, and only then are the narrower constraints (which
+   * would reject the same id from another process) dropped. A table without any
+   * unique key is deduplicated on the new key first. Rows with a run id
+   * also get a partial unique index on (id, run id), so one process read through
+   * two addresses is stored once; rows duplicated that way are collapsed first.
+   * Only this schema's constraints are considered.
+   *
+   * If a CONCURRENTLY build fails, the build falls back to a blocking one that
+   * holds a SHARE lock, so log inserts from other replicas wait until it ends.
+   * That wait is not bounded on purpose: a build given up on a timeout would
+   * leave the tables on their old keys until the next start, storing one
+   * process's entries again under each address it is read through.
+   *
+   * The constraints dropped below are the ones the previous version's inserts
+   * name. Stop that version before this one starts. Leaving it running makes
+   * every slow log and command log insert fail until it is replaced. See
+   * docs/updating.md.
+   */
+  private async migrateLogSourceKeys(): Promise<void> {
+    if (!this.pool) return;
+    const tables = [
+      {
+        table: 'slow_log_entries',
+        constraint: 'slow_log_entries_id_host_port_run_conn_key',
+        columns: ['slowlog_id', 'source_host', 'source_port', 'source_run_id', 'connection_id'],
+      },
+      {
+        table: 'command_log_entries',
+        constraint: 'command_log_entries_id_type_host_port_run_conn_key',
+        columns: ['commandlog_id', 'log_type', 'source_host', 'source_port', 'source_run_id', 'connection_id'],
+      },
+    ];
+    const uniqueConstraints = `
+      SELECT c.conname, c.conkey @> ARRAY(
+               SELECT attnum FROM pg_attribute WHERE attrelid = t.oid AND attname = ANY($2::text[])
+             ) AS covers,
+             c.conkey @> ARRAY(
+               SELECT attnum FROM pg_attribute WHERE attrelid = t.oid AND attname = 'source_run_id'
+             ) AS has_run_id
+      FROM pg_constraint c
+      JOIN pg_class t ON c.conrelid = t.oid
+      JOIN pg_namespace n ON n.oid = t.relnamespace
+      WHERE t.relname = $1 AND n.nspname = current_schema() AND c.contype = 'u'`;
+
+    const client = await this.pool.connect();
+    try {
+      for (const { table, constraint, columns } of tables) {
+        let existing = (await client.query(uniqueConstraints, [table, columns])).rows;
+        if (!existing.some((row) => row.covers)) {
+          // Any unique key these tables had is narrower than the new one, so
+          // only a table with none at all (created before the first) can hold
+          // rows the new key rejects; keep the first copy of each.
+          if (existing.length === 0) {
+            await client.query(
+              `DELETE FROM ${table} a USING ${table} b
+               WHERE a.pk > b.pk AND ${columns.map((column) => `a.${column} = b.${column}`).join(' AND ')}`,
+            );
+          }
+          const built = await this.ensureIndexConcurrently(client, constraint, table, columns.join(', '), {
+            unique: true,
+          });
+          if (!built) await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS ${constraint} ON ${table}(${columns.join(', ')})`);
+          await client.query(`ALTER TABLE ${table} ADD CONSTRAINT ${constraint} UNIQUE USING INDEX ${constraint}`);
+          existing = (await client.query(uniqueConstraints, [table, columns])).rows;
+        }
+        for (const row of existing) {
+          if (!row.has_run_id) await client.query(`ALTER TABLE ${table} DROP CONSTRAINT ${row.conname}`);
+        }
+      }
+
+      for (const { table, index, columns } of LOG_RUN_ID_UNIQUE_INDEXES) {
+        if (await this.isIndexValid(client, index, table)) continue;
+        await client.query(
+          `DELETE FROM ${table} a USING ${table} b
+           WHERE a.source_run_id <> '' AND a.pk > b.pk
+             AND ${columns
+               .split(', ')
+               .map((column) => `a.${column} = b.${column}`)
+               .join(' AND ')}`,
+        );
+        const built = await this.ensureIndexConcurrently(client, index, table, columns, {
+          unique: true,
+          where: "source_run_id <> ''",
+        });
+        if (!built) {
+          await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS ${index} ON ${table}(${columns}) WHERE source_run_id <> ''`);
+        }
+      }
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
    * A connection outside the pool with the pool's settings (connection
    * string, SSL) and, like the pool's on-connect hook, the schema's
    * search_path. Used for builds close() must be able to cut short: pool.end()
@@ -5125,7 +5867,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     // An error on an idle dedicated connection must not crash the process.
     client.on('error', (err: unknown) => {
       if (!this.closing) {
-        console.warn(`Index build connection error: ${err instanceof Error ? err.message : String(err)}`);
+        console.warn(
+          `Index build connection error: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
     });
     await client.connect();
@@ -5143,7 +5887,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   /**
    * Build the (connection_id, captured_at) indexes every bounded client
-   * analytics and audit read relies on. Called fire-and-forget from
+   * analytics and audit read relies on, and the anomaly correlation scope
+   * indexes. Called fire-and-forget from
    * initialize(): on a multi-million-row table the build takes minutes, and
    * CONCURRENTLY keeps writers flowing while it runs. Until it completes,
    * isClientSnapshotIndexReady() reports false.
@@ -5159,6 +5904,18 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const indexes: Array<[string, string, string]> = [
       ['idx_client_connection_captured', 'client_snapshots', 'connection_id, captured_at'],
       ['idx_acl_connection_captured', 'acl_audit', 'connection_id, captured_at'],
+      ['idx_anomaly_events_scope', 'anomaly_events', 'scope_id, timestamp DESC'],
+      ['idx_correlated_groups_scope', 'correlated_anomaly_groups', 'scope_id, timestamp DESC'],
+      [
+        'idx_slowlog_connection_source',
+        'slow_log_entries',
+        'connection_id, source_run_id, source_host, source_port, slowlog_id',
+      ],
+      [
+        'idx_commandlog_connection_source',
+        'command_log_entries',
+        'log_type, connection_id, source_run_id, source_host, source_port, commandlog_id',
+      ],
     ];
     if (this.closing) return;
     // A dedicated connection, not a pooled one, so close() can end it
@@ -5211,7 +5968,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
           await this.waitForIndexLockRetry();
           if (this.closing) return;
           if (await this.isIndexValid(client, indexName, tableName)) {
-            console.log(`Index ${indexName} was built by another instance; ready after ${Date.now() - started}ms`);
+            console.log(
+              `Index ${indexName} was built by another instance; ready after ${Date.now() - started}ms`,
+            );
             break;
           }
         }
@@ -5295,6 +6054,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     indexName: string,
     tableName: string,
     columns: string,
+    options: { unique?: boolean; where?: string } = {},
   ): Promise<boolean> {
     // Keyed on this schema's table oid, not a constant: advisory locks are
     // database-wide, so with per-tenant schemas in one database a shared key
@@ -5307,11 +6067,13 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     );
     if (!lock.rows[0]?.locked) return false;
     const lockKey: number = lock.rows[0].key;
+    const unique = options.unique ? 'UNIQUE ' : '';
+    const where = options.where ? ` WHERE ${options.where}` : '';
     try {
       try {
         await this.dropInvalidIndex(client, indexName, tableName, true);
         await client.query(
-          `CREATE INDEX CONCURRENTLY IF NOT EXISTS ${indexName} ON ${tableName}(${columns})`,
+          `CREATE ${unique}INDEX CONCURRENTLY IF NOT EXISTS ${indexName} ON ${tableName}(${columns})${where}`,
         );
       } catch (error) {
         // close() ended the connection: nothing to fall back on.
@@ -5324,7 +6086,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         );
         // The failed concurrent build may have left its own invalid index.
         await this.dropInvalidIndex(client, indexName, tableName, false);
-        await client.query(`CREATE INDEX IF NOT EXISTS ${indexName} ON ${tableName}(${columns})`);
+        await client.query(`CREATE ${unique}INDEX IF NOT EXISTS ${indexName} ON ${tableName}(${columns})${where}`);
       }
     } finally {
       // A closed connection has already released its session lock.
@@ -5541,13 +6303,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'vector_index_snapshots', 'timestamp < $1 AND connection_id = $2', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'vector_index_snapshots',
+        'timestamp < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
-    return chunkedPostgresDelete(this.pool, 'vector_index_snapshots', 'timestamp < $1', [cutoffTimestamp]);
+    return chunkedPostgresDelete(this.pool, 'vector_index_snapshots', 'timestamp < $1', [
+      cutoffTimestamp,
+    ]);
   }
 
   // CVE Inspection Methods
@@ -5691,8 +6457,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     await this.pool.query(
       `
-      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, node_username, node_password, node_password_encrypted, db_index, tls, ssh_tunnel, connection_type, auto_register_nodes, membership, is_default, created_at, updated_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, node_username, node_password, node_password_encrypted, db_index, tls, tls_config, auth_mode, ssh_tunnel, connection_type, auto_register_nodes, membership, node_availability_zones, is_default, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
       ON CONFLICT(id) DO UPDATE SET
         name = EXCLUDED.name,
         host = EXCLUDED.host,
@@ -5705,10 +6471,13 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         node_password_encrypted = EXCLUDED.node_password_encrypted,
         db_index = EXCLUDED.db_index,
         tls = EXCLUDED.tls,
+        tls_config = EXCLUDED.tls_config,
+        auth_mode = EXCLUDED.auth_mode,
         ssh_tunnel = EXCLUDED.ssh_tunnel,
         connection_type = EXCLUDED.connection_type,
         auto_register_nodes = EXCLUDED.auto_register_nodes,
         membership = EXCLUDED.membership,
+        node_availability_zones = EXCLUDED.node_availability_zones,
         is_default = EXCLUDED.is_default,
         updated_at = EXCLUDED.updated_at
     `,
@@ -5725,10 +6494,13 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         config.nodePassword ? config.nodePasswordEncrypted === true : null,
         config.dbIndex || 0,
         config.tls || false,
+        config.tlsConfig ? JSON.stringify(config.tlsConfig) : null,
+        config.authMode ?? null,
         config.sshTunnel ? JSON.stringify(config.sshTunnel) : null,
         config.connectionType ?? null,
         config.autoRegisterNodes ?? null,
         config.membership ? JSON.stringify(config.membership) : null,
+        config.nodeAvailabilityZones ? JSON.stringify(config.nodeAvailabilityZones) : null,
         config.isDefault || false,
         config.createdAt,
         config.updatedAt || null,
@@ -5754,6 +6526,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       nodePasswordEncrypted: row.node_password_encrypted === true ? true : undefined,
       dbIndex: row.db_index,
       tls: row.tls,
+      tlsConfig: parseTlsConfig(row.tls_config),
+      authMode: row.auth_mode === 'certificate' ? 'certificate' : undefined,
       sshTunnel: parseSshTunnel(row.ssh_tunnel),
       connectionType: row.connection_type === 'external' ? 'external' : 'direct',
       autoRegisterNodes:
@@ -5761,6 +6535,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
           ? undefined
           : row.auto_register_nodes,
       membership: parseMembership(row.membership),
+      nodeAvailabilityZones: parseNodeAvailabilityZones(row.node_availability_zones),
       isDefault: row.is_default,
       createdAt: Number(row.created_at),
       updatedAt: row.updated_at ? Number(row.updated_at) : undefined,
@@ -5787,6 +6562,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       nodePasswordEncrypted: row.node_password_encrypted === true ? true : undefined,
       dbIndex: row.db_index,
       tls: row.tls,
+      tlsConfig: parseTlsConfig(row.tls_config),
+      authMode: row.auth_mode === 'certificate' ? 'certificate' : undefined,
       sshTunnel: parseSshTunnel(row.ssh_tunnel),
       connectionType: row.connection_type === 'external' ? 'external' : 'direct',
       autoRegisterNodes:
@@ -5794,6 +6571,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
           ? undefined
           : row.auto_register_nodes,
       membership: parseMembership(row.membership),
+      nodeAvailabilityZones: parseNodeAvailabilityZones(row.node_availability_zones),
       isDefault: row.is_default,
       createdAt: Number(row.created_at),
       updatedAt: row.updated_at ? Number(row.updated_at) : undefined,
@@ -5851,6 +6629,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if ('membership' in updates) {
       setClauses.push(`membership = $${paramIndex++}`);
       params.push(updates.membership ? JSON.stringify(updates.membership) : null);
+    }
+    if ('nodeAvailabilityZones' in updates) {
+      setClauses.push(`node_availability_zones = $${paramIndex++}`);
+      params.push(updates.nodeAvailabilityZones ? JSON.stringify(updates.nodeAvailabilityZones) : null);
     }
 
     if (setClauses.length === 0) return;
@@ -6456,10 +7238,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return result.rows[0]?.count ?? 0;
   }
 
-  async saveCaptureSession(
-    session: StoredCaptureSession,
-    connectionId: string,
-  ): Promise<string> {
+  async saveCaptureSession(session: StoredCaptureSession, connectionId: string): Promise<string> {
     if (!this.pool) throw new Error('Database not initialized');
 
     await this.pool.query(
@@ -6495,10 +7274,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
   async getCaptureSession(id: string): Promise<StoredCaptureSession | null> {
     if (!this.pool) throw new Error('Database not initialized');
 
-    const result = await this.pool.query(
-      'SELECT * FROM capture_sessions WHERE id = $1',
-      [id],
-    );
+    const result = await this.pool.query('SELECT * FROM capture_sessions WHERE id = $1', [id]);
 
     return result.rows.length > 0 ? this.mapCaptureSessionRow(result.rows[0]) : null;
   }
@@ -6546,7 +7322,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   private mapCaptureSessionRow(row: Record<string, unknown>): StoredCaptureSession {
-    const toNumber = (v: unknown): number => (typeof v === 'string' ? parseInt(v, 10) : (v as number));
+    const toNumber = (v: unknown): number =>
+      typeof v === 'string' ? parseInt(v, 10) : (v as number);
     const toOptionalNumber = (v: unknown): number | undefined => {
       if (v === null || v === undefined) return undefined;
       return toNumber(v);
@@ -6660,7 +7437,11 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return trigger.id;
   }
 
-  async updateCaptureTrigger(id: string, patch: CaptureTriggerPatch): Promise<boolean> {
+  async updateCaptureTrigger(
+    id: string,
+    patch: CaptureTriggerPatch,
+    fromStatuses?: readonly CaptureTriggerStatus[],
+  ): Promise<boolean> {
     if (!this.pool) throw new Error('Database not initialized');
     const sets: string[] = [];
     const params: unknown[] = [];
@@ -6683,8 +7464,13 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
     if (sets.length === 0) return false;
     params.push(id);
+    let where = `id = $${p++}`;
+    if (fromStatuses) {
+      where += ` AND status = ANY($${p}::text[])`;
+      params.push([...fromStatuses]);
+    }
     const result = await this.pool.query(
-      `UPDATE capture_triggers SET ${sets.join(', ')} WHERE id = $${p}`,
+      `UPDATE capture_triggers SET ${sets.join(', ')} WHERE ${where}`,
       params,
     );
     return (result.rowCount ?? 0) > 0;
@@ -6913,7 +7699,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       [sessionId],
     );
 
-    const toNumber = (v: unknown): number => (typeof v === 'string' ? parseInt(v, 10) : (v as number));
+    const toNumber = (v: unknown): number =>
+      typeof v === 'string' ? parseInt(v, 10) : (v as number);
 
     return result.rows.map((row) => ({
       sessionId: row.session_id as string,

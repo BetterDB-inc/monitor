@@ -12,6 +12,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { LineChart, Line, BarChart, Bar, AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from 'recharts';
 import { DoctorCard } from '../components/DoctorCard';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
+import { dateRangeFromParams } from '../components/ui/date-range';
 import type { LatencyEvent } from '../types/metrics';
 
 const EVENTS_POLL_INTERVAL_MS = 10_000;
@@ -43,16 +44,9 @@ export function Latency() {
   const { data: doctorReport, isLoading: doctorLoading } = useLatencyDoctor(currentConnection?.id);
 
   // Time filter state — initialise from URL ?start=&end= (epoch ms)
-  const [dateRange, setDateRange] = useState<DateRange | undefined>(() => {
-    const s = searchParams.get('start');
-    const e = searchParams.get('end');
-    if (s && e) {
-      const from = new Date(Number(s));
-      const to = new Date(Number(e));
-      if (!isNaN(from.getTime()) && !isNaN(to.getTime())) return { from, to };
-    }
-    return undefined;
-  });
+  const [dateRange, setDateRange] = useState<DateRange | undefined>(() =>
+    dateRangeFromParams(searchParams.get('start'), searchParams.get('end')),
+  );
 
   const startTime = dateRange?.from
     ? dateRange.from.getTime()

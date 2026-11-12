@@ -4,6 +4,7 @@ import {
   type CustomSchema,
   type ParsedMessage,
 } from '@betterdb/shared';
+import { MAX_GLOB_STARS } from '../glob-match';
 import type { PresetDefinition } from './types';
 import {
   concatSession,
@@ -102,7 +103,20 @@ function templateErrors(template: string): string[] {
   if (literals.slice(1, -1).some((literal) => literal === '')) {
     errors.push('Session template needs text between {session} and *');
   }
+  if (gaps.filter((gap) => gap === 'wildcard').length > MAX_GLOB_STARS) {
+    errors.push(`Session template must contain at most ${MAX_GLOB_STARS} *`);
+  }
   return errors;
+}
+
+function templateGlob({ literals, gaps }: SessionTemplate, sessionId: string): string {
+  return literals
+    .map((literal, i) => {
+      const gap = gaps[i];
+      const filler = gap === undefined ? '' : gap === 'session' ? escapeGlob(sessionId) : '*';
+      return escapeGlob(literal) + filler;
+    })
+    .join('');
 }
 
 export function matchSessionTemplate(template: SessionTemplate, key: string): string | null {
@@ -368,6 +382,8 @@ export function createCustomPreset(schema: CustomSchema): PresetDefinition {
     id: 'custom',
     defaultPattern: (prefix) => `${escapeGlob(prefix)}*`,
     sessionIdOf: (key) => (template ? matchSessionTemplate(template, key) : key),
+    sessionLookup: (sessionId) =>
+      template ? { match: templateGlob(template, sessionId) } : { key: sessionId },
     parseKey: (k) => {
       if (!expectedTypes.includes(k.type)) {
         return failedView(k, `Expected ${schema.valueType}, found ${k.type}`);

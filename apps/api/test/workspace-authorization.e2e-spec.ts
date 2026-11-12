@@ -1,10 +1,8 @@
 import { RequestMethod, ValidationPipe } from '@nestjs/common';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
-import { rmSync } from 'fs';
 import { IncomingMessage, Server } from 'http';
 import { AddressInfo, Socket } from 'net';
-import { tmpdir } from 'os';
 import { join } from 'path';
 import WebSocket from 'ws';
 import type { CliServerMessage } from '../src/cli/cli.types';
@@ -18,12 +16,10 @@ const OWNER = { email: 'owner@example.com', password: 'correct horse battery', n
 const MEMBER_EMAIL = 'member@example.com';
 const MEMBER_PASSWORD = 'member horse battery';
 const TRUSTED_ORIGIN = 'http://localhost:5173';
-const LOCAL_CREDENTIAL_ISSUER = 'local:credential';
 
 const TOUCHED = [
   'WORKSPACE_DISABLED',
   'NODE_ENV',
-  'BETTERDB_DATA_DIR',
   'AUTH_PUBLIC_URL',
   'AUTH_SECRET',
   'STORAGE_TYPE',
@@ -80,7 +76,7 @@ describe('Workspace authorization (E2E)', () => {
   let ownerCookie: string;
   let memberCookie: string;
   const previous = new Map<string, string | undefined>();
-  const sqlitePath = join(tmpdir(), `workspace-authorization-${Date.now()}.db`);
+  const sqlitePath = join(process.env.BETTERDB_DATA_DIR!, 'workspace-authorization.db');
   const openSockets: WebSocket[] = [];
 
   beforeAll(async () => {
@@ -90,7 +86,6 @@ describe('Workspace authorization (E2E)', () => {
     delete process.env.WORKSPACE_DISABLED;
     delete process.env.AUTH_SECRET;
     process.env.NODE_ENV = 'production';
-    process.env.BETTERDB_DATA_DIR = '';
     process.env.STORAGE_TYPE = 'sqlite';
     process.env.STORAGE_SQLITE_FILEPATH = sqlitePath;
     process.env.AUTH_PUBLIC_URL = TRUSTED_ORIGIN;
@@ -164,7 +159,6 @@ describe('Workspace authorization (E2E)', () => {
     await context.internalAdapter.linkAccount({
       userId: member.id,
       providerId: 'credential',
-      issuer: LOCAL_CREDENTIAL_ISSUER,
       accountId: member.id,
       password: hashedPassword,
     });
@@ -201,7 +195,6 @@ describe('Workspace authorization (E2E)', () => {
         process.env[key] = value;
       }
     }
-    rmSync(sqlitePath, { force: true });
   });
 
   it('lets a member list connections', async () => {

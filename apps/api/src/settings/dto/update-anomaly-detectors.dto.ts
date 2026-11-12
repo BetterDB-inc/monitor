@@ -192,4 +192,11 @@ export class UpdateAnomalyDetectorsDto {
   @ValidateNested()
   @Type(() => DetectorConfigDto)
   fragmentation_ratio?: DetectorConfigDto;
+
+  @ApiPropertyOptional({ type: DetectorConfigDto })
+  @IsOptionalNotNull()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => DetectorConfigDto)
+  error_replies?: DetectorConfigDto;
 }

@@ -144,9 +144,54 @@ export async function runBetterAuthMigrations(
   if (handle.kind === 'memory') {
     return;
   }
+  await relaxLegacyAccountIssuer(handle);
   const modules = await loadBetterAuthModules();
   const { runMigrations } = await modules.getMigrations(auth.options);
   await runMigrations();
+}
+
+const LEGACY_ISSUER_INDEX = 'account_issuer_accountId_uidx';
+
+/**
+ * Better Auth 1.7.0-1.7.2 created a required `account.issuer` column plus a
+ * unique (issuer, accountId) index. 1.7.3+ never writes it, so on databases
+ * migrated by those versions every account insert (sign-up, invite, broker
+ * link) fails until the constraint is relaxed. Follows the upstream 1.7
+ * upgrade guide: Postgres keeps the column but drops NOT NULL; SQLite cannot
+ * alter a column, so it is dropped.
+ */
+export async function relaxLegacyAccountIssuer(handle: RawDatabaseHandle): Promise<void> {
+  if (handle.kind === 'memory') {
+    return;
+  }
+  if (handle.kind === 'postgres') {
+    const result = await handle.pool.query<{ attnotnull: boolean }>(
+      `SELECT a.attnotnull FROM pg_attribute a
+        WHERE a.attrelid = to_regclass('account') AND a.attname = 'issuer' AND NOT a.attisdropped`,
+    );
+    if (result.rows.length === 0) {
+      return;
+    }
+    await handle.pool.query(`DROP INDEX IF EXISTS "${LEGACY_ISSUER_INDEX}"`);
+    if (result.rows[0].attnotnull === true) {
+      await handle.pool.query('ALTER TABLE "account" ALTER COLUMN "issuer" DROP NOT NULL');
+    }
+    return;
+  }
+  // BEGIN IMMEDIATE takes the write lock before the check, so a second process
+  // migrating the same file waits and then sees the column already gone.
+  handle.db.exec('BEGIN IMMEDIATE');
+  try {
+    const columns = handle.db.prepare("PRAGMA table_info('account')").all() as { name: string }[];
+    if (columns.some((column) => column.name === 'issuer')) {
+      handle.db.exec(`DROP INDEX IF EXISTS "${LEGACY_ISSUER_INDEX}"`);
+      handle.db.exec('ALTER TABLE "account" DROP COLUMN "issuer"');
+    }
+    handle.db.exec('COMMIT');
+  } catch (error) {
+    handle.db.exec('ROLLBACK');
+    throw error;
+  }
 }
 
 export async function countUsers(auth: BetterAuthInstance): Promise<number> {

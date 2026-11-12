@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { LicenseService } from './license.service';
+import { KEEP_ENV } from '../../apps/api/test/test-env';
 
 describe('LicenseService', () => {
   let service: LicenseService;
@@ -9,11 +10,10 @@ describe('LicenseService', () => {
   beforeEach(async () => {
     // Reset environment
     process.env = { ...originalEnv };
+    delete process.env.BETTERDB_LICENSE_KEY;
     // These specs predate signed entitlement tokens and mock unsigned responses
     process.env.LICENSE_ALLOW_UNSIGNED = 'true';
     process.env.APP_VERSION = '0.1.0';
-    // Disable actual HTTP calls
-    delete process.env.BETTERDB_LICENSE_KEY;
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -39,6 +39,13 @@ describe('LicenseService', () => {
     // Restore original env
     process.env = originalEnv;
   });
+
+  (KEEP_ENV && process.env.ENTITLEMENT_URL ? it.skip : it)(
+    'never targets the production entitlement host from a test run',
+    () => {
+      expect(new URL((service as any).entitlementUrl).hostname).toBe('127.0.0.1');
+    },
+  );
 
   describe('Version Check', () => {
     describe('isUpdateAvailable', () => {

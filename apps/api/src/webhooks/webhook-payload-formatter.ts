@@ -1,5 +1,18 @@
 import type { Webhook, WebhookPayload } from '@betterdb/shared';
-import { WebhookPayloadFormat } from '@betterdb/shared';
+import { WebhookPayloadFormat, incidentEventUrl } from '@betterdb/shared';
+
+const TITLE_LIMIT = 120;
+const SLACK_TEXT_LIMIT = 3000;
+const DISCORD_DESCRIPTION_LIMIT = 4096;
+const ANOMALY_PAGE_EVENTS: ReadonlySet<string> = new Set([
+  'anomaly.detected',
+  'anomaly.sequence.detected',
+  'retry_amplification.detected',
+]);
+const INCIDENT_LINK_EVENTS: ReadonlySet<string> = new Set([
+  'anomaly.detected',
+  'anomaly.sequence.detected',
+]);
 
 function num(v: unknown): number | undefined {
   return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
@@ -44,6 +57,17 @@ export function escapeDiscord(text: string): string {
   return text.replace(/([\\`*_~|>\[\]()])/g, '\\$1').replace(/@(everyone|here)/g, '@\u200b$1');
 }
 
+function escapeWithin(text: string, limit: number, escape: (text: string) => string): string {
+  let fits = 0;
+  let tooLong = text.length + 1;
+  while (tooLong - fits > 1) {
+    const middle = Math.floor((fits + tooLong) / 2);
+    if (escape(text.slice(0, middle)).length <= limit) fits = middle;
+    else tooLong = middle;
+  }
+  return escape(text.slice(0, fits));
+}
+
 function instanceLabel(p: WebhookPayload): string {
   const host = p.instance?.host ?? 'unknown';
   const port = p.instance?.port;
@@ -52,8 +76,13 @@ function instanceLabel(p: WebhookPayload): string {
 
 function titleFor(p: WebhookPayload): string {
   const msg = str(p.data['message']);
-  if (msg) return msg.length > 120 ? `${msg.slice(0, 117)}...` : msg;
+  if (msg) return msg.length > TITLE_LIMIT ? `${msg.slice(0, TITLE_LIMIT - 3)}...` : msg;
   return `BetterDB alert: ${p.event}`;
+}
+
+function truncatedMessage(p: WebhookPayload): string | undefined {
+  const msg = str(p.data['message']);
+  return msg && msg.length > TITLE_LIMIT ? msg : undefined;
 }
 
 export function formatWebhookBody(
@@ -81,8 +110,17 @@ export function toSlack(payload: WebhookPayload, appBaseUrl?: string): Record<st
       text: `*Value / baseline:*\n${s.value ?? '?'} / ${s.baseline ?? '?'}`,
     });
   }
+  const message = truncatedMessage(payload);
   const blocks: unknown[] = [
     { type: 'section', text: { type: 'mrkdwn', text: `*${escapeSlack(title)}*` } },
+    ...(message
+      ? [
+          {
+            type: 'section',
+            text: { type: 'mrkdwn', text: escapeWithin(message, SLACK_TEXT_LIMIT, escapeSlack) },
+          },
+        ]
+      : []),
     { type: 'section', fields },
     {
       type: 'context',
@@ -103,6 +141,7 @@ const DISCORD_COLORS: Record<string, number> = {
   'instance.down': 0xe5484d,
   'instance.up': 0x30a46c,
   'anomaly.detected': 0xf5a524,
+  'anomaly.sequence.detected': 0xf5a524,
   'writes.rejected': 0xe5484d,
   'writes.recovered': 0x30a46c,
 };
@@ -120,12 +159,16 @@ export function toDiscord(payload: WebhookPayload, appBaseUrl?: string): Record<
   }
   const link = dashboardLink(payload, appBaseUrl);
   const safeTitle = escapeDiscord(title);
+  const message = truncatedMessage(payload);
   return {
     content: safeTitle,
     allowed_mentions: { parse: [] },
     embeds: [
       {
         title: safeTitle,
+        ...(message
+          ? { description: escapeWithin(message, DISCORD_DESCRIPTION_LIMIT, escapeDiscord) }
+          : {}),
         color: DISCORD_COLORS[payload.event] ?? 0x3e63dd,
         fields,
         timestamp: new Date(payload.timestamp).toISOString(),
@@ -138,7 +181,13 @@ export function toDiscord(payload: WebhookPayload, appBaseUrl?: string): Record<
 
 function dashboardLink(payload: WebhookPayload, appBaseUrl?: string): string | undefined {
   if (!appBaseUrl) return undefined;
+  const data = payload.data ?? {};
+  const anomalyId = str(data['anomalyId']);
+  const at = num(data['timestamp']);
+  if (INCIDENT_LINK_EVENTS.has(payload.event) && anomalyId && at !== undefined) {
+    return incidentEventUrl(appBaseUrl, anomalyId, at, str(data['connectionId']));
+  }
   const base = appBaseUrl.replace(/\/$/, '');
-  const path = payload.event === 'anomaly.detected' ? '/anomalies' : '/dashboard';
+  const path = ANOMALY_PAGE_EVENTS.has(payload.event) ? '/anomalies' : '/dashboard';
   return `${base}${path}`;
 }

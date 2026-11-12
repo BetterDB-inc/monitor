@@ -320,6 +320,14 @@ function combineSignals(
 }
 
 export async function fetchApi<T>(endpoint: string, options?: FetchApiOptions): Promise<T> {
+  return (await fetchApiWithHeaders<T>(endpoint, options)).data;
+}
+
+/** Like fetchApi, for endpoints that report part of their result in response headers. */
+export async function fetchApiWithHeaders<T>(
+  endpoint: string,
+  options?: FetchApiOptions,
+): Promise<{ data: T; headers: Headers }> {
   const { timeoutMs, skipAuthRedirect, ...init } = options ?? {};
   const headers: Record<string, string> = {
     ...(init?.headers as Record<string, string>),
@@ -373,7 +381,7 @@ export async function fetchApi<T>(endpoint: string, options?: FetchApiOptions): 
       );
     }
 
-    return await parseSuccessPayload<T>(response);
+    return { data: await parseSuccessPayload<T>(response), headers: response.headers };
   } finally {
     cleanup();
   }

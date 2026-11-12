@@ -18,6 +18,7 @@ import {
   ANOMALY_DETECTORS_QUERY_KEY,
   LIFETIME_COUNTER_METRICS,
   METRIC_UNITS,
+  WARNING_ZSCORE_ONLY_METRICS,
   buildSave,
   isDirty,
   summarize,
@@ -83,9 +84,9 @@ export function DetectorPanel({
   }
 
   const dirty = isDirty(form, baseline);
-  const errors = validateForm(form, defaults);
+  const errors = validateForm(form, defaults, metric);
   const hasErrors = Object.keys(errors).length > 0;
-  const summary = summarize(resolved, defaults);
+  const summary = summarize(resolved, defaults, metric);
 
   const mutation = useMutation({
     mutationFn: ({
@@ -244,7 +245,8 @@ export function DetectorPanel({
         )}
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           {textField('warningZScore', 'Warning z-score', '0.5–10', '0.1')}
-          {textField('criticalZScore', 'Critical z-score', '1–15, above warning', '0.1')}
+          {!WARNING_ZSCORE_ONLY_METRICS.has(metric) &&
+            textField('criticalZScore', 'Critical z-score', '1–15, above warning', '0.1')}
           {absoluteField('warningAbsolute', 'Warning above')}
           {absoluteField('criticalAbsolute', 'Critical above')}
           {textField('consecutiveRequired', 'Consecutive breaches', '1–20', '1')}

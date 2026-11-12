@@ -42,7 +42,7 @@ from betterdb_valkey_search_kit import (
 )
 
 from .normalizer import BinaryNormalizer, default_normalizer
-from .utils import ContentBlock, encode_float32, decode_float32, escape_tag, extract_binary_refs, extract_text, parse_ft_search_response
+from .utils import ContentBlock, encode_float32, decode_float32, escape_glob_pattern, escape_tag, extract_binary_refs, extract_text, parse_ft_search_response
 
 INVALIDATE_BATCH_SIZE = 1000
 
@@ -173,7 +173,9 @@ class SemanticCache:
             except Exception as exc:
                 raise ValkeyCommandError("DEL", exc) from exc
 
-        for pattern in [f"{self._name}:entry:*", f"{self._name}:embed:*"]:
+        # Glob-escape the name so a name like "app?" can't match another cache's keys.
+        safe_name = escape_glob_pattern(self._name)
+        for pattern in [f"{safe_name}:entry:*", f"{safe_name}:embed:*"]:
             await cluster_scan(self._client, pattern, _del)
 
         await self._client.delete(self._stats_key)

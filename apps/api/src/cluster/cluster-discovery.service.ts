@@ -1,9 +1,12 @@
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, OnModuleDestroy } from '@nestjs/common';
 import Valkey from 'iovalkey';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { dialsDataNodes } from '../connections/data-node-reach';
 import { ClusterNode } from '../common/types/metrics.types';
 import { MetricsParser } from '../database/parsers/metrics.parser';
 import { tlsIdentityOptions } from '../database/adapters/tls-servername';
+import { parseNodeAddress } from '../topology/membership-diff';
+import { readClusterShards, withConfiguredZones, withShardMetadata } from './shard-metadata';
 
 export interface DiscoveredNode {
   id: string;
@@ -15,6 +18,8 @@ export interface DiscoveredNode {
   healthy: boolean;
   flags: string[];
   hostname?: string;
+  availabilityZone?: string;
+  shardId?: string;
 }
 
 export interface NodeConnection {
@@ -22,6 +27,8 @@ export interface NodeConnection {
   client: Valkey;
   lastHealthCheck: number;
   healthy: boolean;
+  connectionId?: string;
+  host?: string;
 }
 
 export interface NodeHealth {
@@ -44,13 +51,14 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   private discoveredNodes: Map<string, NodeConnection> = new Map();
   // Per-connection discovery cache to prevent cross-connection cache contamination
   private discoveryCacheByConnection: Map<string, DiscoveryCache> = new Map();
+  private discoveryInFlight: Map<string, Promise<DiscoveredNode[]>> = new Map();
   private loggedConnectionErrors: Set<string> = new Set();
   private loggedGetConnectionErrors: Set<string> = new Set();
   private readonly MAX_LOGGED_ERRORS = 1000; // Prevent unbounded growth
   private readonly DISCOVERY_CACHE_TTL = 30000; // 30 seconds
   private readonly CONNECTION_TIMEOUT = 5000; // 5 seconds
   private readonly HEALTH_CHECK_INTERVAL = 30000; // 30 seconds
-  private readonly MAX_CONNECTIONS = 100; // Maximum number of concurrent connections
+  private readonly MAX_CONNECTIONS = 512; // Maximum number of concurrent connections
 
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
@@ -61,31 +69,62 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   }
 
   async discoverNodes(connectionId?: string): Promise<DiscoveredNode[]> {
-    // Use connection-specific cache key (default connection uses 'default')
-    const cacheKey = connectionId || this.connectionRegistry.getDefaultId() || 'default';
+    const ownerId = connectionId || this.connectionRegistry.getDefaultId();
+    if (!ownerId) {
+      throw new NotFoundException('No connection available');
+    }
+    const cacheKey = ownerId;
     const cached = this.freshCache(cacheKey);
     if (cached) {
       return cached;
     }
+    const pending = this.discoveryInFlight.get(cacheKey);
+    if (pending) return pending;
 
-    try {
-      const client = this.connectionRegistry.get(connectionId);
-      return this.remember(cacheKey, await client.getClusterNodes());
-    } catch (error) {
-      this.logger.error(
-        `Failed to discover cluster nodes: ${error instanceof Error ? error.message : error}`,
-      );
-      throw error;
-    }
+    const discovery: Promise<DiscoveredNode[]> = Promise.resolve().then(async () => {
+      try {
+        const client = this.connectionRegistry.get(ownerId);
+        const [clusterNodes, shards] = await Promise.all([client.getClusterNodes(), readClusterShards(client)]);
+        const nodes = withConfiguredZones(
+          withShardMetadata(clusterNodes, shards),
+          this.connectionRegistry.getNodeAvailabilityZones(ownerId),
+        );
+        if (this.discoveryInFlight.get(cacheKey) !== discovery) return this.toDiscoveredNodes(nodes);
+        return this.remember(cacheKey, nodes);
+      } catch (error) {
+        this.logger.error(
+          `Failed to discover cluster nodes: ${error instanceof Error ? error.message : error}`,
+        );
+        throw error;
+      } finally {
+        if (this.discoveryInFlight.get(cacheKey) === discovery) this.discoveryInFlight.delete(cacheKey);
+      }
+    });
+    this.discoveryInFlight.set(cacheKey, discovery);
+    return discovery;
   }
 
+  /**
+   * CLUSTER NODES over a socket of its own, opened for this call. Never served
+   * from or written to the discovery cache: the cache holds the main socket's
+   * view, while a seed behind a VIP lands each new socket on an arbitrary
+   * node, and topology sync relies on seeing which node that was.
+   */
   async discoverNodesIsolated(connectionId: string, timeoutMs: number): Promise<DiscoveredNode[]> {
-    const cached = this.freshCache(connectionId);
-    if (cached) {
-      return cached;
-    }
+    return this.onIsolatedClient(connectionId, timeoutMs, async (client) => {
+      const raw = await client.call('CLUSTER', 'NODES');
+      return this.toDiscoveredNodes(MetricsParser.parseClusterNodes(raw as string));
+    });
+  }
 
-    const { host, port, username, password, tls } = this.connectionRegistry.get(connectionId).getClient().options;
+  async onIsolatedClient<T>(
+    connectionId: string | undefined,
+    timeoutMs: number,
+    run: (client: Valkey) => Promise<T>,
+  ): Promise<T> {
+    const { host, port, username, password, tls } = this.connectionRegistry
+      .get(connectionId)
+      .getClient().options;
     const client = new Valkey({
       host,
       port,
@@ -104,11 +143,16 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     client.on('error', () => undefined);
     try {
       await client.connect();
-      const raw = await client.call('CLUSTER', 'NODES');
-      return this.remember(connectionId, MetricsParser.parseClusterNodes(raw as string));
+      return await run(client);
     } finally {
       client.disconnect();
     }
+  }
+
+  forgetTopology(connectionId?: string): void {
+    const cacheKey = connectionId || this.connectionRegistry.getDefaultId() || 'default';
+    this.discoveryCacheByConnection.delete(cacheKey);
+    this.discoveryInFlight.delete(cacheKey);
   }
 
   private freshCache(cacheKey: string): DiscoveredNode[] | null {
@@ -124,12 +168,31 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   }
 
   private remember(cacheKey: string, clusterNodes: ClusterNode[]): DiscoveredNode[] {
+    const discovered = this.toDiscoveredNodes(clusterNodes);
+
+    // Store in per-connection cache
+    this.discoveryCacheByConnection.set(cacheKey, {
+      nodes: discovered,
+      lastDiscoveryTime: Date.now(),
+    });
+
+    // A failed node lingers in CLUSTER NODES until it is forgotten; keep it out
+    // of the role counts so a dead primary is not reported as a fourth master.
+    const failed = discovered.filter((n) => !n.healthy).length;
+    this.logger.log(
+      `Discovered ${discovered.length} nodes for connection ${cacheKey} (${discovered.filter(n => n.healthy && n.role === 'master').length} masters, ${discovered.filter(n => n.healthy && n.role === 'replica').length} replicas${failed > 0 ? `, ${failed} failed` : ''})`,
+    );
+
+    return discovered;
+  }
+
+  private toDiscoveredNodes(clusterNodes: ClusterNode[]): DiscoveredNode[] {
     const discovered: DiscoveredNode[] = [];
 
     for (const node of clusterNodes) {
-      const isHealthy =
-        node.flags.includes('connected') ||
-        (!node.flags.includes('disconnected') && !node.flags.includes('fail'));
+      // The link state is the answering node's own cluster-bus link to this
+      // one, not whether Monitor can reach it, so only a failure flag counts.
+      const isHealthy = !node.flags.includes('fail');
 
       const isMaster = node.flags.includes('master');
       const isReplica = node.flags.includes('slave') || node.flags.includes('replica');
@@ -148,24 +211,112 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         healthy: isHealthy,
         flags: node.flags,
         ...(node.hostname ? { hostname: node.hostname } : {}),
+        ...(node.availabilityZone ? { availabilityZone: node.availabilityZone } : {}),
+        ...(node.shardId ? { shardId: node.shardId } : {}),
       });
     }
-
-    // Store in per-connection cache
-    this.discoveryCacheByConnection.set(cacheKey, {
-      nodes: discovered,
-      lastDiscoveryTime: Date.now(),
-    });
-
-    this.logger.log(
-      `Discovered ${discovered.length} nodes for connection ${cacheKey} (${discovered.filter(n => n.role === 'master').length} masters, ${discovered.filter(n => n.role === 'replica').length} replicas)`,
-    );
-
     return discovered;
   }
 
   async getNodeConnection(nodeId: string, connectionId?: string): Promise<Valkey> {
-    const existingConnection = this.discoveredNodes.get(nodeId);
+    // Bind the node client to the connection that owns it now, so a later
+    // default-connection change can't swap in another connection's TLS identity.
+    const ownerId = connectionId || this.connectionRegistry.getDefaultId() || undefined;
+    this.assertDialsDataNodes(ownerId, nodeId);
+    const nodes = await this.discoverNodes(ownerId);
+    const node = nodes.find((n) => n.id === nodeId);
+
+    if (!node) {
+      throw new Error(`Node ${nodeId} not found in cluster`);
+    }
+
+    const key = this.nodeClientKey(nodeId, ownerId);
+    const existing = this.discoveredNodes.get(key);
+    if (existing && existing.node.address.split('@')[0] !== node.address.split('@')[0]) {
+      this.discoveredNodes.delete(key);
+      existing.client.disconnect();
+    }
+    const reused = await this.reuseNodeClient(key);
+    if (reused) return reused;
+
+    // Cluster node addresses include bus port: "host:port@busport", and an
+    // IPv6 host has colons of its own, so the port is after the last one.
+    const parsed = parseNodeAddress(node.address);
+    if (!parsed) {
+      throw new Error(`Invalid node address: ${node.address}`);
+    }
+    const { host, port } = parsed;
+
+    const primaryClient = this.connectionRegistry.get(ownerId).getClient();
+    return this.openNodeClient(key, node, host, port, ownerId, {
+      username: primaryClient.options.username || '',
+      password: primaryClient.options.password || '',
+    });
+  }
+
+  /**
+   * Refuses node clients for a connection whose nodes the monitor cannot dial
+   * itself (an agent connection), rather than failing later on the seed's raw
+   * client and reading as an unreachable node.
+   */
+  private assertDialsDataNodes(connectionId: string | undefined, node: string): void {
+    if (connectionId && !dialsDataNodes(this.connectionRegistry.getConfig(connectionId))) {
+      throw new Error(`Connection ${connectionId} cannot dial ${node} directly`);
+    }
+  }
+
+  async getAddressConnection(host: string, port: number, connectionId: string): Promise<Valkey> {
+    this.assertDialsDataNodes(connectionId, `${host}:${port}`);
+    const credentials = this.connectionRegistry.sentinelDataNodeCredentials(connectionId);
+    if (!credentials) {
+      throw new Error(`Connection ${connectionId} has no data-node credentials for ${host}:${port}`);
+    }
+    const key = `addr:${connectionId}:${host}:${port}`;
+    const reused = await this.reuseNodeClient(key);
+    if (reused) return reused;
+    const node: DiscoveredNode = {
+      id: key,
+      address: `${host}:${port}`,
+      role: 'master',
+      slots: [],
+      configEpoch: 0,
+      healthy: true,
+      flags: [],
+    };
+    return this.openNodeClient(key, node, host, port, connectionId, {
+      username: credentials.username ?? '',
+      password: credentials.password ?? '',
+    });
+  }
+
+  async getReplicaConnection(host: string, port: number, connectionId: string, hostname?: string): Promise<Valkey> {
+    this.assertDialsDataNodes(connectionId, `${host}:${port}`);
+    const config = this.connectionRegistry.getConfig(connectionId);
+    if (!config || config.membership || config.sshTunnel?.enabled) {
+      throw new Error(`Connection ${connectionId} cannot dial its replica ${host}:${port} directly`);
+    }
+    const key = `replica:${connectionId}:${host}:${port}`;
+    const reused = await this.reuseNodeClient(key);
+    if (reused) return reused;
+    const { username, password } = this.connectionRegistry.get(connectionId).getClient().options;
+    const node: DiscoveredNode = {
+      id: key,
+      address: `${host}:${port}`,
+      role: 'replica',
+      slots: [],
+      configEpoch: 0,
+      healthy: true,
+      flags: [],
+      hostname,
+    };
+    return this.openNodeClient(key, node, host, port, connectionId, {
+      username: username || '',
+      password: password || '',
+    });
+  }
+
+  private async reuseNodeClient(key: string): Promise<Valkey | null> {
+    const existingConnection = this.discoveredNodes.get(key);
     if (existingConnection) {
       if (existingConnection.client.status === 'ready') {
         // Reuse the live client and refresh its check stamp. A ready connection
@@ -182,12 +333,13 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
 
       // Not ready — revive it in place before falling back to a brand-new client.
       try {
+        this.refreshNodeTls(existingConnection);
         await existingConnection.client.connect();
         existingConnection.lastHealthCheck = Date.now();
         existingConnection.healthy = true;
         return existingConnection.client;
       } catch (error) {
-        this.logger.warn(`Failed to reconnect to node ${nodeId}: ${error}`);
+        this.logger.warn(`Failed to reconnect to node ${key}: ${error}`);
         existingConnection.healthy = false;
       }
     }
@@ -204,35 +356,24 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
           this.logger.warn(`Closing oldest connection to ${oldestNodeId} to make room for new connection`);
           const oldConnection = this.discoveredNodes.get(oldestNodeId);
           if (oldConnection) {
-            await oldConnection.client.quit().catch(() => {/* ignore */});
+            await this.closeNodeClient(oldConnection.client);
             this.discoveredNodes.delete(oldestNodeId);
           }
         }
       }
     }
+    return null;
+  }
 
-    const nodes = await this.discoverNodes(connectionId);
-    const node = nodes.find((n) => n.id === nodeId);
-
-    if (!node) {
-      throw new Error(`Node ${nodeId} not found in cluster`);
-    }
-
-    // Cluster node addresses include bus port: "host:port@busport"
-    // We only need the client port, so split on '@' first
-    const [host, portStr] = node.address.split('@')[0].split(':');
-    const port = parseInt(portStr, 10);
-
-    if (!host || isNaN(port)) {
-      throw new Error(`Invalid node address: ${node.address}`);
-    }
-
-    const dbClient = this.connectionRegistry.get(connectionId);
-    const primaryClient = dbClient.getClient();
-    const username = primaryClient.options.username || '';
-    const password = primaryClient.options.password || '';
-    const { servername: _servername, checkServerIdentity: _checkServerIdentity, ...nodeTls } = primaryClient.options.tls ?? {};
-    const tls = primaryClient.options.tls ? { ...nodeTls, ...tlsIdentityOptions(host, node.hostname) } : undefined;
+  private async openNodeClient(
+    key: string,
+    node: DiscoveredNode,
+    host: string,
+    port: number,
+    ownerId: string | undefined,
+    { username, password }: { username: string; password: string },
+  ): Promise<Valkey> {
+    const tls = this.nodeTlsOptions(ownerId, host, node.hostname);
 
     const client = new Valkey({
       host,
@@ -246,14 +387,29 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       connectionName: `BetterDB-Monitor-Node-${node.id.substring(0, 8)}`,
     });
 
+    // Node clients are long-lived, so pick up rotated client cert/key material
+    // from the primary adapter before every reconnect.
+    client.on('reconnecting', () => {
+      this.refreshNodeTls({ node, client, connectionId: ownerId, host });
+    });
+
     // Add error handler to prevent unhandled error events
     // Only log each unique connection error once to avoid log spam
+    //
+    // The last error is kept because iovalkey reports a refused connection
+    // (WRONGPASS, NOAUTH, a socket error) on this event and then rejects
+    // connect() with its generic "Connection is closed.", which tells the
+    // caller nothing about why. Only kept until connect() settles, so a
+    // stored client does not hold on to its later errors.
+    let lastError: Error | undefined;
+    let connecting = true;
     client.on('error', (err) => {
+      if (connecting) lastError = err;
       const errorCode = (err as any).code || err.name;
-      const errorKey = `${nodeId}-${host}:${port}-${errorCode}`;
+      const errorKey = `${key}-${host}:${port}-${errorCode}`;
       if (!this.loggedConnectionErrors.has(errorKey)) {
         this.logger.warn(
-          `Cannot connect to node ${nodeId.substring(0, 12)} at ${host}:${port}: ${err.message}`,
+          `Cannot connect to node ${key.substring(0, 12)} at ${host}:${port}: ${err.message}`,
         );
         // Prevent unbounded growth
         if (this.loggedConnectionErrors.size >= this.MAX_LOGGED_ERRORS) {
@@ -270,35 +426,55 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
           setTimeout(() => reject(new Error('Connection timeout')), this.CONNECTION_TIMEOUT),
         ),
       ]);
+      connecting = false;
+      lastError = undefined;
 
       const connection: NodeConnection = {
         node,
         client,
         lastHealthCheck: Date.now(),
         healthy: true,
+        connectionId: ownerId,
+        host,
       };
 
-      // Quit any stale client we're about to replace so the overwrite never
+      // Close any stale client we're about to replace so the overwrite never
       // orphans a still-open socket (belt-and-suspenders for the not-ready path
       // that falls through above).
-      const replaced = this.discoveredNodes.get(nodeId);
+      let storeKey = key;
+      let replaced = this.discoveredNodes.get(storeKey);
+      if (replaced && replaced.client !== client && replaced.connectionId !== ownerId) {
+        storeKey = `node:${ownerId}:${node.id}`;
+        replaced = this.discoveredNodes.get(storeKey);
+      }
       if (replaced && replaced.client !== client) {
-        await replaced.client.quit().catch(() => {});
+        await this.closeNodeClient(replaced.client);
       }
 
-      this.discoveredNodes.set(nodeId, connection);
-      this.logger.log(`Connected to node ${nodeId} at ${host}:${port}`);
+      this.discoveredNodes.set(storeKey, connection);
+      this.logger.log(`Connected to node ${key} at ${host}:${port}`);
 
       // Clear logged errors for this node on successful connection
-      this.clearNodeErrors(nodeId);
+      this.clearNodeErrors(key);
 
       return client;
-    } catch (error) {
+    } catch (connectError) {
+      // Surface the server's reply (or the socket error) behind iovalkey's
+      // generic rejection, so a credential refusal reads as one downstream
+      // (isAuthErrorReply matches the code after the `: `). A rejection that
+      // already is the emitted error, or came with no error event, is kept.
+      const error =
+        lastError && lastError !== connectError
+          ? new Error(`Failed to connect to ${host}:${port}: ${lastError.message}`, { cause: lastError })
+          : connectError;
+
       // Only log each unique connection error once to avoid spam
-      const errorKey = `connect-${nodeId}`;
+      const errorKey = `connect-${key}`;
       if (!this.loggedGetConnectionErrors.has(errorKey)) {
+        // The reply itself, not the wrapped message, which repeats this prefix.
+        const reason = lastError ?? connectError;
         this.logger.debug(
-          `Failed to connect to node ${nodeId} at ${host}:${port}: ${error instanceof Error ? error.message : error}`,
+          `Failed to connect to node ${key} at ${host}:${port}: ${reason instanceof Error ? reason.message : reason}`,
         );
         // Prevent unbounded growth
         if (this.loggedGetConnectionErrors.size >= this.MAX_LOGGED_ERRORS) {
@@ -307,9 +483,39 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         this.loggedGetConnectionErrors.add(errorKey);
       }
 
-      await client.quit().catch(() => {});
+      await this.closeNodeClient(client);
 
       throw error;
+    }
+  }
+
+  /**
+   * TLS options for a discovered node, built from the primary adapter's current
+   * material. getClient() re-reads file-sourced material when it has rotated.
+   */
+  private nodeTlsOptions(
+    connectionId: string | undefined,
+    host: string,
+    hostname: string | undefined,
+  ): Valkey['options']['tls'] {
+    const primaryTls = this.connectionRegistry.get(connectionId).getClient().options.tls;
+    if (!primaryTls) return undefined;
+    const { servername: _servername, checkServerIdentity: _checkServerIdentity, ...nodeTls } = primaryTls;
+    return { ...nodeTls, ...tlsIdentityOptions(host, hostname) };
+  }
+
+  private refreshNodeTls(connection: Pick<NodeConnection, 'node' | 'client' | 'connectionId' | 'host'>): void {
+    if (!connection.host || !connection.client.options?.tls) return;
+    try {
+      connection.client.options.tls = this.nodeTlsOptions(
+        connection.connectionId,
+        connection.host,
+        connection.node.hostname,
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Keeping previous TLS material for node ${connection.node.id.substring(0, 12)}: ${error instanceof Error ? error.message : error}`,
+      );
     }
   }
 
@@ -334,7 +540,15 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     return Promise.all(healthChecks);
   }
 
+  private nodeClientKey(nodeId: string, ownerId: string | undefined): string {
+    const scoped = `node:${ownerId}:${nodeId}`;
+    if (this.discoveredNodes.has(scoped)) return scoped;
+    const shared = this.discoveredNodes.get(nodeId);
+    return !shared || shared.connectionId === ownerId ? nodeId : scoped;
+  }
+
   private async healthCheckNode(node: DiscoveredNode): Promise<NodeHealth> {
+    const ownerId = this.connectionRegistry.getDefaultId() || undefined;
     try {
       const client = await this.getNodeConnection(node.id);
       const result = await Promise.race([
@@ -346,7 +560,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
 
       const healthy = result === 'PONG';
 
-      const connection = this.discoveredNodes.get(node.id);
+      const connection = this.discoveredNodes.get(this.nodeClientKey(node.id, ownerId));
       if (connection) {
         connection.healthy = healthy;
         connection.lastHealthCheck = Date.now();
@@ -359,7 +573,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         lastCheck: Date.now(),
       };
     } catch (error) {
-      const connection = this.discoveredNodes.get(node.id);
+      const connection = this.discoveredNodes.get(this.nodeClientKey(node.id, ownerId));
       if (connection) {
         connection.healthy = false;
         connection.lastHealthCheck = Date.now();
@@ -379,22 +593,42 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     return Array.from(this.discoveredNodes.values());
   }
 
+  async releaseConnection(connectionId: string): Promise<void> {
+    const owned = [...this.discoveredNodes].filter(([, connection]) => connection.connectionId === connectionId);
+    for (const [key] of owned) this.discoveredNodes.delete(key);
+    this.discoveryCacheByConnection.delete(connectionId);
+    this.discoveryInFlight.delete(connectionId);
+    await Promise.allSettled(owned.map(([, connection]) => this.closeNodeClient(connection.client)));
+  }
+
+  /**
+   * Drop and disconnect a node client a caller gave up waiting on. Node
+   * clients have no command timeout, so on a socket that went silent the
+   * queued commands would otherwise wait for TCP to give up; disconnecting
+   * rejects them now, and the next getNodeConnection opens a fresh client.
+   */
+  evictNodeClient(client: Valkey): void {
+    for (const [key, connection] of this.discoveredNodes) {
+      if (connection.client === client) this.discoveredNodes.delete(key);
+    }
+    client.disconnect();
+  }
+
+  async retainAddressConnections(connectionId: string, addrs: ReadonlySet<string>): Promise<void> {
+    const prefix = `addr:${connectionId}:`;
+    const dropped = [...this.discoveredNodes].filter(
+      ([key]) => key.startsWith(prefix) && !addrs.has(key.slice(prefix.length)),
+    );
+    for (const [key] of dropped) this.discoveredNodes.delete(key);
+    await Promise.allSettled(dropped.map(([, connection]) => this.closeNodeClient(connection.client)));
+  }
+
   async disconnectAll(): Promise<void> {
     this.logger.log(`Disconnecting from ${this.discoveredNodes.size} nodes`);
 
-    const disconnectPromises: Promise<void>[] = [];
-
-    for (const [nodeId, connection] of this.discoveredNodes.entries()) {
-      disconnectPromises.push(
-        connection.client.quit().then(() => undefined).catch((error) => {
-          this.logger.warn(
-            `Failed to disconnect from node ${nodeId}: ${error instanceof Error ? error.message : error}`,
-          );
-        }),
-      );
-    }
-
-    await Promise.allSettled(disconnectPromises);
+    await Promise.allSettled(
+      Array.from(this.discoveredNodes.values(), (connection) => this.closeNodeClient(connection.client)),
+    );
     this.discoveredNodes.clear();
     this.discoveryCacheByConnection.clear();
     this.logger.log('All node connections closed');
@@ -416,10 +650,23 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       for (const nodeId of toRemove) {
         const connection = this.discoveredNodes.get(nodeId);
         if (connection) {
-          await connection.client.quit().catch(() => {});
+          await this.closeNodeClient(connection.client);
           this.discoveredNodes.delete(nodeId);
         }
       }
+    }
+  }
+
+  /**
+   * Node clients set enableOfflineQueue: false, so quit() on one that isn't
+   * ready rejects without closing it and iovalkey keeps reconnecting (and
+   * re-reading TLS) forever. Only quit a ready client; disconnect the rest.
+   */
+  private async closeNodeClient(client: Valkey): Promise<void> {
+    if (client.status === 'ready') {
+      await client.quit().catch(() => client.disconnect());
+    } else {
+      client.disconnect();
     }
   }
 

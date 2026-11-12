@@ -27,6 +27,8 @@ const KNOWN_KINDS: ReadonlySet<string> = new Set<AiInstanceKind>([
 @Injectable()
 export class DiscoveryReaderService {
   private readonly logger = new Logger(DiscoveryReaderService.name);
+  // Clients already told that the registry key lives on another cluster node.
+  private readonly redirectNoticed = new WeakSet<DatabasePort>();
 
   constructor(private readonly registry: ConnectionRegistry) {}
 
@@ -43,9 +45,20 @@ export class DiscoveryReaderService {
       const raw = await client.call('HGETALL', [REGISTRY_KEY]);
       fields = parseHashReply(raw);
     } catch (err) {
-      this.logger.warn(
-        `Failed to read discovery registry: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      const message = err instanceof Error ? err.message : String(err);
+      // On a cluster seed the registry key hashes to whichever node owns its
+      // slot; this client is attached to one node and does not follow
+      // redirects. Say so once instead of warning on every poll.
+      if (/^(MOVED|ASK) /.test(message)) {
+        if (!this.redirectNoticed.has(client)) {
+          this.redirectNoticed.add(client);
+          this.logger.log(
+            `Discovery registry lives on another cluster node (${message}); AI instance discovery is skipped for this connection`,
+          );
+        }
+        return [];
+      }
+      this.logger.warn(`Failed to read discovery registry: ${message}`);
       return [];
     }
 

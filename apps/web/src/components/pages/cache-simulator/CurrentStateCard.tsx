@@ -55,6 +55,11 @@ export function CurrentStateCard({ snapshot }: { snapshot: CacheSimulatorSnapsho
               Sampled dataset size <span className="font-semibold">{formatBytes(estimate.totalBytes)}</span> ± {formatBytes(estimate.ci95Bytes)} (95%)
               {estimate.partial && ' — partial sample, the range is wider than usual'}
             </p>
+            {estimate.likelyMissedLargeKeys && (
+              <p className="text-sm text-amber-700 dark:text-amber-400">
+                Some large keys were likely missed; the estimate may be low. The range reaches up to the dataset memory reported by INFO plus 24 bytes per key for its entry in the keyspace index.
+              </p>
+            )}
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left text-muted-foreground">

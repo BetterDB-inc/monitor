@@ -9,6 +9,7 @@ export type EndpointRole = 'source' | 'target';
 interface Props {
   role: EndpointRole;
   connection: Connection | null;
+  serverlessCheck?: boolean;
   isPrefilled: boolean;
   selectableCount: number;
   offlineCount: number;
@@ -40,6 +41,7 @@ function availabilitySummary(
 export function EndpointPanel({
   role,
   connection,
+  serverlessCheck = false,
   isPrefilled,
   selectableCount,
   offlineCount,
@@ -47,6 +49,37 @@ export function EndpointPanel({
   onChoose,
   onClear,
 }: Props) {
+  if (connection === null && serverlessCheck) {
+    return (
+      <div className="flex min-h-[250px] flex-col gap-3 rounded-xl border bg-card p-5">
+        <div className="flex items-start justify-between gap-2">
+          <span className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">
+            {ROLE_LABEL[role]}
+          </span>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="-mt-1.5 -mr-1.5 text-muted-foreground"
+            onClick={onClear}
+            aria-label={`Clear ${role}`}
+          >
+            <X aria-hidden="true" />
+          </Button>
+        </div>
+
+        <span className="text-xl font-semibold tracking-tight">ElastiCache Serverless</span>
+
+        <span className="text-xs text-muted-foreground">
+          Readiness check against AWS limits. No target connection is used.
+        </span>
+
+        <Button variant="outline" size="sm" className="mt-auto self-start" onClick={onChoose}>
+          Change {role}
+        </Button>
+      </div>
+    );
+  }
+
   if (connection === null) {
     return (
       <div className="flex min-h-[250px] flex-col items-center justify-center gap-2 rounded-xl border border-dashed p-6 text-center">

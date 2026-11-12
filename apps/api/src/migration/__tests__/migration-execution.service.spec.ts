@@ -1,7 +1,8 @@
 import { MigrationExecutionService } from '../migration-execution.service';
-import { BadRequestException, ConflictException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { BadGatewayException, BadRequestException, ConflictException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { CUTOVER_DRAIN_LIMIT_MS, CUTOVER_TIMEOUT_NOTICE } from '../execution/cutover';
 import type { ShakeStatus } from '../execution/shake-status';
+import { FakeTunnels, SSH_TUNNEL, fakeEndpointResolver } from './helpers/fake-tunnels';
 
 jest.mock('../execution/redisshake-runner', () => ({
   findRedisShakeBinary: jest.fn().mockReturnValue('/usr/local/bin/redis-shake'),
@@ -126,6 +127,7 @@ function createExecutionService(
   return new MigrationExecutionService(
     registry as any,
     createMockMigrationService(analysis) as any,
+    fakeEndpointResolver(),
   );
 }
 
@@ -314,7 +316,11 @@ describe('MigrationExecutionService', () => {
       });
 
       // Let the mocked process run to close (resolves at 20ms) so the job is terminal.
-      await new Promise(r => setTimeout(r, 30));
+      // Poll rather than sleep a fixed time: a loaded CI runner can take longer.
+      const deadline = Date.now() + 2_000;
+      while (crossForkService.getExecution(id)!.status !== 'completed' && Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 10));
+      }
       const result = crossForkService.getExecution(id);
       expect(result!.status).toBe('completed');
       expect(result!.notices!.some(n => /functions are excluded/i.test(n))).toBe(true);
@@ -1016,6 +1022,14 @@ describe('MigrationExecutionService', () => {
         service.stopExecution(id); // Mark as cancelled (terminal)
       }
 
+      // A cancelled job is evictable only once its run has settled and its
+      // RedisShake has exited, so let the stopped runs finish first.
+      const runs = (service as unknown as { runs: Map<string, Promise<void>> }).runs;
+      for (let i = 0; i < 200 && runs.size > 0; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(runs.size).toBe(0);
+
       // One more should trigger eviction
       const { id: newId } = await service.startExecution({
         sourceConnectionId: 'conn-1',
@@ -1063,6 +1077,7 @@ describe('MigrationExecutionService with external connections', () => {
     const service = new MigrationExecutionService(
       registry as any,
       { findLatestCompletedAnalysis: () => undefined } as any,
+      fakeEndpointResolver(),
     );
     const { runCommandMigration } = require('../execution/command-migration-worker');
     const { spawn } = require('child_process');
@@ -1084,5 +1099,342 @@ describe('MigrationExecutionService with external connections', () => {
     expect(runCommandMigration).not.toHaveBeenCalled();
     expect(spawn).not.toHaveBeenCalled();
     expect((service as unknown as { jobs: Map<string, unknown> }).jobs.size).toBe(0);
+  });
+});
+
+describe('MigrationExecutionService with SSH-tunneled connections', () => {
+  const CLUSTER_MESSAGE =
+    'One or more selected instances is a cluster reached through an SSH tunnel. Only the configured node is tunnelled, so migration cannot reach the other nodes. Use a connection BetterDB can reach directly.';
+  const PREFER_REPLICA_MESSAGE =
+    'Reading from a replica is not available when the source is reached through an SSH tunnel: RedisShake would connect to the replica directly and bypass the tunnel. Turn off the replica option.';
+  const { runCommandMigration } = require('../execution/command-migration-worker');
+  const { buildScanReaderToml, buildSyncReaderToml } = require('../execution/toml-builder');
+  const { spawn } = require('child_process');
+
+  function setup(tunnelledIds: string[], registryOverrides?: Parameters<typeof createMockRegistry>[0]) {
+    const registry = createMockRegistry(registryOverrides);
+    registry.getConfig.mockImplementation((id: string) => ({
+      id,
+      name: id,
+      host: id === 'conn-1' ? 'src.internal' : 'tgt.internal',
+      port: 6379,
+      createdAt: Date.now(),
+      connectionType: 'direct',
+      ...(tunnelledIds.includes(id) ? { sshTunnel: SSH_TUNNEL } : {}),
+    }));
+    const tunnels = new FakeTunnels();
+    const service = new MigrationExecutionService(
+      registry as any,
+      createMockMigrationService() as any,
+      fakeEndpointResolver(tunnels),
+    );
+    jest.spyOn(service['logger'], 'error').mockImplementation(() => undefined);
+    return { registry, tunnels, service };
+  }
+
+  async function waitForTerminal(service: MigrationExecutionService, id: string) {
+    for (let i = 0; i < 200; i++) {
+      const job = service.getExecution(id);
+      if (job && ['completed', 'failed', 'cancelled'].includes(job.status)) return job;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    throw new Error('execution did not finish');
+  }
+
+  beforeEach(() => {
+    runCommandMigration.mockClear();
+    buildScanReaderToml.mockClear();
+    buildSyncReaderToml.mockClear();
+    spawn.mockClear();
+    spawn.mock.results.forEach((result: { value: { kill: jest.Mock } }) => result.value.kill.mockClear());
+  });
+
+  it('points RedisShake at the local tunnel port and closes the tunnel when the job ends', async () => {
+    const { service, tunnels } = setup(['conn-1']);
+
+    const { id } = await service.startExecution({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2', mode: 'redis_shake' });
+
+    const [source, target] = buildScanReaderToml.mock.calls[0];
+    expect(source).toMatchObject({ host: 'src.internal', dial: { host: '127.0.0.1', port: 40001 } });
+    expect(target.dial).toBeUndefined();
+    expect([...tunnels.opened.keys()]).toEqual([`migration:${id}:source`]);
+    expect(tunnels.closed).toEqual([]);
+
+    const job = await waitForTerminal(service, id);
+    expect(job.status).toBe('completed');
+    expect(tunnels.closed).toEqual([`migration:${id}:source`]);
+  });
+
+  it('hands the command worker the local tunnel port for a tunnelled target and closes the tunnel afterwards', async () => {
+    const { service, tunnels } = setup(['conn-2']);
+
+    const { id } = await service.startExecution({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2', mode: 'command' });
+    const job = await waitForTerminal(service, id);
+
+    const options = runCommandMigration.mock.calls[0][0];
+    expect(options.targetConfig).toMatchObject({ host: 'tgt.internal', dial: { host: '127.0.0.1', port: 40001 } });
+    expect(options.sourceConfig.dial).toBeUndefined();
+    expect(job.status).toBe('completed');
+    expect(tunnels.closed).toEqual([`migration:${id}:target`]);
+  });
+
+  it.each([
+    ['source', 'conn-1', { sourceClusterEnabled: true }],
+    ['target', 'conn-2', { targetClusterEnabled: true }],
+  ])('rejects a tunnelled cluster %s before flushing, opening a tunnel or starting a worker', async (_side, tunnelledId, overrides) => {
+    const { service, tunnels, registry } = setup([tunnelledId], overrides);
+
+    for (const mode of ['command', 'redis_shake', 'redis_shake_sync'] as const) {
+      const error = await service
+        .startExecution({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2', mode, redisShakeOptions: { emptyDbBeforeSync: true } })
+        .catch((err: unknown) => err);
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect((error as Error).message).toBe(CLUSTER_MESSAGE);
+    }
+    await flushProbe();
+
+    expect(tunnels.opened.size).toBe(0);
+    expect(registry.mockTargetAdapter.getClient).not.toHaveBeenCalled();
+    expect(runCommandMigration).not.toHaveBeenCalled();
+    expect(spawn).not.toHaveBeenCalled();
+    expect((service as unknown as { jobs: Map<string, unknown> }).jobs.size).toBe(0);
+  });
+
+  it('rejects prefer_replica for a tunnelled source before opening a tunnel', async () => {
+    const { service, tunnels } = setup(['conn-1']);
+
+    const error = await service
+      .startExecution({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2', mode: 'redis_shake_sync', syncReaderOptions: { preferReplica: true } })
+      .catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(BadRequestException);
+    expect((error as Error).message).toBe(PREFER_REPLICA_MESSAGE);
+    expect(tunnels.opened.size).toBe(0);
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it.each(['redis_shake', 'redis_shake_sync'] as const)('rejects %s for a tunnelled TLS side before opening a tunnel', async (mode) => {
+    const { service, tunnels, registry } = setup(['conn-2']);
+    const plainConfig = registry.getConfig.getMockImplementation()!;
+    registry.getConfig.mockImplementation((id: string) => ({ ...plainConfig(id), tls: true }));
+
+    const error = await service
+      .startExecution({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2', mode, redisShakeOptions: { emptyDbBeforeSync: true } })
+      .catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(BadRequestException);
+    expect((error as Error).message).toBe(
+      'One or more selected instances uses TLS through an SSH tunnel. RedisShake does not verify the server certificate, so it cannot confirm which server answered through the tunnel. Use command mode.',
+    );
+    expect(tunnels.opened.size).toBe(0);
+    expect(registry.mockTargetAdapter.getClient).not.toHaveBeenCalled();
+    expect(spawn).not.toHaveBeenCalled();
+    expect((service as unknown as { jobs: Map<string, unknown> }).jobs.size).toBe(0);
+  });
+
+  it('allows prefer_replica when only the target is tunnelled', async () => {
+    const { service } = setup(['conn-2']);
+
+    const { id } = await service.startExecution({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2', mode: 'redis_shake_sync', syncReaderOptions: { preferReplica: true } });
+
+    expect(buildSyncReaderToml.mock.calls[0][1]).toMatchObject({ dial: { host: '127.0.0.1', port: 40001 } });
+    await waitForTerminal(service, id);
+  });
+
+  it('fails the request, registers no job and frees the status port when a tunnel cannot be opened', async () => {
+    const { service, tunnels } = setup(['conn-1', 'conn-2']);
+    tunnels.failFor = 'target';
+    mockReleaseStatusPort.mockClear();
+
+    const error = await service
+      .startExecution({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2', mode: 'redis_shake_sync' })
+      .catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(BadGatewayException);
+    expect((error as Error).message).toBe('Could not open the SSH tunnel to the target: All configured authentication methods failed');
+    expect(tunnels.closed).toHaveLength(1);
+    expect(mockReleaseStatusPort).toHaveBeenCalledTimes(1);
+    expect(spawn).not.toHaveBeenCalled();
+    expect((service as unknown as { jobs: Map<string, unknown> }).jobs.size).toBe(0);
+  });
+
+  it('closes the tunnels when the RedisShake config cannot be written', async () => {
+    const { service, tunnels } = setup(['conn-1']);
+    buildScanReaderToml.mockImplementationOnce(() => { throw new Error('Invalid host: empty or too long'); });
+
+    await expect(
+      service.startExecution({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2', mode: 'redis_shake' }),
+    ).rejects.toThrow('Invalid host: empty or too long');
+
+    expect(tunnels.closed).toHaveLength(1);
+  });
+
+  it('frees the job slot when the RedisShake config cannot be written', async () => {
+    const { service } = setup(['conn-1']);
+    buildScanReaderToml.mockImplementationOnce(() => { throw new Error('Invalid host: empty or too long'); });
+
+    await expect(
+      service.startExecution({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2', mode: 'redis_shake' }),
+    ).rejects.toThrow('Invalid host: empty or too long');
+
+    expect((service as unknown as { jobs: Map<string, unknown> }).jobs.size).toBe(0);
+  });
+
+  it('stops RedisShake and fails the job with the tunnel message when a tunnel drops mid-run', async () => {
+    const { service, tunnels } = setup(['conn-1']);
+
+    const { id } = await service.startExecution({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2', mode: 'redis_shake' });
+    await flushProbe();
+    tunnels.drop('source');
+
+    const job = await waitForTerminal(service, id);
+    expect(spawn.mock.results.at(-1).value.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(job.status).toBe('failed');
+    expect(job.error).toBe('The SSH tunnel to the source closed unexpectedly');
+    expect(tunnels.closed).toEqual([`migration:${id}:source`]);
+  });
+
+  it('neither flushes the target nor starts RedisShake when a tunnel drops before the process starts', async () => {
+    const { service, tunnels, registry } = setup(['conn-1'], { sourceDbType: 'valkey', targetDbType: 'redis' });
+    const flushall = jest.fn().mockResolvedValue('OK');
+    registry.mockTargetAdapter.getClient.mockReturnValue({ flushall, quit: jest.fn() });
+    registry.mockSourceAdapter.getClient.mockReturnValue({
+      call: jest.fn().mockImplementation(async () => {
+        tunnels.drop('source');
+        return [];
+      }),
+      quit: jest.fn(),
+    });
+
+    const { id } = await service.startExecution({
+      sourceConnectionId: 'conn-1',
+      targetConnectionId: 'conn-2',
+      mode: 'redis_shake_sync',
+      redisShakeOptions: { emptyDbBeforeSync: true },
+    });
+
+    const job = await waitForTerminal(service, id);
+    expect(job.status).toBe('failed');
+    expect(job.error).toBe('The SSH tunnel to the source closed unexpectedly');
+    expect(flushall).not.toHaveBeenCalled();
+    expect(job.notices).toEqual([]);
+    expect(spawn).not.toHaveBeenCalled();
+    expect(tunnels.closed).toEqual([`migration:${id}:source`]);
+  });
+
+  it('does not start RedisShake when a tunnel drops while the target is being flushed', async () => {
+    const { service, tunnels, registry } = setup(['conn-1']);
+    const flushall = jest.fn().mockImplementation(async () => {
+      tunnels.drop('source');
+      return 'OK';
+    });
+    registry.mockTargetAdapter.getClient.mockReturnValue({ flushall, quit: jest.fn() });
+
+    const { id } = await service.startExecution({
+      sourceConnectionId: 'conn-1',
+      targetConnectionId: 'conn-2',
+      mode: 'redis_shake',
+      redisShakeOptions: { emptyDbBeforeSync: true },
+    });
+
+    const job = await waitForTerminal(service, id);
+    expect(job.status).toBe('failed');
+    expect(job.error).toBe('The SSH tunnel to the source closed unexpectedly');
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it('says the target was already emptied when a tunnel drops during the flush', async () => {
+    const { service, tunnels, registry } = setup(['conn-1']);
+    const flushall = jest.fn().mockImplementation(async () => {
+      tunnels.drop('source');
+      return 'OK';
+    });
+    registry.mockTargetAdapter.getClient.mockReturnValue({ flushall, quit: jest.fn() });
+
+    const { id } = await service.startExecution({
+      sourceConnectionId: 'conn-1',
+      targetConnectionId: 'conn-2',
+      mode: 'redis_shake',
+      redisShakeOptions: { emptyDbBeforeSync: true },
+    });
+
+    const job = await waitForTerminal(service, id);
+    expect(flushall).toHaveBeenCalledTimes(1);
+    expect(job.notices).toEqual(['The target was emptied before the migration stopped, and nothing was copied to it.']);
+  });
+
+  it('says the target was already emptied when the job is cancelled during the flush', async () => {
+    const { service, registry } = setup(['conn-1']);
+    let finishFlush: () => void = () => undefined;
+    const flushall = jest.fn().mockImplementation(() => new Promise<string>((resolve) => { finishFlush = () => resolve('OK'); }));
+    registry.mockTargetAdapter.getClient.mockReturnValue({ flushall, quit: jest.fn() });
+
+    const { id } = await service.startExecution({
+      sourceConnectionId: 'conn-1',
+      targetConnectionId: 'conn-2',
+      mode: 'redis_shake',
+      redisShakeOptions: { emptyDbBeforeSync: true },
+    });
+    await flushProbe();
+    expect(flushall).toHaveBeenCalledTimes(1);
+    service.stopExecution(id);
+    finishFlush();
+
+    let job = await waitForTerminal(service, id);
+    for (let i = 0; i < 200 && job.completedAt === undefined; i++) {
+      await flushProbe();
+      job = service.getExecution(id)!;
+    }
+    expect(job.status).toBe('cancelled');
+    expect(job.notices).toEqual(['The target was emptied before the migration stopped, and nothing was copied to it.']);
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it('fails a command-mode job with the tunnel message when a tunnel drops mid-run', async () => {
+    const { service, tunnels } = setup(['conn-2']);
+    let finishWorker: () => void = () => undefined;
+    runCommandMigration.mockImplementationOnce(() => new Promise<void>((resolve) => { finishWorker = resolve; }));
+
+    const { id } = await service.startExecution({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2', mode: 'command' });
+    await flushProbe();
+    tunnels.drop('target');
+    finishWorker();
+
+    const job = await waitForTerminal(service, id);
+    expect(job.status).toBe('failed');
+    expect(job.error).toBe('The SSH tunnel to the target closed unexpectedly');
+  });
+
+  it('disconnects the command worker clients when a tunnel drops', async () => {
+    const { service, tunnels } = setup(['conn-2']);
+    const dropConnections = jest.fn();
+    let finishWorker: () => void = () => undefined;
+    runCommandMigration.mockImplementationOnce(({ job }: { job: { dropConnections?: () => void } }) => {
+      job.dropConnections = dropConnections;
+      return new Promise<void>((resolve) => { finishWorker = resolve; });
+    });
+
+    const { id } = await service.startExecution({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2', mode: 'command' });
+    await flushProbe();
+    tunnels.drop('target');
+
+    expect(dropConnections).toHaveBeenCalledTimes(1);
+    finishWorker();
+    await waitForTerminal(service, id);
+  });
+
+  it('keeps a user cancellation when the tunnel drops afterwards', async () => {
+    const { service, tunnels } = setup(['conn-2']);
+    let finishWorker: () => void = () => undefined;
+    runCommandMigration.mockImplementationOnce(() => new Promise<void>((resolve) => { finishWorker = resolve; }));
+
+    const { id } = await service.startExecution({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2', mode: 'command' });
+    await flushProbe();
+    service.stopExecution(id);
+    tunnels.drop('target');
+    finishWorker();
+
+    const job = await waitForTerminal(service, id);
+    expect(job.status).toBe('cancelled');
   });
 });

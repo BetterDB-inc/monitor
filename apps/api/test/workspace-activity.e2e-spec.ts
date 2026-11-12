@@ -1,8 +1,6 @@
 import { RequestMethod, ValidationPipe } from '@nestjs/common';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
-import { rmSync } from 'fs';
-import { tmpdir } from 'os';
 import { join } from 'path';
 import { INVALID_CURSOR_MESSAGE } from '../src/activity/activity.service';
 
@@ -19,7 +17,6 @@ const OWNER_SIGN_IN_IP = '198.51.100.51';
 const TOUCHED = [
   'WORKSPACE_DISABLED',
   'NODE_ENV',
-  'BETTERDB_DATA_DIR',
   'AUTH_PUBLIC_URL',
   'AUTH_SECRET',
   'STORAGE_TYPE',
@@ -68,7 +65,7 @@ describe('Workspace activity log (E2E)', () => {
   let inviteeId: string;
   let invitationId: string;
   const previous = new Map<string, string | undefined>();
-  const sqlitePath = join(tmpdir(), `workspace-activity-${Date.now()}.db`);
+  const sqlitePath = join(process.env.BETTERDB_DATA_DIR!, 'workspace-activity.db');
 
   async function activity(cookie: string, query = ''): Promise<ActivityPageBody> {
     const response = await app.inject({
@@ -88,7 +85,6 @@ describe('Workspace activity log (E2E)', () => {
     delete process.env.AUTH_SECRET;
     delete process.env.ACTIVITY_RETENTION_DAYS;
     process.env.NODE_ENV = 'production';
-    process.env.BETTERDB_DATA_DIR = '';
     process.env.STORAGE_TYPE = 'sqlite';
     process.env.STORAGE_SQLITE_FILEPATH = sqlitePath;
     process.env.AUTH_PUBLIC_URL = TRUSTED_ORIGIN;
@@ -138,7 +134,6 @@ describe('Workspace activity log (E2E)', () => {
     if (app !== undefined) {
       await app.close();
     }
-    rmSync(sqlitePath, { force: true });
     for (const key of TOUCHED) {
       const value = previous.get(key);
       if (value === undefined) {

@@ -14,6 +14,7 @@ export const METRIC_UNITS: Record<AnomalyDetectorMetric, string> = {
   blocked_clients: 'clients',
   keyspace_misses: 'misses',
   fragmentation_ratio: 'ratio',
+  error_replies: 'error replies/s',
 };
 
 export const LIFETIME_COUNTER_METRICS: ReadonlySet<AnomalyDetectorMetric> = new Set<AnomalyDetectorMetric>([
@@ -107,9 +108,14 @@ export function fillDefaults(
   };
 }
 
+export const WARNING_ZSCORE_ONLY_METRICS: ReadonlySet<AnomalyDetectorMetric> = new Set([
+  'error_replies',
+]);
+
 export function validateForm(
   form: DetectorFormState,
   defaults: AnomalyDetectorConfigEntry,
+  metric?: AnomalyDetectorMetric,
 ): DetectorFormErrors {
   const filled = fillDefaults(form, defaults);
   const errors: DetectorFormErrors = {};
@@ -117,7 +123,9 @@ export function validateForm(
   const warnZ = parse(filled.warningZScore);
   const critZ = parse(filled.criticalZScore);
   if (!inRange(warnZ, 0.5, 10)) errors.warningZScore = 'Must be between 0.5 and 10';
-  if (!inRange(critZ, 1, 15)) errors.criticalZScore = 'Must be between 1 and 15';
+  if (metric !== undefined && WARNING_ZSCORE_ONLY_METRICS.has(metric)) {
+    if (!errors.warningZScore && warnZ >= critZ) errors.warningZScore = `Must be below ${critZ}`;
+  } else if (!inRange(critZ, 1, 15)) errors.criticalZScore = 'Must be between 1 and 15';
   else if (!errors.warningZScore && critZ <= warnZ) {
     errors.criticalZScore = 'Must be greater than the warning z-score';
   }
@@ -181,7 +189,9 @@ export function isCustomized(
 export function summarize(
   resolved: AnomalyDetectorConfigEntry,
   defaults: AnomalyDetectorConfigEntry,
+  metric?: AnomalyDetectorMetric,
 ): Array<{ text: string; customized: boolean }> {
+  const warningZScoreOnly = metric !== undefined && WARNING_ZSCORE_ONLY_METRICS.has(metric);
   const differs = (key: keyof AnomalyDetectorConfigEntry) => resolved[key] !== defaults[key];
   const absolute = (label: string, key: AbsoluteKey) => ({
     text: resolved[key] === undefined ? `${label} off` : `${label} >${resolved[key]}`,
@@ -189,8 +199,10 @@ export function summarize(
   });
   return [
     {
-      text: `z ${resolved.warningZScore} / ${resolved.criticalZScore}`,
-      customized: differs('warningZScore') || differs('criticalZScore'),
+      text: warningZScoreOnly
+        ? `z ${resolved.warningZScore}`
+        : `z ${resolved.warningZScore} / ${resolved.criticalZScore}`,
+      customized: differs('warningZScore') || (!warningZScoreOnly && differs('criticalZScore')),
     },
     absolute('warn', 'warningAbsolute'),
     absolute('crit', 'criticalAbsolute'),

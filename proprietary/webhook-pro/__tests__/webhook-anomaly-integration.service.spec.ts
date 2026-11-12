@@ -3,16 +3,19 @@ import { ConfigService } from '@nestjs/config';
 import { WebhookAnomalyIntegrationService } from '../webhook-anomaly-integration.service';
 import { WebhookProService } from '../webhook-pro.service';
 import { StoragePort, StoredAnomalyEvent } from '@app/common/interfaces/storage-port.interface';
+import { incidentEventUrl } from '@betterdb/shared';
 
 describe('WebhookAnomalyIntegrationService', () => {
   let service: WebhookAnomalyIntegrationService;
   let webhookProService: jest.Mocked<WebhookProService>;
   let storageClient: jest.Mocked<StoragePort>;
   let configService: jest.Mocked<ConfigService>;
+  let frontendUrl: string | undefined;
 
   beforeEach(async () => {
     webhookProService = {
       dispatchAnomalyDetected: jest.fn(),
+      dispatchAnomalySequenceDetected: jest.fn(),
       dispatchLatencySpike: jest.fn(),
       dispatchConnectionSpike: jest.fn(),
     } as any;
@@ -21,8 +24,10 @@ describe('WebhookAnomalyIntegrationService', () => {
       getAnomalyEvents: jest.fn(),
     } as any;
 
+    frontendUrl = undefined;
     configService = {
       get: jest.fn((key: string, defaultValue: any) => {
+        if (key === 'FRONTEND_URL') return frontendUrl;
         if (key === 'database.host') return 'localhost';
         if (key === 'database.port') return 6379;
         return defaultValue;
@@ -69,10 +74,7 @@ describe('WebhookAnomalyIntegrationService', () => {
         sourcePort: 6379,
       };
 
-      storageClient.getAnomalyEvents.mockResolvedValue([anomaly]);
-
-      // Trigger the polling check
-      await (service as any).checkForNewAnomalies();
+      await service.dispatchAnomalyWebhook(anomaly);
 
       expect(webhookProService.dispatchAnomalyDetected).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -109,9 +111,7 @@ describe('WebhookAnomalyIntegrationService', () => {
         sourcePort: 6379,
       };
 
-      storageClient.getAnomalyEvents.mockResolvedValue([anomaly]);
-
-      await (service as any).checkForNewAnomalies();
+      await service.dispatchAnomalyWebhook(anomaly);
 
       expect(webhookProService.dispatchAnomalyDetected).toHaveBeenCalled();
       expect(webhookProService.dispatchConnectionSpike).not.toHaveBeenCalled();
@@ -137,9 +137,7 @@ describe('WebhookAnomalyIntegrationService', () => {
         sourcePort: 6379,
       };
 
-      storageClient.getAnomalyEvents.mockResolvedValue([anomaly]);
-
-      await (service as any).checkForNewAnomalies();
+      await service.dispatchAnomalyWebhook(anomaly);
 
       expect(webhookProService.dispatchAnomalyDetected).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -176,9 +174,7 @@ describe('WebhookAnomalyIntegrationService', () => {
         sourcePort: 6379,
       };
 
-      storageClient.getAnomalyEvents.mockResolvedValue([anomaly]);
-
-      await (service as any).checkForNewAnomalies();
+      await service.dispatchAnomalyWebhook(anomaly);
 
       expect(webhookProService.dispatchAnomalyDetected).toHaveBeenCalled();
       expect(webhookProService.dispatchLatencySpike).not.toHaveBeenCalled();
@@ -202,9 +198,7 @@ describe('WebhookAnomalyIntegrationService', () => {
         sourcePort: 6379,
       };
 
-      storageClient.getAnomalyEvents.mockResolvedValue([anomaly]);
-
-      await (service as any).checkForNewAnomalies();
+      await service.dispatchAnomalyWebhook(anomaly);
 
       // When value is 0, baseline/0 = Infinity
       expect(webhookProService.dispatchLatencySpike).toHaveBeenCalledWith({
@@ -254,9 +248,7 @@ describe('WebhookAnomalyIntegrationService', () => {
         },
       ];
 
-      storageClient.getAnomalyEvents.mockResolvedValue(anomalies);
-
-      await (service as any).checkForNewAnomalies();
+      for (const anomaly of anomalies) await service.dispatchAnomalyWebhook(anomaly);
 
       expect(webhookProService.dispatchAnomalyDetected).toHaveBeenCalledTimes(2);
       expect(webhookProService.dispatchConnectionSpike).toHaveBeenCalledTimes(1);
@@ -264,44 +256,7 @@ describe('WebhookAnomalyIntegrationService', () => {
     });
   });
 
-  describe('command_p99 (latency regression)', () => {
-    it('does not dispatch the generic anomaly.detected for command_p99 (dedicated event owns it)', async () => {
-      const anomalies: StoredAnomalyEvent[] = [
-        {
-          id: 'lr-1',
-          timestamp: Date.now(),
-          metricType: 'command_p99',
-          anomalyType: 'spike',
-          severity: 'critical',
-          value: 6000,
-          baseline: 2000,
-          stdDev: 0,
-          zScore: 0,
-          threshold: 3.0,
-          message: 'P99 latency regression after upgrade',
-          resolved: false,
-          sourceHost: 'localhost',
-          sourcePort: 6379,
-        },
-      ];
-
-      storageClient.getAnomalyEvents.mockResolvedValue(anomalies);
-
-      await (service as any).checkForNewAnomalies();
-
-      expect(webhookProService.dispatchAnomalyDetected).not.toHaveBeenCalled();
-    });
-  });
-
   describe('error handling', () => {
-    it('should handle storage errors gracefully', async () => {
-      storageClient.getAnomalyEvents.mockRejectedValue(new Error('Storage error'));
-
-      await expect((service as any).checkForNewAnomalies()).resolves.not.toThrow();
-
-      expect(webhookProService.dispatchAnomalyDetected).not.toHaveBeenCalled();
-    });
-
     it('should continue processing if webhook dispatch fails', async () => {
       const anomalies: StoredAnomalyEvent[] = [
         {
@@ -322,10 +277,117 @@ describe('WebhookAnomalyIntegrationService', () => {
         },
       ];
 
-      storageClient.getAnomalyEvents.mockResolvedValue(anomalies);
       webhookProService.dispatchAnomalyDetected.mockRejectedValue(new Error('Webhook error'));
 
-      await expect((service as any).checkForNewAnomalies()).resolves.not.toThrow();
+      await expect(service.dispatchAnomalyWebhook(anomalies[0])).resolves.not.toThrow();
+    });
+  });
+
+  describe('sequence alert', () => {
+    const event = (id: string, timestamp: number, metricType: string, connectionId?: string) =>
+      ({ id, timestamp, metricType, connectionId }) as any;
+    const group = (overrides: Record<string, unknown> = {}) =>
+      ({
+        correlationId: 'grp-1',
+        timestamp: 1000,
+        anomalies: [
+          event('a', 1000, 'connections', 'conn-1'),
+          event('b', 2000, 'memory_used', 'conn-2'),
+        ],
+        pattern: 'memory_pressure',
+        severity: 'critical',
+        diagnosis: 'Connections led to memory growth',
+        recommendations: ['Check clients'],
+        ...overrides,
+      }) as any;
+
+    it('sends one alert under the connection of the first event', async () => {
+      await service.dispatchSequenceWebhook(group());
+
+      expect(webhookProService.dispatchAnomalySequenceDetected).toHaveBeenCalledTimes(1);
+      expect(webhookProService.dispatchAnomalySequenceDetected.mock.calls[0][0]).toStrictEqual({
+        correlationId: 'grp-1',
+        pattern: 'memory_pressure',
+        severity: 'critical',
+        diagnosis: 'Connections led to memory growth',
+        recommendations: ['Check clients'],
+        anomalyIds: ['a', 'b'],
+        metricTypes: ['connections', 'memory_used'],
+        anomalyId: 'a',
+        timestamp: 1000,
+        message: 'Memory pressure: Connections led to memory growth',
+        connectionId: 'conn-1',
+      });
+    });
+
+    it('adds the incident link when the frontend URL is set', async () => {
+      frontendUrl = 'https://m.example.com/';
+
+      await service.dispatchSequenceWebhook(group());
+
+      expect(webhookProService.dispatchAnomalySequenceDetected.mock.calls[0][0].incidentUrl).toBe(
+        'https://m.example.com/anomalies/incidents/by-event/a?at=1000&connection=conn-1',
+      );
+    });
+
+    it('carries the recommendation values of the match', async () => {
+      const values = [{ setting: 'repl-backlog-size', current: 1, target: 64, unit: 'MB' }];
+
+      await service.dispatchSequenceWebhook(group({ values }));
+
+      expect(webhookProService.dispatchAnomalySequenceDetected.mock.calls[0][0].values).toEqual(
+        values,
+      );
+    });
+
+    it('sends nothing for a group whose first event has no connection', async () => {
+      await service.dispatchSequenceWebhook(group({ anomalies: [event('a', 1000, 'connections')] }));
+      await service.dispatchSequenceWebhook(group({ anomalies: [] }));
+
+      expect(webhookProService.dispatchAnomalySequenceDetected).not.toHaveBeenCalled();
+    });
+
+    it('does not reject when the dispatch fails', async () => {
+      webhookProService.dispatchAnomalySequenceDetected.mockRejectedValue(new Error('down'));
+
+      await expect(service.dispatchSequenceWebhook(group())).resolves.toBeUndefined();
+    });
+  });
+
+  describe('incident link on anomaly.detected', () => {
+    const anomaly: StoredAnomalyEvent = {
+      id: 'ev-1',
+      timestamp: 1706457000000,
+      metricType: 'memory_used',
+      anomalyType: 'spike',
+      severity: 'warning',
+      value: 2,
+      baseline: 1,
+      stdDev: 0.1,
+      zScore: 5,
+      threshold: 3,
+      message: 'Memory spike',
+      resolved: false,
+      connectionId: 'conn-1',
+    };
+
+    it('adds the incident link when the frontend URL is set', async () => {
+      frontendUrl = 'https://m.example.com';
+
+      await service.dispatchAnomalyWebhook(anomaly);
+
+      expect(webhookProService.dispatchAnomalyDetected.mock.calls[0][0]).toHaveProperty(
+        'incidentUrl',
+        incidentEventUrl('https://m.example.com', 'ev-1', 1706457000000, 'conn-1'),
+      );
+    });
+
+    it('leaves the incident link off without a frontend URL', async () => {
+      await service.dispatchAnomalyWebhook(anomaly);
+
+      expect(webhookProService.dispatchAnomalyDetected.mock.calls[0][0]).not.toHaveProperty(
+        'incidentUrl',
+      );
     });
   });
 });

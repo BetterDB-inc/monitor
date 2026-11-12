@@ -4,6 +4,7 @@ import { join } from 'path';
 import { BadRequestException, ServiceUnavailableException } from '@nestjs/common';
 import { MigrationService } from '../migration.service';
 import { MigrationExecutionService } from '../migration-execution.service';
+import { fakeEndpointResolver } from './helpers/fake-tunnels';
 import {
   loadAnalysisVerdict,
   resolveVerdictDir,
@@ -102,7 +103,7 @@ describe('migration safety gate regressions', () => {
   });
 
   it('P1-1 fail-closed: missing MigrationService blocks instead of silently skipping', async () => {
-    const svc = new MigrationExecutionService(mockRegistry() as any, undefined as any);
+    const svc = new MigrationExecutionService(mockRegistry() as any, undefined as any, fakeEndpointResolver());
     await expect(
       svc.startExecution({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2' }),
     ).rejects.toThrow(ServiceUnavailableException);
@@ -112,6 +113,7 @@ describe('migration safety gate regressions', () => {
     const svc = new MigrationExecutionService(
       mockRegistry() as any,
       { findLatestCompletedAnalysis: () => undefined } as any,
+      fakeEndpointResolver(),
     );
     const err = await svc
       .startExecution({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2' })
@@ -188,6 +190,7 @@ describe('migration safety gate regressions', () => {
           incompatibilities: [],
         }),
       } as any,
+      fakeEndpointResolver(),
     );
     const err = await svc
       .startExecution({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2' })

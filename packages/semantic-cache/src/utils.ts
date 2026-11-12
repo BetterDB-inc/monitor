@@ -7,6 +7,14 @@ export function sha256(text: string): string {
 
 export { escapeTag, encodeFloat32, parseFtSearchResponse } from '@betterdb/valkey-search-kit';
 
+/**
+ * Escape glob metacharacters for use in SCAN MATCH patterns.
+ * Backslash is escaped first so that subsequent replacements don't double-escape.
+ */
+export function escapeGlobPattern(str: string): string {
+  return str.replace(/\\/g, '\\\\').replace(/([*?[\]])/g, '\\$1');
+}
+
 // --- Content block types (mirrors agent-cache for cross-package compatibility) ---
 
 export type ContentBlock =

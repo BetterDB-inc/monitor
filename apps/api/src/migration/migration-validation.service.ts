@@ -16,7 +16,8 @@ import { validateSample } from './validation/sample-validator';
 import { compareBaseline } from './validation/baseline-comparator';
 import { MigrationService } from './migration.service';
 import { createClient, createTargetClient } from './execution/client-factory';
-import { assertLiveMigrationPair } from './live-connections';
+import { assertAddressableEndpoints, assertLiveMigrationPair, assertTunnelSupport } from './live-connections';
+import { MigrationEndpointResolver, tunnelClosedMessage, type MigrationEndpoints } from './migration-endpoints';
 
 @Injectable()
 export class MigrationValidationService {
@@ -28,6 +29,7 @@ export class MigrationValidationService {
     private readonly connectionRegistry: ConnectionRegistry,
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
     private readonly migrationService: MigrationService,
+    private readonly endpointResolver: MigrationEndpointResolver,
   ) {}
 
   async startValidation(req: MigrationValidationRequest): Promise<StartValidationResponse> {
@@ -47,6 +49,7 @@ export class MigrationValidationService {
     }
 
     assertLiveMigrationPair(this.connectionRegistry, req.sourceConnectionId, req.targetConnectionId);
+    assertAddressableEndpoints(sourceConfig, targetConfig);
 
     // 3. Optionally retrieve Phase 1 analysis result
     let analysisResult: MigrationAnalysisResult | undefined;
@@ -102,8 +105,10 @@ export class MigrationValidationService {
     analysisResult?: MigrationAnalysisResult,
   ): Promise<void> {
     let sourceClient: Valkey | null = null;
-    let sourceCountClient: Valkey | null = null;
+    let sourceClusterClient: Valkey | null = null;
     let targetClient: Valkey | null = null;
+    let endpoints: MigrationEndpoints | null = null;
+    let tunnelError: string | undefined;
 
     try {
       job.status = 'running';
@@ -117,10 +122,18 @@ export class MigrationValidationService {
       const targetIsCluster = isClusterEnabled(await targetAdapter.getInfo(['cluster']));
 
       // Create temporary iovalkey clients — same pattern as command-migration-worker.ts
-      sourceClient = createClient(sourceConfig, 'BetterDB-Validation-Source');
-      targetClient = createTargetClient(targetConfig, 'BetterDB-Validation-Target', targetIsCluster);
+      assertTunnelSupport(sourceConfig, targetConfig, { sourceIsCluster, targetIsCluster });
+      endpoints = await this.endpointResolver.open(job.id, { source: sourceConfig, target: targetConfig }, (side) => {
+        tunnelError ??= tunnelClosedMessage(side);
+        sourceClient?.disconnect();
+        targetClient?.disconnect();
+      });
+
+      sourceClient = createClient(endpoints.source, 'BetterDB-Validation-Source');
+      targetClient = createTargetClient(endpoints.target, 'BetterDB-Validation-Target', targetIsCluster);
 
       // Step 1: Connect check (5%)
+      if (tunnelError !== undefined) return;
       try {
         await sourceClient.connect();
       } catch (err: unknown) {
@@ -131,6 +144,7 @@ export class MigrationValidationService {
         return;
       }
 
+      if (tunnelError !== undefined) return;
       try {
         await targetClient.connect();
       } catch (err: unknown) {
@@ -156,19 +170,20 @@ export class MigrationValidationService {
 
       // Step 2: Key count comparison (20%)
       // The standalone source client only sees the seed node of a cluster, so
-      // count a cluster source through a Cluster client that reaches every master.
+      // count and sample a cluster source through a Cluster client that reaches
+      // every master.
       if (sourceIsCluster) {
-        sourceCountClient = createTargetClient(sourceConfig, 'BetterDB-Validation-Source-Count', true);
-        await sourceCountClient.connect();
+        sourceClusterClient = createTargetClient(sourceConfig, 'BetterDB-Validation-Source-Cluster', true);
+        await sourceClusterClient.connect();
       }
-      const keyCount = await compareKeyCounts(sourceCountClient ?? sourceClient, targetClient, analysisResult);
+      const keyCount = await compareKeyCounts(sourceClusterClient ?? sourceClient, targetClient, analysisResult);
       job.result.keyCount = keyCount;
       job.progress = 20;
 
       if (job.cancelled) return;
 
       // Step 3: Sample validation (20–70%)
-      const sampleValidation = await validateSample(sourceClient, targetClient, 500);
+      const sampleValidation = await validateSample(sourceClusterClient ?? sourceClient, targetClient, 500);
       job.result.sampleValidation = sampleValidation;
       job.progress = 70;
 
@@ -220,15 +235,24 @@ export class MigrationValidationService {
         this.logger.error(`Validation ${job.id} error: ${message}`);
       }
     } finally {
+      if (tunnelError !== undefined && !job.cancelled) {
+        job.status = 'failed';
+        job.error = tunnelError;
+      }
       // Ensure cancelled jobs get a terminal status
       if (job.cancelled && job.status === 'running') {
         job.status = 'cancelled';
         job.error = job.error ?? 'Cancelled by user';
       }
       job.completedAt = Date.now();
-      // Graceful cleanup — never Promise.all, never disconnect()
-      const clients = [sourceClient, sourceCountClient, targetClient].filter((c): c is Valkey => c !== null);
-      await Promise.allSettled(clients.map(c => c.quit()));
+      // Graceful cleanup — never Promise.all; disconnect() only after a tunnel drop, when QUIT would redial
+      const clients = [sourceClient, sourceClusterClient, targetClient].filter((c): c is Valkey => c !== null);
+      if (tunnelError !== undefined) {
+        for (const client of clients) client.disconnect();
+      } else {
+        await Promise.allSettled(clients.map(c => c.quit()));
+      }
+      await endpoints?.close().catch(() => undefined);
     }
   }
 

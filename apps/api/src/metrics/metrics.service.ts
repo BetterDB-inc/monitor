@@ -1,5 +1,6 @@
-import { Injectable, Inject, NotFoundException } from '@nestjs/common';
+import { Injectable, Inject, NotFoundException, Optional } from '@nestjs/common';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { ClusterMetricsService } from '../cluster/cluster-metrics.service';
 import {
   InfoResponse,
   SlowLogEntry,
@@ -20,12 +21,18 @@ import {
 } from '../common/types/metrics.types';
 import { analyzeSlowLogPatterns } from './slowlog-analyzer';
 import { StoragePort, toSlowLogEntry } from '../common/interfaces/storage-port.interface';
+import { isReplicaRole } from '../database/parsers/replication-info.parser';
+import { readClusterShards, withConfiguredZones, withShardMetadata } from '../cluster/shard-metadata';
+
+/** Comma-separated addresses of slot-owning primaries missing from a slot stats response. */
+export const SLOT_STATS_FAILED_NODES_HEADER = 'x-slot-stats-failed-nodes';
 
 @Injectable()
 export class MetricsService {
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
+    @Optional() private readonly clusterMetrics?: ClusterMetricsService,
   ) { }
 
   private getClient(connectionId?: string) {
@@ -142,16 +149,37 @@ export class MetricsService {
   }
 
   async getClusterNodes(connectionId?: string): Promise<ClusterNode[]> {
-    return this.getClient(connectionId).getClusterNodes();
+    const ownerId = connectionId || this.connectionRegistry.getDefaultId() || undefined;
+    const client = this.getClient(ownerId);
+    const [nodes, shards] = await Promise.all([client.getClusterNodes(), readClusterShards(client)]);
+    return withConfiguredZones(
+      withShardMetadata(nodes, shards),
+      this.connectionRegistry.getNodeAvailabilityZones(ownerId),
+    );
   }
 
   async getClusterSlotStats(orderBy?: 'key-count' | 'cpu-usec', limit?: number, connectionId?: string): Promise<SlotStats> {
+    return (await this.getClusterSlotStatsResult(orderBy, limit, connectionId)).stats;
+  }
+
+  /** Slot stats plus the slot-owning primaries that did not answer, whose slots are missing. */
+  async getClusterSlotStatsResult(
+    orderBy?: 'key-count' | 'cpu-usec',
+    limit?: number,
+    connectionId?: string,
+  ): Promise<{ stats: SlotStats; failedNodes: string[] }> {
     const client = this.getClient(connectionId);
     const capabilities = client.getCapabilities();
     if (!capabilities.hasClusterSlotStats) {
       throw new Error('CLUSTER SLOT-STATS not supported on this database version');
     }
-    return client.getClusterSlotStats(orderBy, limit);
+    // The connection's own socket only sees the slots of the node it landed on;
+    // one connection per cluster reports them all.
+    if (capabilities.clusterEnabled && this.clusterMetrics && (await this.clusterMetrics.usesClusterWideSlotStats(connectionId))) {
+      const { stats, failedNodes } = await this.clusterMetrics.getClusterSlotStatsResult(orderBy, limit, connectionId);
+      return { stats, failedNodes };
+    }
+    return { stats: await client.getClusterSlotStats(orderBy, limit), failedNodes: [] };
   }
 
   async getConfigValue(parameter: string, connectionId?: string): Promise<string | null> {
@@ -189,7 +217,7 @@ export class MetricsService {
 
     const role = replication?.role ?? 'unknown';
     let replicationLag: number | null = null;
-    if (role === 'slave' || role === 'replica') {
+    if (isReplicaRole(role)) {
       const lastIo = Number(replication?.master_last_io_seconds_ago ?? -1);
       replicationLag = lastIo >= 0 ? lastIo : null;
     }

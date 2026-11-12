@@ -33,7 +33,7 @@ function clientConfig(token: string): string {
         betterdb: {
           type: 'stdio',
           command: 'npx',
-          args: ['@betterdb/mcp'],
+          args: ['-y', '@betterdb/mcp@1.6.0'],
           env: { BETTERDB_URL: apiOrigin(), BETTERDB_TOKEN: token },
         },
       },

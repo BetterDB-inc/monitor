@@ -105,14 +105,16 @@ resources:
     memory: 1Gi
 
 # Gates liveness until the app has finished starting, so a slow first boot
-# (e.g. postgres schema init against a remote DB) is not restart-looped by the
-# liveness probe. failureThreshold*periodSeconds = up to 150s of startup grace.
+# (e.g. postgres schema init against a remote DB, or the one-off rebuild of the
+# slow/command log unique indexes on a large database) is not restart-looped by
+# the liveness probe. failureThreshold*periodSeconds = up to 10 minutes of
+# startup grace.
 startupProbe:
   httpGet:
     path: /api/health
     port: http
   periodSeconds: 5
-  failureThreshold: 30
+  failureThreshold: 120
   timeoutSeconds: 3
 
 livenessProbe:

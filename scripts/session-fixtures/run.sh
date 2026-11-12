@@ -1,11 +1,11 @@
-#!/usr/bin/env zsh
-# Usage: zsh scripts/session-fixtures/run.sh [--seed-only]
+#!/usr/bin/env bash
+# Usage: bash scripts/session-fixtures/run.sh [--seed-only]
 # Seeds the compose valkey (6380) with session data
 # written by real client libraries under the sxfix: prefix, then captures
 # fixtures into apps/api/test/fixtures/session-explorer. Never flushes.
 set -euo pipefail
 
-HERE="${0:A:h}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 cd "$HERE"
 

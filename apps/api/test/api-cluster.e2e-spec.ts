@@ -142,9 +142,7 @@ describe('Cluster API (E2E)', () => {
         if (slots.length > 0) {
           const firstSlot = response.body[slots[0]];
           expect(firstSlot).toHaveProperty('key_count');
-          expect(firstSlot).toHaveProperty('expires_count');
-          expect(firstSlot).toHaveProperty('total_reads');
-          expect(firstSlot).toHaveProperty('total_writes');
+          expect(firstSlot).not.toHaveProperty('expires_count');
         }
       }
     });

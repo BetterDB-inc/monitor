@@ -78,6 +78,10 @@ spec:
           env:
             - name: GF_SERVER_ROOT_URL
               value: https://demo-grafana.app.betterdb.com
+            # Grafana serves its multi-MB JS bundles uncompressed by default,
+            # which made a cold load take ~13s.
+            - name: GF_SERVER_ENABLE_GZIP
+              value: "true"
             # Land visitors directly on the Instance Vitals dashboard instead of
             # the empty Grafana home (one of the provisioned dashboard files).
             - name: GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH

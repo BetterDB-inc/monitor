@@ -28,6 +28,7 @@ export interface CorrelatedAnomalyGroup {
   correlationId: string;
   timestamp: number;
   anomalies: AnomalyEvent[];
+  truncated?: boolean;
   pattern: string;
   diagnosis: string;
   recommendations: string[];
@@ -54,4 +55,156 @@ export interface AnomalyBufferStats {
   max: number;
   latest: number;
   isReady: boolean;
+}
+
+export type FanoutCoverageReason =
+  | 'not_applicable'
+  | 'no_sentinel_credentials'
+  | 'sentinel_credentials_unreadable'
+  | 'connection_secrets_unreadable'
+  | 'certificate_auth'
+  | 'agent_connection'
+  | 'ssh_tunnel'
+  | 'topology_unknown'
+  | 'topology_unreadable'
+  | 'no_targets'
+  | 'covered_elsewhere'
+  | 'fanout_failed';
+
+/** Outcome of the latest per-node fan-out of a cluster or Sentinel connection. */
+export interface FanoutCoverage {
+  connectionId: string;
+  topology: 'cluster' | 'sentinel' | null;
+  checked: number;
+  unreachable: number;
+  authFailed: number;
+  skipped: number;
+  notDialed: number;
+  reason: FanoutCoverageReason | null;
+  tunnelled: boolean;
+  targetLimit: number;
+  timeoutMs: number;
+  timestamp: number;
+  /** Server-side age when the entry was read. */
+  ageMs: number;
+  /** No poll has refreshed the entry lately; the per-node checks may have stopped. */
+  stale: boolean;
+}
+
+export interface HotShardLoad {
+  perSecond: number;
+  share: number;
+  median: number;
+  ratio: number;
+}
+
+export interface HotShardSlot {
+  slot: number;
+  cpuUsecPerSecond: number;
+  networkBytesPerSecond: number;
+  keyCount: number;
+  shareOfShard: number;
+}
+
+export interface HotShardKey {
+  key: string;
+  slot: number;
+  freq: number;
+}
+
+export interface HotShardDetail {
+  eventId: string;
+  captureAvailable: boolean;
+  shardId: string;
+  nodeAddr: string;
+  slotCount: number;
+  since: number;
+  sampledAt: number;
+  cpu: HotShardLoad;
+  network: Omit<HotShardLoad, 'ratio'>;
+  topSlots: HotShardSlot[];
+  topKeys: HotShardKey[];
+  keySource: 'lfu' | 'unavailable';
+  keyNote?: string;
+  keysSampled: number;
+  keysSampledAt?: number;
+}
+
+export type ReplicationDivergenceLevel = 'none' | 'behind' | 'warning' | 'critical' | 'unobserved';
+
+export interface ReplicationDivergenceWindow {
+  start: number;
+  end: number;
+  gapBytes: number;
+  bytesPerSec: number | null;
+  secondsBehind: number | null;
+  replicaGapBytes: number | null;
+  replicaView: ReplicaViewStatus | null;
+}
+
+export type ReplicaViewStatus = 'ok' | 'unreachable' | 'replid_mismatch' | 'not_replica';
+
+export interface ReplicaDivergenceHistory {
+  replica: string;
+  level: ReplicationDivergenceLevel;
+  latest: ReplicationDivergenceWindow | null;
+  windows: ReplicationDivergenceWindow[];
+}
+
+export type IncidentRecoveryStatus = 'active' | 'recovering' | 'recovered' | 'degraded' | 'unknown';
+
+export type IncidentEntryRecovery = 'recovered' | 'open' | 'unknown' | 'recurred';
+
+export interface IncidentTimelineEntry {
+  anomalyId: string;
+  connectionId: string;
+  nodeAddr?: string;
+  timestamp: number;
+  metricType: string;
+  severity: AnomalySeverity;
+  message: string;
+  recoveredAt: number | null;
+  recoveryState: IncidentEntryRecovery;
+  values?: RecommendationValue[];
+}
+
+export interface IncidentSequenceStep {
+  anomalyId: string;
+  step: number | null;
+}
+
+export interface RecommendationValue {
+  setting: string;
+  current: number;
+  target: number;
+  unit: string;
+  nodeAddr?: string;
+}
+
+export interface IncidentSequenceMatch {
+  pattern: string;
+  anomalyIds: string[];
+  steps: IncidentSequenceStep[];
+  diagnosis: string;
+  recommendations: string[];
+  values?: RecommendationValue[];
+  severity: AnomalySeverity;
+}
+
+export interface IncidentTimeline {
+  incidentId: string;
+  scope: string;
+  connectionIds: string[];
+  startedAt: number;
+  lastEventAt: number;
+  entries: IncidentTimelineEntry[];
+  sequence: string[];
+  matchedPatterns: string[];
+  sequenceMatches: IncidentSequenceMatch[];
+  recovery: {
+    status: IncidentRecoveryStatus;
+    openSignals: string[];
+    unknownSignals: string[];
+    recoveredAt: number | null;
+  };
 }

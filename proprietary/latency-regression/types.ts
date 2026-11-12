@@ -1,10 +1,12 @@
+import type { AnomalyKind } from '@app/common/interfaces/storage-port.interface';
+
 /**
  * Types for the P99 latency regression guard (valkey/valkey#3527).
  * All latency values are microseconds, sourced from INFO latencystats
  * cumulative t-digests collected by LatencystatsPollerService.
  */
 
-export type RegressionKind = 'upgrade_regression' | 'sustained_degradation';
+export type RegressionKind = AnomalyKind;
 
 /** One stored latencystats point, as read back from storage. */
 export interface CommandP99Point {

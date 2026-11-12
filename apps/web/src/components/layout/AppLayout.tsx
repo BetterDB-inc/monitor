@@ -37,11 +37,14 @@ import { VectorAi } from '../../pages/VectorAi';
 import { InferenceLatency } from '../../pages/InferenceLatency';
 import { MetricForecasting } from '../../pages/MetricForecasting';
 import { ScalingReadiness } from '../../pages/ScalingReadiness';
+import { SessionExplorer } from '../../pages/SessionExplorer';
 import { CacheSimulator } from '../../pages/CacheSimulator';
 import { CacheSimulatorGuard } from '../CacheSimulatorGuard';
 import { CacheProposals } from '../../pages/CacheProposals';
 import { Monitor } from '../../pages/Monitor';
 import { MonitorSession } from '../../pages/MonitorSession';
+import { IncidentByEvent } from '../../pages/IncidentByEvent';
+import { IncidentDetail } from '../../pages/IncidentDetail';
 import { Security } from '../../pages/Security';
 
 import { useAuth } from '../../contexts/AuthContext';
@@ -212,6 +215,22 @@ function AppLayoutInner(): ReactElement {
                 }
               />
               <Route
+                path="/anomalies/incidents/by-event/:anomalyId"
+                element={
+                  <NoConnectionsGuard>
+                    <IncidentByEvent />
+                  </NoConnectionsGuard>
+                }
+              />
+              <Route
+                path="/anomalies/incidents/:incidentId"
+                element={
+                  <NoConnectionsGuard>
+                    <IncidentDetail />
+                  </NoConnectionsGuard>
+                }
+              />
+              <Route
                 path="/key-analytics"
                 element={
                   <NoConnectionsGuard>
@@ -325,6 +344,16 @@ function AppLayoutInner(): ReactElement {
                       <KvCacheGuard>
                         <KvCache />
                       </KvCacheGuard>
+                    </LiveConnectionGuard>
+                  </NoConnectionsGuard>
+                }
+              />
+              <Route
+                path="/session-explorer"
+                element={
+                  <NoConnectionsGuard>
+                    <LiveConnectionGuard>
+                      <SessionExplorer />
                     </LiveConnectionGuard>
                   </NoConnectionsGuard>
                 }

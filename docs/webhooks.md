@@ -72,14 +72,18 @@ Advanced monitoring events for anomaly detection and performance tracking:
 |-------|-------------|-------------------|
 | `slowlog.threshold` | Slow query detected | Slowlog count exceeds configured threshold |
 | `replication.lag` | Replication lag detected | Replica lag exceeds acceptable threshold |
+| `replication.divergence` | Replica falling behind | A replica's byte gap to the primary keeps growing, stays far behind, or stops draining |
+| `replication.recovered` | Replica divergence closed | A diverged replica is back under the alert thresholds, or a divergence left open by a restart was resolved |
 | `cluster.failover` | Cluster failover occurred | Cluster state changes or slot failures |
-| `anomaly.detected` | Anomaly detected | Z-score analysis detects unusual patterns |
+| `anomaly.detected` | Anomaly detected | Z-score analysis detects unusual patterns. Sent when the event is first saved, so it waits for storage if a save has to be retried. `command_p99`, `retry_amplification` and `replication_divergence` are excluded; they send `latency.regression.detected`, `retry_amplification.detected` and `replication.divergence` instead |
+| `anomaly.sequence.detected` | Anomaly sequence matched | A sequence rule matched inside an incident. Sent once when the match is recorded; nothing is sent on recovery. A compound rule that replaces an earlier match sends a second alert with the more severe diagnosis |
 | `latency.spike` | Latency spike detected | Command latency spikes above baseline |
 | `connection.spike` | Connection spike detected | Connection count spikes above baseline |
 | `cve.critical_detected` | New critical CVEs | CVE scan finds new critical findings vs previous scan |
 | `scaling_readiness.low` | Scaling readiness low | Scaling readiness score dropped to or below the connection's alert threshold |
 | `kv_cache.hit_rate_low` | KV cache hit rate low | An LMCache engine's token hit rate over the last 15 minutes dropped to or below the connection's threshold |
 | `kv_cache.eviction_risk` | KV cache eviction risk | LMCache keys cannot be evicted under a `volatile-*` policy, or Valkey is evicting while LMCache holds most of its memory |
+| `retry_amplification.detected` | Retry amplification detected | Load per client keeps rising, or steps up and holds, together with error replies or connection churn while the client count stays flat |
 
 ### Enterprise Tier
 
@@ -99,7 +103,10 @@ Compliance and audit events for regulated environments:
 Set `payloadFormat` per webhook (`generic` default, `slack`, or `discord`).
 `generic` sends the raw BetterDB event JSON below; `slack` sends Block Kit
 blocks and `discord` sends an embed with the same fields (instance, metric,
-value/baseline, link back to `/anomalies` or `/dashboard`).
+value/baseline, link back to `/anomalies` or `/dashboard`). For
+`anomaly.detected` and `anomaly.sequence.detected` the link opens the incident
+that holds the event. A `message` too long for the title is shown in full
+below it.
 HMAC headers are still sent for all formats; Slack/Discord ignore them.
 
 Getting the webhook URL: Slack — create an app and enable an **Incoming
@@ -110,6 +117,9 @@ format (it is auto-suggested from the URL).
 The "View in BetterDB" button (Slack) / embed link (Discord) points at your
 `FRONTEND_URL` (e.g. `https://monitor.example.com`). When `FRONTEND_URL` is
 unset, messages render without the link — everything else is unchanged.
+For `anomaly.detected` and `anomaly.sequence.detected` the link opens the
+incident that holds the event, looked up again each time it is opened, so it
+keeps working when the incident is regrouped.
 
 ```jsonc
 // generic (default)
@@ -355,6 +365,60 @@ Escalation of an open edge, after clients start receiving `MISCONF`:
 }
 ```
 
+#### replication.divergence (Pro)
+
+Sent when a divergence opens or escalates, once the event has been saved. If storage is down the webhook waits for the retry, and is skipped if the event closes first. `reason` is one of `growth`, `ceiling`, `not_catching_up`, `not_applying` or `not_acking`. `not_applying` means writes have stopped and the gap is not draining; a window counts as stopped when the replication stream stays under 4 KiB/s, so PINGs count as idle. `secondsBehind` is `null` when writes have stopped.
+
+When the primary and the stalled replica are both monitored, a webhook subscribed to both `replication.lag` and `replication.divergence` gets one alert when the replica stops acknowledging writes, whichever is delivered first:
+
+- **Divergence first.** Once the webhook has received a `not_acking` divergence for the open stall, the replica's `replication.lag` alert is skipped. A divergence with another reason does not skip it. The skipped alert stays latched, so it is not sent until lag drops below the recovery level and crosses the threshold again, even if the stall recovers in between.
+- **Lag first.** If the webhook's lag alert is still active when the stall opens with `not_acking`, that divergence is skipped, and so is the stall's `replication.recovered`. A lag alert covers one stall only: an escalation to `critical` is sent (followed by `replication.recovered`), and so is any later stall.
+
+An alert only counts once its delivery succeeds, so a failed or dropped delivery never suppresses the other one. Divergences with other reasons are always sent. The anomaly event is still recorded either way.
+
+`replicaView` is what the replica itself reported when the monitor could read it: `gapBytes` from its `slave_repl_offset`, `linkStatus` from `master_link_status`, and `applyBacklogBytes`, the data it has received but not applied (`null` when the server does not report `slave_read_repl_offset`). It is `null` when the replica could not be read. A divergence is not sent when the replica reports its link is up and it is less than 1 MiB behind, except a `not_acking` one: that is still sent, and its message says the replica's acknowledgements are not reaching the primary. See [Replica cross-check](./anomaly-detection.md#replication_divergence).
+
+Detection works on windows of at least 30 seconds, or three poll intervals if that's longer. If polling stops for longer than a window and more than twice the previous gap between polls, the monitor treats it as an outage: every streak restarts, so an alert can take several windows to fire after polling resumes. A divergence that was already open stays open. Polling that stays steadily slower than a window is not an outage, and detection continues on longer windows.
+
+```json
+{
+  "replica": "10.0.0.2:6379",
+  "level": "critical",
+  "reason": "ceiling",
+  "gapBytes": 629145600,
+  "secondsBehind": 600,
+  "bytesPerSec": 1048576,
+  "slopeBytesPerWindow": -1048576,
+  "windowCount": 2,
+  "correlatedSignals": ["memory_used"],
+  "replicaView": { "gapBytes": 629145600, "linkStatus": "up", "applyBacklogBytes": 524288000 },
+  "message": "CRITICAL: Replica 10.0.0.2:6379 is 600 MB (~600s at the current write rate) behind the primary; it has stayed at least 120s behind for 2 windows. The replica confirms it is 600 MB behind; it has received 500 MB it has not applied yet, so it is slow to apply.",
+  "timestamp": 1706457600000,
+  "instance": { "host": "10.0.0.1", "port": 6379 },
+  "connectionId": "conn-1"
+}
+```
+
+#### replication.recovered (Pro)
+
+`reason` is `caught_up` when the replica stays under the alert thresholds for two windows: its gap is below 1 MiB, or less than 5 seconds behind at the current write rate. `gapBytes` can therefore be above zero, and above 1 MiB on a fast primary. It is `resolved_after_restart` when the monitor closes a divergence the previous run left open and the replica has stayed under the alert thresholds for two windows; `gapBytes` is then `null`. A replica that is still behind but below the alert thresholds keeps its event open.
+
+No `replication.recovered` is sent when the replica was not seen to catch up: when an alerted replica goes offline or drops out of the primary's replica list, when the node stops being a primary, or when a replica with a restart-orphaned event is gone. The anomaly event closes silently, because a dropped replica is usually worse off than one that was behind. Treat a missing recovery as unknown, and watch `replication.lag` or the replica's connection state if you need to page on it.
+
+If the replica alerts again, the old event closes with no `replication.recovered`, since the new `replication.divergence` replaces it. A restart sends at most one per replica, and none when the event was already resolved elsewhere. Removing a connection closes its divergence events without sending `replication.recovered`.
+
+```json
+{
+  "replica": "10.0.0.2:6379",
+  "reason": "caught_up",
+  "gapBytes": 0,
+  "message": "Replica 10.0.0.2:6379 is back under the alert thresholds.",
+  "timestamp": 1706457660000,
+  "instance": { "host": "10.0.0.1", "port": 6379 },
+  "connectionId": "conn-1"
+}
+```
+
 #### cluster.failover (Pro)
 
 ```json
@@ -383,9 +447,53 @@ Escalation of an open edge, after clients start receiving `MISCONF`:
   "zScore": 4.2,
   "threshold": 3.0,
   "message": "Unusual spike in ops_per_sec: 50000 (baseline: 10000, z-score: 4.2)",
-  "timestamp": 1706457600000
+  "timestamp": 1706457600000,
+  "incidentUrl": "https://monitor.example.com/anomalies/incidents/by-event/anom-550e8400-e29b-41d4-a716-446655440000?at=1706457600000&connection=conn-1"
 }
 ```
+
+`incidentUrl` opens the incident that holds the event. It is only present when `FRONTEND_URL` is set.
+
+A finding on a primary that a cluster connection reads but that is not registered, such as `reshard_shard_skew` or `hot_shard`, also carries `nodeAddr`, and its `sourceHost` and `sourcePort` are that primary's address rather than the registered node's.
+
+**Key names in `hot_shard` messages.** On a cluster with an LFU `maxmemory-policy`, the `message` of a `hot_shard` event names up to 3 of the hottest keys it sampled on the shard, for example `Hot keys: "user:42" (freq 255), "cart:{9}" (freq 201).` (see [hot keys](anomaly-detection.md#hot_shard)). The sample is the first 500 names of each of the shard's top three slots, so a hotter key can be missing. If your key names hold personal or otherwise sensitive data, such as an email address or a session token, check where the webhook delivers before you subscribe a chat channel or a third-party tool to `anomaly.detected`. Each name is cut to 64 characters, and control and invisible characters are written as `\xNN` or `\u{NNNN}`, so a name cannot add a line. The Slack and Discord formats also escape mentions, links and markdown. The generic format carries the text as it is in a JSON string, so escape it yourself if you forward it to a chat tool.
+
+#### anomaly.sequence.detected (Pro)
+
+```json
+{
+  "correlationId": "7d0f6f0e-3b0a-4a51-9d57-2f6f6c1b8a10",
+  "pattern": "backlog_exhaustion",
+  "severity": "critical",
+  "diagnosis": "The replication backlog had shrunk below the time a replica needs to reconnect, and a later disconnect outran it and forced a full resync.",
+  "recommendations": [
+    "Raise repl-backlog-size so a disconnect of this length resumes with a partial sync",
+    "Check why the replica disconnected",
+    "Act on backlog coverage warnings before a disconnect turns them into a full resync"
+  ],
+  "values": [
+    { "setting": "repl-backlog-size", "current": 1, "target": 64, "unit": "MB" }
+  ],
+  "anomalyIds": ["anom-1", "anom-2"],
+  "metricTypes": ["backlog_coverage_risk", "resync_escalation"],
+  "anomalyId": "anom-1",
+  "timestamp": 1706457600000,
+  "message": "Backlog exhaustion: The replication backlog had shrunk below the time a replica needs to reconnect, and a later disconnect outran it and forced a full resync.",
+  "incidentUrl": "https://monitor.example.com/anomalies/incidents/by-event/anom-1?at=1706457600000&connection=conn-1",
+  "connectionId": "conn-1"
+}
+```
+
+Notes:
+- `anomalyId` and `timestamp` are the first event listed in `anomalyIds`. The
+  alert is sent under that event's connection. A sequence can span several nodes of a
+  cluster; a webhook scoped only to another connection of the same sequence
+  does not receive it.
+- `incidentUrl` opens the incident that holds the sequence. It is only present
+  when `FRONTEND_URL` is set.
+- `values` is only present when the match carries settings to change.
+- Sent once per recorded match, and again when a compound rule replaces it
+  with a more severe diagnosis. Nothing is sent on recovery.
 
 #### cve.critical_detected (Pro)
 
@@ -479,6 +587,40 @@ Fires once per connection and reason when a footprint collection finds LMCache a
   "noTtlRatio": 1,
   "evictedKeysDelta": null,
   "message": "LMCache keys have no TTL under volatile-lru; Valkey cannot evict them",
+  "timestamp": 1735689600000,
+  "instance": { "host": "valkey.example.com", "port": 6379 }
+}
+```
+
+#### retry_amplification.detected (Pro)
+
+Fires when the anomaly detector sees a self-sustaining retry loop rather than a transient blip. Polls are grouped into 60-second windows and compared with the median of the last 30 normal windows (detection starts after 10). A window is hot when commands per client are at least 1.3× baseline, ops/s at least 1.2× baseline and the client count within ±15% of baseline, while a P99 latency regression, an error-reply burst or connection churn is present. A burst shorter than 3 hot windows is treated as transient and never alerts. After 3 hot windows the event fires in one of two shapes, given in `pattern`:
+- `rising`: load rises at least 10% and moves with stress inside the run (`correlation` ≥ 0.5).
+- `step`: the last 3 windows hold at 2× baseline or more with an error-reply or reconnect burst. `correlation` is `null` for this shape.
+
+`level` is `critical` while saturation is active in the latest window, otherwise `warning`. It fires when a run first reaches a level and each time it rises to `critical` again after falling back to `warning`. A fall to `warning` does not fire. It is sent when the event is first saved, so it waits for storage if a save has to be retried, and a finding that is never saved sends nothing. It re-arms after 2 normal windows.
+
+This event replaces the generic `anomaly.detected` for retry amplification, so one finding is delivered once.
+
+`trigger` is the stress signal that showed up first: `latency`, `errors` or `churn`. `loadRatio` is commands per client against baseline; `value` is the same ratio rounded to two decimals against a `baseline` of 1, which is what Slack and Discord show. `topContributors` lists up to 5 clients grouped by name, then user, then IP; a connection captured before it ran `CLIENT SETNAME` counts under the name it set later, and BetterDB's own connections are left out. `commandRateGrowth` compares each client's command rate during the episode with its rate just before the episode and needs CLIENT LIST `tot-cmds` (Valkey 8+). It is `null` for a client with no reading from before the episode. On older servers it is `null` for every client, and clients are ranked by `newConnections` (reconnects seen in client snapshots). `topContributors` is `null` when neither source could be read.
+
+On a cluster or Sentinel connection the finding can come from another primary the connection reads rather than the registered node. `instance` is then that primary's address, `connectionId` stays the cluster or Sentinel connection, and `topContributors` is `null`.
+
+```json
+{
+  "metricType": "retry_amplification",
+  "value": 1.9,
+  "baseline": 1,
+  "level": "warning",
+  "trigger": "latency",
+  "windows": 3,
+  "loadRatio": 1.9,
+  "pattern": "rising",
+  "correlation": 0.97,
+  "topContributors": [
+    { "key": "checkout", "keyKind": "name", "commandRateGrowth": 4.8, "newConnections": 12, "connections": 40 }
+  ],
+  "message": "WARNING: Retry amplification — commands per client at 1.9× baseline for 3 min while connected clients stay flat at ~120; load is rising with stress (r=0.97). Trigger: a latency regression (COMMAND_P99). Without client backoff the loop keeps feeding itself. Top clients: name checkout (cmds 4.8×, 12 reconnects).",
   "timestamp": 1735689600000,
   "instance": { "host": "valkey.example.com", "port": 6379 }
 }
@@ -965,7 +1107,8 @@ These events fire immediately without hysteresis:
 
 - `instance.down` / `instance.up` (state change events)
 - `client.blocked` (each occurrence)
-- `anomaly.detected` (each detection)
+- `anomaly.detected` (each detection, except `command_p99`, `retry_amplification` and `replication_divergence`, which have their own events)
+- `anomaly.sequence.detected` (each recorded sequence match)
 - `acl.violation` (each violation)
 - `audit.policy.violation` (each violation)
 - `acl.modified` (each change)

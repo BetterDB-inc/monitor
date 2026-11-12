@@ -93,27 +93,28 @@ See [Configuration Reference](configuration.md#prometheus-metrics) for the `METR
 
 ## Cardinality Contract
 
-This section states how many series a scrape can hold, so you can size Prometheus before you add connections. Every series except the Node.js process metrics carries a `connection` label. The total is therefore a fixed instance overhead plus a budget per connection.
+This section states how many series a scrape can hold, so you can size Prometheus before you add connections. Every series except the Node.js process metrics and the connection-less anomaly series carries a `connection` label. The total is therefore a fixed instance overhead plus a budget per connection.
 
 ```
 total = P + A + Σ over connections (F + V)
 ```
 
 - `P`: process metrics, paid once per BetterDB instance.
-- `A`: the anomaly summary, paid once per instance under `full`.
+- `A`: the anomaly baseline buffers, paid once per instance under `full`, plus 9 anomaly summary series per user-added connection that anomaly detection polls and up to 61 for each connection with anomalies in the last hour.
 - `F`: the fixed series for the connection's type and profile.
 - `V`: the variable series. Under `vitals` this is always 0.
 
-The OTLP mirror exports the same series as the scrape, so the same budget applies to both.
+The OTLP mirror exports the same series as the scrape, so the same budget applies to both. A connection-less anomaly series has no `connection` attribute in OTLP, just as it has no `connection` label once Prometheus ingests it; the `semconv` export sends those points under the monitor's own resource rather than a node's.
 
 ### Instance overhead
 
 | Source                                                              | Series                                                                        | Profile |
 | ------------------------------------------------------------------- | ----------------------------------------------------------------------------- | ------- |
 | Node.js process metrics (`betterdb_process_*`, `betterdb_nodejs_*`) | about 55 on Node 22. The count shifts slightly with heap spaces and GC kinds. | both    |
-| Anomaly summary and baseline buffers                                | up to 181, while anomaly detection runs                                       | `full`  |
+| Anomaly baseline buffers                                            | up to 120, while anomaly detection runs                                       | `full`  |
+| Anomaly summary                                                     | 9 per polled user-added connection, plus up to 61 per connection (user-added or auto-registered) with anomalies in the last hour, plus up to 61 for connection-less events | `full`  |
 
-The anomaly summary and buffer gauges are published once per instance under the default connection's label, not once per connection. Their bounds:
+The buffer gauges are published once per instance: the default connection's baselines under its label while anomaly detection polls it, and no buffer series otherwise. They are removed from the old label when the default connection changes. The anomaly summary gauges are published per connection, under each connection's own label. A connection is published while it has an anomaly or correlated group in the last hour, even if it has since gone down, so its unresolved anomalies stay visible during an outage. A user-added connection that anomaly detection polls successfully is also published when quiet, with its three severity gauges at 0, so it reads 0 rather than no data. Auto-registered cluster and Sentinel nodes are not, to keep large clusters cheap. So a quiet node has no series, and neither does a quiet connection that is disconnected or whose polls fail; one with an anomaly or group in the window keeps its series until that ages out, whatever its state. Retired and deleted connections never have series: theirs are removed when the connection goes, and are not published again. The metric-type and pattern gauges exist only while a connection has an anomaly or correlated group of that kind in the last hour, and are removed once it ages out. Connections that share a `host:port` share one set of series, which counts the anomalies and groups of both. Events that belong to no connection are exported with an empty `connection` value. Prometheus drops a label with an empty value at ingestion, so these series are stored without a `connection` label at all: select them with `{connection=""}`, which matches a missing label, and a `sum by (connection)` groups them under an empty value. Their bounds:
 
 | Gauges                                                                                                      | Label               | Bound         | Series |
 | ----------------------------------------------------------------------------------------------------------- | ------------------- | ------------- | ------ |
@@ -122,20 +123,20 @@ The anomaly summary and buffer gauges are published once per instance under the 
 | `betterdb_correlated_groups_by_pattern`                                                                     | correlation pattern | 12            | 12     |
 | the three `betterdb_anomaly_buffer_*` gauges                                                                | metric type         | 40 each       | 120    |
 
-Total: 9 + 40 + 12 + 120 = 181.
+Total: up to 120 once, plus 9 per polled user-added connection, plus up to 9 + 40 + 12 = 61 per connection with anomalies in the last hour (52 for a user-added one, whose 9 are already counted). A connection whose anomalies aged out goes back to 9, or to 0 for an auto-registered node.
 
 ### Fixed series per connection (`F`)
 
 | Connection type    | `vitals` | `full` |
 | ------------------ | -------- | ------ |
-| Standalone primary | 33       | 73     |
-| Standalone replica | 34       | 74     |
-| Cluster primary    | 39       | 80     |
-| Cluster replica    | 40       | 81     |
+| Standalone primary | 33       | 80     |
+| Standalone replica | 34       | 81     |
+| Cluster primary    | 39       | 87     |
+| Cluster replica    | 40       | 88     |
 
 The `vitals` column is the budget from [Export Profiles](#export-profiles).
 
-The `full` column starts from the INFO-derived series: the `vitals` families plus `betterdb_pubsub_channels` and `betterdb_pubsub_patterns`. That gives 35, 36, 41 and 42 series. Each family below then adds its series once its collector has data. The `full` column is the ceiling with every one of them present:
+The `full` column starts from the INFO-derived series: the `vitals` families plus `betterdb_pubsub_channels`, `betterdb_pubsub_patterns` and the seven counters `betterdb_rejected_connections_total`, `betterdb_sync_full_total`, `betterdb_sync_partial_ok_total`, `betterdb_sync_partial_err_total`, `betterdb_net_input_bytes_total`, `betterdb_net_output_bytes_total` and `betterdb_error_replies_total` (the last one only on Redis 6.2+ / Valkey). That gives 42, 43, 48 and 49 series. Each family below then adds its series once its collector has data. The `full` column is the ceiling with every one of them present:
 
 | Family                                                                                   | Series | Present when                                                                                    |
 | ---------------------------------------------------------------------------------------- | ------ | ----------------------------------------------------------------------------------------------- |
@@ -162,11 +163,18 @@ A family marked **removed** tracks only its current label values: a value that d
 | -------------------------------------------------------------------------------------------- | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
 | `betterdb_db_keys`, `betterdb_db_keys_expiring`, `betterdb_db_avg_ttl_seconds`               | 3 × D        | D is the number of databases that have held keys. It cannot exceed the server's `databases` setting (default 16). In cluster mode this is normally just `db0`.                | zeroed       |
 | `betterdb_cluster_slot_keys`, `_expires`, `_reads_total`, `_writes_total`                    | 4 × N        | N is `METRICS_SLOT_STATS_TOP_N` (default 100, maximum 16384). Only cluster connections on Valkey 8.0+ emit these.                                                             | removed      |
+| `betterdb_cluster_shard_cpu_usec_per_second`, `_network_bytes_in_per_second`, `_network_bytes_out_per_second`, `_cpu_share`, `_network_share`, `_slots` | 6 × P | P is the number of slot-owning primaries. Only cluster connections with `cluster-slot-stats-enabled yes` on every node emit these. | removed      |
 | `betterdb_commandstats_calls_total`, `betterdb_commandstats_latency_us`                      | 2 × C        | C is the number of commands with at least one call. The command table (with any module commands) caps it; typically a few dozen.                                              | removed      |
 | `betterdb_repl_output_buffer_ratio`                                                          | R            | R is the number of connected replicas.                                                                                                                                        | removed      |
 | `betterdb_vector_index_docs`, `_memory_bytes`, `_indexing_failures`, `_percent_indexed`      | 4 × I        | I is the number of search indexes.                                                                                                                                            | removed      |
 | `betterdb_inference_bucket_p50_us`, `_p95_us`, `_p99_us`, `betterdb_inference_unhealthy`     | 4 × (2 + I′) | One `read` bucket, one `write` bucket, and one `FT.SEARCH:<index>` bucket for each of the I′ indexes that appear in the slowlog or COMMANDLOG window.                         | removed      |
 | `betterdb_inference_sla_breach`                                                              | ≤ I          | One per index with an SLA configured.                                                                                                                                         | removed      |
+| `betterdb_replication_gap_bytes`, `_seconds_behind`, `_divergence_level`                     | 3 × N × R    | N is the number of primaries checked for the connection (1 for a standalone connection, every primary for a cluster or Sentinel connection, up to 64) and R the replicas each one reports. All three are absent until a divergence window has closed for that replica; while a replica has stopped acknowledging, `_gap_bytes` follows its live gap and `_seconds_behind` is absent. A fan-out primary that cannot be read, or every fan-out primary when the topology cannot be read, loses its series until the next good read. | removed      |
+| `betterdb_replication_write_rate_bytes_per_second`, `_backlog_coverage_seconds`              | 2 × N        | One per checked primary. Absent while the write rate (or the backlog size) is unknown, and on a node that reports a replica role.                                             | removed      |
+| `betterdb_connections_received_per_second`, `betterdb_connection_churn_per_op`, `betterdb_retry_amplification_state` | 3 × N | One per checked primary. A node that turns into a replica, or a fan-out node that cannot be read, loses these series.                                          | removed      |
+| `betterdb_anomaly_fanout_primaries`                                                          | 5            | One per `state` (`checked`, `unreachable`, `auth_failed`, `skipped`, `not_dialed`) on a cluster or Sentinel connection; absent on a standalone connection, and withdrawn once no poll has refreshed it for 3 poll intervals (at least 30 seconds), on the next poll, summary update or API read. | removed      |
+| `betterdb_anomaly_fanout_gap`                                                                | ≤ 1          | One `reason` series, set to `1`, while the fan-out of a cluster or Sentinel connection dials no primary; absent while it reads its primaries and whenever `betterdb_anomaly_fanout_primaries` is absent. | removed      |
+| `betterdb_incident_active`                                                                   | ≤ 3 × (P + 1) | P sequence patterns plus `none`, × 3 open statuses. Kept while the connection is stale.                                                                                                                         | removed      |
 | `betterdb_metric_forecast_time_to_limit_seconds`                                             | ≤ 4          | The four forecast metric kinds.                                                                                                                                               | removed      |
 | `betterdb_key_pattern_memory_bytes`, `_avg_memory_bytes`, `_max_memory_bytes`, `betterdb_key_pattern_keys` | 4 × P        | P is `METRICS_KEY_PATTERNS_TOP_N` (default 100, `0` disables): the top `(pattern, db)` series by total memory from the latest key analytics run (a pattern in several logical databases is several series, each carrying a `db` label). Pro connections only.                       | removed      |
 | `betterdb_key_memory_bytes`, `betterdb_key_cardinality`                                      | 2 × K        | K is `METRICS_KEY_DETAILS_TOP_N` (default 10, maximum 50, `0` disables): the top tracked keys by memory, each a `(key, type, db)` series. Key names become label values. Pro connections only.                  | removed      |
@@ -185,7 +193,7 @@ Patterns are fingerprinted before they become label values. Each key segment is 
 
 ### Worst cases
 
-- **Full slot coverage.** With `METRICS_SLOT_STATS_TOP_N=16384`, one cluster connection exports 65,536 slot series. At the default of 100 it exports at most 400.
+- **Full slot coverage.** With `METRICS_SLOT_STATS_TOP_N=16384` and `cluster-slot-stats-enabled yes`, one cluster connection exports 65,536 slot series. At the default of 100 it exports at most 100 with slot stats off (key counts only) and 800 with them on (the top 100 by keys plus the top 100 by CPU, 4 series each).
 - **Pattern churn.** Fingerprinting does not catch short, non-hex dynamic segments such as `session:ab12x` or `user:alice`. Each distinct key then becomes its own pattern. A workload like this can add up to 128 new slowlog patterns per poll. On servers with COMMANDLOG (Valkey 8.1+) it can also add up to 128 new large-request and 128 new large-reply patterns per poll. Because the pattern families are zeroed rather than removed, over the process lifetime they are bounded only by the number of distinct patterns each source has produced since BetterDB started. The client-name and ACL-username families behave the same way when names are generated per session.
 - **Many databases.** A standalone server that uses all 16 databases adds 48 per-db series.
 - **Keysize buckets.** `betterdb_keysize_bucket_keys` has no top-N knob: it is bounded only by the server (populated databases × data types × log2 buckets, up to D × T × B ≈ 6,144 series for a 16-database Redis 8 connection using every type and bucket; a single-db instance typically emits a few dozen). The only mitigations are `METRICS_EXPORT_PROFILE=vitals` or `metric_relabel_configs`.
@@ -202,7 +210,7 @@ If a worst case applies, use one of these:
 This example uses `full` with 5 standalone primaries and 2 cluster primaries, assuming each connection has:
 
 - 2 populated databases for a standalone primary, or `db0` only for a cluster primary
-- default `METRICS_SLOT_STATS_TOP_N` (100)
+- default `METRICS_SLOT_STATS_TOP_N` (100) and `cluster-slot-stats-enabled no` (the Valkey default), so key counts only
 - 40 active commands
 - no search indexes
 - 20 slowlog patterns
@@ -215,9 +223,9 @@ This example uses `full` with 5 standalone primaries and 2 cluster primaries, as
 
 | Term                | Standalone primary | Cluster primary |
 | ------------------- | ------------------ | --------------- |
-| `F`                 | 73                 | 80              |
+| `F`                 | 80                 | 87              |
 | Per-db              | 6                  | 3               |
-| Slot stats          | 0                  | 400             |
+| Slot stats          | 0                  | 100             |
 | Commandstats        | 80                 | 80              |
 | Inference latency   | 8                  | 8               |
 | Forecast            | 4                  | 4               |
@@ -225,9 +233,9 @@ This example uses `full` with 5 standalone primaries and 2 cluster primaries, as
 | COMMANDLOG patterns | 20                 | 20              |
 | Client name/user    | 7                  | 7               |
 | ACL reason/user     | 5                  | 5               |
-| **Per connection**  | **263**            | **667**         |
+| **Per connection**  | **270**            | **374**         |
 
-The total with `full` is 55 + 5 × 263 + 2 × 667 = **2,704 series**. Add up to 181 more while anomaly detection runs.
+The total with `full` is 55 + 5 × 270 + 2 × 374 = **2,153 series**. Add up to 120 more while anomaly detection runs, plus 9 per polled user-added connection (63 for this fleet, if all 7 are user-added) and up to 61 more for each connection with anomalies in the last hour. Anomaly detection also exports up to 5 node signal series per checked primary (connects per second, churn per op, retry state, write rate and backlog coverage; 35 for this fleet), 3 more for each replica those primaries report, 5 `betterdb_anomaly_fanout_primaries` series and up to 1 `betterdb_anomaly_fanout_gap` series per cluster or Sentinel connection, and `betterdb_incident_active` series while incidents are open. `betterdb_retry_amplification_state` is set on every poll, even with no anomaly events.
 
 The same fleet under `vitals` exports 55 + 5 × 33 + 2 × 39 = **298 series**, and that number does not change with key count, database count, pattern churn or cluster size.
 
@@ -383,6 +391,15 @@ Operational statistics and throughput.
 | `betterdb_expired_keys_total`         | gauge | -      | Total expired keys                  | `56789`    |
 | `betterdb_pubsub_channels`            | gauge | -      | Number of pub/sub channels          | `12`       |
 | `betterdb_pubsub_patterns`            | gauge | -      | Number of pub/sub patterns          | `3`        |
+| `betterdb_rejected_connections_total` | gauge | -      | Connections refused because `maxclients` was reached | `0` |
+| `betterdb_sync_full_total`            | gauge | -      | Full resyncs this node has served to replicas        | `2` |
+| `betterdb_sync_partial_ok_total`      | gauge | -      | Partial resync requests accepted                     | `14` |
+| `betterdb_sync_partial_err_total`     | gauge | -      | Partial resync requests denied (each forces a full sync) | `1` |
+| `betterdb_net_input_bytes_total`      | gauge | -      | Total bytes read from the network                    | `9876543210` |
+| `betterdb_net_output_bytes_total`     | gauge | -      | Total bytes written to the network                   | `12345678901` |
+| `betterdb_error_replies_total`        | gauge | -      | Total error replies sent to clients (Redis 6.2+ / Valkey; omitted on older servers) | `37` |
+
+The counters above are cumulative since the server started (they reset on restart), so use `rate()` or `increase()` on them. `sync_*` counts resyncs this node **served** as a primary; on a replica they only move for replicas chained below it. These counters are exported under `full` only.
 
 ### CPU Metrics
 
@@ -482,14 +499,35 @@ Cluster mode health and slot distribution.
 
 #### Cluster Slot Metrics (Valkey 8.0+)
 
-| Metric                               | Type  | Labels | Description                   | Example |
-| ------------------------------------ | ----- | ------ | ----------------------------- | ------- |
-| `betterdb_cluster_slot_keys`         | gauge | `slot` | Keys in cluster slot          | `512`   |
-| `betterdb_cluster_slot_expires`      | gauge | `slot` | Expiring keys in cluster slot | `128`   |
-| `betterdb_cluster_slot_reads_total`  | gauge | `slot` | Total reads for cluster slot  | `45678` |
-| `betterdb_cluster_slot_writes_total` | gauge | `slot` | Total writes for cluster slot | `12345` |
+| Metric                                          | Type  | Labels | Description                                                  | Example   |
+| ----------------------------------------------- | ----- | ------ | ------------------------------------------------------------ | --------- |
+| `betterdb_cluster_slot_keys`                    | gauge | `slot` | Keys in cluster slot                                         | `512`     |
+| `betterdb_cluster_slot_cpu_usec_total`          | gauge | `slot` | CPU time spent on the slot in microseconds, cumulative       | `4560000` |
+| `betterdb_cluster_slot_network_bytes_in_total`  | gauge | `slot` | Bytes received for the slot, cumulative                      | `98765`   |
+| `betterdb_cluster_slot_network_bytes_out_total` | gauge | `slot` | Bytes sent for the slot, cumulative                          | `12345`   |
 
-**Availability**: Only populated when connected to Valkey 8.0+ cluster. Limited to the top `METRICS_SLOT_STATS_TOP_N` slots by key count (default 100; `0` disables). A slot that leaves the top N is removed rather than reported as 0, so a cluster connection exports at most 4 × N slot series. Not exported under `vitals`.
+**Availability**: Only populated when connected to a Valkey 8.0+ cluster. Read from every primary, since a node only reports the slots it owns; with cluster auto-registration only the seed connection exports them, so each slot appears once. Coverage can be partial: a primary that fails or times out keeps its last series until they are older than the staleness bound, and when no primary can be reached directly only the connection's own node is read. The `_total` series need `cluster-slot-stats-enabled yes` on every node and are left out otherwise. They are cumulative, so use `rate()`; they reset when a slot moves or its node restarts. Limited to the top `METRICS_SLOT_STATS_TOP_N` slots by key count plus the top N by cumulative CPU (default 100; `0` disables), so a slot that only just became hot can be missing. A slot that leaves both lists is removed rather than reported as 0. Not exported under `vitals`.
+
+#### Cluster Shard Load Metrics (Valkey 8.0+)
+
+| Metric                                               | Type  | Labels            | Description                                                                 | Example  |
+| ---------------------------------------------------- | ----- | ----------------- | --------------------------------------------------------------------------- | -------- |
+| `betterdb_cluster_shard_cpu_usec_per_second`         | gauge | `node`, `node_id` | CPU microseconds per second spent on the slots of the shard                 | `412000` |
+| `betterdb_cluster_shard_network_bytes_in_per_second` | gauge | `node`, `node_id` | Bytes per second received for the slots of the shard                        | `98000`  |
+| `betterdb_cluster_shard_network_bytes_out_per_second`| gauge | `node`, `node_id` | Bytes per second sent for the slots of the shard, replication included      | `120000` |
+| `betterdb_cluster_shard_cpu_share`                   | gauge | `node`, `node_id` | The shard's part of the cluster-wide per-slot CPU rate, from 0 to 1         | `0.62`   |
+| `betterdb_cluster_shard_network_share`               | gauge | `node`, `node_id` | The shard's part of the cluster-wide per-slot network rate, in plus out, replication included | `0.55`   |
+| `betterdb_cluster_shard_slots`                       | gauge | `node`, `node_id` | Slots the shard owns, as counted for its load                               | `5461`   |
+
+A shard is one slot-owning primary: `node` is its address and `node_id` its cluster node id. A CPU share far above `1 / number of shards` means the load is skewed onto that shard.
+
+**Network is not client traffic alone**: Valkey adds the bytes of the replication stream to a slot's bytes out once per replica. A shard with more writes, or a primary with more replicas, therefore sends more and takes a larger network share than a shard serving the same client traffic. Use the CPU share to find skewed client load.
+
+**How the rates are made**: every poll already reads the usage counters of every slot from every primary for the slot metrics above. The rate of each slot is the change since the previous poll divided by the time between them, smoothed over about 30 seconds, and a shard's rate is the sum over the slots it owns. This covers all slots, not only the top `METRICS_SLOT_STATS_TOP_N`, and costs no extra command.
+
+**Availability**: needs a Valkey 8.0+ cluster with `cluster-slot-stats-enabled yes` on every node, and the cluster-wide slot read, so nothing is exported under `vitals`, with `METRICS_SLOT_STATS_TOP_N=0`, or for a cluster whose nodes are registered one by one as separate connections. The first series appear after two complete polls. A poll in which any primary did not answer, or answered for fewer slots than it was asked for because a slot just moved, adds no new value: the last one stays until it is older than the staleness bound, then the series are removed. The same holds while the cluster topology cannot be read, and while polls run out of time before the slot read. A slot whose counter went down (its node restarted, or `CONFIG RESETSTAT` ran) or that moved to another shard is left out of the rates for one poll, so a shard that just received slots reads low for a moment and a primary that just restarted reads 0.
+
+**Shares while slots settle**: a share worked out while some slots are left out would be too high for every other shard. So while any slot is left out, and for two polls after a slot changed owner, both shares stay at their last values and only the rates move. A shard that had no share before, such as one that just joined, gets no share series until then. During a long resharding the shares stay where they were before it started.
 
 ### Anomaly Detection Metrics
 
@@ -511,6 +549,8 @@ Real-time anomaly detection system metrics.
 - `metric_type`: `connections`, `ops_per_sec`, `memory_used`, `input_kbps`, `output_kbps`, `slowlog_last_id`, `acl_denied`, `evicted_keys`, `blocked_clients`, `keyspace_misses`, `fragmentation_ratio`, `cpu_utilization`, `replication_role`
 - `anomaly_type`: `spike`, `drop`
 
+The three gauges are published per connection, under the connection the anomaly is stored under; sum over `connection` for a fleet-wide count. A connection with an anomaly in the last hour is published, including after it goes down. `betterdb_anomaly_events_current` and `betterdb_anomaly_by_severity` are also published at 0 for every user-added connection anomaly detection polls successfully, so a quiet one reads 0 rather than having no series; a quiet auto-registered node has no series, and neither does a quiet connection that is disconnected or failing, while one with an anomaly in the window keeps its series until it ages out. The window holds up to the 1,000 most recent anomalies of each connection and 10,000 in total. When the total is reached, the connection with the most anomalies loses its oldest first, so a noisy connection cannot push a quieter connection's anomalies out early. Retired and deleted connections never have series. `betterdb_anomaly_by_metric` series exist only for metric types with an anomaly in the last hour and are removed once those anomalies age out. An anomaly with no connection is not filed under the default connection: it has no `connection` label in Prometheus, matched by `{connection=""}`, and those series exist only while such anomalies are in the window. `betterdb_anomaly_events_total` counts each anomaly under the same connection as the gauges, and one with no connection without the label. Its series, and those of `betterdb_correlated_groups_total`, are removed when the connection is retired or deleted, unless another connection on the same `host:port` is still listed.
+
 #### Correlation Metrics
 
 | Metric                                   | Type    | Labels                | Description                     | Example |
@@ -521,6 +561,8 @@ Real-time anomaly detection system metrics.
 
 **Pattern Values**: `traffic_burst`, `batch_job`, `memory_pressure`, `slow_queries`, `auth_attack`, `connection_leak`, `cache_thrashing`, `node_failover`, `unknown`
 
+The two gauges follow the same per-connection rules as the anomaly gauges above: `betterdb_correlated_groups_by_severity` is published at 0 for every polled user-added connection, `betterdb_correlated_groups_by_pattern` only for patterns seen in the last hour. Each group is counted once, under the connection it is stored under (its first member's), in the gauges and in `betterdb_correlated_groups_total` alike. A group whose members span several connections therefore appears under one of them only, and a sum over `connection` counts every group exactly once. A group with no connection has no `connection` label.
+
 #### Buffer Stats Metrics
 
 | Metric                           | Type  | Labels        | Description                             | Example |
@@ -528,6 +570,56 @@ Real-time anomaly detection system metrics.
 | `betterdb_anomaly_buffer_ready`  | gauge | `metric_type` | Buffer ready state (1=ready, 0=warming) | `1`     |
 | `betterdb_anomaly_buffer_mean`   | gauge | `metric_type` | Rolling mean for anomaly detection      | `2450`  |
 | `betterdb_anomaly_buffer_stddev` | gauge | `metric_type` | Rolling stddev for anomaly detection    | `125.5` |
+
+#### Replication Signal Metrics
+
+Values behind the replication divergence and backlog detectors. The `node` label is the address (`host:port`) of the primary that was read: the connection's own node, or each primary that BetterDB checks for a cluster or Sentinel connection. The `replica` label is the replica's address as that primary reports it.
+
+| Metric                                             | Type  | Labels            | Description                                                                          | Example    |
+| -------------------------------------------------- | ----- | ----------------- | ------------------------------------------------------------------------------------ | ---------- |
+| `betterdb_replication_gap_bytes`                   | gauge | `node`, `replica` | Replica offset gap behind its primary in the latest closed divergence window          | `1048576`  |
+| `betterdb_replication_seconds_behind`              | gauge | `node`, `replica` | Estimated seconds the replica trails its primary in the latest closed window          | `2.5`      |
+| `betterdb_replication_divergence_level`            | gauge | `node`, `replica` | Divergence level: `0` none, `1` warning, `2` critical                                 | `1`        |
+| `betterdb_replication_write_rate_bytes_per_second` | gauge | `node`            | Smoothed replication stream write rate of the primary                                 | `524288`   |
+| `betterdb_replication_backlog_coverage_seconds`    | gauge | `node`            | `repl-backlog-size` divided by the write rate: how many seconds of writes the backlog holds | `120`  |
+
+The three per-replica series appear once the first divergence window closes for that replica, and `betterdb_replication_seconds_behind` is absent while the write rate is unknown or 0. `betterdb_replication_write_rate_bytes_per_second` is absent until a rate is known, and `betterdb_replication_backlog_coverage_seconds` is also absent while the backlog size is unknown or the write rate is 0. A replica that stops being reported, and a primary that leaves the topology, lose their series. Up to 64 primaries are checked per connection. When the topology itself cannot be read (`CLUSTER NODES` fails, or Sentinel has not reported its primaries yet), the other primaries lose their series until it can.
+
+#### Connection Churn and Retry Metrics
+
+Inputs and live state of the retry amplification detector, one series per primary (`node`, as above).
+
+| Metric                                     | Type  | Labels | Description                                                       | Example |
+| ------------------------------------------ | ----- | ------ | ----------------------------------------------------------------- | ------- |
+| `betterdb_connections_received_per_second` | gauge | `node` | New client connections accepted per second since the previous poll | `35`    |
+| `betterdb_connection_churn_per_op`         | gauge | `node` | New connections per command processed (connects/s ÷ ops/s, with ops/s at least 1) | `0.04`  |
+| `betterdb_retry_amplification_state`       | gauge | `node` | Retry amplification classification: `0` none, `1` candidate (hot windows seen, not yet confirmed), `2` amplifying | `0` |
+
+The two rate gauges are absent until two polls have produced a connection rate. `betterdb_retry_amplification_state` is reported on every poll of a primary; a node that becomes a replica loses all three series.
+
+#### Fan-out Coverage Metrics
+
+How much of a cluster or Sentinel topology the per-node fan-out behind the replication, retry and reshard detectors reached on its latest cycle.
+
+| Metric                              | Type  | Labels  | Description                                                                                  | Example |
+| ----------------------------------- | ----- | ------- | -------------------------------------------------------------------------------------------- | ------- |
+| `betterdb_anomaly_fanout_primaries` | gauge | `state` | Other primaries of the connection by outcome: `checked` (read this cycle), `unreachable` (flagged down, in retry backoff, or failed to answer), `auth_failed` (refused the credentials with `WRONGPASS`, `NOAUTH` or `NOPERM`), `skipped` (past the 64-primary cap and checked by no connection), `not_dialed` (listed by the topology but not dialed: a Sentinel without usable data-node credentials, an SSH-tunnelled Sentinel, an agent connection, or a cycle that failed before its reads, including when the deployment has no cluster discovery) | `3` |
+| `betterdb_anomaly_fanout_gap`       | gauge | `reason` | `1` for why the fan-out dialed no primary this cycle: one of the `reason` values of [`GET /api/anomaly/coverage`](./anomaly-detection.md#get-fan-out-coverage) other than `not_applicable`, including `covered_elsewhere` and `no_targets`. Absent while the fan-out reads primaries | `1` |
+
+All five series are set on every poll of a cluster or Sentinel connection. A Sentinel connection without data-node credentials reports its unchecked primaries under `not_dialed` (see [anomaly detection](./anomaly-detection.md#replication_divergence) for what to set). Primaries monitored as their own connection, and primaries another connection checks, are counted under none of the states, so a fully covered connection can report `0` everywhere; `betterdb_anomaly_fanout_gap` tells that apart from a topology that could not be read (`reason="topology_unreadable"` against `covered_elsewhere` or `no_targets`). A primary the topology flags as down is counted by one connection only (a connection whose topology still reaches it takes it over and reads it, and leaves it to the down holder until a read succeeds); any other primary whose read failed is counted `unreachable` (or `auth_failed`) by each connection that tried it, until one reads it. A standalone connection has no series, and the series of a connection no longer polled (disconnected, for example) are removed once 3 poll intervals (at least 30 seconds) pass, on the next poll of any connection, summary update or API read.
+
+#### Incident Metrics
+
+| Metric                     | Type  | Labels              | Description                                                                 | Example |
+| -------------------------- | ----- | ------------------- | --------------------------------------------------------------------------- | ------- |
+| `betterdb_incident_active` | gauge | `pattern`, `status` | Open incidents per connection, by matched pattern and recovery status | `1` |
+
+**Label Values**:
+
+- `pattern`: each sequence pattern the incident matched (for example `retry_storm`, `backlog_exhaustion`), or `none` when it matched none. An incident that matched two patterns is counted under both.
+- `status`: `active`, `recovering`, `degraded`. Recovered incidents and incidents whose recovery is unknown are not counted.
+
+An incident that spans several connections is counted under each of them, so unlike the correlated group gauges, a sum over `connection` counts such an incident more than once; connections that share a `host:port` count it once. An incident with no connection has no `connection` label (matched by `{connection=""}`) rather than being filed under the default connection. Retired and deleted connections are not counted. An incident stays counted for as long as it is open, up to the 30-day incident lookback, including after a restart. The gauge refreshes on the anomaly summary interval, and a pattern and status pair with no open incident loses its series. Unlike the other per-connection gauges, it is kept while the connection is stale, so an incident on a node that went down stays visible. If incidents cannot be read from storage, the last values are kept; after three failed refreshes in a row the series are removed.
 
 ### Metric Forecasting Metrics
 
@@ -571,7 +663,7 @@ BetterDB Monitor application health metrics.
 
 **Service Values**: Names of polling services (audit, client-analytics, metrics, etc.)
 
-**Staleness**: If a connection has no successful `INFO` read within `PROMETHEUS_STALENESS_MS` (default: 3 × `PROMETHEUS_POLL_INTERVAL_MS`), all of its gauge series are removed from the exposition and from the OTLP mirror. A dead or wedged connection then shows up as a gap instead of a flat line. Counters and `betterdb_poll_stale` stay, so `betterdb_poll_stale == 1` tells a stale connection apart from one that was never collected. The anomaly summary gauges (`betterdb_anomaly_events_current`, `betterdb_anomaly_by_severity`, `betterdb_anomaly_by_metric`, `betterdb_correlated_groups_by_severity`, `betterdb_correlated_groups_by_pattern`) are the exception: they describe recorded anomalies rather than the last poll, so they stay while the connection is stale. INFO-based series return on the next successful poll; series owned by other collectors (commandstats and inference latency refresh every 60s, the vector index every 30s) return on their own refresh cycle instead. `betterdb_poll_stale` reflects `INFO` reachability only. The storage-based refresh (ACL audit and client analytics gauges) runs separately and cannot delay `INFO` polls or the scrape response, so a slow storage backend no longer marks a connection stale; if that refresh overruns a poll tick, a warning is logged once per connection per 5 minutes. The client analytics gauges are absent until the aggregator's first run (within 15 seconds of startup). Deleting a connection removes its gauge series on the next poll cycle, not immediately, and a connection whose `host:port` changes has the series under its old label removed the same way. For an OTLP-push connection the clock starts only once its pushed data goes stale: its series keep their last pushed values for `OTEL_METRICS_STALE_AFTER_MS` (default 5 minutes) after the last push, then disappear after the staleness bound.
+**Staleness**: If a connection has no successful `INFO` read within `PROMETHEUS_STALENESS_MS` (default: 3 × `PROMETHEUS_POLL_INTERVAL_MS`), all of its gauge series are removed from the exposition and from the OTLP mirror. A dead or wedged connection then shows up as a gap instead of a flat line. Counters and `betterdb_poll_stale` stay, so `betterdb_poll_stale == 1` tells a stale connection apart from one that was never collected. The anomaly summary gauges (`betterdb_anomaly_events_current`, `betterdb_anomaly_by_severity`, `betterdb_anomaly_by_metric`, `betterdb_correlated_groups_by_severity`, `betterdb_correlated_groups_by_pattern`) and `betterdb_incident_active` are the exception: they describe recorded anomalies rather than the last poll, so they stay while the connection is stale. INFO-based series return on the next successful poll; series owned by other collectors (commandstats and inference latency refresh every 60s, the vector index every 30s) return on their own refresh cycle instead. `betterdb_poll_stale` reflects `INFO` reachability only. The storage-based refresh (ACL audit and client analytics gauges) runs separately and cannot delay `INFO` polls or the scrape response, so a slow storage backend no longer marks a connection stale; if that refresh overruns a poll tick, a warning is logged once per connection per 5 minutes. The client analytics gauges are absent until the aggregator's first run (within 15 seconds of startup). Deleting a connection removes its gauge series on the next poll cycle, not immediately, and a connection whose `host:port` changes has the series under its old label removed the same way. For an OTLP-push connection the clock starts only once its pushed data goes stale: its series keep their last pushed values for `OTEL_METRICS_STALE_AFTER_MS` (default 5 minutes) after the last push, then disappear after the staleness bound.
 
 **Alerting note**: this is a behaviour change — alert rules that test a gauge's value directly (e.g. `betterdb_inference_unhealthy == 1`) will now resolve when a connection dies or is removed, since the series disappears instead of holding its last value. Alert on `betterdb_poll_stale == 1` as well to catch that case.
 
@@ -702,6 +794,42 @@ topk(5, betterdb_anomaly_by_metric)
 betterdb_anomaly_events_current{severity="critical"}
 ```
 
+### Replication, Retry and Incident Signals
+
+```promql
+# Largest replica gap per primary
+max by (connection, node) (betterdb_replication_gap_bytes)
+
+# Replicas currently at critical divergence
+betterdb_replication_divergence_level == 2
+
+# Primaries whose backlog holds less than 60 seconds of writes
+betterdb_replication_backlog_coverage_seconds < 60
+
+# Primaries in a confirmed retry storm
+betterdb_retry_amplification_state == 2
+
+# Connection churn per primary, smoothed
+avg_over_time(betterdb_connections_received_per_second[5m])
+
+# Open incident-connection pairs by pattern (an incident spanning two connections counts twice)
+sum by (pattern) (betterdb_incident_active)
+
+# Cluster or Sentinel connections with primaries the fan-out does not check
+sum without (state) (betterdb_anomaly_fanout_primaries{state!="checked"}) > 0
+
+# Of those, the ones whose fan-out checks no primary at all
+sum without (state) (betterdb_anomaly_fanout_primaries{state!="checked"}) > 0
+  unless ignoring(state) betterdb_anomaly_fanout_primaries{state="checked"} > 0
+
+# Connections whose fan-out dials nothing for a reason other than full coverage
+betterdb_anomaly_fanout_gap{reason!~"covered_elsewhere|no_targets"}
+
+# Share of a connection's primaries the fan-out could not reach
+betterdb_anomaly_fanout_primaries{state="unreachable"}
+  / ignoring(state) sum without (state) (betterdb_anomaly_fanout_primaries)
+```
+
 ### CPU Utilization
 
 ```promql
@@ -730,6 +858,18 @@ rate(betterdb_commands_processed_total[5m])
 
 # Network throughput (combined input + output)
 betterdb_instantaneous_input_kbps + betterdb_instantaneous_output_kbps
+
+# Network throughput from the cumulative byte counters (bytes/second)
+rate(betterdb_net_input_bytes_total[5m]) + rate(betterdb_net_output_bytes_total[5m])
+
+# Connections refused because maxclients was reached (per minute)
+increase(betterdb_rejected_connections_total[1m])
+
+# Error replies per second
+rate(betterdb_error_replies_total[5m])
+
+# Share of resync requests that fell back to a full sync
+increase(betterdb_sync_full_total[1h]) / clamp_min(increase(betterdb_sync_full_total[1h]) + increase(betterdb_sync_partial_ok_total[1h]), 1)
 ```
 
 ### Client Analytics
@@ -808,6 +948,12 @@ increase(betterdb_correlated_groups_total{pattern="memory_pressure"}[10m]) > 0
 increase(betterdb_correlated_groups_total{pattern="auth_attack"}[5m]) > 0
 ```
 
+**BetterDBConnectionsRejected** - `maxclients` reached; new clients are being refused
+
+```promql
+increase(betterdb_rejected_connections_total[5m]) > 0
+```
+
 ### Warning Alerts
 
 **BetterDBWarningSpike** - Multiple warning anomalies in short period
@@ -867,6 +1013,12 @@ for: 10m
 > has a delta near zero and does not trip this rule — only actual growth within
 > the window does. To also catch keys that are already large but not growing, use
 > the absolute-size variant above (`BetterDBLargeKey`).
+
+**BetterDBRepeatedFullResyncs** - Replicas keep needing full syncs instead of partial ones
+
+```promql
+increase(betterdb_sync_full_total[15m]) > 2
+```
 
 ### Info Alerts
 

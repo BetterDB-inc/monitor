@@ -6,6 +6,7 @@ import { SlowLogAnalyticsService } from '../slowlog-analytics/slowlog-analytics.
 import { CommandLogAnalyticsService } from '../commandlog-analytics/commandlog-analytics.service';
 import { HealthService } from '../health/health.service';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
+import { ShardLoadService } from '../cluster/shard-load.service';
 
 const LABEL = '10.0.0.1:6379';
 
@@ -357,8 +358,10 @@ describe('PrometheusService export profiles', () => {
 });
 
 describe('PrometheusService slot stats', () => {
-  function slot(keys: number): Record<string, number> {
-    return { key_count: keys, expires_count: 0, total_reads: 0, total_writes: 0 };
+  function slot(keys: number, cpu?: number): Record<string, number> {
+    return cpu === undefined
+      ? { key_count: keys }
+      : { key_count: keys, cpu_usec: cpu, network_bytes_in: cpu * 2, network_bytes_out: cpu * 3 };
   }
 
   async function runClusterInfo(harness: Harness): Promise<void> {
@@ -414,6 +417,41 @@ describe('PrometheusService slot stats', () => {
     expect(harness.client.getClusterSlotStats).not.toHaveBeenCalled();
   });
 
+  it('exports the usage counters when the server tracks them', async () => {
+    const harness = buildService();
+    harness.client.getClusterSlotStats.mockResolvedValue({ '1': slot(50, 7) });
+    await runSlotStats(harness);
+    const text = await harness.service.getMetrics();
+
+    expect(text).toContain(`betterdb_cluster_slot_cpu_usec_total{connection="${LABEL}",slot="1"} 7`);
+    expect(text).toContain(`betterdb_cluster_slot_network_bytes_in_total{connection="${LABEL}",slot="1"} 14`);
+    expect(text).toContain(`betterdb_cluster_slot_network_bytes_out_total{connection="${LABEL}",slot="1"} 21`);
+  });
+
+  it('exports no usage series, rather than zeros, when slot stats are disabled', async () => {
+    const harness = buildService();
+    harness.client.getClusterSlotStats.mockResolvedValue({ '1': slot(50) });
+    await runSlotStats(harness);
+    const text = await harness.service.getMetrics();
+
+    expect(text).toContain(`betterdb_cluster_slot_keys{connection="${LABEL}",slot="1"} 50`);
+    expect(text).not.toContain(`betterdb_cluster_slot_cpu_usec_total{`);
+    expect(harness.client.getClusterSlotStats).toHaveBeenCalledTimes(1);
+  });
+
+  it("also exports a node's busiest slots, not only its biggest", async () => {
+    const harness = buildService({ METRICS_SLOT_STATS_TOP_N: '1' });
+    harness.client.getClusterSlotStats.mockImplementation((orderBy: string) =>
+      Promise.resolve(orderBy === 'cpu-usec' ? { '2': slot(3, 900) } : { '1': slot(50, 7) }),
+    );
+    await runSlotStats(harness);
+    const text = await harness.service.getMetrics();
+
+    expect(harness.client.getClusterSlotStats).toHaveBeenCalledWith('cpu-usec', 1);
+    expect(text).toContain(`betterdb_cluster_slot_keys{connection="${LABEL}",slot="1"} 50`);
+    expect(text).toContain(`betterdb_cluster_slot_cpu_usec_total{connection="${LABEL}",slot="2"} 900`);
+  });
+
   it('removes a slot that leaves the top-N instead of zeroing it', async () => {
     const harness = buildService();
     harness.client.getClusterSlotStats.mockResolvedValueOnce({ '1': slot(50), '2': slot(40) });
@@ -424,6 +462,320 @@ describe('PrometheusService slot stats', () => {
 
     expect(text).not.toContain(`slot="1"`);
     expect(text).toContain(`betterdb_cluster_slot_keys{connection="${LABEL}",slot="2"} 60`);
+  });
+
+  it('keeps the slot series of a primary that did not answer, and prunes on a complete poll', async () => {
+    const harness = buildService();
+    harness.client.getCapabilities.mockReturnValue({ hasClusterSlotStats: true, clusterEnabled: true });
+    const clusterMetrics = { getClusterSlotStatsResult: jest.fn(), usesClusterWideSlotStats: jest.fn(() => true), coveredBySeed: jest.fn(() => false) };
+    (harness.service as unknown as { clusterMetricsService: unknown }).clusterMetricsService = clusterMetrics;
+
+    clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce({
+      stats: { '1': slot(50), '2': slot(45), '9000': slot(40) },
+      failedNodes: [],
+      failedSlotRanges: [],
+    });
+    await runSlotStats(harness);
+    // The primary owning slot 9000 times out on the next poll, and slot 2 of a
+    // healthy primary drops out of the top N.
+    clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce({
+      stats: { '1': slot(55) },
+      failedNodes: ['10.0.0.3:6379'],
+      failedSlotRanges: [[8192, 16383]],
+    });
+    await runSlotStats(harness);
+    let text = await harness.service.getMetrics();
+    expect(text).toContain(`betterdb_cluster_slot_keys{connection="${LABEL}",slot="1"} 55`);
+    expect(text).toContain(`betterdb_cluster_slot_keys{connection="${LABEL}",slot="9000"} 40`);
+    expect(text).not.toContain(`slot="2"`);
+
+    clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce({
+      stats: { '1': slot(56) },
+      failedNodes: [],
+      failedSlotRanges: [],
+    });
+    await runSlotStats(harness);
+    text = await harness.service.getMetrics();
+    expect(text).not.toContain(`slot="9000"`);
+    expect(clusterMetrics.getClusterSlotStatsResult).toHaveBeenCalledWith(
+      ['key-count', 'cpu-usec'],
+      100,
+      'conn-1',
+      5_000,
+      5_000,
+    );
+    expect(harness.client.getClusterSlotStats).not.toHaveBeenCalled();
+  });
+
+  it('drops the kept series of a primary that keeps failing once they are older than the staleness bound', async () => {
+    const harness = buildService();
+    harness.client.getCapabilities.mockReturnValue({ hasClusterSlotStats: true, clusterEnabled: true });
+    const clusterMetrics = {
+      getClusterSlotStatsResult: jest.fn(),
+      usesClusterWideSlotStats: jest.fn(() => true),
+      coveredBySeed: jest.fn(() => false),
+    };
+    (harness.service as unknown as { clusterMetricsService: unknown }).clusterMetricsService = clusterMetrics;
+    const stalenessMs = (harness.service as unknown as { stalenessMs: number }).stalenessMs;
+    let now = Date.now();
+    const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce({
+        stats: { '1': slot(50), '9000': slot(40) },
+        failedNodes: [],
+        failedSlotRanges: [],
+      });
+      await runSlotStats(harness);
+      const failing = { stats: { '1': slot(51) }, failedNodes: ['10.0.0.3:6379'], failedSlotRanges: [[8192, 16383]] };
+      clusterMetrics.getClusterSlotStatsResult.mockResolvedValue(failing);
+
+      now += stalenessMs;
+      await runSlotStats(harness);
+      expect(await harness.service.getMetrics()).toContain(`slot="9000"`);
+
+      now += 1;
+      await runSlotStats(harness);
+      const text = await harness.service.getMetrics();
+      expect(text).not.toContain(`slot="9000"`);
+      expect(text).toContain(`betterdb_cluster_slot_keys{connection="${LABEL}",slot="1"} 51`);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it('still reads cluster-wide slot stats at a one-second poll interval', async () => {
+    const harness = buildService({ PROMETHEUS_POLL_INTERVAL_MS: 1000 });
+    harness.client.getCapabilities.mockReturnValue({ hasClusterSlotStats: true, clusterEnabled: true });
+    const clusterMetrics = {
+      getClusterSlotStatsResult: jest.fn().mockResolvedValue({ stats: {}, failedNodes: [], failedSlotRanges: [] }),
+      usesClusterWideSlotStats: jest.fn(() => true),
+      coveredBySeed: jest.fn(() => false),
+    };
+    const service = harness.service as unknown as { clusterMetricsService: unknown; passDeadlines: Map<string, number> };
+    service.clusterMetricsService = clusterMetrics;
+
+    service.passDeadlines.set('conn-1', Date.now() + 800);
+    await runSlotStats(harness);
+
+    expect(clusterMetrics.getClusterSlotStatsResult).toHaveBeenCalledTimes(1);
+    const [, , , timeoutMs, fullBudgetMs] = clusterMetrics.getClusterSlotStatsResult.mock.calls[0];
+    expect(timeoutMs).toBeLessThanOrEqual(800);
+    expect(fullBudgetMs).toBe(1000);
+  });
+
+  it('drops series a failing fan-out keeps once they are older than the staleness bound', async () => {
+    const harness = buildService();
+    harness.client.getCapabilities.mockReturnValue({ hasClusterSlotStats: true, clusterEnabled: true });
+    const clusterMetrics = {
+      getClusterSlotStatsResult: jest.fn().mockResolvedValue({
+        stats: { '1': slot(50) },
+        failedNodes: [],
+        failedSlotRanges: [],
+      }),
+      usesClusterWideSlotStats: jest.fn(() => true),
+      coveredBySeed: jest.fn(() => false),
+    };
+    (harness.service as unknown as { clusterMetricsService: unknown }).clusterMetricsService = clusterMetrics;
+    const stalenessMs = (harness.service as unknown as { stalenessMs: number }).stalenessMs;
+    let now = Date.now();
+    const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      await runSlotStats(harness);
+      clusterMetrics.getClusterSlotStatsResult.mockRejectedValue(
+        new Error('Cluster discovery did not answer within 1200ms'),
+      );
+
+      now += stalenessMs;
+      await runSlotStats(harness);
+      expect(await harness.service.getMetrics()).toContain(`slot="1"`);
+
+      now += 1;
+      await runSlotStats(harness);
+      expect(await harness.service.getMetrics()).not.toContain(`slot="1"`);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it('drops series it keeps for lack of pass time once they are older than the staleness bound', async () => {
+    const harness = buildService();
+    harness.client.getCapabilities.mockReturnValue({ hasClusterSlotStats: true, clusterEnabled: true });
+    const clusterMetrics = {
+      getClusterSlotStatsResult: jest.fn().mockResolvedValue({ stats: { '1': slot(50) }, failedNodes: [], failedSlotRanges: [] }),
+      usesClusterWideSlotStats: jest.fn(() => true),
+      coveredBySeed: jest.fn(() => false),
+    };
+    const service = harness.service as unknown as { clusterMetricsService: unknown; passDeadlines: Map<string, number> };
+    service.clusterMetricsService = clusterMetrics;
+    const stalenessMs = (harness.service as unknown as { stalenessMs: number }).stalenessMs;
+    let now = Date.now();
+    const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      await runSlotStats(harness);
+      service.passDeadlines.set('conn-1', now + 100);
+      await runSlotStats(harness);
+      expect(await harness.service.getMetrics()).toContain(`slot="1"`);
+
+      now += stalenessMs + 1;
+      service.passDeadlines.set('conn-1', now + 100);
+      await runSlotStats(harness);
+      expect(await harness.service.getMetrics()).not.toContain(`slot="1"`);
+      expect(clusterMetrics.getClusterSlotStatsResult).toHaveBeenCalledTimes(1);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it('bounds the cluster-wide fan-out by what is left of the INFO pass', async () => {
+    const harness = buildService();
+    harness.client.getCapabilities.mockReturnValue({ hasClusterSlotStats: true, clusterEnabled: true });
+    const clusterMetrics = {
+      getClusterSlotStatsResult: jest.fn().mockResolvedValue({ stats: {}, failedNodes: [], failedSlotRanges: [] }),
+      usesClusterWideSlotStats: jest.fn(() => true),
+      coveredBySeed: jest.fn(() => false),
+    };
+    const service = harness.service as unknown as { clusterMetricsService: unknown; passDeadlines: Map<string, number> };
+    service.clusterMetricsService = clusterMetrics;
+
+    service.passDeadlines.set('conn-1', Date.now() + 3_000);
+    await runSlotStats(harness);
+    const [, , , timeoutMs] = clusterMetrics.getClusterSlotStatsResult.mock.calls[0];
+    expect(timeoutMs).toBeGreaterThan(1_000);
+    expect(timeoutMs).toBeLessThanOrEqual(3_000);
+
+    // Under a second left: not worth starting, the last series stay.
+    service.passDeadlines.set('conn-1', Date.now() + 500);
+    await runSlotStats(harness);
+    service.passDeadlines.set('conn-1', Date.now() - 1);
+    await runSlotStats(harness);
+    expect(clusterMetrics.getClusterSlotStatsResult).toHaveBeenCalledTimes(1);
+  });
+
+  function asMemberOfSeed(
+    harness: Harness,
+    seedExported: boolean,
+  ): { coveredBySeed: jest.Mock; getClusterSlotStatsResult: jest.Mock; usesClusterWideSlotStats: jest.Mock } {
+    harness.client.getCapabilities.mockReturnValue({ hasClusterSlotStats: true, clusterEnabled: true });
+    const clusterMetrics = {
+      getClusterSlotStatsResult: jest.fn(),
+      usesClusterWideSlotStats: jest.fn((id: string) => id === 'seed'),
+      coveredBySeed: jest.fn((id: string) => id === 'conn-1'),
+    };
+    const service = harness.service as unknown as {
+      clusterMetricsService: unknown;
+      connectionRegistry: { getConfig: jest.Mock };
+    };
+    service.clusterMetricsService = clusterMetrics;
+    service.connectionRegistry.getConfig.mockImplementation((id: string) => {
+      if (id === 'conn-1') {
+        return {
+          host: '10.0.0.1',
+          port: 6379,
+          membership: { seedId: 'seed', nodeId: 'n1', origin: 'auto', source: 'cluster' },
+        };
+      }
+      if (id === 'seed') return { host: '10.0.0.2', port: 6379 };
+      return null;
+    });
+    if (seedExported) seedSlotsSeenAt(harness, Date.now());
+    return clusterMetrics;
+  }
+
+  function seedSlotsSeenAt(harness: Harness, at: number): void {
+    const seedState = harness.service['getConnectionState']('seed');
+    seedState.currentClusterSlotLabels = new Set(['1']);
+    seedState.clusterSlotSeenAt = new Map([['1', at]]);
+  }
+
+  it('exports no slot series for a member whose seed is still reading the cluster', async () => {
+    const harness = buildService();
+    const clusterMetrics = asMemberOfSeed(harness, false);
+    harness.client.getClusterSlotStats.mockResolvedValue({ '1': slot(7) });
+    // The seed's fan-out is under way: it exports this node's slots when it returns.
+    let finishFanOut!: (result: unknown) => void;
+    clusterMetrics.getClusterSlotStatsResult.mockReturnValue(new Promise((resolve) => (finishFanOut = resolve)));
+    const seedClient = {
+      ...harness.client,
+      getCapabilities: jest.fn().mockReturnValue({ hasClusterSlotStats: true, clusterEnabled: true }),
+    };
+    const seedPass = harness.service['updateSlotStatsMetrics'](
+      seedClient as never,
+      'seed',
+      '10.0.0.2:6379',
+      harness.service['getConnectionState']('seed'),
+      harness.service['currentEpoch']('seed'),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+
+    await runSlotStats(harness);
+    finishFanOut({ stats: { '1': slot(7) }, failedNodes: [], failedSlotRanges: [] });
+    await seedPass;
+
+    expect(harness.client.getClusterSlotStats).not.toHaveBeenCalled();
+    expect(await harness.service.getMetrics()).not.toContain(`betterdb_cluster_slot_keys{connection="${LABEL}"`);
+    expect(await harness.service.getMetrics()).toContain('betterdb_cluster_slot_keys{connection="10.0.0.2:6379",slot="1"} 7');
+  });
+
+  it('exports no slot series for a member whose seed kept its last series this pass', async () => {
+    const harness = buildService();
+    asMemberOfSeed(harness, false);
+    // The seed's pass ran out of time and kept the series it read a pass ago.
+    seedSlotsSeenAt(harness, Date.now() - 5_000);
+
+    await runSlotStats(harness);
+
+    expect(harness.client.getClusterSlotStats).not.toHaveBeenCalled();
+  });
+
+  it('exports a member\'s own slots once its seed\'s series are older than the staleness bound', async () => {
+    const harness = buildService();
+    asMemberOfSeed(harness, false);
+    const stalenessMs = (harness.service as unknown as { stalenessMs: number }).stalenessMs;
+    seedSlotsSeenAt(harness, Date.now() - stalenessMs - 1);
+    harness.client.getClusterSlotStats.mockResolvedValue({ '1': slot(7) });
+
+    await runSlotStats(harness);
+
+    expect(harness.client.getClusterSlotStats).toHaveBeenCalledWith('key-count', 100);
+  });
+
+  it('exports no slot series for a member whose seed exported them this pass', async () => {
+    const harness = buildService();
+    const clusterMetrics = asMemberOfSeed(harness, true);
+
+    await runSlotStats(harness);
+
+    expect(clusterMetrics.coveredBySeed).toHaveBeenCalledWith('conn-1');
+    expect(harness.client.getClusterSlotStats).not.toHaveBeenCalled();
+    expect(await harness.service.getMetrics()).not.toContain('betterdb_cluster_slot_keys{');
+  });
+
+  it('keeps a member exporting its own slots when its seed holds no slot series', async () => {
+    const harness = buildService();
+    asMemberOfSeed(harness, false);
+    harness.client.getClusterSlotStats.mockResolvedValue({ '1': slot(7) });
+
+    await runSlotStats(harness);
+
+    expect(harness.client.getClusterSlotStats).toHaveBeenCalledWith('key-count', 100);
+    expect(await harness.service.getMetrics()).toContain(`betterdb_cluster_slot_keys{connection="${LABEL}",slot="1"} 7`);
+  });
+
+  it('keeps a node registered on its own on its own node slot stats', async () => {
+    const harness = buildService();
+    harness.client.getCapabilities.mockReturnValue({ hasClusterSlotStats: true, clusterEnabled: true });
+    const clusterMetrics = {
+      getClusterSlotStatsResult: jest.fn(),
+      usesClusterWideSlotStats: jest.fn(() => false),
+      coveredBySeed: jest.fn(() => false),
+    };
+    (harness.service as unknown as { clusterMetricsService: unknown }).clusterMetricsService = clusterMetrics;
+
+    await runSlotStats(harness);
+
+    expect(clusterMetrics.usesClusterWideSlotStats).toHaveBeenCalledWith('conn-1');
+    expect(clusterMetrics.getClusterSlotStatsResult).not.toHaveBeenCalled();
+    expect(harness.client.getClusterSlotStats).toHaveBeenCalledWith('key-count', 100);
   });
 
   it('clears slot series when slot stats become unavailable', async () => {
@@ -553,5 +905,462 @@ describe('PrometheusService slot stats', () => {
     );
 
     expect(await harness.service.getMetrics()).not.toContain(`slot="1"`);
+  });
+
+  describe('shard load', () => {
+    const P1 = { nodeId: 'p1', address: '10.0.0.1:6379' };
+    const P2 = { nodeId: 'p2', address: '10.0.0.3:6379' };
+
+    function fanOut(p1Cpu: number, p2Cpu: number, failedNodes: string[] = []) {
+      return {
+        stats: { '1': slot(50, p1Cpu), '9000': slot(40, p2Cpu) },
+        failedNodes,
+        failedSlotRanges: failedNodes.length > 0 ? [[8192, 16383]] : [],
+        nodeStats: [
+          { ...P1, stats: { '1': slot(50, p1Cpu) } },
+          ...(failedNodes.length > 0 ? [] : [{ ...P2, stats: { '9000': slot(40, p2Cpu) } }]),
+        ],
+      };
+    }
+
+    function clusterHarness() {
+      const harness = buildService();
+      harness.client.getCapabilities.mockReturnValue({ hasClusterSlotStats: true, clusterEnabled: true });
+      const clusterMetrics = {
+        getClusterSlotStatsResult: jest.fn(),
+        usesClusterWideSlotStats: jest.fn(() => true),
+        coveredBySeed: jest.fn(() => false),
+      };
+      const internals = harness.service as unknown as {
+        clusterMetricsService: unknown;
+        shardLoadService: unknown;
+        stalenessMs: number;
+      };
+      internals.clusterMetricsService = clusterMetrics;
+      internals.shardLoadService = new ShardLoadService();
+      return { harness, clusterMetrics, stalenessMs: internals.stalenessMs };
+    }
+
+    it('exports the load of each shard once two complete reads give a rate', async () => {
+      const { harness, clusterMetrics } = clusterHarness();
+      let now = 1_000_000;
+      const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+      try {
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(0, 0));
+        await runSlotStats(harness);
+        expect(await harness.service.getMetrics()).not.toContain('betterdb_cluster_shard_cpu_usec_per_second{');
+
+        now += 5_000;
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(15_000, 5_000));
+        await runSlotStats(harness);
+        const text = await harness.service.getMetrics();
+
+        const p1 = `connection="${LABEL}",node="10.0.0.1:6379",node_id="p1"`;
+        const p2 = `connection="${LABEL}",node="10.0.0.3:6379",node_id="p2"`;
+        expect(text).toContain(`betterdb_cluster_shard_cpu_usec_per_second{${p1}} 3000`);
+        expect(text).toContain(`betterdb_cluster_shard_cpu_usec_per_second{${p2}} 1000`);
+        expect(text).toContain(`betterdb_cluster_shard_network_bytes_in_per_second{${p1}} 6000`);
+        expect(text).toContain(`betterdb_cluster_shard_network_bytes_out_per_second{${p1}} 9000`);
+        expect(text).toContain(`betterdb_cluster_shard_cpu_share{${p1}} 0.75`);
+        expect(text).toContain(`betterdb_cluster_shard_network_share{${p2}} 0.25`);
+        expect(text).toContain(`betterdb_cluster_shard_slots{${p1}} 1`);
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
+    it('keeps the last shard load through an incomplete read, until it is older than the staleness bound', async () => {
+      const { harness, clusterMetrics, stalenessMs } = clusterHarness();
+      let now = 1_000_000;
+      const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+      try {
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(0, 0));
+        await runSlotStats(harness);
+        now += 5_000;
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(15_000, 5_000));
+        await runSlotStats(harness);
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValue(fanOut(900_000, 5_000, [P2.address]));
+
+        now += stalenessMs;
+        await runSlotStats(harness);
+        expect(await harness.service.getMetrics()).toContain(
+          `betterdb_cluster_shard_cpu_usec_per_second{connection="${LABEL}",node="10.0.0.1:6379",node_id="p1"} 3000`,
+        );
+
+        now += 1;
+        await runSlotStats(harness);
+        expect(await harness.service.getMetrics()).not.toContain('betterdb_cluster_shard_cpu_usec_per_second{');
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
+    it('ages the shard load out while CLUSTER INFO keeps failing', async () => {
+      const { harness, clusterMetrics, stalenessMs } = clusterHarness();
+      let now = 1_000_000;
+      const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+      try {
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(0, 0));
+        await runSlotStats(harness);
+        now += 5_000;
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(15_000, 5_000));
+        await runSlotStats(harness);
+        harness.client.getClusterInfo.mockRejectedValue(new Error('timeout'));
+
+        now += stalenessMs;
+        await runClusterInfo(harness);
+        expect(await harness.service.getMetrics()).toContain(
+          `betterdb_cluster_shard_cpu_usec_per_second{connection="${LABEL}",node="10.0.0.1:6379",node_id="p1"} 3000`,
+        );
+
+        now += 1;
+        await runClusterInfo(harness);
+        expect(await harness.service.getMetrics()).not.toContain('betterdb_cluster_shard_cpu_usec_per_second{');
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
+    it('ages the shard load out on a scrape while no cluster pass finishes', async () => {
+      const { harness, clusterMetrics, stalenessMs } = clusterHarness();
+      const freshness = harness.service['freshness'];
+      let now = 1_000_000;
+      const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+      try {
+        freshness.observe('conn-1', LABEL, now);
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(0, 0));
+        await runSlotStats(harness);
+        now += 5_000;
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(15_000, 5_000));
+        await runSlotStats(harness);
+
+        now += stalenessMs;
+        freshness.markFresh('conn-1', LABEL, now);
+        expect(await harness.service.getMetrics()).toContain(
+          `betterdb_cluster_shard_cpu_usec_per_second{connection="${LABEL}",node="10.0.0.1:6379",node_id="p1"} 3000`,
+        );
+
+        now += 1;
+        freshness.markFresh('conn-1', LABEL, now);
+        expect(await harness.service.getMetrics()).not.toContain(
+          'betterdb_cluster_shard_cpu_usec_per_second{',
+        );
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
+    it('keeps the shard load through a pass that cannot tell how the cluster is read', async () => {
+      const { harness, clusterMetrics } = clusterHarness();
+      const shardLoad = (harness.service as unknown as { shardLoadService: ShardLoadService })
+        .shardLoadService;
+      const forget = jest.spyOn(shardLoad, 'forget');
+      let now = 1_000_000;
+      const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+      try {
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(0, 0));
+        await runSlotStats(harness);
+        now += 5_000;
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(15_000, 5_000));
+        await runSlotStats(harness);
+
+        clusterMetrics.usesClusterWideSlotStats.mockReturnValue(null as never);
+        now += 5_000;
+        await runSlotStats(harness);
+
+        expect(forget).not.toHaveBeenCalled();
+        expect(await harness.service.getMetrics()).toContain(
+          `betterdb_cluster_shard_cpu_usec_per_second{connection="${LABEL}",node="10.0.0.1:6379",node_id="p1"} 3000`,
+        );
+
+        clusterMetrics.usesClusterWideSlotStats.mockReturnValue(true);
+        now += 5_000;
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(45_000, 20_000));
+        await runSlotStats(harness);
+
+        expect(await harness.service.getMetrics()).toContain(
+          `betterdb_cluster_shard_cpu_usec_per_second{connection="${LABEL}",node="10.0.0.1:6379",node_id="p1"} 3000`,
+        );
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
+    it('stamps a shard load sample with the time its read finished', async () => {
+      const { harness, clusterMetrics } = clusterHarness();
+      let now = 1_000_000;
+      const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+      try {
+        clusterMetrics.getClusterSlotStatsResult.mockImplementationOnce(async () => {
+          now += 400;
+          return fanOut(0, 0);
+        });
+        await runSlotStats(harness);
+        now += 5_000;
+        clusterMetrics.getClusterSlotStatsResult.mockImplementationOnce(async () => {
+          now += 900;
+          return fanOut(15_000, 5_000);
+        });
+        await runSlotStats(harness);
+
+        const shardLoad = (harness.service as unknown as { shardLoadService: ShardLoadService })
+          .shardLoadService;
+        expect(shardLoad.getLatest('conn-1')?.timestamp).toBe(1_000_000 + 400 + 5_000 + 900);
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
+    it('removes the series of a shard that left the cluster', async () => {
+      const { harness, clusterMetrics } = clusterHarness();
+      let now = 1_000_000;
+      const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+      try {
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(0, 0));
+        await runSlotStats(harness);
+        now += 5_000;
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(15_000, 5_000));
+        await runSlotStats(harness);
+
+        now += 5_000;
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce({
+          stats: { '1': slot(50, 30_000) },
+          failedNodes: [],
+          failedSlotRanges: [],
+          nodeStats: [{ ...P1, stats: { '1': slot(50, 30_000) } }],
+        });
+        await runSlotStats(harness);
+        const text = await harness.service.getMetrics();
+
+        expect(text).toContain('node_id="p1"');
+        expect(text).not.toContain('node_id="p2"');
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
+    it('holds the shares and keeps the series of a shard whose primary restarted', async () => {
+      const { harness, clusterMetrics } = clusterHarness();
+      let now = 1_000_000;
+      const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+      try {
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(0, 0));
+        await runSlotStats(harness);
+        now += 5_000;
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(15_000, 5_000));
+        await runSlotStats(harness);
+
+        now += 5_000;
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(30_000, 100));
+        await runSlotStats(harness);
+        const lines = (await harness.service.getMetrics()).split('\n');
+
+        const p1 = `connection="${LABEL}",node="10.0.0.1:6379",node_id="p1"`;
+        const p2 = `connection="${LABEL}",node="10.0.0.3:6379",node_id="p2"`;
+        expect(lines).toContain(`betterdb_cluster_shard_cpu_share{${p1}} 0.75`);
+        expect(lines).toContain(`betterdb_cluster_shard_cpu_share{${p2}} 0.25`);
+        expect(lines).toContain(`betterdb_cluster_shard_network_share{${p1}} 0.75`);
+        expect(lines).toContain(`betterdb_cluster_shard_network_share{${p2}} 0.25`);
+        expect(lines).toContain(`betterdb_cluster_shard_cpu_usec_per_second{${p2}} 0`);
+        expect(lines).toContain(`betterdb_cluster_shard_slots{${p2}} 1`);
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
+    it('exports no share for a shard that appears until the load has settled', async () => {
+      const { harness, clusterMetrics } = clusterHarness();
+      const withThird = (step: number) => {
+        const third = { '12000': slot(10, 10_000 * step) };
+        const two = fanOut(15_000 * step, 5_000 * step);
+        return {
+          ...two,
+          stats: { ...two.stats, ...third },
+          nodeStats: [...two.nodeStats, { nodeId: 'p3', address: '10.0.0.5:6379', stats: third }],
+        };
+      };
+      let now = 1_000_000;
+      const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+      try {
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(0, 0));
+        await runSlotStats(harness);
+        now += 5_000;
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(15_000, 5_000));
+        await runSlotStats(harness);
+
+        const p1 = `connection="${LABEL}",node="10.0.0.1:6379",node_id="p1"`;
+        const p3 = `connection="${LABEL}",node="10.0.0.5:6379",node_id="p3"`;
+        for (const step of [2, 3, 4]) {
+          now += 5_000;
+          clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(withThird(step));
+          await runSlotStats(harness);
+          const text = await harness.service.getMetrics();
+
+          expect(text).toContain(`betterdb_cluster_shard_cpu_usec_per_second{${p3}}`);
+          expect(text).toContain(`betterdb_cluster_shard_slots{${p3}} 1`);
+          expect(text).not.toContain(`betterdb_cluster_shard_cpu_share{${p3}}`);
+          expect(text).not.toContain(`betterdb_cluster_shard_network_share{${p3}}`);
+          expect(text.split('\n')).toContain(`betterdb_cluster_shard_cpu_share{${p1}} 0.75`);
+        }
+
+        now += 5_000;
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(withThird(5));
+        await runSlotStats(harness);
+        const settled = (await harness.service.getMetrics()).split('\n');
+
+        expect(settled).toContain(`betterdb_cluster_shard_cpu_share{${p1}} 0.5`);
+        expect(
+          settled.some((line) => line.startsWith(`betterdb_cluster_shard_cpu_share{${p3}} 0.3`)),
+        ).toBe(true);
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
+    it('keeps the last shard load through a read that gives no per-node stats', async () => {
+      const { harness, clusterMetrics } = clusterHarness();
+      let now = 1_000_000;
+      const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+      try {
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(0, 0));
+        await runSlotStats(harness);
+        now += 5_000;
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(15_000, 5_000));
+        await runSlotStats(harness);
+
+        now += 5_000;
+        const { nodeStats: _dropped, ...short } = fanOut(900_000, 5_000);
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(short);
+        await runSlotStats(harness);
+        const lines = (await harness.service.getMetrics()).split('\n');
+
+        const p1 = `connection="${LABEL}",node="10.0.0.1:6379",node_id="p1"`;
+        expect(lines).toContain(`betterdb_cluster_shard_cpu_usec_per_second{${p1}} 3000`);
+        expect(lines).toContain(`betterdb_cluster_shard_cpu_share{${p1}} 0.75`);
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
+    it('drops the shard load at once when a seed starts exporting the cluster', async () => {
+      const { harness, clusterMetrics } = clusterHarness();
+      let now = 1_000_000;
+      const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+      try {
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(0, 0));
+        await runSlotStats(harness);
+        now += 5_000;
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(15_000, 5_000));
+        await runSlotStats(harness);
+
+        clusterMetrics.coveredBySeed.mockReturnValue(true);
+        (harness.service as unknown as { slotStatsFanOuts: Set<string> }).slotStatsFanOuts.add('seed');
+        (harness.service as unknown as { connectionRegistry: { getConfig: jest.Mock } }).connectionRegistry.getConfig.mockReturnValue(
+          { host: '10.0.0.1', port: 6379, membership: { seedId: 'seed' } },
+        );
+        now += 5_000;
+        await runSlotStats(harness);
+
+        expect(await harness.service.getMetrics()).not.toContain('betterdb_cluster_shard_cpu_usec_per_second{');
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
+    it('does not let a read with a missing primary wipe the rates of the others', async () => {
+      const { harness, clusterMetrics } = clusterHarness();
+      const shardLoad = (harness.service as unknown as { shardLoadService: ShardLoadService }).shardLoadService;
+      const record = jest.spyOn(shardLoad, 'record');
+      let now = 1_000_000;
+      const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+      try {
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(0, 0));
+        await runSlotStats(harness);
+        now += 5_000;
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(15_000, 5_000));
+        await runSlotStats(harness);
+
+        now += 5_000;
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(30_000, 5_000, [P2.address]));
+        await runSlotStats(harness);
+        expect(record).toHaveBeenCalledTimes(2);
+
+        now += 5_000;
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(45_000, 15_000));
+        await runSlotStats(harness);
+        const sample = shardLoad.getLatest('conn-1');
+
+        expect(sample?.settling).toBe(false);
+        expect(sample?.shards.map((shard) => shard.nodeId)).toEqual(['p1', 'p2']);
+        expect(sample?.shards[1].measuredSlots).toBe(1);
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
+    it('frees the shard load of a connection that stops reading the whole cluster', async () => {
+      const { harness, clusterMetrics } = clusterHarness();
+      const shardLoad = (harness.service as unknown as { shardLoadService: ShardLoadService }).shardLoadService;
+      const forget = jest.spyOn(shardLoad, 'forget');
+      let now = 1_000_000;
+      const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+      try {
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(0, 0));
+        await runSlotStats(harness);
+        now += 5_000;
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(15_000, 5_000));
+        await runSlotStats(harness);
+        expect(forget).not.toHaveBeenCalled();
+
+        clusterMetrics.usesClusterWideSlotStats.mockReturnValue(false);
+        now += 5_000;
+        await runSlotStats(harness);
+
+        expect(forget).toHaveBeenCalledWith('conn-1');
+        expect(shardLoad.getLatest('conn-1')).toBeNull();
+        expect(await harness.service.getMetrics()).not.toContain('betterdb_cluster_shard_cpu_usec_per_second{');
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
+    it('frees the shard load of a removed connection', async () => {
+      const { harness, clusterMetrics } = clusterHarness();
+      const shardLoad = (harness.service as unknown as { shardLoadService: ShardLoadService }).shardLoadService;
+      let now = 1_000_000;
+      const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+      try {
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(0, 0));
+        await runSlotStats(harness);
+        now += 5_000;
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(15_000, 5_000));
+        await runSlotStats(harness);
+        expect(shardLoad.getLatest('conn-1')).not.toBeNull();
+
+        harness.service.cleanupConnectionMetrics('conn-1');
+
+        expect(shardLoad.getLatest('conn-1')).toBeNull();
+        expect(shardLoad.record('conn-1', fanOut(20_000, 6_000).nodeStats as never, now + 5_000)).toBeNull();
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
+    it('exports no shard load when the fallback read only the connection\'s own node', async () => {
+      const { harness, clusterMetrics } = clusterHarness();
+      let now = 1_000_000;
+      const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+      try {
+        const ownNode = { stats: { '1': slot(50, 10) }, failedNodes: [], failedSlotRanges: [] };
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValue(ownNode);
+        await runSlotStats(harness);
+        now += 5_000;
+        await runSlotStats(harness);
+
+        expect(await harness.service.getMetrics()).not.toContain('betterdb_cluster_shard_cpu_usec_per_second{');
+      } finally {
+        clock.mockRestore();
+      }
+    });
   });
 });
