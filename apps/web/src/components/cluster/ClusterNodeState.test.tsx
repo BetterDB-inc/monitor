@@ -3,7 +3,7 @@ import { fireEvent, render, screen, within } from '@testing-library/react';
 import type { ClusterNode } from '../../types/metrics';
 import { ClusterNodesTable } from './ClusterNodesTable';
 import { ClusterTopology } from './ClusterTopology';
-import { graphNodeHealth } from './nodeHealth';
+import { graphNodeHealth, graphNodeStatus } from './nodeHealth';
 
 function clusterNode(overrides: Partial<ClusterNode>): ClusterNode {
   return {
@@ -102,8 +102,22 @@ describe('graphNodeHealth', () => {
     [['master', 'fail'], 'connected', 'unhealthy'],
     [['master', 'fail?', 'fail'], 'disconnected', 'unhealthy'],
     [['master'], 'disconnected', 'unhealthy'],
-    [['master', 'fail?'], 'disconnected', 'unhealthy'],
+    [['master', 'fail?'], 'disconnected', 'suspect'],
+    [['master', 'handshake'], 'disconnected', 'suspect'],
+    [['master', 'noaddr'], 'disconnected', 'suspect'],
   ])('reads flags %j on a %s link as %s', (flags, linkState, expected) => {
     expect(graphNodeHealth({ flags, linkState })).toBe(expected);
+  });
+});
+
+describe('graphNodeStatus', () => {
+  it.each([
+    [['master'], 'connected', ''],
+    [['master', 'fail?'], 'connected', 'State: suspect\n'],
+    [['master', 'fail?'], 'disconnected', 'State: suspect\nLink: disconnected\n'],
+    [['master', 'fail'], 'disconnected', 'State: unhealthy\nLink: disconnected\n'],
+    [['master'], 'disconnected', 'State: unhealthy\nLink: disconnected\n'],
+  ])('describes flags %j on a %s link as %j', (flags, linkState, expected) => {
+    expect(graphNodeStatus({ flags, linkState })).toBe(expected);
   });
 });

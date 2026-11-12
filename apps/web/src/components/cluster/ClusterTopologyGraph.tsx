@@ -21,7 +21,7 @@ import { formatBytes } from '../../lib/utils';
 import { countSlots } from '../../types/cluster';
 import type { ClusterNode } from '../../types/metrics';
 import type { NodeStats } from '../../types/cluster';
-import { graphNodeHealth, type GraphNodeHealth } from './nodeHealth';
+import { graphNodeHealth, graphNodeStatus, type GraphNodeHealth } from './nodeHealth';
 
 interface GraphNode extends SimulationNodeDatum {
   id: string;
@@ -31,6 +31,7 @@ interface GraphNode extends SimulationNodeDatum {
   slots: number[][];
   stats?: NodeStats;
   health: GraphNodeHealth;
+  status: string;
   availabilityZone?: string;
 }
 
@@ -163,6 +164,7 @@ export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTo
         slots: node.slots,
         stats: nodeStats?.find((s) => s.nodeId === node.id),
         health: graphNodeHealth(node),
+        status: graphNodeStatus(node),
         availabilityZone: node.availabilityZone,
         x: pos.x,
         y: pos.y,
@@ -306,7 +308,7 @@ export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTo
       const slotCount = countSlots(d.slots);
       return (
         `${d.address}\nRole: ${d.role}\n` +
-        (d.health === 'healthy' ? '' : `State: ${d.health}\n`) +
+        d.status +
         (d.availabilityZone ? `Zone: ${d.availabilityZone}\n` : '') +
         `Slots: ${slotCount > 0 ? slotCount.toLocaleString() : 'none'}\n` +
         `Memory: ${d.stats ? formatBytes(d.stats.memoryUsed) : 'N/A'}\n` +
