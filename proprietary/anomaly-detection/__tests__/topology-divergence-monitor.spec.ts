@@ -119,10 +119,27 @@ describe('TopologyDivergenceMonitor', () => {
 
     await poll('conn-1', 'a1', 0);
     await poll('conn-2', 'b1', 1000);
+    await poll('conn-1', 'a1', INTERVAL);
     asked.length = 0;
-    await poll('conn-1', 'a1', 1000 + 3 * INTERVAL + 1);
+    await poll('conn-1', 'a1', 2 * INTERVAL);
 
     expect(asked).toEqual(['b1', 'c1']);
+  });
+
+  it('counts a view that was offered once in one round only', async () => {
+    const { poll, asked } = harness();
+
+    await poll('conn-1', 'a1', 0);
+    await poll('conn-2', 'b1', 1000, { c2: { configEpoch: 7 } });
+    asked.length = 0;
+    const first = await poll('conn-1', 'a1', INTERVAL);
+    const second = await poll('conn-1', 'a1', 2 * INTERVAL);
+    const third = await poll('conn-1', 'a1', 3 * INTERVAL);
+
+    expect(first?.disagreements).toMatchObject([{ key: 'config_epoch:c2', rounds: 1 }]);
+    expect(asked.filter((id) => id === 'b1')).toHaveLength(2);
+    expect(second?.disagreements).toEqual([]);
+    expect(third?.disagreements).toEqual([]);
   });
 
   it('hands the rounds to another connection when the first goes quiet', async () => {
