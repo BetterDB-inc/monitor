@@ -24,6 +24,7 @@ import {
 } from './types';
 import { ReplicaDivergenceHistory } from './replication-divergence-detector';
 import { HotShardDetail } from './hot-shard-detector';
+import { TopologyDivergenceReport } from './topology-divergence-report';
 import { LicenseGuard, RequiresFeature, Feature } from '@proprietary/licenses';
 import { ConnectionId, CONNECTION_ID_HEADER } from '../../apps/api/src/common/decorators';
 import { parseOptionalInt } from '../../apps/api/src/common/utils/parse-query-param';
@@ -172,6 +173,14 @@ export class AnomalyController {
   @ApiHeader({ name: CONNECTION_ID_HEADER, required: true, description: 'Connection ID of the cluster' })
   getHotShards(@ConnectionId({ required: true }) connectionId: string): HotShardDetail[] {
     return this.anomalyService.getHotShards(connectionId);
+  }
+
+  @Get('topology-divergence')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: true, description: 'Connection ID of the cluster' })
+  getTopologyDivergence(@ConnectionId({ required: true }) connectionId: string): TopologyDivergenceReport {
+    return this.anomalyService.getTopologyDivergence(connectionId);
   }
 
   @Post('events/:id/resolve')
