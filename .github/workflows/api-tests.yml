@@ -126,6 +126,7 @@ jobs:
 
     env:
       VALKEY_URL: redis://localhost:6379
+      BETTERDB_ALLOW_VALKEY_URL: '1'
 
     steps:
       - uses: actions/checkout@v4

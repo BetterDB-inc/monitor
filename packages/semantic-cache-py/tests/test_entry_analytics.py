@@ -453,12 +453,20 @@ async def test_replica_and_permission_errors_hint_opt_out(error_type: type[Excep
 async def test_live_valkey_reloads_usage_script_and_refreshes_ttl():
     """Hit counts survive SCRIPT FLUSH, and default_ttl is applied by the reloaded script.
 
-    Set BETTERDB_TEST_VALKEY_PORT to a disposable Valkey. The test runs SCRIPT FLUSH.
+    Uses BETTERDB_TEST_VALKEY_PORT by default. VALKEY_URL is honoured only when
+    BETTERDB_ALLOW_VALKEY_URL=1 (CI sets both to the disposable service). The test runs SCRIPT FLUSH.
     """
-    valkey_url = os.environ.get("VALKEY_URL")
     port = os.environ.get("BETTERDB_TEST_VALKEY_PORT")
+    valkey_url = (
+        os.environ.get("VALKEY_URL")
+        if os.environ.get("BETTERDB_ALLOW_VALKEY_URL") == "1"
+        else None
+    )
     if not valkey_url and not port:
-        pytest.skip("set VALKEY_URL or BETTERDB_TEST_VALKEY_PORT to a disposable Valkey")
+        pytest.skip(
+            "set BETTERDB_TEST_VALKEY_PORT or VALKEY_URL with BETTERDB_ALLOW_VALKEY_URL=1 "
+            "to a disposable Valkey"
+        )
 
     import valkey.asyncio as valkey
 
