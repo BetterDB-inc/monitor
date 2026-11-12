@@ -203,6 +203,16 @@ describe('WebhooksService', () => {
       await expect(create('http://hook.operator-sim.svc.cluster.local/')).resolves.toBe(stored);
     });
 
+    it('should hold loopback to the allowlist outside production too', async () => {
+      process.env.NODE_ENV = 'development';
+      await expect(create('http://127.0.0.1:3001/')).resolves.toBe(stored);
+      process.env.WEBHOOK_ALLOWED_PRIVATE_HOSTS = '*.svc.cluster.local';
+      await expect(create('http://127.0.0.1:3001/')).rejects.toThrow(BadRequestException);
+      await expect(update('http://localhost:3001/')).rejects.toThrow(BadRequestException);
+      process.env.WEBHOOK_ALLOWED_PRIVATE_CIDRS = '127.0.0.0/8';
+      await expect(create('http://127.0.0.1:3001/')).resolves.toBe(stored);
+    });
+
     it('should ignore the allowlist in cloud mode', async () => {
       jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
       process.env.CLOUD_MODE = 'true';

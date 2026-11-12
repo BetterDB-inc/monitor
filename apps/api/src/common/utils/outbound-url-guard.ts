@@ -192,13 +192,15 @@ export async function assertSafeOutboundUrl(rawUrl: string, options: OutboundUrl
     const isLocalhost =
       host === 'localhost' || (isIP(host) !== 0 && LOOPBACK.some((pattern) => pattern.test(host)));
 
-    if (isLocalhost && (!isProduction || allowPrivateNetworks)) {
+    // A configured policy is the whole rule in every environment: the
+    // development exception for loopback applies only when there is none.
+    if (isLocalhost && (allowPrivateNetworks || (!isProduction && !options.privateNetworkPolicy))) {
       logger.debug(`Allowing localhost ${label} in ${process.env.NODE_ENV || 'development'} mode: ${parsed.host}`);
       return parsed;
     }
 
     if (parsed.hostname === 'localhost' || parsed.hostname === '0.0.0.0') {
-      throw new BadRequestException(`Cannot use localhost or 0.0.0.0 as ${label} in production`);
+      throw new BadRequestException(`Cannot use localhost or 0.0.0.0 as ${label}${isProduction ? ' in production' : ''}`);
     }
 
     if (isIP(host) && isBlockedIp(host, allow)) {
@@ -237,9 +239,11 @@ export async function assertSafeOutboundUrl(rawUrl: string, options: OutboundUrl
 
 type ConnectOptions = Omit<OutboundUrlOptions, 'resolveDns' | 'privateHint'>;
 
-// The connect-time rule: outside production loopback stays reachable, as in assertSafeOutboundUrl.
+// The connect-time rule. As in assertSafeOutboundUrl, loopback stays reachable
+// outside production only when no policy is configured.
 function isBlockedAtConnect(address: string, options: ConnectOptions, hostname?: string): boolean {
-  const allowLoopback = options.allowPrivateNetworks || process.env.NODE_ENV !== 'production';
+  const allowLoopback =
+    options.allowPrivateNetworks || (process.env.NODE_ENV !== 'production' && !options.privateNetworkPolicy);
   return isBlockedIp(address, allowance(options), hostname) && !(allowLoopback && isLoopback(address));
 }
 

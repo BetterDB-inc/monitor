@@ -1363,7 +1363,8 @@ docker run -e WEBHOOK_ALLOWED_PRIVATE_CIDRS=172.17.0.0/16 ... betterdb/monitor
 ### Rules
 
 - **Metadata and link-local addresses stay blocked.** `169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`, `100.100.100.200` and `192.0.0.192` can never be allowed. A CIDR that overlaps one of them (for example `0.0.0.0/0`, `169.254.0.0/16`, or the whole `100.64.0.0/10` or `fd00::/8` range) is refused at startup; list narrower ranges instead.
-- **Loopback needs its own CIDR.** `127.0.0.0/8`, `::1` and `0.0.0.0/8` are accepted only when listed as a CIDR, and never through a hostname pattern, so a webhook cannot reach BetterDB's own API or a sidecar by accident. Use the IP literal (`http://127.0.0.1:9000/hook`); the name `localhost` stays rejected in production.
+- **Loopback needs its own CIDR.** `127.0.0.0/8`, `::1` and `0.0.0.0/8` are accepted only when listed as a CIDR, and never through a hostname pattern, so a webhook cannot reach BetterDB's own API or a sidecar by accident. Use the IP literal (`http://127.0.0.1:9000/hook`); the name `localhost` stays rejected.
+- **The allowlist applies in every environment.** Without one, `localhost` and `127.x.x.x` are allowed when `NODE_ENV` is not `production`. Once either variable is set, that exception no longer applies and loopback must be listed like any other private range.
 - **A typo fails startup.** An invalid CIDR or hostname pattern stops BetterDB from starting with an error naming the entry. `*` alone is not a valid hostname pattern.
 - **Ignored in cloud mode.** With `CLOUD_MODE` set, both variables are ignored and a warning is logged at startup.
 - **Shrinking the allowlist blocks existing webhooks.** Deliveries to a target that is no longer allowed fail with `Webhook URL resolves to a blocked address` and are recorded as failed deliveries.
@@ -1484,7 +1485,7 @@ BetterDB blocks private IP addresses to prevent SSRF attacks:
 - IPv6 private ranges
 
 **Allowed in development:**
-- `localhost` and `127.x.x.x` are allowed when `NODE_ENV !== 'production'`
+- `localhost` and `127.x.x.x` are allowed when `NODE_ENV !== 'production'` and no private-network allowlist is set
 
 **Solution:**
 - For a receiver on your own network (same Kubernetes cluster, VPC or Docker network), allow it with `WEBHOOK_ALLOWED_PRIVATE_CIDRS` or `WEBHOOK_ALLOWED_PRIVATE_HOSTS`; see [Receivers on a Private Network](#receivers-on-a-private-network)

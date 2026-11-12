@@ -396,8 +396,35 @@ describe('outbound url guard', () => {
       expect(() => assertConnectableIpLiteral('http://10.245.0.1/hook', options)).toThrow(BlockedAddressError);
       expect(() => assertConnectableIpLiteral('http://[::ffff:169.254.169.254]/', options)).toThrow(BlockedAddressError);
       expect(() => assertConnectableIpLiteral('http://127.0.0.1:3001/', options)).toThrow(BlockedAddressError);
+    });
+
+    it('holds loopback to the policy outside production too', async () => {
       process.env.NODE_ENV = 'development';
-      expect(() => assertConnectableIpLiteral('http://127.0.0.1:3001/', options)).not.toThrow();
+      const hostsOnly = webhook('', '*.svc.cluster.local');
+      for (const url of ['http://127.0.0.1:3001/', 'http://[::1]:3001/', 'http://0.0.0.0:3001/', 'http://localhost:3001/']) {
+        await expect(assertSafeOutboundUrl(url, hostsOnly)).rejects.toBeInstanceOf(BadRequestException);
+      }
+      await expect(assertSafeOutboundUrl('http://localhost:3001/', hostsOnly)).rejects.toThrow('Cannot use localhost or 0.0.0.0 as webhook URL');
+      await expect(assertSafeOutboundUrl('http://localhost:3001/', hostsOnly)).rejects.not.toThrow('in production');
+      expect(() => assertConnectableIpLiteral('http://127.0.0.1:3001/', hostsOnly)).toThrow(BlockedAddressError);
+      resolveTo('127.0.0.1');
+      expect((await run(guardedLookup(hostsOnly), 'r.ns.svc.cluster.local')).error).toBeInstanceOf(BlockedAddressError);
+      expect((await run(guardedLookup(hostsOnly), 'localhost')).error).toBeInstanceOf(BlockedAddressError);
+
+      const withLoopback = webhook('127.0.0.0/8');
+      await expect(assertSafeOutboundUrl('http://127.0.0.1:3001/', withLoopback)).resolves.toBeInstanceOf(URL);
+      expect(() => assertConnectableIpLiteral('http://127.0.0.1:3001/', withLoopback)).not.toThrow();
+      expect((await run(guardedLookup(withLoopback), 'relay.internal')).address).toBe('127.0.0.1');
+    });
+
+    it('keeps the development loopback exception when no policy is configured', async () => {
+      process.env.NODE_ENV = 'development';
+      const none = { label: 'webhook URL' };
+      await expect(assertSafeOutboundUrl('http://127.0.0.1:3001/', none)).resolves.toBeInstanceOf(URL);
+      await expect(assertSafeOutboundUrl('http://localhost:3001/', none)).resolves.toBeInstanceOf(URL);
+      expect(() => assertConnectableIpLiteral('http://127.0.0.1:3001/', none)).not.toThrow();
+      resolveTo('127.0.0.1');
+      expect((await run(guardedLookup(none), 'localhost')).address).toBe('127.0.0.1');
     });
 
     it.each(['0.0.0.0/0', '169.254.0.0/16', '169.254.169.254/32', '100.64.0.0/10', '192.0.0.0/24', '::/0', 'fe80::/64', 'fd00::/8', '::ffff:169.254.0.0/112'])(

@@ -1100,6 +1100,17 @@ describe('WebhookDispatcherService', () => {
         await expect(service.testWebhook(hook('http://10.245.0.1/ok'))).resolves.toMatchObject({ success: false, error: blocked });
       });
 
+      it('holds loopback to the allowlist outside production too', async () => {
+        process.env.NODE_ENV = 'test';
+        process.env.WEBHOOK_ALLOWED_PRIVATE_HOSTS = '*.svc.cluster.local';
+        await expect(service.testWebhook(hook(`http://127.0.0.1:${port}/ok`))).resolves.toMatchObject({ success: false, error: blocked });
+        resolveTo('127.0.0.1');
+        await expect(service.testWebhook(hook(`http://localhost:${port}/ok`))).resolves.toMatchObject({ success: false, error: blocked });
+        expect(hits['/ok']).toBeUndefined();
+        process.env.WEBHOOK_ALLOWED_PRIVATE_CIDRS = '127.0.0.0/8';
+        await expect(service.testWebhook(hook(`http://127.0.0.1:${port}/ok`))).resolves.toMatchObject({ success: true, statusCode: 200 });
+      });
+
       it('blocks a stored private IP literal once the allowlist is removed', async () => {
         await expect(service.sendWebhook(hook('http://10.244.1.7/ok'), 'd1', payload)).resolves.toBe(DeliveryStatus.FAILED);
         expect(storageClient.updateDelivery).toHaveBeenLastCalledWith('d1', expect.objectContaining({ status: DeliveryStatus.FAILED, responseBody: blocked }));
