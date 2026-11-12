@@ -488,6 +488,20 @@ describe('DivergenceTracker', () => {
     expect(confirmedSlots(21000)).toEqual([[[0, 300], [500, 600]]]);
   });
 
+  it('holds a slot that joins a dispute back for the minimum age of the kind as well', () => {
+    const tracker = new DivergenceTracker();
+    const rule = { minRounds: 3, minAgeMs: { slot_owner: 60_000 } };
+
+    tracker.observe(round(0, [slots([[0, 100]])]));
+    tracker.observe(round(50_000, [slots([[0, 200]])]));
+    tracker.observe(round(55_000, [slots([[0, 200]])]));
+    tracker.observe(round(60_000, [slots([[0, 200]])]));
+    expect(confirmedDisagreements(tracker.tracked(), 60_000, rule)).toMatchObject([{ slots: [[0, 100]] }]);
+
+    tracker.observe(round(110_000, [slots([[0, 200]])]));
+    expect(confirmedDisagreements(tracker.tracked(), 110_000, rule)).toMatchObject([{ slots: [[0, 200]] }]);
+  });
+
   it('confirms only the slots that stayed in dispute for the required rounds', () => {
     const tracker = new DivergenceTracker();
 
