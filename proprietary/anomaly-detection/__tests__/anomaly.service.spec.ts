@@ -24,6 +24,8 @@ import { ConnectionRegistry } from '@app/connections/connection-registry.service
 import { ConnectionContext } from '@app/common/services/multi-connection-poller';
 import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import { ClusterNode, SentinelNodeInfo } from '@app/common/types/metrics.types';
+import type { NodeSlotStats } from '@app/cluster/shard-load';
+import { ShardLoadService } from '@app/cluster/shard-load.service';
 import { nodeAclDigest, clusterKeyFromNodes } from '../acl-drift-detector';
 import { RETRY_AMP_LATENCY_VERDICT_TTL_MS } from '../retry-amplification-detector';
 import { NODE_ATTRIBUTION_UNAVAILABLE } from '../retry-amplification-attribution';
@@ -1737,6 +1739,560 @@ describe('AnomalyService', () => {
   });
 
   // ─── Cluster State Webhook Dispatch ──────────────────────────────────────
+
+  describe('hot shard', () => {
+    const BASE = 1_700_000_000_000;
+    const IDS = ['a0000000', 'b0000000', 'c0000000'];
+    const ADDRS = ['10.0.0.1:6379', '10.0.0.2:6379', '10.0.0.3:6379'];
+    const STEP_MS = 15_000;
+    const HOT = [900_000, 100_000, 100_000];
+    const EVEN = [300_000, 310_000, 290_000];
+    const FLAT = [100_000, 100_000, 100_000];
+    let clock: number;
+    let shardLoad: ShardLoadService;
+    let counters: Map<number, number>;
+    let bytesOut: Map<number, number>;
+    let owners: number[][];
+    let migrating: boolean;
+    let ctx: ConnectionContext;
+
+    function clusterNodes() {
+      return IDS.map((id, i) => ({
+        id,
+        address: `${ADDRS[i]}@16379`,
+        flags: i === 0 ? ['myself', 'master'] : ['master'],
+        master: '-',
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 1,
+        linkState: 'connected',
+        slots: [],
+        migratingSlots: i === 0 && migrating ? [{ slot: 1, targetNodeId: IDS[1] }] : [],
+      }));
+    }
+
+    function reading(): NodeSlotStats[] {
+      return owners.map((slots, shard) => ({
+        nodeId: IDS[shard],
+        address: ADDRS[shard],
+        stats: Object.fromEntries(
+          slots.map((slot) => [
+            slot,
+            {
+              key_count: 10,
+              cpu_usec: counters.get(slot) ?? 0,
+              network_bytes_in: 0,
+              network_bytes_out: bytesOut.get(slot) ?? 0,
+            },
+          ]),
+        ),
+      }));
+    }
+
+    async function step(cpuPerSecond: number[], times = 1): Promise<void> {
+      for (let n = 0; n < times; n += 1) {
+        clock += STEP_MS;
+        cpuPerSecond.forEach((rate, shard) => {
+          const slots = owners[shard];
+          slots.forEach((slot, i) => {
+            const part = slots.length === 1 ? 1 : i === 0 ? 0.75 : 0.25 / (slots.length - 1);
+            counters.set(slot, (counters.get(slot) ?? 0) + (rate * part * STEP_MS) / 1000);
+          });
+        });
+        shardLoad.record('conn-a', reading(), clock);
+        await poll(ctx);
+      }
+    }
+
+    async function idle(ms: number): Promise<void> {
+      clock += ms;
+      await poll(ctx);
+    }
+
+    const hotEvents = () =>
+      service.getRecentEvents().filter((e) => e.metricType === MetricType.HOT_SHARD);
+
+    beforeEach(() => {
+      clock = BASE;
+      jest.spyOn(Date, 'now').mockImplementation(() => clock);
+      storage.getLatencyStatsHistory = jest.fn().mockResolvedValue([]);
+      shardLoad = new ShardLoadService();
+      (service as any).shardLoad = shardLoad;
+      counters = new Map();
+      bytesOut = new Map();
+      owners = [
+        [0, 1],
+        [10, 11],
+        [20, 21],
+      ];
+      migrating = false;
+      const info = {
+        server: { redis_version: '8.0.0' },
+        replication: { role: 'master' },
+        clients: { connected_clients: '10', blocked_clients: '0' },
+        memory: { used_memory: '1000000' },
+        stats: { instantaneous_ops_per_sec: '6000', cluster_enabled: '1' },
+      };
+      ctx = {
+        ...mockCtx,
+        connectionId: 'conn-a',
+        connectionName: 'cluster',
+        client: {
+          ...dbClient,
+          getInfoParsed: jest.fn().mockResolvedValue(info),
+          getClusterInfo: jest.fn().mockResolvedValue({ cluster_state: 'ok' }),
+          getClusterNodes: jest.fn().mockImplementation(async () => clusterNodes()),
+        },
+      } as unknown as ConnectionContext;
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it('raises one event for a shard that stays hot for a minute', async () => {
+      await step(HOT, 5);
+
+      expect(hotEvents()).toEqual([]);
+
+      await step(HOT);
+      await idle(1_000);
+      await step(HOT, 3);
+
+      expect(hotEvents()).toHaveLength(1);
+      expect(hotEvents()[0]).toMatchObject({
+        metricType: MetricType.HOT_SHARD,
+        severity: AnomalySeverity.WARNING,
+        connectionId: 'conn-a',
+        dedupeKey: 'hot_shard:a0000000',
+        value: 9,
+        threshold: 2,
+        resolved: false,
+        message:
+          "Hot shard a0000000 at 10.0.0.1:6379: CPU 9.0x the cluster median (82% of the cluster's slot CPU) for 60s. " +
+          'Top slots by CPU: 0 (75% of the shard), 1 (25%).',
+      });
+      expect(hotEvents()[0].nodeAddr).toBeUndefined();
+    });
+
+    it('stamps the address of a hot primary that is not the node the connection points at', async () => {
+      await step([100_000, 900_000, 100_000], 6);
+
+      expect(hotEvents()).toHaveLength(1);
+      expect(hotEvents()[0]).toMatchObject({
+        nodeAddr: ADDRS[1],
+        dedupeKey: 'hot_shard:b0000000',
+      });
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledWith(
+        expect.objectContaining({
+          dedupeKey: 'hot_shard:b0000000',
+          sourceHost: '10.0.0.2',
+          sourcePort: 6379,
+        }),
+      );
+    });
+
+    it('raises nothing for an evenly loaded cluster', async () => {
+      await step(EVEN, 12);
+
+      expect(hotEvents()).toEqual([]);
+      expect(service.getHotShards('conn-a')).toEqual([]);
+    });
+
+    it('raises nothing for a shard that sends far more bytes than the others on even CPU', async () => {
+      for (let n = 0; n < 12; n += 1) {
+        bytesOut.set(0, (bytesOut.get(0) ?? 0) + (64 * 1024 * 1024 * STEP_MS) / 1000);
+        await step(EVEN);
+      }
+
+      expect(shardLoad.getLatest('conn-a')?.shards[0]).toMatchObject({
+        networkBytesOutPerSecond: 64 * 1024 * 1024,
+        networkShare: 1,
+      });
+      expect(hotEvents()).toEqual([]);
+      expect(service.getHotShards('conn-a')).toEqual([]);
+    });
+
+    it('flags one loaded shard in an otherwise idle cluster with a finite value', async () => {
+      await step([900_000, 0, 0], 6);
+
+      expect(hotEvents()).toHaveLength(1);
+      expect(hotEvents()[0].value).toBe(18);
+      expect(hotEvents()[0].message).toContain(
+        'CPU 0.90 cores against a near-idle cluster median',
+      );
+      expect(JSON.stringify(service.getHotShards('conn-a'))).not.toMatch(/null|NaN|Infinity/);
+    });
+
+    it('reports the open hot shards with their load and top slots', async () => {
+      await step(HOT, 6);
+
+      expect(service.getHotShards('conn-a')).toEqual([
+        {
+          shardId: 'a0000000',
+          nodeAddr: ADDRS[0],
+          slotCount: 2,
+          since: BASE + 2 * STEP_MS,
+          sampledAt: BASE + 6 * STEP_MS,
+          cpu: { perSecond: 900_000, share: expect.closeTo(9 / 11), median: 100_000, ratio: 9 },
+          network: { perSecond: 0, share: 0, median: 0 },
+          topSlots: [
+            {
+              slot: 0,
+              cpuUsecPerSecond: 675_000,
+              networkBytesPerSecond: 0,
+              keyCount: 10,
+              shareOfShard: 0.75,
+            },
+            {
+              slot: 1,
+              cpuUsecPerSecond: 225_000,
+              networkBytesPerSecond: 0,
+              keyCount: 10,
+              shareOfShard: 0.25,
+            },
+          ],
+        },
+      ]);
+      expect(service.getHotShards('conn-other')).toEqual([]);
+    });
+
+    it('keeps the event open between the release and the raise factor, then resolves it', async () => {
+      await step(HOT, 6);
+      await step([170_000, 100_000, 100_000], 25);
+
+      expect(hotEvents()).toHaveLength(1);
+      expect(hotEvents()[0].resolved).toBe(false);
+      expect(service.getHotShards('conn-a')[0].cpu.ratio).toBeCloseTo(1.7, 2);
+
+      await step([140_000, 100_000, 100_000], 25);
+
+      expect(hotEvents()[0].resolved).toBe(true);
+      expect(service.getHotShards('conn-a')).toEqual([]);
+    });
+
+    it('starts the minute over after a slot changes owner', async () => {
+      await step(HOT, 4);
+      owners = [[0, 1], [10], [20, 21, 11]];
+      await step(HOT, 3);
+      await step(HOT, 4);
+
+      expect(hotEvents()).toEqual([]);
+
+      await step(HOT);
+
+      expect(hotEvents()).toHaveLength(1);
+    });
+
+    it('keeps an open event through a sample that is still settling', async () => {
+      await step(HOT, 6);
+      for (const slot of owners[0]) counters.set(slot, 0);
+      await step(FLAT);
+
+      expect(hotEvents()[0].resolved).toBe(false);
+
+      await step(FLAT);
+
+      expect(hotEvents()[0].resolved).toBe(true);
+    });
+
+    it('holds back while a reshard is in progress', async () => {
+      migrating = true;
+      await step(HOT, 8);
+
+      expect(hotEvents()).toEqual([]);
+
+      migrating = false;
+      await step(HOT, 4);
+
+      expect(hotEvents()).toEqual([]);
+
+      await step(HOT);
+
+      expect(hotEvents()).toHaveLength(1);
+    });
+
+    it('keeps an open event through a reshard', async () => {
+      await step(HOT, 6);
+      migrating = true;
+      await step(EVEN, 12);
+
+      expect(hotEvents()[0].resolved).toBe(false);
+
+      migrating = false;
+      await step(EVEN);
+
+      expect(hotEvents()[0].resolved).toBe(true);
+    });
+
+    it('waits out an atomic slot migration, asking only when it is about to raise', async () => {
+      const checkSlotMigrations = jest
+        .fn()
+        .mockResolvedValue({ migrations: [{ slot: 5 }], complete: true });
+      (service as any).clusterMetrics = { checkSlotMigrations };
+      await step(HOT, 5);
+
+      expect(checkSlotMigrations).not.toHaveBeenCalled();
+
+      await step(HOT);
+
+      expect(checkSlotMigrations).toHaveBeenCalledTimes(1);
+      expect(checkSlotMigrations).toHaveBeenCalledWith('conn-a');
+      expect(hotEvents()).toEqual([]);
+
+      checkSlotMigrations.mockResolvedValue({ migrations: [], complete: true });
+      await step(HOT, 4);
+
+      expect(hotEvents()).toEqual([]);
+
+      await step(HOT);
+
+      expect(hotEvents()).toHaveLength(1);
+      expect(checkSlotMigrations).toHaveBeenCalledTimes(2);
+    });
+
+    it('holds a new event back while it cannot tell whether a slot is migrating', async () => {
+      const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: false });
+      (service as any).clusterMetrics = { checkSlotMigrations };
+
+      await step(HOT, 12);
+
+      expect(hotEvents()).toEqual([]);
+      expect(checkSlotMigrations).toHaveBeenCalledTimes(2);
+
+      checkSlotMigrations.mockResolvedValue({ migrations: [], complete: true });
+      await step(HOT, 5);
+
+      expect(hotEvents()).toHaveLength(1);
+    });
+
+    it('keeps an open event while it cannot tell whether a slot is migrating', async () => {
+      const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: true });
+      (service as any).clusterMetrics = { checkSlotMigrations };
+      await step(HOT, 6);
+      checkSlotMigrations.mockResolvedValue({ migrations: [], complete: false });
+
+      await step(HOT, 8);
+
+      expect(hotEvents()).toHaveLength(1);
+      expect(hotEvents()[0].resolved).toBe(false);
+
+      await step(FLAT, 25);
+
+      expect(hotEvents()[0].resolved).toBe(true);
+    });
+
+    it('reports the top slots of the sample it judged, not of one that arrived while it waited', async () => {
+      const checkSlotMigrations = jest.fn().mockImplementation(async () => {
+        counters.set(1, (counters.get(1) ?? 0) + 90_000_000);
+        shardLoad.record('conn-a', reading(), clock + 5_000);
+        return { migrations: [], complete: true };
+      });
+      (service as any).clusterMetrics = { checkSlotMigrations };
+
+      await step(HOT, 6);
+
+      expect(checkSlotMigrations).toHaveBeenCalledTimes(1);
+      expect(shardLoad.getTopSlots('conn-a', IDS[0], 1)[0].slot).toBe(1);
+      expect(hotEvents()[0].message).toContain('Top slots by CPU: 0 (75% of the shard), 1 (25%).');
+      expect(service.getHotShards('conn-a')[0]).toMatchObject({
+        sampledAt: BASE + 6 * STEP_MS,
+        topSlots: [
+          { slot: 0, shareOfShard: 0.75 },
+          { slot: 1, shareOfShard: 0.25 },
+        ],
+      });
+    });
+
+    it('closes an open event after five minutes without a topology read', async () => {
+      await step(HOT, 6);
+      (ctx.client.getClusterNodes as jest.Mock).mockRejectedValue(new Error('CLUSTERDOWN'));
+      await idle(240_000);
+
+      expect(hotEvents()[0].resolved).toBe(false);
+
+      await idle(90_000);
+
+      expect(hotEvents()[0].resolved).toBe(true);
+      expect(service.getHotShards('conn-a')).toEqual([]);
+    });
+
+    it('judges the latest sample again once the topology can be read', async () => {
+      await step(HOT, 4);
+      (ctx.client.getClusterNodes as jest.Mock).mockRejectedValue(new Error('CLUSTERDOWN'));
+      await step(HOT, 4);
+
+      expect(hotEvents()).toEqual([]);
+
+      (ctx.client.getClusterNodes as jest.Mock).mockImplementation(async () => clusterNodes());
+      await idle(1_000);
+
+      expect(hotEvents()).toHaveLength(1);
+    });
+
+    it('closes an open event after five minutes without a shard load sample', async () => {
+      await step(HOT, 6);
+      await idle(240_000);
+
+      expect(hotEvents()[0].resolved).toBe(false);
+      expect(service.getHotShards('conn-a')).toHaveLength(1);
+
+      await idle(90_000);
+
+      expect(hotEvents()[0].resolved).toBe(true);
+      expect(service.getHotShards('conn-a')).toEqual([]);
+    });
+
+    it('closes an open event after five minutes of polls that fail at INFO', async () => {
+      await step(HOT, 6);
+      (ctx.client.getInfoParsed as jest.Mock).mockRejectedValue(new Error('INFO did not answer'));
+      const failedPoll = async (ms: number) => {
+        clock += ms;
+        await expect(poll(ctx)).rejects.toThrow('INFO did not answer');
+      };
+      await failedPoll(240_000);
+
+      expect(hotEvents()[0].resolved).toBe(false);
+      expect(service.getHotShards('conn-a')).toHaveLength(1);
+
+      await failedPoll(90_000);
+
+      expect(hotEvents()[0].resolved).toBe(true);
+      expect(service.getHotShards('conn-a')).toEqual([]);
+    });
+
+    it('asks about migrations before it replaces an event that was resolved by hand', async () => {
+      const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: true });
+      (service as any).clusterMetrics = { checkSlotMigrations };
+      await step(HOT, 6);
+      expect(await service.resolveAnomaly(hotEvents()[0].id)).toBe(true);
+      checkSlotMigrations.mockClear();
+      checkSlotMigrations.mockResolvedValue({ migrations: [{ slot: 5 }], complete: true });
+
+      await step(HOT);
+
+      expect(checkSlotMigrations).toHaveBeenCalledTimes(1);
+      expect(hotEvents()).toHaveLength(1);
+      expect(service.getHotShards('conn-a')).toEqual([]);
+
+      checkSlotMigrations.mockResolvedValue({ migrations: [], complete: true });
+      await step(HOT, 4);
+
+      expect(hotEvents()).toHaveLength(1);
+
+      await step(HOT);
+
+      expect(checkSlotMigrations).toHaveBeenCalledTimes(2);
+      expect(hotEvents()).toHaveLength(2);
+      expect(hotEvents().map((event) => event.resolved)).toEqual([false, true]);
+      expect(service.getHotShards('conn-a')).toHaveLength(1);
+    });
+
+    it('replaces an event resolved by hand at once when no slot is migrating', async () => {
+      await step(HOT, 6);
+      expect(await service.resolveAnomaly(hotEvents()[0].id)).toBe(true);
+
+      await step(HOT);
+
+      expect(hotEvents()).toHaveLength(2);
+      expect(hotEvents().map((event) => event.resolved)).toEqual([false, true]);
+    });
+
+    it('drops an event resolved by hand from the hot shard list at once', async () => {
+      await step(HOT, 6);
+      expect(service.getHotShards('conn-a')).toHaveLength(1);
+
+      expect(await service.resolveAnomaly(hotEvents()[0].id)).toBe(true);
+
+      expect(service.getHotShards('conn-a')).toEqual([]);
+    });
+
+    it('does not replace an event resolved by hand below the raise factor', async () => {
+      const warm = [170_000, 100_000, 100_000];
+      await step(HOT, 6);
+      await step(warm, 25);
+      expect(hotEvents()[0].resolved).toBe(false);
+      expect(await service.resolveAnomaly(hotEvents()[0].id)).toBe(true);
+
+      await step(warm, 2);
+
+      expect(hotEvents()).toHaveLength(1);
+      expect(service.getHotShards('conn-a')).toEqual([]);
+    });
+
+    it('raises nothing while the shard load is not measured', async () => {
+      for (let n = 0; n < 30; n += 1) await idle(STEP_MS);
+
+      expect(hotEvents()).toEqual([]);
+      expect(service.getHotShards('conn-a')).toEqual([]);
+    });
+
+    it('does not count a stalled sample again toward the minute', async () => {
+      await step(HOT, 3);
+      for (let n = 0; n < 12; n += 1) await idle(STEP_MS);
+
+      expect(hotEvents()).toEqual([]);
+    });
+
+    it('adopts its open event after a restart instead of raising a second one', async () => {
+      storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
+        metricType === MetricType.HOT_SHARD && !offset
+          ? [
+              {
+                id: 'stored-1',
+                metricType: MetricType.HOT_SHARD,
+                dedupeKey: 'hot_shard:a0000000',
+                nodeAddr: ADDRS[0],
+                timestamp: BASE - 120_000,
+                resolved: false,
+              },
+              {
+                id: 'stored-0',
+                metricType: MetricType.HOT_SHARD,
+                dedupeKey: 'hot_shard:a0000000',
+                nodeAddr: ADDRS[0],
+                timestamp: BASE - 900_000,
+                resolved: false,
+              },
+            ]
+          : [],
+      );
+      (service as any).connectionRegistry.getConfig.mockImplementation((id: string) => ({ id }));
+
+      await step(HOT, 8);
+
+      expect(hotEvents()).toEqual([]);
+      expect(service.getHotShards('conn-a')).toEqual([
+        expect.objectContaining({ shardId: 'a0000000', since: BASE - 120_000 }),
+      ]);
+      expect(storage.resolveAnomaly).not.toHaveBeenCalledWith('stored-1', expect.anything());
+      expect((service as any).persistenceOutbox.resolvedAt('stored-0')).toEqual(expect.any(Number));
+      expect((service as any).persistenceOutbox.resolvedAt('stored-1')).toBeUndefined();
+
+      await step(EVEN, 12);
+
+      expect(storage.resolveAnomaly).toHaveBeenCalledWith('stored-1', expect.any(Number));
+    });
+
+    it('forgets a removed connection', async () => {
+      await step(HOT, 6);
+
+      (service as any).onConnectionRemoved('conn-a');
+
+      expect(service.getHotShards('conn-a')).toEqual([]);
+      for (const state of [
+        'hotShardFirstSeen',
+        'activeHotShards',
+        'hotShardEventIds',
+        'hotShardSampleAt',
+        'hotShardJudgedAt',
+        'hotShardDetails',
+        'hotShardSince',
+      ]) {
+        expect((service as any)[state].has('conn-a')).toBe(false);
+      }
+    });
+  });
 
   describe('reshard pressure', () => {
     const BASE = 1_700_000_000_000;
@@ -13402,6 +13958,7 @@ describe('AnomalyService', () => {
           [
             MetricType.RAFT_HEALTH,
             MetricType.RESHARD_SHARD_SKEW,
+            MetricType.HOT_SHARD,
             MetricType.REPLICA_SLOT_STATE,
             MetricType.REPLICATION_DIVERGENCE,
             MetricType.BACKLOG_COVERAGE_RISK,

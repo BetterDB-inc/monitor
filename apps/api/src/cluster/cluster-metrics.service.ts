@@ -189,6 +189,11 @@ export interface SlotMigration {
   phase?: string;
 }
 
+export interface SlotMigrationCheck {
+  migrations: SlotMigration[];
+  complete: boolean;
+}
+
 const FINISHED_MIGRATION_STATES = new Set(['success', 'failed', 'cancelled']);
 
 /** One CLUSTER GETSLOTMIGRATIONS job; RESP2 delivers each map as a flat name/value array. */
@@ -553,8 +558,10 @@ export class ClusterMetricsService {
    *   other registered connection is one of the nodes its discovery lists.
    *   Nodes registered one by one each keep their own node's slots. A replica
    *   reports its primary's slots, so registering both counts that shard twice.
+   * Null when that discovery fails, so the caller does not take it for a
+   * change of mode.
    */
-  async usesClusterWideSlotStats(connectionId?: string): Promise<boolean> {
+  async usesClusterWideSlotStats(connectionId?: string): Promise<boolean | null> {
     const id = connectionId ?? this.connectionRegistry.getDefaultId() ?? undefined;
     if (!id) return true;
     if (this.connectionRegistry.getConfig(id)?.membership) return false;
@@ -565,7 +572,7 @@ export class ClusterMetricsService {
     try {
       nodes = await this.discoveryService.discoverNodes(id);
     } catch {
-      return false;
+      return null;
     }
     const registeredElsewhere = (host: string, port: number) => {
       const owner = this.connectionRegistry.findConfigByHostPort(host, port);
@@ -841,14 +848,22 @@ export class ClusterMetricsService {
    * CLUSTER GETSLOTMIGRATIONS on the source and target nodes.
    */
   async getSlotMigrations(connectionId?: string): Promise<SlotMigration[]> {
+    return (await this.checkSlotMigrations(connectionId)).migrations;
+  }
+
+  async checkSlotMigrations(connectionId?: string): Promise<SlotMigrationCheck> {
     let nodes: DiscoveredNode[];
     try {
-      nodes = await this.discoveryService.discoverNodes(connectionId);
+      nodes = await withTimeout(
+        this.discoveryService.discoverNodes(connectionId),
+        NODE_COMMAND_TIMEOUT_MS,
+        `Cluster discovery did not answer within ${NODE_COMMAND_TIMEOUT_MS}ms`,
+      );
     } catch (error) {
       this.logger.error(
         `Failed to check slot migrations: ${error instanceof Error ? error.message : error}`,
       );
-      return [];
+      return { migrations: [], complete: false };
     }
 
     const findNode = (idOrPrefix: string) =>
@@ -871,26 +886,26 @@ export class ClusterMetricsService {
         const [nodeId, address] = parts;
         for (const slotRange of parts.slice(8)) {
           const migrating = slotRange.match(/\[(\d+)->-([a-f0-9]+)\]/i);
-          const target = migrating && findNode(migrating[2]);
-          if (migrating && target) {
+          if (migrating) {
+            const target = findNode(migrating[2]);
             addLegacy({
               slot: parseInt(migrating[1], 10),
               sourceNodeId: nodeId,
               sourceAddress: address,
-              targetNodeId: target.id,
-              targetAddress: target.address,
+              targetNodeId: target?.id ?? migrating[2],
+              targetAddress: target?.address ?? '',
               state: 'migrating',
               keysRemaining: undefined, // Can't get this without node connection
             });
           }
 
           const importing = slotRange.match(/\[(\d+)-<-([a-f0-9]+)\]/i);
-          const source = importing && findNode(importing[2]);
-          if (importing && source) {
+          if (importing) {
+            const source = findNode(importing[2]);
             addLegacy({
               slot: parseInt(importing[1], 10),
-              sourceNodeId: source.id,
-              sourceAddress: source.address,
+              sourceNodeId: source?.id ?? importing[2],
+              sourceAddress: source?.address ?? '',
               targetNodeId: nodeId,
               targetAddress: address,
               state: 'importing',
@@ -900,12 +915,14 @@ export class ClusterMetricsService {
       }
     };
     let nodesRead = 0;
+    let complete = true;
 
     const readNode = async (primary: DiscoveredNode, client: Valkey): Promise<void> => {
       try {
         addLegacyMarkers((await client.call('CLUSTER', 'NODES')) as string);
         nodesRead++;
       } catch (error) {
+        complete = false;
         this.logger.debug(`CLUSTER NODES failed on ${primary.address}: ${error}`);
       }
 
@@ -916,7 +933,9 @@ export class ClusterMetricsService {
         const message = error instanceof Error ? error.message : String(error);
         // Before Valkey 9 the subcommand does not exist; anything else is worth a line.
         const errorKey = `getslotmigrations-${primary.id}-${message}`;
-        if (!/unknown (sub)?command/i.test(message) && !this.loggedErrors.has(errorKey)) {
+        const unsupported = /unknown (sub)?command/i.test(message);
+        if (!unsupported) complete = false;
+        if (!unsupported && !this.loggedErrors.has(errorKey)) {
           this.addLoggedError(errorKey);
           this.logger.warn(`CLUSTER GETSLOTMIGRATIONS failed on ${primary.address}: ${message}`);
         }
@@ -943,10 +962,13 @@ export class ClusterMetricsService {
     };
 
     // A new primary has no slots until its first import lands, so include every primary.
-    const primaries = nodes.filter((node) => node.role === 'master' && node.healthy);
+    const masters = nodes.filter((node) => node.role === 'master');
+    const primaries = masters.filter((node) => node.healthy);
+    if (masters.some((node) => !node.healthy && node.slots.length > 0)) complete = false;
     await Promise.all(
       primaries.map((primary) =>
         this.onNode(primary, connectionId, NODE_COMMAND_TIMEOUT_MS, (client) => readNode(primary, client)).catch((error) => {
+          complete = false;
           this.logger.debug(`Slot migration check skipped ${primary.address}: ${error}`);
         }),
       ),
@@ -955,6 +977,7 @@ export class ClusterMetricsService {
     // No primary could be read directly, as behind an SSH tunnel or NAT: the
     // connection's own node still shows its own markers and migration jobs.
     if (primaries.length > 0 && nodesRead === 0) {
+      complete = false;
       const errorKey = `slotmigrations-${connectionId ?? ''}`;
       if (!this.loggedErrors.has(errorKey)) {
         this.logger.warn(
@@ -966,12 +989,15 @@ export class ClusterMetricsService {
       // (GETSLOTMIGRATIONS) show up as well as legacy markers.
       const self = nodes.find((node) => node.flags.includes('myself')) ?? primaries[0];
       try {
-        // The connection's own client is shared, so a reply that never comes
-        // is left queued on it rather than disconnecting it; only the wait ends.
-        await withTimeout(
-          readNode(self, this.connectionRegistry.get(connectionId).getClient()),
+        await this.discoveryService.onIsolatedClient(
+          connectionId,
           NODE_COMMAND_TIMEOUT_MS,
-          `The connection did not answer the slot migration check within ${NODE_COMMAND_TIMEOUT_MS}ms`,
+          (client) =>
+            withTimeout(
+              readNode(self, client),
+              NODE_COMMAND_TIMEOUT_MS,
+              `The connection did not answer the slot migration check within ${NODE_COMMAND_TIMEOUT_MS}ms`,
+            ),
         );
       } catch (error) {
         this.logger.error(
@@ -982,7 +1008,7 @@ export class ClusterMetricsService {
       this.loggedErrors.delete(`slotmigrations-${connectionId ?? ''}`);
     }
 
-    return [...legacy.values(), ...atomicJobs.values()];
+    return { migrations: [...legacy.values(), ...atomicJobs.values()], complete };
   }
 
   private async getKeysInSlot(client: Valkey, slot: number): Promise<number | undefined> {

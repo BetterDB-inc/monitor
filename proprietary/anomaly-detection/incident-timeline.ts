@@ -138,6 +138,7 @@ export const POINT_IN_TIME_QUIET_MS =
 export const RESOLVER_BACKED_METRICS: ReadonlySet<MetricType> = new Set([
   MetricType.RAFT_HEALTH,
   MetricType.RESHARD_SHARD_SKEW,
+  MetricType.HOT_SHARD,
   MetricType.REPLICA_SLOT_STATE,
   MetricType.REPLICATION_DIVERGENCE,
   MetricType.BACKLOG_COVERAGE_RISK,

@@ -120,7 +120,7 @@ The migration analysis report on the source. Add the key sampling rules too.
 | `ROLE` | Role lookups, key analytics node selection on clusters | Key analytics can't pick which nodes to scan |
 | `CLUSTER INFO`, `NODES`, `SHARDS`, `MYID` | Cluster page, node discovery, auto-registration, anomaly detection | Cluster views and per-node metrics are missing |
 | `CLUSTER SLOT-STATS` | Slot stats page, hot-slot and orphaned-key detection | Slot stats show as unavailable |
-| `CLUSTER GETSLOTMIGRATIONS` | Slot migration progress for atomic slot migrations (Valkey 9.0+) | Atomic migrations don't show; `MIGRATING`/`IMPORTING` moves still do |
+| `CLUSTER GETSLOTMIGRATIONS` | Slot migration progress for atomic slot migrations (Valkey 9.0+) | Atomic migrations don't show; `MIGRATING`/`IMPORTING` moves still do. On Valkey 9.0+ no new `hot_shard` anomaly is raised, because the monitor cannot rule out a migration |
 | `COMMAND INFO` | Classifying commands in cluster node stats, checking whether the server supports `MONITOR` | Node stats can't classify unfamiliar commands |
 | `DBSIZE`, `LASTSAVE`, `TIME` | Key counts, persistence checks, config hazard checks | Those values are empty |
 | `MODULE LIST` | CVE scan of loaded modules | Module CVEs aren't checked |
