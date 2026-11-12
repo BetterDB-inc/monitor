@@ -58,12 +58,13 @@ function SessionPage() {
 }
 
 interface Served {
-  events?: unknown[];
+  events?: unknown[] | Error;
   hotShards?: HotShardDetail[] | Error;
 }
 
 function serve({ events = [EVENT], hotShards = [hotShard()] }: Served = {}): void {
-  getAnomalyEvents.mockResolvedValue(events);
+  if (events instanceof Error) getAnomalyEvents.mockRejectedValue(events);
+  else getAnomalyEvents.mockResolvedValue(events);
   if (hotShards instanceof Error) getHotShards.mockRejectedValue(hotShards);
   else getHotShards.mockResolvedValue(hotShards);
 }
@@ -181,6 +182,35 @@ describe('HotShardCaptureNotice', () => {
     await act(async () => undefined);
 
     expect(screen.queryByRole('button', { name: ACTION })).not.toBeInTheDocument();
+  });
+
+  it.each<[string, Served]>([
+    ['the open events', { events: new Error('boom') }],
+    ['the hot shard list', { hotShards: new Error('boom') }],
+  ])('stops offering a capture when a later read of %s fails', async (_case, served) => {
+    const update = renderNotice();
+    await screen.findByRole('button', { name: ACTION });
+
+    await update(served);
+
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: ACTION })).not.toBeInTheDocument(),
+    );
+  });
+
+  it('offers a capture only for a shard whose own event is open', async () => {
+    serve({
+      events: [{ ...EVENT, id: 'evt-2' }],
+      hotShards: [
+        hotShard(),
+        hotShard({ eventId: 'evt-2', shardId: 'b0000000', nodeAddr: '10.0.0.2:6379' }),
+      ],
+    });
+    renderNotice();
+
+    expect(await screen.findByText(/Hot shard b0000000/)).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: ACTION })).toHaveLength(1);
+    expect(screen.queryByText(/Hot shard a0000000/)).not.toBeInTheDocument();
   });
 
   it('asks nothing and offers nothing when no connection is selected', async () => {

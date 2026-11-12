@@ -31,23 +31,28 @@ export function HotShardCaptureNotice({ connectionId }: Props) {
     wasOpen.current = open;
   }, [open]);
 
-  const { data: openEvents } = usePolling({
+  const { data: openEvents, error: eventsError } = usePolling({
     fetcher: () => metricsApi.getAnomalyEvents({ metricType: 'hot_shard', activeOnly: true }),
     interval: OPEN_EVENTS_POLL_MS,
     enabled: !!connectionId,
     refetchKey: connectionId,
   });
-  const hotShardOpen = !!openEvents?.some(
-    (event) => event.metricType === 'hot_shard' && !event.resolved,
+  const openIds = new Set(
+    (openEvents ?? [])
+      .filter((event) => event.metricType === 'hot_shard' && !event.resolved)
+      .map((event) => event.id),
   );
-  const { data: hotShards } = usePolling<HotShardDetail[]>({
+  const hotShardOpen = openIds.size > 0;
+  const { data: hotShards, error: hotShardsError } = usePolling<HotShardDetail[]>({
     fetcher: () => metricsApi.getHotShards(),
     interval: HOT_SHARDS_POLL_MS,
     enabled: hotShardOpen && !!connectionId,
     refetchKey: connectionId,
   });
   const offered =
-    connectionId && hotShardOpen ? (hotShards ?? []).filter((shard) => shard.captureAvailable) : [];
+    connectionId && !eventsError && !hotShardsError
+      ? (hotShards ?? []).filter((shard) => shard.captureAvailable && openIds.has(shard.eventId))
+      : [];
 
   return (
     <>
