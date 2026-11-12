@@ -336,6 +336,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private commandlogLargeRequestByPattern: Gauge;
   private commandlogLargeReplyByPattern: Gauge;
 
+  private logCaptureLostEntries: Gauge;
+
   // Standard INFO Metrics - Server
   private uptimeInSeconds: Gauge;
   private instanceInfo: Gauge;
@@ -923,6 +925,12 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       'commandlog_large_reply_by_pattern',
       'Large reply count by command pattern',
       ['pattern'],
+    );
+
+    this.logCaptureLostEntries = this.createGauge(
+      'log_capture_lost_entries_total',
+      'Slow log and command log entries the server dropped before BetterDB read them, since BetterDB started',
+      ['log'],
     );
 
     // Standard INFO - Server (per connection)
@@ -3199,6 +3207,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     state: ConnectionMetricState,
   ): Promise<void> {
     try {
+      this.exportLostLogEntries(connLabel, this.slowLogAnalytics.getLostEntries(connectionId));
+
       const analysis = this.slowLogAnalytics.getCachedAnalysis(connectionId);
 
       if (!analysis) {
@@ -3229,6 +3239,12 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
   }
 
+  private exportLostLogEntries(connLabel: string, lost: ReadonlyMap<string, number>): void {
+    for (const [log, count] of lost) {
+      this.logCaptureLostEntries.labels(connLabel, log).set(count);
+    }
+  }
+
   private async updateCommandlogMetrics(
     connectionId: string,
     connLabel: string,
@@ -3238,6 +3254,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       if (!this.commandLogAnalytics.hasCommandLogSupport(connectionId)) {
         return;
       }
+
+      this.exportLostLogEntries(connLabel, this.commandLogAnalytics.getLostEntries(connectionId));
 
       const newRequestPatternLabels = new Set<string>();
       const newReplyPatternLabels = new Set<string>();
