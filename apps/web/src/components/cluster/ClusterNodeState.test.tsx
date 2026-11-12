@@ -115,8 +115,10 @@ describe('graphNodeStatus', () => {
     [['master'], 'connected', ''],
     [['master', 'fail?'], 'connected', 'State: suspect\n'],
     [['master', 'fail?'], 'disconnected', 'State: suspect\nLink: disconnected\n'],
-    [['master', 'fail'], 'disconnected', 'State: unhealthy\nLink: disconnected\n'],
-    [['master'], 'disconnected', 'State: unhealthy\nLink: disconnected\n'],
+    [['master', 'handshake'], 'connected', 'State: suspect\n'],
+    [['master', 'fail'], 'connected', 'State: failed\n'],
+    [['master', 'fail'], 'disconnected', 'State: failed\nLink: disconnected\n'],
+    [['master'], 'disconnected', 'Link: disconnected\n'],
   ])('describes flags %j on a %s link as %j', (flags, linkState, expected) => {
     expect(graphNodeStatus({ flags, linkState })).toBe(expected);
   });

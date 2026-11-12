@@ -13,8 +13,8 @@ export function graphNodeHealth(node: NodeHealthInput): GraphNodeHealth {
 }
 
 export function graphNodeStatus(node: NodeHealthInput): string {
-  const health = graphNodeHealth(node);
-  const state = health === 'healthy' ? '' : `State: ${health}\n`;
+  const nodeState = clusterNodeState(node.flags);
+  const state = nodeState === 'healthy' ? '' : `State: ${nodeState}\n`;
   const link = node.linkState === 'connected' ? '' : `Link: ${node.linkState}\n`;
   return state + link;
 }
