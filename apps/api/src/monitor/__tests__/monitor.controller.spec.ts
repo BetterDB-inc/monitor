@@ -213,26 +213,26 @@ describe('MonitorController', () => {
 
     it('returns descriptor list with isCluster:true when nodes exist', async () => {
       clusterDiscovery.discoverNodes.mockResolvedValueOnce([
-        { id: 'a', address: 'h1:6379', role: 'master', slots: [[0, 5460]], state: 'healthy' },
-        { id: 'b', address: 'h2:6379', role: 'replica', masterId: 'a', slots: [], state: 'healthy' },
+        { id: 'a', address: 'h1:6379', role: 'master', slots: [[0, 5460]], state: 'healthy', healthy: true },
+        { id: 'b', address: 'h2:6379', role: 'replica', masterId: 'a', slots: [], state: 'healthy', healthy: true },
       ]);
       const result = await controller.listConnectionNodes('conn-1');
       expect(result.isCluster).toBe(true);
       expect(result.nodes).toEqual([
-        { id: 'a', address: 'h1:6379', role: 'master', state: 'healthy' },
-        { id: 'b', address: 'h2:6379', role: 'replica', state: 'healthy' },
+        { id: 'a', address: 'h1:6379', role: 'master', state: 'healthy', healthy: true },
+        { id: 'b', address: 'h2:6379', role: 'replica', state: 'healthy', healthy: true },
       ]);
     });
 
     it('reports the state of a node its peers suspect or agreed has failed', async () => {
       clusterDiscovery.discoverNodes.mockResolvedValueOnce([
-        { id: 'a', address: 'h1:6379', role: 'master', slots: [[0, 5460]], state: 'suspect' },
-        { id: 'b', address: 'h2:6379', role: 'master', slots: [[5461, 10922]], state: 'failed' },
+        { id: 'a', address: 'h1:6379', role: 'master', slots: [[0, 5460]], state: 'suspect', healthy: false },
+        { id: 'b', address: 'h2:6379', role: 'master', slots: [[5461, 10922]], state: 'failed', healthy: false },
       ]);
       const result = await controller.listConnectionNodes('conn-1');
       expect(result.nodes).toEqual([
-        { id: 'a', address: 'h1:6379', role: 'master', state: 'suspect' },
-        { id: 'b', address: 'h2:6379', role: 'master', state: 'failed' },
+        { id: 'a', address: 'h1:6379', role: 'master', state: 'suspect', healthy: false },
+        { id: 'b', address: 'h2:6379', role: 'master', state: 'failed', healthy: false },
       ]);
     });
 

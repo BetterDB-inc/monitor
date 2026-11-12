@@ -17,6 +17,7 @@ export interface DiscoveredNode {
   slots: number[][];
   configEpoch: number;
   state: ClusterNodeState;
+  healthy: boolean;
   flags: string[];
   hostname?: string;
   availabilityZone?: string;
@@ -193,6 +194,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     const discovered: DiscoveredNode[] = [];
 
     for (const node of clusterNodes) {
+      const state = clusterNodeState(node.flags);
       const isMaster = node.flags.includes('master');
       const isReplica = node.flags.includes('slave') || node.flags.includes('replica');
 
@@ -209,7 +211,8 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         configEpoch: node.configEpoch,
         // The link state is the answering node's own cluster-bus link to this
         // one, not whether Monitor can reach it, so only the flags count.
-        state: clusterNodeState(node.flags),
+        state,
+        healthy: state === 'healthy',
         flags: node.flags,
         ...(node.hostname ? { hostname: node.hostname } : {}),
         ...(node.availabilityZone ? { availabilityZone: node.availabilityZone } : {}),
@@ -282,6 +285,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       slots: [],
       configEpoch: 0,
       state: 'healthy',
+      healthy: true,
       flags: [],
     };
     return this.openNodeClient(key, node, host, port, connectionId, {
@@ -307,6 +311,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       slots: [],
       configEpoch: 0,
       state: 'healthy',
+      healthy: true,
       flags: [],
       hostname,
     };

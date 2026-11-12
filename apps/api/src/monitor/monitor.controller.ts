@@ -78,6 +78,7 @@ export interface MonitorNodeDescriptor {
   address: string;
   role: 'master' | 'replica';
   state: ClusterNodeState;
+  healthy: boolean;
 }
 
 export interface MonitorNodesResponse {
@@ -186,6 +187,7 @@ export class MonitorController {
           address: n.address,
           role: n.role,
           state: n.state,
+          healthy: n.healthy,
         })),
       };
     } catch {

@@ -398,6 +398,13 @@ export class DiscoveredNodeDto {
   })
   state: 'healthy' | 'suspect' | 'failed';
 
+  @ApiProperty({
+    description: 'True only when state is healthy. Kept for older clients; read state instead',
+    example: true,
+    deprecated: true,
+  })
+  healthy: boolean;
+
   @ApiPropertyOptional({
     description: 'Availability zone the node reports in CLUSTER SHARDS (Valkey 9.1+, when the node has one set)',
     example: 'us-east-1a',

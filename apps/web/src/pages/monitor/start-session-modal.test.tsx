@@ -46,9 +46,9 @@ describe('StartSessionModal', () => {
     listConnectionNodes.mockReset().mockResolvedValue({
       isCluster: true,
       nodes: [
-        { id: 'r1', address: '10.0.0.9:6379', role: 'replica', state: 'healthy' },
-        { id: 'm1', address: '10.0.0.1:6379', role: 'master', state: 'healthy' },
-        { id: 'm2', address: '10.0.0.2:6379', role: 'master', state: 'healthy' },
+        { id: 'r1', address: '10.0.0.9:6379', role: 'replica', state: 'healthy', healthy: true },
+        { id: 'm1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', healthy: true },
+        { id: 'm2', address: '10.0.0.2:6379', role: 'master', state: 'healthy', healthy: true },
       ],
     });
     preflight.mockReset().mockResolvedValue({});
@@ -72,7 +72,7 @@ describe('StartSessionModal', () => {
   it('labels the selected node its peers suspect', async () => {
     listConnectionNodes.mockResolvedValue({
       isCluster: true,
-      nodes: [{ id: 'm1', address: '10.0.0.1:6379', role: 'master', state: 'suspect' }],
+      nodes: [{ id: 'm1', address: '10.0.0.1:6379', role: 'master', state: 'suspect', healthy: false }],
     });
     renderModal();
 

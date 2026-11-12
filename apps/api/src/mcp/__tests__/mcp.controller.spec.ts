@@ -73,9 +73,9 @@ describe('McpController', () => {
     const nodes = await withDiscovery.getClusterNodes('conn-1');
 
     expect(nodes).toEqual([
-      expect.objectContaining({ id: 'a', state: 'healthy' }),
-      expect.objectContaining({ id: 'b', state: 'suspect' }),
-      expect.objectContaining({ id: 'c', state: 'failed' }),
+      expect.objectContaining({ id: 'a', state: 'healthy', healthy: true }),
+      expect.objectContaining({ id: 'b', state: 'suspect', healthy: false }),
+      expect.objectContaining({ id: 'c', state: 'failed', healthy: false }),
     ]);
   });
 

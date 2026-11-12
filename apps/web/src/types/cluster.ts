@@ -27,6 +27,7 @@ export interface DiscoveredNode {
   masterId?: string;
   slots: number[][];
   state: ClusterNodeState;
+  healthy: boolean;
   availabilityZone?: string;
   shardId?: string;
 }

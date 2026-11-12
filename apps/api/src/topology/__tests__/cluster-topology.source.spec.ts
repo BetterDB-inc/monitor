@@ -11,8 +11,8 @@ describe('ClusterTopologySource', () => {
 
   it('maps CLUSTER NODES to desired cluster nodes, dropping the seed', async () => {
     const discovery = { discoverNodesIsolated: jest.fn().mockResolvedValue([
-      { id: 'self', address: 'seed.local:7001@17001', flags: ['myself', 'master'], role: 'master', slots: [], configEpoch: 0, state: 'healthy' },
-      { id: 'n2', address: '10.0.0.2:7002@17002', flags: ['master'], role: 'master', slots: [], configEpoch: 0, state: 'healthy' },
+      { id: 'self', address: 'seed.local:7001@17001', flags: ['myself', 'master'], role: 'master', slots: [], configEpoch: 0, state: 'healthy', healthy: true },
+      { id: 'n2', address: '10.0.0.2:7002@17002', flags: ['master'], role: 'master', slots: [], configEpoch: 0, state: 'healthy', healthy: true },
     ]) };
     const source = new ClusterTopologySource(discovery as never);
     source.resolveHost = jest.fn().mockResolvedValue(['10.0.0.1']);
@@ -27,8 +27,8 @@ describe('ClusterTopologySource', () => {
     // Kubernetes headless Service: every discovery lands on a random pod, so
     // `myself` is a real node and dropping it retired a different node each sync.
     const discovery = { discoverNodesIsolated: jest.fn().mockResolvedValue([
-      { id: 'n1', address: '10.0.0.1:6379@16379', flags: ['myself', 'master'], role: 'master', slots: [], configEpoch: 0, state: 'healthy' },
-      { id: 'n2', address: '10.0.0.2:6379@16379', flags: ['slave'], role: 'replica', slots: [], configEpoch: 0, state: 'healthy' },
+      { id: 'n1', address: '10.0.0.1:6379@16379', flags: ['myself', 'master'], role: 'master', slots: [], configEpoch: 0, state: 'healthy', healthy: true },
+      { id: 'n2', address: '10.0.0.2:6379@16379', flags: ['slave'], role: 'replica', slots: [], configEpoch: 0, state: 'healthy', healthy: true },
     ]) };
     const source = new ClusterTopologySource(discovery as never);
     source.resolveHost = jest.fn().mockResolvedValue(['10.0.0.1', '10.0.0.2']);
@@ -41,8 +41,8 @@ describe('ClusterTopologySource', () => {
   });
 
   const nodes = [
-    { id: 'n1', address: '10.0.0.1:6379@16379', flags: ['myself', 'master'], role: 'master', slots: [], configEpoch: 0, state: 'healthy' },
-    { id: 'n2', address: '10.0.0.2:6379@16379', flags: ['slave'], role: 'replica', slots: [], configEpoch: 0, state: 'healthy' },
+    { id: 'n1', address: '10.0.0.1:6379@16379', flags: ['myself', 'master'], role: 'master', slots: [], configEpoch: 0, state: 'healthy', healthy: true },
+    { id: 'n2', address: '10.0.0.2:6379@16379', flags: ['slave'], role: 'replica', slots: [], configEpoch: 0, state: 'healthy', healthy: true },
   ];
   // Two syncs, so an alias verdict is confirmed; the second sync's result.
   const discoverWith = async (addresses: string[]) => {

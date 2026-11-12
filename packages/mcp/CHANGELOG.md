@@ -24,10 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `get_cluster_nodes` returns a `state` for each node in place of the
-  `healthy` boolean: `failed` for a node flagged `fail`, `suspect` for one
-  flagged `fail?` (PFAIL), `handshake` or `noaddr`, and `healthy` otherwise.
-  A node its peers only suspect was reported as healthy before.
+- `get_cluster_nodes` returns a `state` for each node: `failed` for a node
+  flagged `fail`, `suspect` for one flagged `fail?` (PFAIL), `handshake` or
+  `noaddr`, and `healthy` otherwise. `healthy` is still returned and is now
+  `true` only when `state` is `healthy`; a node its peers only suspect was
+  reported as healthy before.
 
 ### Fixed
 

@@ -4,7 +4,7 @@ import { ClusterTopologySource } from '../cluster-topology.source';
 import type { DiscoveredNode } from '../../cluster/cluster-discovery.service';
 
 function discovered(id: string, address: string, flags = ['master']): DiscoveredNode {
-  return { id, address, flags, role: 'master', slots: [], configEpoch: 0, state: 'healthy' };
+  return { id, address, flags, role: 'master', slots: [], configEpoch: 0, state: 'healthy', healthy: true };
 }
 
 // The seed host resolves to the node that answers discovery (a single-node

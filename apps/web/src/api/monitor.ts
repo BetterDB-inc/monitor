@@ -104,6 +104,7 @@ export interface MonitorNodeDescriptor {
   address: string;
   role: 'master' | 'replica';
   state: ClusterNodeState;
+  healthy: boolean;
 }
 
 export interface MonitorNodesResponse {
