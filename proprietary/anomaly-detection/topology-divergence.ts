@@ -169,7 +169,8 @@ function perNodeDisagreements(indexes: ViewIndex[]): TopologyDisagreement[] {
 function slotOwners(index: ViewIndex, ids: Map<string, number>): Int32Array {
   const owners = new Int32Array(SLOT_COUNT).fill(-1);
   const epochs = new Float64Array(SLOT_COUNT).fill(-1);
-  for (const node of index.known.values()) {
+  const claimants = [...index.known.values()].sort((a, b) => compareText(a.id, b.id));
+  for (const node of claimants) {
     if (node.slots.length === 0) continue;
     let ordinal = ids.get(node.id);
     if (ordinal === undefined) {
@@ -186,6 +187,14 @@ function slotOwners(index: ViewIndex, ids: Map<string, number>): Int32Array {
     }
   }
   return owners;
+}
+
+function slotDisputeKey(owners: string, nth: number): string {
+  return `slot_owner:${owners}${nth > 1 ? `#${nth}` : ''}`;
+}
+
+function slotDisputeOwners(disagreement: TopologyDisagreement): string {
+  return sortedUnique(disagreement.positions.map((position) => position.value)).join('|');
 }
 
 function slotDisagreements(indexes: ViewIndex[]): TopologyDisagreement[] {
@@ -216,10 +225,9 @@ function slotDisagreements(indexes: ViewIndex[]): TopologyDisagreement[] {
   return [...claims.values()].map((dispute) => {
     const nth = (sameOwners.get(dispute.owners) ?? 0) + 1;
     sameOwners.set(dispute.owners, nth);
-    const key = `slot_owner:${dispute.owners}${nth > 1 ? `#${nth}` : ''}`;
     const positions = positionsOf(dispute.votes);
     return {
-      key,
+      key: slotDisputeKey(dispute.owners, nth),
       kind: 'slot_owner' as const,
       subjectIds: positions.map((position) => position.value).filter((value) => value !== UNASSIGNED_SLOT_OWNER),
       slots: dispute.slots,
@@ -246,6 +254,10 @@ export function intersectSlotRanges(a: number[][], b: number[][]): number[][] {
     }
   }
   return shared.sort((x, y) => x[0] - y[0]);
+}
+
+function countSlots(ranges: number[][]): number {
+  return ranges.reduce((total, [start, end = start]) => total + end - start + 1, 0);
 }
 
 function mergeSlotRanges(ranges: number[][]): number[][] {
@@ -315,13 +327,8 @@ export class DivergenceTracker {
 
   observe(round: DivergenceRound): void {
     const comparable = round.views >= 2;
-    const seen = new Set<string>();
-    if (comparable) {
-      for (const disagreement of round.disagreements) {
-        seen.add(disagreement.key);
-        this.entries.set(disagreement.key, this.advance(disagreement, round.at));
-      }
-    }
+    const { seen, joined } = this.matchToEntries(comparable ? round.disagreements : []);
+    for (const [key, disagreement] of seen) this.entries.set(key, this.advance({ ...disagreement, key }, round.at));
 
     const unanswered = new Set(round.unanswered);
     for (const [key, entry] of this.entries) {
@@ -331,6 +338,11 @@ export class DivergenceTracker {
       ).length;
       const unseeable = !comparable || answeringSides < 2;
       if (!unseeable || round.at - entry.lastSeenAt > TOPOLOGY_DIVERGENCE_BLIND_MS) this.entries.delete(key);
+    }
+
+    for (const disagreement of joined) {
+      const key = this.freeSlotDisputeKey(slotDisputeOwners(disagreement));
+      this.entries.set(key, this.advance({ ...disagreement, key }, round.at));
     }
   }
 
@@ -346,6 +358,41 @@ export class DivergenceTracker {
 
   clear(): void {
     this.entries.clear();
+  }
+
+  private matchToEntries(disagreements: TopologyDisagreement[]): {
+    seen: Map<string, TopologyDisagreement>;
+    joined: TopologyDisagreement[];
+  } {
+    const seen = new Map<string, TopologyDisagreement>();
+    const overlaps: Array<{ disagreement: TopologyDisagreement; key: string; shared: number }> = [];
+    for (const disagreement of disagreements) {
+      if (!disagreement.slots) {
+        seen.set(disagreement.key, disagreement);
+        continue;
+      }
+      const owners = slotDisputeOwners(disagreement);
+      for (const entry of this.entries.values()) {
+        if (!entry.slots || slotDisputeOwners(entry) !== owners) continue;
+        const shared = countSlots(intersectSlotRanges(entry.slots, disagreement.slots));
+        if (shared > 0) overlaps.push({ disagreement, key: entry.key, shared });
+      }
+    }
+
+    const matched = new Set<TopologyDisagreement>();
+    overlaps.sort((a, b) => b.shared - a.shared || compareText(a.key, b.key));
+    for (const { disagreement, key } of overlaps) {
+      if (seen.has(key) || matched.has(disagreement)) continue;
+      seen.set(key, disagreement);
+      matched.add(disagreement);
+    }
+    return { seen, joined: disagreements.filter((entry) => entry.slots && !matched.has(entry)) };
+  }
+
+  private freeSlotDisputeKey(owners: string): string {
+    let nth = 1;
+    while (this.entries.has(slotDisputeKey(owners, nth))) nth += 1;
+    return slotDisputeKey(owners, nth);
   }
 
   private advance(disagreement: TopologyDisagreement, at: number): TrackedDisagreement {
