@@ -10,7 +10,7 @@ import {
   UseGuards,
   NotFoundException,
 } from '@nestjs/common';
-import { ApiHeader } from '@nestjs/swagger';
+import { ApiHeader, ApiOperation } from '@nestjs/swagger';
 import { AnomalyService } from './anomaly.service';
 import { IncidentTimeline } from './incident-timeline';
 import {
@@ -178,6 +178,12 @@ export class AnomalyController {
   @Get('topology-divergence')
   @UseGuards(LicenseGuard)
   @RequiresFeature(Feature.ANOMALY_DETECTION)
+  @ApiOperation({
+    summary: 'Last topology divergence round of the cluster',
+    description:
+      'Status ok means the views that answered were compared, not that the whole cluster agrees. ' +
+      'Nodes listed in unanswered gave no view, and nodes that were not asked are not in the report.',
+  })
   @ApiHeader({ name: CONNECTION_ID_HEADER, required: true, description: 'Connection ID of the cluster' })
   getTopologyDivergence(@ConnectionId({ required: true }) connectionId: string): TopologyDivergenceReport {
     return this.anomalyService.getTopologyDivergence(connectionId);
