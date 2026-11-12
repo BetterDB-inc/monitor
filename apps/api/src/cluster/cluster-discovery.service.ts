@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, OnModuleDestroy } from '@nestjs/common';
 import Valkey from 'iovalkey';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { dialsDataNodes } from '../connections/data-node-reach';
@@ -6,6 +6,7 @@ import { ClusterNode } from '../common/types/metrics.types';
 import { MetricsParser } from '../database/parsers/metrics.parser';
 import { tlsIdentityOptions } from '../database/adapters/tls-servername';
 import { parseNodeAddress } from '../topology/membership-diff';
+import { readClusterShards, withConfiguredZones, withShardMetadata } from './shard-metadata';
 
 export interface DiscoveredNode {
   id: string;
@@ -17,6 +18,8 @@ export interface DiscoveredNode {
   healthy: boolean;
   flags: string[];
   hostname?: string;
+  availabilityZone?: string;
+  shardId?: string;
 }
 
 export interface NodeConnection {
@@ -66,8 +69,11 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   }
 
   async discoverNodes(connectionId?: string): Promise<DiscoveredNode[]> {
-    // Use connection-specific cache key (default connection uses 'default')
-    const cacheKey = connectionId || this.connectionRegistry.getDefaultId() || 'default';
+    const ownerId = connectionId || this.connectionRegistry.getDefaultId();
+    if (!ownerId) {
+      throw new NotFoundException('No connection available');
+    }
+    const cacheKey = ownerId;
     const cached = this.freshCache(cacheKey);
     if (cached) {
       return cached;
@@ -77,7 +83,12 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
 
     const discovery: Promise<DiscoveredNode[]> = Promise.resolve().then(async () => {
       try {
-        const nodes = await this.connectionRegistry.get(connectionId).getClusterNodes();
+        const client = this.connectionRegistry.get(ownerId);
+        const [clusterNodes, shards] = await Promise.all([client.getClusterNodes(), readClusterShards(client)]);
+        const nodes = withConfiguredZones(
+          withShardMetadata(clusterNodes, shards),
+          this.connectionRegistry.getNodeAvailabilityZones(ownerId),
+        );
         if (this.discoveryInFlight.get(cacheKey) !== discovery) return this.toDiscoveredNodes(nodes);
         return this.remember(cacheKey, nodes);
       } catch (error) {
@@ -200,6 +211,8 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         healthy: isHealthy,
         flags: node.flags,
         ...(node.hostname ? { hostname: node.hostname } : {}),
+        ...(node.availabilityZone ? { availabilityZone: node.availabilityZone } : {}),
+        ...(node.shardId ? { shardId: node.shardId } : {}),
       });
     }
     return discovered;

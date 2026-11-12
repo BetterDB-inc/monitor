@@ -30,6 +30,7 @@ interface GraphNode extends SimulationNodeDatum {
   slots: number[][];
   stats?: NodeStats;
   healthy: boolean;
+  availabilityZone?: string;
 }
 
 interface GraphLink extends SimulationLinkDatum<GraphNode> {
@@ -160,6 +161,7 @@ export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTo
         slots: node.slots,
         stats: nodeStats?.find((s) => s.nodeId === node.id),
         healthy: node.linkState === 'connected' && !node.flags.includes('fail'),
+        availabilityZone: node.availabilityZone,
         x: pos.x,
         y: pos.y,
       };
@@ -301,6 +303,7 @@ export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTo
       const slotCount = countSlots(d.slots);
       return (
         `${d.address}\nRole: ${d.role}\n` +
+        (d.availabilityZone ? `Zone: ${d.availabilityZone}\n` : '') +
         `Slots: ${slotCount > 0 ? slotCount.toLocaleString() : 'none'}\n` +
         `Memory: ${d.stats ? formatBytes(d.stats.memoryUsed) : 'N/A'}\n` +
         `Ops/sec: ${d.stats ? d.stats.opsPerSec.toLocaleString() : 'N/A'}\n` +

@@ -42,6 +42,7 @@ export interface Connection {
   connectionType?: 'direct' | 'agent' | 'external';
   autoRegisterNodes?: boolean;
   membership?: TopologyMembership;
+  nodeAvailabilityZones?: Record<string, string>;
   /** Redacted tunnel summary; present when the connection is reached through SSH. */
   sshTunnel?: SshTunnelStatus;
   /** Redacted TLS material summary; present when a custom CA or client certificate is configured. */
