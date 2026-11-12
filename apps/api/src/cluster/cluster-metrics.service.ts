@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import Valkey from 'iovalkey';
 import { ClusterDiscoveryService, DiscoveredNode } from './cluster-discovery.service';
+import { NodeSlotStats } from './shard-load';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { MetricsParser } from '../database/parsers/metrics.parser';
 import { InfoParser } from '../database/parsers/info.parser';
@@ -56,10 +57,15 @@ export interface ClusterSlotStatsResult {
   failedNodes: string[];
   /** The slot ranges that could not be read, as discovery sees them. */
   failedSlotRanges: number[][];
+  nodeStats?: NodeSlotStats[];
 }
 
 export function inSlotRanges(slot: number, ranges: number[][]): boolean {
   return ranges.some(([start, end]) => slot >= start && slot <= (end ?? start));
+}
+
+function slotsInRanges(ranges: number[][]): number {
+  return ranges.reduce((count, [start, end]) => count + (end ?? start) - start + 1, 0);
 }
 
 /** Keep only the slots inside the node's owned ranges, as discovery sees them. */
@@ -686,6 +692,8 @@ export class ClusterMetricsService {
     );
 
     const perNode: SlotStats[] = [];
+    const nodeStats: NodeSlotStats[] = [];
+    let ownershipDrifted = false;
     const unhealthy = owners.filter((node) => !node.healthy);
     const failedNodes = unhealthy.map((node) => node.address);
     const failedSlotRanges = unhealthy.flatMap((node) => node.slots);
@@ -714,8 +722,19 @@ export class ClusterMetricsService {
             `slot ranges from ${node.address}: ${result.value.reason}`,
         );
       } else {
+        nodeStats.push({
+          nodeId: node.id,
+          address: node.address.split('@')[0],
+          stats: result.value.stats,
+        });
+        if (Object.keys(result.value.stats).length < slotsInRanges(node.slots)) {
+          ownershipDrifted = true;
+        }
         this.loggedErrors.delete(errorKey);
       }
+    }
+    if (ownershipDrifted) {
+      this.discoveryService.forgetTopology(connectionId);
     }
     if (primaries.length > 0 && perNode.length === 0) {
       // No primary answered on the address it announces, as behind an SSH
@@ -755,6 +774,7 @@ export class ClusterMetricsService {
       stats: mergeSlotStats(perNode, orderBy, validLimit),
       failedNodes,
       failedSlotRanges,
+      nodeStats: ownershipDrifted ? undefined : nodeStats,
     };
   }
 
