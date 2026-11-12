@@ -35,7 +35,7 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
   private lastSeenIds = new Map<string, number | null>();
   // New slowlog entries that anomaly detection should count. Own clients and
   // the configured prefixes/commands are stored, but they do not move this.
-  // Entries logged but never read (see `unread` in pollConnection) do.
+  // Entries logged but never read are estimated (see `unread` in pollConnection).
   // Reset wherever lastSeenIds is deleted: a moved log source, or a removed
   // connection. Absent means this connection has not completed a poll yet.
   private externalEntryCounts = new Map<string, number>();
@@ -143,12 +143,12 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
         : entries;
 
       const firstPoll = !this.externalEntryCounts.has(ctx.connectionId);
-      if (firstPoll) {
-        this.externalEntryCounts.set(ctx.connectionId, 0);
-      }
 
       if (newEntries.length === 0) {
         this.gaps.completePoll(ctx.connectionId, SLOWLOG_CAPTURE, entries, currentLastSeenId);
+        if (firstPoll) {
+          this.externalEntryCounts.set(ctx.connectionId, 0);
+        }
         this.logger.debug(`No new slow log entries to save for ${ctx.connectionName}`);
         return;
       }
@@ -186,24 +186,25 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
       // Slowlog ids are sequential, so the id gap is how many entries were
       // logged since the last poll. Any beyond the ones read here (more than
       // the 128 fetched, or already rotated out of the log) have no known
-      // client, so they are counted: a burst must not be capped at the fetch
-      // size. Skipped on the first poll, where the gap spans the time before
-      // this process was polling.
+      // client. They are assumed to have the same mix as the ones read: a
+      // burst is then not capped at the fetch size, and a burst of ignored
+      // entries still adds nothing. Skipped on the first poll, where the gap
+      // spans the time before this process was polling.
       const unread =
         firstPoll || typeof currentLastSeenId !== 'number'
           ? 0
           : Math.max(0, maxId - currentLastSeenId - newEntries.length);
+      const externalRead = newEntries.filter((entry) => !this.isIgnoredSlowlogEntry(entry)).length;
+      const externalUnread = Math.round((unread * externalRead) / newEntries.length);
       if (unread > 0) {
         this.logger.warn(
-          `Slow log for ${ctx.connectionName} gained ${unread} entries that were gone before they could be read; they are counted for anomaly detection but not stored`,
+          `Slow log for ${ctx.connectionName} gained ${unread} entries that were gone before they could be read; an estimated ${externalUnread} of them count for anomaly detection`,
         );
       }
-      const externalAdded =
-        newEntries.filter((entry) => !this.isIgnoredSlowlogEntry(entry)).length + unread;
-      if (externalAdded > 0) {
-        const previous = this.externalEntryCounts.get(ctx.connectionId) ?? 0;
-        this.externalEntryCounts.set(ctx.connectionId, previous + externalAdded);
-      }
+      // Published only after the save: a failed first poll must still be the
+      // first poll when it is retried.
+      const previous = this.externalEntryCounts.get(ctx.connectionId) ?? 0;
+      this.externalEntryCounts.set(ctx.connectionId, previous + externalRead + externalUnread);
 
       this.logger.debug(`Saved ${saved} new slow log entries for ${ctx.connectionName} (lastSeenId: ${this.lastSeenIds.get(ctx.connectionId)})`);
     } catch (error) {

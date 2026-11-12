@@ -124,12 +124,14 @@ describe('SlowLogAnalyticsService external entry counts', () => {
     };
   }
 
-  function buildService(): SlowLogAnalyticsService {
+  function buildService(
+    saveSlowLogEntries: jest.Mock = jest.fn(async (entries: StoredSlowLogEntry[]) => {
+      saved.push(...entries);
+      return entries.length;
+    }),
+  ): SlowLogAnalyticsService {
     const storage = {
-      saveSlowLogEntries: jest.fn(async (entries: StoredSlowLogEntry[]) => {
-        saved.push(...entries);
-        return entries.length;
-      }),
+      saveSlowLogEntries,
       getLatestSlowLogId: jest.fn(async () => 10),
       hasRunIdLogEntries: async () => false,
     };
@@ -239,7 +241,7 @@ describe('SlowLogAnalyticsService external entry counts', () => {
     expect(service.getExternalEntryCount('conn-1')).toBe(2);
   });
 
-  it('counts entries logged but not read, from the id gap, except on the first poll', async () => {
+  it('estimates entries logged but not read from the id gap, except on the first poll', async () => {
     // Stored id is 10 and the log is at 1015: that gap is from before this
     // process polled, so only the entries read are counted.
     served = [entry(1014, 'BetterDB-Monitor'), entry(1015, 'app')];
@@ -253,7 +255,42 @@ describe('SlowLogAnalyticsService external entry counts', () => {
     await poll();
 
     expect(service.getLastSeenId('conn-1')).toBe(1415);
-    // 1 from the first poll + 125 read from `app` + 272 never read.
-    expect(service.getExternalEntryCount('conn-1')).toBe(398);
+    // 1 from the first poll + 125 read from `app` + 272 never read, of which
+    // 125/128 (266) are taken to be external.
+    expect(service.getExternalEntryCount('conn-1')).toBe(392);
+  });
+
+  it('adds nothing for unread entries when every entry read is ignored', async () => {
+    served = [entry(1015, 'app')];
+    await poll();
+
+    served = Array.from({ length: 128 }, (_, i) => entry(1288 + i, 'BetterDB-Monitor-Node-ab'));
+    await poll();
+
+    expect(service.getLastSeenId('conn-1')).toBe(1415);
+    expect(service.getExternalEntryCount('conn-1')).toBe(1);
+  });
+
+  it('still treats the retry as the first poll when the first save fails', async () => {
+    const save = jest
+      .fn()
+      .mockRejectedValueOnce(new Error('storage down'))
+      .mockImplementation(async (entries: StoredSlowLogEntry[]) => entries.length);
+    service = buildService(save);
+    served = [entry(1014, 'BetterDB-Monitor'), entry(1015, 'app')];
+
+    await expect(poll()).rejects.toThrow('storage down');
+    expect(service.getExternalEntryCount('conn-1')).toBeNull();
+
+    // The gap from stored id 10 is from before polling started.
+    await poll();
+    expect(service.getExternalEntryCount('conn-1')).toBe(1);
+  });
+
+  it('publishes a zero count after a first poll with nothing new', async () => {
+    served = [];
+    await poll();
+
+    expect(service.getExternalEntryCount('conn-1')).toBe(0);
   });
 });
