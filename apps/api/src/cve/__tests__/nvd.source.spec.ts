@@ -1,5 +1,6 @@
 import type { Advisory } from '@betterdb/shared';
 import { NvdSource } from '../sources/nvd.source';
+import { matchAdvisories } from '../matcher/advisory-matcher';
 import { matchRanges } from '../matcher/version-range';
 import nvdValkey from './fixtures/nvd-valkey.json';
 
@@ -42,16 +43,19 @@ describe('NvdSource', () => {
       branch: '8.0',
       vulnerableBelow: '8.0.7',
       vulnerableFrom: '8.0.0',
+      patchedAt: '8.0.7',
     });
     expect(advisory?.affected).toContainEqual({
       branch: '8.1',
       vulnerableBelow: '8.1.6',
       vulnerableFrom: '8.1.0',
+      patchedAt: '8.1.6',
     });
     expect(advisory?.affected).toContainEqual({
       branch: '9.0',
       vulnerableBelow: '9.0.2',
       vulnerableFrom: '9.0.0',
+      patchedAt: '9.0.2',
     });
     expect(advisory?.affected).toHaveLength(4);
   });
@@ -108,6 +112,7 @@ describe('NvdSource', () => {
       branch: '7.4',
       vulnerableBelow: '7.4.3',
       vulnerableFrom: '7.4.0',
+      patchedAt: '7.4.3',
     });
   });
 
@@ -122,6 +127,106 @@ describe('NvdSource', () => {
       vulnerableFrom: '2.6.0',
     });
     expect(matchRanges('6.5.0', advisory?.affected ?? []).vulnerable).toBe(true);
+  });
+
+  it('records patchedAt only for an exclusive end on a concrete branch', () => {
+    const cve = (match: Record<string, string>) => ({
+      totalResults: 1,
+      vulnerabilities: [
+        {
+          cve: {
+            id: 'CVE-2099-7000',
+            configurations: [
+              {
+                nodes: [
+                  {
+                    cpeMatch: [
+                      {
+                        criteria: 'cpe:2.3:a:redis:redis:*:*:*:*:*:*:*:*',
+                        vulnerable: true,
+                        ...match,
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      ],
+    });
+    const rangesFor = async (match: Record<string, string>) => {
+      const result = await new NvdSource(fetchStub(cve(match))).fetchAdvisories();
+      return result.advisories.find((a) => a.product === 'redis')?.affected ?? [];
+    };
+
+    return Promise.all([
+      rangesFor({ versionStartIncluding: '7.0.0', versionEndExcluding: '7.0.15' }),
+      rangesFor({ versionStartIncluding: '7.0.0', versionEndIncluding: '7.0.14' }),
+      rangesFor({ versionEndExcluding: '7.0.15' }),
+    ]).then(([excluding, including, wildcard]) => {
+      expect(excluding).toEqual([
+        { branch: '7.0', vulnerableBelow: '7.0.15', vulnerableFrom: '7.0.0', patchedAt: '7.0.15' },
+      ]);
+      expect(including[0]).not.toHaveProperty('patchedAt');
+      expect(wildcard[0]).toMatchObject({ branch: '*' });
+      expect(wildcard[0]).not.toHaveProperty('patchedAt');
+    });
+  });
+
+  describe('NVD branch fix plus its own wildcard (KIvanow #6, jamby77)', () => {
+    const payload = {
+      totalResults: 1,
+      vulnerabilities: [
+        {
+          cve: {
+            id: 'CVE-2099-7001',
+            configurations: [
+              {
+                nodes: [
+                  {
+                    cpeMatch: [
+                      {
+                        criteria: 'cpe:2.3:a:redis:redis:*:*:*:*:*:*:*:*',
+                        vulnerable: true,
+                        versionStartIncluding: '7.0.0',
+                        versionEndExcluding: '7.0.5',
+                      },
+                      {
+                        criteria: 'cpe:2.3:a:redis:redis:*:*:*:*:*:*:*:*',
+                        vulnerable: true,
+                        versionEndExcluding: '7.2.0',
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      ],
+    };
+    const redisAdvisory = async () => {
+      const result = await new NvdSource(fetchStub(payload)).fetchAdvisories();
+      const advisory = result.advisories.find((a) => a.product === 'redis');
+      expect(advisory).toBeDefined();
+      return advisory as Advisory;
+    };
+
+    it('reports fixedIn on an NVD on-branch finding (new, visible behaviour)', async () => {
+      const advisory = await redisAdvisory();
+      const finding = matchAdvisories({ product: 'redis', engineVersion: '7.0.4', modules: [] }, [
+        advisory,
+      ]).findings[0];
+      expect(finding.fixedIn).toBe('7.0.5');
+      expect(finding.confidence).toBe(advisory.confidence);
+    });
+
+    it("keeps flagging a build past the branch fix that NVD's own wildcard still covers (unchanged vs master)", async () => {
+      const advisory = await redisAdvisory();
+      expect(matchRanges('7.0.10', advisory.affected).vulnerable).toBe(true);
+      expect(matchRanges('7.2.0', advisory.affected).vulnerable).toBe(false);
+    });
   });
 
   it('keeps a .0 exclusive upper bound exclusive, so the first patched release is not a finding', async () => {

@@ -1,0 +1,97 @@
+{
+  "totalResults": 1,
+  "vulnerabilities": [
+    {
+      "cve": {
+        "id": "CVE-2025-49844",
+        "vulnStatus": "Modified",
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "Redis is an open source, in-memory database that persists on disk. Versions 8.2.1 and below allow an authenticated user to use a specially crafted Lua script to manipulate the garbage collector, trigger a use-after-free and potentially lead to remote code execution. The problem exists in all versions of Redis with Lua scripting. This issue is fixed in version 8.2.2. To workaround this issue without patching the redis-server executable is to prevent users from executing Lua scripts. This can be done using ACL to restrict EVAL and EVALSHA commands."
+          }
+        ],
+        "metrics": {
+          "cvssMetricV31": [
+            {
+              "cvssData": {
+                "baseScore": 10.0,
+                "baseSeverity": "CRITICAL"
+              }
+            }
+          ]
+        },
+        "weaknesses": [],
+        "references": [],
+        "configurations": [
+          {
+            "nodes": [
+              {
+                "operator": "OR",
+                "negate": false,
+                "cpeMatch": [
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:redis:redis:*:*:*:*:*:*:*:*",
+                    "versionEndExcluding": "6.2.20"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:redis:redis:*:*:*:*:*:*:*:*",
+                    "versionStartIncluding": "7.0",
+                    "versionEndExcluding": "7.2.11"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:redis:redis:*:*:*:*:*:*:*:*",
+                    "versionStartIncluding": "7.4.0",
+                    "versionEndExcluding": "7.4.6"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:redis:redis:*:*:*:*:*:*:*:*",
+                    "versionStartIncluding": "8.0.0",
+                    "versionEndExcluding": "8.0.4"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:redis:redis:*:*:*:*:*:*:*:*",
+                    "versionStartIncluding": "8.2.0",
+                    "versionEndExcluding": "8.2.2"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "nodes": [
+              {
+                "operator": "OR",
+                "negate": false,
+                "cpeMatch": [
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:lfprojects:valkey:*:*:*:*:*:*:*:*",
+                    "versionEndExcluding": "7.2.11"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:lfprojects:valkey:*:*:*:*:*:*:*:*",
+                    "versionStartIncluding": "8.0.0",
+                    "versionEndExcluding": "8.0.6"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:lfprojects:valkey:*:*:*:*:*:*:*:*",
+                    "versionStartIncluding": "8.1.0",
+                    "versionEndExcluding": "8.1.4"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
