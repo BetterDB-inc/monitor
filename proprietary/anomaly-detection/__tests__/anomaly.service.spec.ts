@@ -23368,6 +23368,53 @@ describe('AnomalyService', () => {
       expect(service.getTopologyDivergence('conn-2').divergences).toHaveLength(1);
     });
 
+    it('leaves the sampling to a connection that can dial when an agent watches the same cluster', async () => {
+      views.c = { a: { epoch: 9 } };
+      const agent: ConnectionContext = {
+        ...mockCtx,
+        connectionId: 'conn-agent',
+        connectionName: 'Agent',
+        client: clusterClient('b') as any,
+      };
+      const getConfig = (service as any).connectionRegistry.getConfig as jest.Mock;
+      const configOf = getConfig.getMockImplementation();
+      getConfig.mockImplementation((id: string) => (id === 'conn-agent' ? { host: 'agent' } : configOf?.(id)));
+
+      try {
+        for (let i = 0; i < 4; i++) {
+          now += 5_000;
+          await poll(agent);
+          await poll(mockCtx);
+          await poll(agent);
+        }
+      } finally {
+        getConfig.mockImplementation(configOf);
+      }
+
+      expect(viewsReadBy('conn-agent')).toEqual([]);
+      expect(viewsReadBy('conn-1')).toContain('c');
+      expect(divergenceEvents()).toMatchObject([{ connectionId: 'conn-1', resolved: false }]);
+      expect(service.getTopologyDivergence('conn-agent')).toMatchObject({ status: 'ok' });
+    });
+
+    it('adds the slots that join an owner dispute to the report once they have disagreed long enough', async () => {
+      const disputedSlots = () =>
+        service.getTopologyDivergence('conn-1').divergences.flatMap((d) => d.disagreements.map((x) => x.slots));
+      views.b = { a: { slots: '100-5460' }, b: { slots: '0-99 5461-10922' } };
+      await rounds(3);
+      expect(divergenceEvents()).toHaveLength(1);
+      expect(divergenceEvents()[0].message).toContain('the owner of slots 0-99');
+      expect(disputedSlots()).toEqual([[[0, 99]]]);
+
+      views.b = { a: { slots: '' }, b: { slots: '0-10922' } };
+      await rounds(2);
+      expect(disputedSlots()).toEqual([[[0, 99]]]);
+
+      await rounds(1);
+      expect(disputedSlots()).toEqual([[[0, 5460]]]);
+      expect(divergenceEvents()).toHaveLength(1);
+    });
+
     it('hands the open event to another connection when the first one goes quiet', async () => {
       views.c = { a: { epoch: 9 } };
       const second: ConnectionContext = {
