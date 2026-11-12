@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/explicit-function-return-type */
+import { BadRequestException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { VectorSearchService } from '../vector-search.service';
 import { StoragePort } from '../../common/interfaces/storage-port.interface';
@@ -220,5 +221,177 @@ describe('VectorSearchService.pollConnection — extended snapshot fields', () =
 
     expect(prometheus.updateVectorIndexMetrics).toHaveBeenCalledWith('conn-flaky', []);
     expect(storage.saveVectorIndexSnapshots).not.toHaveBeenCalled();
+  });
+});
+
+describe('VectorSearchService.sampleKeys: SCAN MATCH glob escaping', () => {
+  function buildRawClient(prefixes: string[], keysByPattern: Record<string, string[]>) {
+    const scanPatterns: Array<string | undefined> = [];
+    const scanCursors: string[] = [];
+    const client = {
+      getCapabilities: () => ({ hasVectorSearch: true }),
+      getVectorIndexInfo: jest.fn().mockResolvedValue(
+        makeInfo('idx_keys', {
+          indexDefinition: { prefixes, defaultLanguage: null, defaultScore: null },
+        }),
+      ),
+      getClient: () => ({
+        scan: jest.fn(async (cursor: string, ...args: unknown[]) => {
+          const matchIndex = args.indexOf('MATCH');
+          const pattern = matchIndex === -1 ? undefined : (args[matchIndex + 1] as string);
+          scanPatterns.push(pattern);
+          scanCursors.push(cursor);
+          return ['0', pattern ? (keysByPattern[pattern] ?? []) : []];
+        }),
+        pipeline: () => {
+          const visited: string[] = [];
+          return {
+            hgetall: (key: string) => {
+              visited.push(key);
+            },
+            exec: async () => visited.map((key) => [null, { content: `value for ${key}` }]),
+          };
+        },
+      }),
+    };
+    return { client, scanPatterns, scanCursors };
+  }
+
+  async function expectInvalidCursor(
+    sample: Promise<unknown>,
+    scanCursors: string[],
+  ): Promise<void> {
+    const error = await sample.catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(BadRequestException);
+    expect((error as BadRequestException).getStatus()).toBe(400);
+    expect(scanCursors).toEqual([]);
+  }
+
+  function buildService(client: any) {
+    const registry = {
+      get: () => client,
+      getDefaultId: jest.fn().mockReturnValue('conn-keys'),
+      list: jest.fn().mockReturnValue([]),
+    } as any;
+    const storage = {
+      saveVectorIndexSnapshots: jest.fn().mockResolvedValue(1),
+      getVectorIndexSnapshots: jest.fn().mockResolvedValue([]),
+      pruneOldVectorIndexSnapshots: jest.fn().mockResolvedValue(0),
+    } as any;
+    const prometheus = { updateVectorIndexMetrics: jest.fn() } as any;
+    const retention = { getSampleRetentionMs: () => 7 * 24 * 60 * 60 * 1000 } as any;
+    return new VectorSearchService(registry, storage, prometheus, retention);
+  }
+
+  it('escapes brackets so only the index own keys are sampled', async () => {
+    const { client, scanPatterns } = buildRawClient(['tenant[1]:doc:'], {
+      'tenant\\[1\\]:doc:*': ['tenant[1]:doc:42'],
+      'tenant[1]:doc:*': ['tenant1:doc:other'],
+    });
+
+    const { keys } = await buildService(client).sampleKeys('conn-keys', 'idx_keys', '0', 10);
+
+    expect(scanPatterns).toEqual(['tenant\\[1\\]:doc:*']);
+    expect(keys.map((k) => k.key)).toEqual(['tenant[1]:doc:42']);
+  });
+
+  it('escapes ? so a single character wildcard cannot leak keys of other indexes', async () => {
+    const { client, scanPatterns } = buildRawClient(['cache?:'], {
+      'cache\\?:*': ['cache?:1'],
+    });
+
+    const { keys } = await buildService(client).sampleKeys('conn-keys', 'idx_keys', '0', 10);
+
+    expect(scanPatterns).toEqual(['cache\\?:*']);
+    expect(keys.map((k) => k.key)).toEqual(['cache?:1']);
+  });
+
+  it('escapes the prefix of every index when an index has several prefixes', async () => {
+    const { client, scanPatterns } = buildRawClient(['a[1]:', 'b?:'], {
+      'a\\[1\\]:*': ['a[1]:1'],
+      'b\\?:*': ['b?:2'],
+    });
+
+    const { keys, cursor } = await buildService(client).sampleKeys(
+      'conn-keys',
+      'idx_keys',
+      '0',
+      10,
+    );
+
+    expect(scanPatterns).toEqual(['a\\[1\\]:*', 'b\\?:*']);
+    expect(keys.map((k) => k.key)).toEqual(['a[1]:1', 'b?:2']);
+    expect(cursor).toBe('0');
+  });
+
+  it('leaves a prefix without glob characters untouched', async () => {
+    const { client, scanPatterns } = buildRawClient(['doc:'], {
+      'doc:*': ['doc:1'],
+    });
+
+    const { keys } = await buildService(client).sampleKeys('conn-keys', 'idx_keys', '0', 10);
+
+    expect(scanPatterns).toEqual(['doc:*']);
+    expect(keys.map((k) => k.key)).toEqual(['doc:1']);
+  });
+
+  it('rejects a negative prefix index', async () => {
+    const { client, scanCursors } = buildRawClient(['a[1]:', 'b?:'], {
+      'a\\[1\\]:*': ['a[1]:1'],
+      'b\\?:*': ['b?:2'],
+    });
+
+    await expectInvalidCursor(
+      buildService(client).sampleKeys('conn-keys', 'idx_keys', '-1:0', 10),
+      scanCursors,
+    );
+  });
+
+  it('rejects a prefix index past the last prefix', async () => {
+    const { client, scanCursors } = buildRawClient(['a[1]:', 'b?:'], {
+      'a\\[1\\]:*': ['a[1]:1'],
+      'b\\?:*': ['b?:2'],
+    });
+
+    await expectInvalidCursor(
+      buildService(client).sampleKeys('conn-keys', 'idx_keys', '5:0', 10),
+      scanCursors,
+    );
+  });
+
+  it('rejects an out-of-range prefix without reusing its scan position', async () => {
+    const { client, scanCursors } = buildRawClient(['a[1]:', 'b?:'], {
+      'a\\[1\\]:*': ['a[1]:1'],
+      'b\\?:*': ['b?:2'],
+    });
+
+    await expectInvalidCursor(
+      buildService(client).sampleKeys('conn-keys', 'idx_keys', '5:1234', 10),
+      scanCursors,
+    );
+    expect(scanCursors).not.toContain('1234');
+  });
+
+  it('rejects a composite cursor on a single-prefix index', async () => {
+    const { client, scanCursors } = buildRawClient(['doc:'], {
+      'doc:*': ['doc:1'],
+    });
+
+    await expectInvalidCursor(
+      buildService(client).sampleKeys('conn-keys', 'idx_keys', '0:1234', 10),
+      scanCursors,
+    );
+  });
+
+  it('returns every key from a SCAN page longer than the requested limit', async () => {
+    const page = ['doc:1', 'doc:2', 'doc:3', 'doc:4', 'doc:5'];
+    const { client, scanCursors } = buildRawClient(['doc:'], {
+      'doc:*': page,
+    });
+
+    const { keys } = await buildService(client).sampleKeys('conn-keys', 'idx_keys', '0', 2);
+
+    expect(scanCursors).toEqual(['0']);
+    expect(keys.map((k) => k.key)).toEqual(page);
   });
 });
