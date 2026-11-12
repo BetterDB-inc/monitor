@@ -201,6 +201,34 @@ describe('SlowLogAnalyticsService lost entries', () => {
       expect(lost()).toBe(0);
     });
 
+    it('does not count from an empty first poll after BetterDB starts', async () => {
+      log = entries(range(0, 9), 1000);
+      await poll();
+
+      service = newService();
+      log = [];
+      await poll();
+      log = entries(range(50, 60), 1000);
+      await poll();
+
+      expect(lost()).toBe(0);
+    });
+
+    it('counts again once an entry has been read after BetterDB starts', async () => {
+      log = entries(range(0, 9), 1000);
+      await poll();
+
+      service = newService();
+      log = [];
+      await poll();
+      log = entries(range(50, 60), 1000);
+      await poll();
+      log = entries(range(70, 75), 1000);
+      await poll();
+
+      expect(lost()).toBe(9);
+    });
+
     it('does not count a server restart', async () => {
       log = entries(range(0, 9), 1000);
       await poll();

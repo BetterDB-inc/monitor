@@ -157,6 +157,19 @@ describe.each(TYPES)('CommandLogAnalyticsService lost entries (%s)', (type) => {
     expect(lost()).toBe(0);
   });
 
+  it('does not count from an empty first poll after BetterDB starts', async () => {
+    log = entries(type, range(0, 9), 1000);
+    await poll();
+
+    service = newService();
+    log = [];
+    await poll();
+    log = entries(type, range(50, 60), 1000);
+    await poll();
+
+    expect(lost()).toBe(0);
+  });
+
   it('does not count a server restart', async () => {
     log = entries(type, range(0, 9), 1000);
     await poll();

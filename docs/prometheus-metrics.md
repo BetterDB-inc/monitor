@@ -324,7 +324,7 @@ The value only grows while BetterDB runs and starts again at `0` when BetterDB r
 
 Not counted, because the previous id is not one this process read from the same server process:
 
-- the first poll after BetterDB starts (whatever was logged while it was down)
+- every poll after BetterDB starts, up to and including the first one that returns an entry (whatever was logged while it was down)
 - a server restart, seen as a changed `run_id`, or as ids starting over when `INFO` is refused
 - a log that was empty with nothing stored for it at the poll before
 

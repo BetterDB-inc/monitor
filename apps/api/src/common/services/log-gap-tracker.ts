@@ -44,10 +44,10 @@ export class LogGapTracker {
   ): number {
     const newestTimestamps = this.logsOf(this.newestTimestamps, connectionId);
     const lost = this.logsOf(this.lost, connectionId);
-    const polledBefore = newestTimestamps.has(log);
+    const readBefore = (newestTimestamps.get(log) ?? null) !== null;
 
     let missed = 0;
-    if (polledBefore && lastSeenId !== null && entries.length > 0) {
+    if (readBefore && lastSeenId !== null && entries.length > 0) {
       const oldestId = Math.min(...entries.map((entry) => entry.id));
       missed = Math.max(0, oldestId - lastSeenId - 1);
     }
