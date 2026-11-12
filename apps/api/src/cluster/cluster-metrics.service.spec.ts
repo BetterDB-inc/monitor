@@ -6,7 +6,12 @@ import { ConnectionRegistry } from '../connections/connection-registry.service';
 
 describe('ClusterMetricsService', () => {
   let service: ClusterMetricsService;
-  let mockDiscoveryService: { discoverNodes: jest.Mock; getNodeConnection: jest.Mock; evictNodeClient: jest.Mock };
+  let mockDiscoveryService: {
+    discoverNodes: jest.Mock;
+    getNodeConnection: jest.Mock;
+    evictNodeClient: jest.Mock;
+    forgetTopology: jest.Mock;
+  };
   let mockConnectionRegistry: {
     get: jest.Mock;
     getDefaultId: jest.Mock;
@@ -115,6 +120,7 @@ used_cpu_user:20.3\r
       discoverNodes: jest.fn().mockResolvedValue(mockNodes),
       getNodeConnection: jest.fn().mockResolvedValue(mockClient),
       evictNodeClient: jest.fn(),
+      forgetTopology: jest.fn(),
     };
 
     mockConnectionRegistry = {
@@ -740,6 +746,115 @@ used_cpu_user:20.3\r
       expect(result.failedSlotRanges).toEqual([[0, 100]]);
     });
 
+    it('returns every owned slot of each primary that answered in full, whatever the limit', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[1, 2]] },
+        { id: 'p2', address: '10.0.0.3:6379', role: 'master', healthy: true, slots: [[9000, 9000]] },
+      ]);
+      const replies: Record<string, unknown> = {
+        p1: [[1, ['key-count', 50]], [2, ['key-count', 5]]],
+        p2: [[9000, ['key-count', 70]], [2, ['key-count', 999]]],
+      };
+      mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => ({
+        call: jest.fn(async () => replies[nodeId]),
+      }));
+
+      const result = await service.getClusterSlotStatsResult('key-count', 1, 'conn-1');
+
+      expect(Object.keys(result.stats)).toEqual(['9000']);
+      expect(result.nodeStats).toEqual([
+        { nodeId: 'p1', address: '10.0.0.1:6379', stats: { '1': { key_count: 50 }, '2': { key_count: 5 } } },
+        { nodeId: 'p2', address: '10.0.0.3:6379', stats: { '9000': { key_count: 70 } } },
+      ]);
+    });
+
+    it('gives the per-node stats the client address, without the cluster bus port', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+        { id: 'p1', address: '10.0.0.1:6379@16379', role: 'master', healthy: true, slots: [[7, 7]] },
+      ]);
+      mockDiscoveryService.getNodeConnection.mockResolvedValue({
+        call: jest.fn(async () => [[7, ['key-count', 3]]]),
+      });
+
+      const result = await service.getClusterSlotStatsResult('key-count', 10, 'conn-1');
+
+      expect(result.nodeStats).toEqual([
+        { nodeId: 'p1', address: '10.0.0.1:6379', stats: { '7': { key_count: 3 } } },
+      ]);
+    });
+
+    it('forgets the cached topology and gives no per-node stats when a primary answers for fewer slots than it was asked for', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 1], [5, 5]] },
+        { id: 'p2', address: '10.0.0.3:6379', role: 'master', healthy: true, slots: [[9, 9]] },
+      ]);
+      const replies: Record<string, Record<number, unknown>> = {
+        p1: { 0: [[0, ['key-count', 1]], [1, ['key-count', 1]]], 5: [] },
+        p2: { 9: [[9, ['key-count', 1]]] },
+      };
+      mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => ({
+        call: jest.fn(async (_c: string, _s: string, _r: string, start: number) => replies[nodeId][start]),
+      }));
+
+      const result = await service.getClusterSlotStatsResult('key-count', 10, 'conn-1');
+
+      expect(mockDiscoveryService.forgetTopology).toHaveBeenCalledTimes(1);
+      expect(mockDiscoveryService.forgetTopology).toHaveBeenCalledWith('conn-1');
+      expect(result.failedNodes).toEqual([]);
+      expect(Object.keys(result.stats).sort()).toEqual(['0', '1', '9']);
+      expect(result.nodeStats).toBeUndefined();
+    });
+
+    it('keeps the cached topology while every primary answers for all its slots', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 1], [5, 5]] },
+      ]);
+      const replies: Record<number, unknown> = {
+        0: [[0, ['key-count', 1]], [1, ['key-count', 0]]],
+        5: [[5, ['key-count', 0]], [6, ['key-count', 4]]],
+      };
+      mockDiscoveryService.getNodeConnection.mockResolvedValue({
+        call: jest.fn(async (_c: string, _s: string, _r: string, start: number) => replies[start]),
+      });
+
+      await service.getClusterSlotStatsResult('key-count', 10, 'conn-1');
+
+      expect(mockDiscoveryService.forgetTopology).not.toHaveBeenCalled();
+    });
+
+    it('keeps the cached topology when a range could not be read', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 0], [5, 5]] },
+      ]);
+      mockDiscoveryService.getNodeConnection.mockResolvedValue({
+        call: jest.fn(async (_c: string, _s: string, _r: string, start: number) => {
+          if (start === 5) throw new Error('boom');
+          return [[0, ['key-count', 1]]];
+        }),
+      });
+
+      await service.getClusterSlotStatsResult('key-count', 10, 'conn-1');
+
+      expect(mockDiscoveryService.forgetTopology).not.toHaveBeenCalled();
+    });
+
+    it('leaves a primary with an unread range out of the per-node stats', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 99], [200, 299]] },
+        { id: 'p2', address: '10.0.0.3:6379', role: 'master', healthy: true, slots: [[300, 300]] },
+      ]);
+      mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => ({
+        call: jest.fn(async (_c: string, _s: string, _r: string, start: number) => {
+          if (start === 200) throw new Error('boom');
+          return nodeId === 'p1' ? [[1, ['key-count', 50]]] : [[300, ['key-count', 7]]];
+        }),
+      }));
+
+      const result = await service.getClusterSlotStatsResult('key-count', 10);
+
+      expect(result.nodeStats?.map((node) => node.nodeId)).toEqual(['p2']);
+    });
+
     it('does not let a slot a primary is handing off push out the slots it owns', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
         { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 99], [200, 299]] },
@@ -947,6 +1062,7 @@ used_cpu_user:20.3\r
       expect(result.stats).toEqual({ '1': { key_count: 50 } });
       expect(result.failedNodes).toEqual(['10.0.0.3:6379']);
       expect(result.failedSlotRanges).toEqual([[8192, 16383]]);
+      expect(result.nodeStats).toBeUndefined();
     });
 
     it('fails with the connection\'s own error when neither a primary nor the connection answered', async () => {

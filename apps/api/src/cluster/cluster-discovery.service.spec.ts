@@ -270,6 +270,47 @@ describe('ClusterDiscoveryService', () => {
       expect(mockDbClient.getClusterNodes).toHaveBeenCalledTimes(1);
     });
 
+    it('reads CLUSTER NODES again once the topology is forgotten', async () => {
+      await service.discoverNodes('test-connection');
+      service.forgetTopology('test-connection');
+      await service.discoverNodes('test-connection');
+
+      expect(mockDbClient.getClusterNodes).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not join or keep a read that was running when the topology was forgotten', async () => {
+      const moved = [{ ...mockClusterNodes[0], slots: [[0, 100]] }, mockClusterNodes[1]];
+      let answerOld!: (nodes: unknown[]) => void;
+      mockDbClient.getClusterNodes
+        .mockImplementationOnce(() => new Promise((resolve) => (answerOld = resolve)))
+        .mockResolvedValue(moved);
+      const slotsOf = (nodes: Array<{ role: string; slots: number[][] }>) =>
+        nodes.find((n) => n.role === 'master')?.slots;
+      const old = service.discoverNodes('test-connection');
+      await Promise.resolve();
+
+      service.forgetTopology('test-connection');
+      const fresh = service.discoverNodes('test-connection');
+      await Promise.resolve();
+
+      expect(mockDbClient.getClusterNodes).toHaveBeenCalledTimes(2);
+      expect(slotsOf(await fresh)).toEqual([[0, 100]]);
+
+      answerOld(mockClusterNodes);
+      await old;
+
+      expect(slotsOf(await service.discoverNodes('test-connection'))).toEqual([[0, 100]]);
+      expect(mockDbClient.getClusterNodes).toHaveBeenCalledTimes(2);
+    });
+
+    it('forgets the topology of the default connection when none is named', async () => {
+      await service.discoverNodes();
+      service.forgetTopology();
+      await service.discoverNodes();
+
+      expect(mockDbClient.getClusterNodes).toHaveBeenCalledTimes(2);
+    });
+
     it('should mark nodes as healthy based on flags', async () => {
       const nodes = await service.discoverNodes();
 
