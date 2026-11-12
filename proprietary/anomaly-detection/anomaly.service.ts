@@ -7613,11 +7613,16 @@ export class AnomalyService
     connectionId: string,
     metricType?: MetricType,
   ): Promise<boolean> {
-    const cached =
-      this.recentAnomalies.find((e) => e.id === id) ?? this.persistenceOutbox.unsavedAnomaly(id);
+    const cached = this.eventInMemory(id);
     return cached !== undefined
       ? Promise.resolve(!cached.resolved)
       : this.isAnomalyUnresolvedInStorage(id, connectionId, metricType);
+  }
+
+  private eventInMemory(id: string): AnomalyEvent | undefined {
+    return (
+      this.recentAnomalies.find((e) => e.id === id) ?? this.persistenceOutbox.unsavedAnomaly(id)
+    );
   }
 
   /**
@@ -9019,9 +9024,15 @@ export class AnomalyService
   // Public API methods
 
   getHotShards(connectionId: string): HotShardDetail[] {
-    return [...(this.hotShardDetails.get(connectionId)?.values() ?? [])].sort(
-      (a, b) => b.cpu.ratio - a.cpu.ratio,
-    );
+    const eventIds = this.hotShardEventIds.get(connectionId);
+    const resolvedByHand = (signature: string) => {
+      const eventId = eventIds?.get(signature);
+      return eventId !== undefined && this.eventInMemory(eventId)?.resolved === true;
+    };
+    return [...(this.hotShardDetails.get(connectionId) ?? [])]
+      .filter(([signature]) => !resolvedByHand(signature))
+      .map(([, detail]) => detail)
+      .sort((a, b) => b.cpu.ratio - a.cpu.ratio);
   }
 
   getRecentEvents(limit = 100, metricType?: MetricType): AnomalyEvent[] {
