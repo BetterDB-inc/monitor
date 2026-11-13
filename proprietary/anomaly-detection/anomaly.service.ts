@@ -453,6 +453,7 @@ interface FanoutGap {
 }
 
 type FanoutCount = 'checked' | 'unreachable' | 'authFailed' | 'skipped' | 'notDialed';
+type SlotMigrationState = 'running' | 'none' | 'unknown';
 
 /** Coverage as recorded; its age and staleness are worked out when it is read. */
 type StoredFanoutCoverage = Omit<FanoutCoverage, 'ageMs' | 'stale'>;
@@ -6314,15 +6315,18 @@ export class AnomalyService
           this.shardLoad?.getSlots(connectionId, finding.shardId) ?? [],
         ]),
       );
-      const held =
-        findings === null ||
-        (await this.isSlotMigrationInFlight(connectionId, sample.timestamp, findings));
-      if (held) {
+      const migration =
+        findings === null
+          ? 'running'
+          : await this.slotMigrationBeforeRaise(connectionId, sample.timestamp, findings);
+      if (findings === null || migration !== 'none') {
         this.restartHotShardHold(connectionId);
-        this.holdRebalance(
-          connectionId,
-          findings === null && !resharding ? 'settling' : 'migration_running',
-        );
+        if (migration === 'running') {
+          this.holdRebalance(
+            connectionId,
+            findings === null && !resharding ? 'settling' : 'migration_running',
+          );
+        }
         return;
       }
       await this.refreshHotShardKeys(ctx, timestamp, sample.timestamp, findings, topSlots);
@@ -6384,17 +6388,22 @@ export class AnomalyService
     );
   }
 
-  private async isSlotMigrationInFlight(
+  private async slotMigrationBeforeRaise(
     connectionId: string,
     sampledAt: number,
     findings: HotShardFinding[],
-  ): Promise<boolean> {
-    if (!this.clusterMetrics) return false;
+  ): Promise<SlotMigrationState> {
     if (!findings.some((finding) => this.isHotShardAboutToRaise(connectionId, sampledAt, finding))) {
-      return false;
+      return 'none';
     }
+    return this.readSlotMigrationState(connectionId);
+  }
+
+  private async readSlotMigrationState(connectionId: string): Promise<SlotMigrationState> {
+    if (!this.clusterMetrics) return 'none';
     const check = await this.clusterMetrics.checkSlotMigrations(connectionId);
-    return !check.complete || check.migrations.length > 0;
+    if (check.migrations.length > 0) return 'running';
+    return check.complete ? 'none' : 'unknown';
   }
 
   private isHotShardAboutToRaise(
@@ -6473,11 +6482,19 @@ export class AnomalyService
     );
     const shards = this.rebalanceShards(sample, nodes, findings);
     const ownership = [
-      ...shards.map((shard) => `${shard.shardId}:${shard.slotCount}:${shard.hot ? 'hot' : ''}`),
+      ...shards.map((shard) => `${shard.shardId}:${shard.slotCount}`),
       ...unhealthy,
     ]
       .sort()
       .join(',');
+    const hot = new Set(findings.map((finding) => finding.shardId));
+    const isCurrent = (last: { verdict: RebalanceVerdict; ownership: string }) =>
+      !isTransientNoPlan(last.verdict) &&
+      last.ownership === ownership &&
+      !(
+        last.verdict.kind === 'plan' &&
+        last.verdict.moves.some((move) => hot.has(move.targetShardId))
+      );
     const kept = new Map<
       string,
       { verdict: RebalanceVerdict; computedAt: number; ownership: string }
@@ -6496,8 +6513,7 @@ export class AnomalyService
       if (
         !topologyBlocker &&
         last &&
-        !isTransientNoPlan(last.verdict) &&
-        last.ownership === ownership &&
+        isCurrent(last) &&
         timestamp - last.computedAt < REBALANCE_REFRESH_MS
       ) {
         kept.set(signature, last);
@@ -6509,32 +6525,44 @@ export class AnomalyService
         : [...(verdict.coveredBy ?? []), ...(verdict.conflictsWith ?? [])].map(
             (shard) => shard.shardId,
           );
-    let settled = false;
-    while (!settled) {
-      settled = true;
-      for (const [signature, last] of [...kept]) {
-        if (
-          plannedWith(last.verdict).some(
-            (shardId) => kept.get(hotShardSignature(shardId))?.verdict.kind !== 'plan',
-          )
-        ) {
-          kept.delete(signature);
-          settled = false;
+    const dropOrphans = () => {
+      let settled = false;
+      while (!settled) {
+        settled = true;
+        for (const [signature, last] of [...kept]) {
+          if (
+            plannedWith(last.verdict).some(
+              (shardId) => kept.get(hotShardSignature(shardId))?.verdict.kind !== 'plan',
+            )
+          ) {
+            kept.delete(signature);
+            settled = false;
+          }
         }
       }
-    }
+    };
+    dropOrphans();
     due.push(...tracked.filter(({ signature }) => !kept.has(signature)));
     const withdrawable = [...kept]
       .filter(([, last]) => last.verdict.kind === 'plan' || plannedWith(last.verdict).length > 0)
       .map(([signature]) => signature);
     if (withdrawable.length > 0 || due.length > 0) {
-      const blocked =
-        topologyBlocker ??
-        (migrationsChecked || !(await this.isSlotMigrationRunning(ctx))
-          ? undefined
-          : 'migration_running');
+      const migration =
+        topologyBlocker || migrationsChecked ? 'none' : await this.slotMigrationState(ctx);
+      const blocked = topologyBlocker ?? (migration === 'none' ? undefined : 'migration_running');
+      if (migration === 'unknown') {
+        for (const { signature } of due) {
+          const last = known?.get(signature);
+          if (last && isCurrent(last)) kept.set(signature, last);
+        }
+        dropOrphans();
+      }
       if (blocked) {
-        for (const signature of [...withdrawable, ...due.map((plan) => plan.signature)]) {
+        const held =
+          migration === 'unknown'
+            ? due.filter(({ signature }) => !kept.has(signature)).map((plan) => plan.signature)
+            : [...withdrawable, ...due.map((plan) => plan.signature)];
+        for (const signature of held) {
           kept.set(signature, {
             verdict: noRebalancePlan(blocked),
             computedAt: timestamp,
@@ -6680,16 +6708,14 @@ export class AnomalyService
     );
   }
 
-  private async isSlotMigrationRunning(ctx: ConnectionContext): Promise<boolean> {
-    if (!this.clusterMetrics) return false;
+  private async slotMigrationState(ctx: ConnectionContext): Promise<SlotMigrationState> {
     try {
-      const check = await this.clusterMetrics.checkSlotMigrations(ctx.connectionId);
-      return !check.complete || check.migrations.length > 0;
+      return await this.readSlotMigrationState(ctx.connectionId);
     } catch (err) {
       this.logger.warn(
         `Slot migration check failed for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
       );
-      return true;
+      return 'unknown';
     }
   }
 

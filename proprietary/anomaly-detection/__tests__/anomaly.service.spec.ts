@@ -3127,19 +3127,105 @@ describe('AnomalyService', () => {
         expect(rebalance()).toMatchObject({ kind: 'plan' });
       });
 
-      it('plans from the next sample after a migration check that failed', async () => {
-        const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: true });
-        (service as any).clusterMetrics = { checkSlotMigrations };
-        spreadLoad();
-        await step(HOT, 6);
-        checkSlotMigrations.mockRejectedValue(new Error('connection lost'));
-        await step(HOT, 20);
-        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'migration_running' });
+      describe('a migration check that does not hear from every primary', () => {
+        const HEAVIER = [1_300_000, 100_000, 100_000];
+        const unheard = [
+          ['fails', () => Promise.reject(new Error('connection lost'))],
+          ['misses a primary', () => Promise.resolve({ migrations: [], complete: false })],
+        ] as const;
 
-        checkSlotMigrations.mockResolvedValue({ migrations: [], complete: true });
-        await step(HOT);
+        it.each(unheard)(
+          'keeps the plan as it is while the check %s, and plans again once it passes',
+          async (_case, reply) => {
+            const checkSlotMigrations = jest
+              .fn()
+              .mockResolvedValue({ migrations: [], complete: true });
+            (service as any).clusterMetrics = { checkSlotMigrations };
+            spreadLoad();
+            await step(HOT, 6);
 
-        expect(rebalance()).toMatchObject({ kind: 'plan' });
+            checkSlotMigrations.mockImplementation(reply);
+            for (let round = 0; round < 24; round += 1) {
+              await step(HEAVIER);
+
+              expect(rebalance()).toMatchObject({ moves: [{ ranges: [[100, 107]] }] });
+            }
+
+            checkSlotMigrations.mockResolvedValue({ migrations: [], complete: true });
+            await step(HEAVIER);
+
+            expect(rebalance()).toMatchObject({ moves: [{ ranges: [[100, 108]] }] });
+          },
+        );
+
+        it('withdraws the plan when the check misses a primary and still finds a migration', async () => {
+          const checkSlotMigrations = jest
+            .fn()
+            .mockResolvedValue({ migrations: [], complete: true });
+          (service as any).clusterMetrics = { checkSlotMigrations };
+          spreadLoad();
+          await step(HOT, 6);
+
+          checkSlotMigrations.mockResolvedValue({ migrations: [{ slot: 5 }], complete: false });
+          await step(HOT);
+
+          expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'migration_running' });
+        });
+
+        it.each(unheard)(
+          'holds back a new suggestion while the check %s',
+          async (_case, reply) => {
+            const checkSlotMigrations = jest
+              .fn()
+              .mockResolvedValue({ migrations: [], complete: true });
+            (service as any).clusterMetrics = { checkSlotMigrations };
+            spreadLoad();
+            await step(HOT, 6);
+
+            checkSlotMigrations.mockImplementation(reply);
+            (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue([
+              ...clusterNodes(),
+              { ...clusterNodes()[1], id: 'd0000000', address: '10.0.0.4:6379@16379' },
+            ]);
+            await step(HOT, 3);
+
+            expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'migration_running' });
+
+            checkSlotMigrations.mockResolvedValue({ migrations: [], complete: true });
+            await step(HOT);
+
+            expect(targets()[0]).toBe('d0000000');
+          },
+        );
+
+        it('keeps the plan of a shard while the event of another waits on the check', async () => {
+          const checkSlotMigrations = jest
+            .fn()
+            .mockResolvedValue({ migrations: [], complete: true });
+          (service as any).clusterMetrics = { checkSlotMigrations };
+          IDS.push('d0000000', 'e0000000');
+          ADDRS.push('10.0.0.4:6379', '10.0.0.5:6379');
+          owners = [[...WIDE], [10, 11], [20, 21], [30, 31], [40, 41]];
+          evenSlots = true;
+          try {
+            await step([900_000, 150_000, 100_000, 100_000, 100_000], 6);
+            const plan = rebalance();
+            expect(targets()).not.toContain('b0000000');
+
+            checkSlotMigrations.mockClear();
+            checkSlotMigrations.mockResolvedValue({ migrations: [], complete: false });
+            for (let round = 0; round < 12; round += 1) {
+              await step([900_000, 900_000, 100_000, 100_000, 100_000]);
+
+              expect(rebalance()).toEqual(plan);
+            }
+            expect(checkSlotMigrations).toHaveBeenCalled();
+            expect(hotEvents()).toHaveLength(1);
+          } finally {
+            IDS.length = 3;
+            ADDRS.length = 3;
+          }
+        });
       });
 
       it('plans from the next sample once the slot load of the shard is measured', async () => {
@@ -3190,6 +3276,30 @@ describe('AnomalyService', () => {
         }
       });
 
+      it('keeps a plan when a shard it moves nothing to goes over and under the hot line', async () => {
+        IDS.push('d0000000', 'e0000000');
+        ADDRS.push('10.0.0.4:6379', '10.0.0.5:6379');
+        owners = [[...WIDE], [10, 11], [20, 21], [30, 31], [40, 41]];
+        evenSlots = true;
+        try {
+          await step([900_000, 150_000, 100_000, 100_000, 100_000], 6);
+          const plan = rebalance();
+          expect(plan).toMatchObject({ kind: 'plan' });
+          expect(targets()).not.toContain('b0000000');
+
+          for (let round = 0; round < 6; round += 1) {
+            await step([1_300_000, 250_000, 100_000, 100_000, 100_000]);
+            expect(rebalance()).toEqual(plan);
+
+            await step([1_300_000, 150_000, 100_000, 100_000, 100_000]);
+            expect(rebalance()).toEqual(plan);
+          }
+        } finally {
+          IDS.length = 3;
+          ADDRS.length = 3;
+        }
+      });
+
       it('still judges the shard when the migration check of a refresh fails', async () => {
         const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: true });
         (service as any).clusterMetrics = { checkSlotMigrations };
@@ -3200,7 +3310,7 @@ describe('AnomalyService', () => {
         await step(HOT, 21);
 
         expect(service.getHotShards('conn-a')).toHaveLength(1);
-        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'migration_running' });
+        expect(hotEvents()[0].resolved).toBe(false);
       });
 
       it('plans nothing while a primary is suspect', async () => {
