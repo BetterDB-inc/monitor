@@ -1083,12 +1083,76 @@ describe('planRebalances', () => {
       expect(planOf(later).plannedAfter).toEqual(['a']);
     });
 
+    describe('a shard with no plan on the loads the earlier plans leave', () => {
+      const crowded = [
+        shard('a', 646_995, { hot: true, slotCount: 17 }),
+        shard('b', 690_000, { hot: true, slotCount: 9 }),
+        shard('c', 607_000, { hot: true, slotCount: 5 }),
+        shard('d', 202_000),
+        shard('e', 242_000),
+        shard('f', 207_000),
+      ];
+      const heavy = [
+        { hotShardId: 'a', slots: slots(0, [77_640, 135_870, ...even(15, 28_899)]) },
+        { hotShardId: 'b', slots: slots(200, [241_500, 75_900, 303_600, ...even(6, 11_500)]) },
+        { hotShardId: 'c', slots: slots(400, even(5, 121_400)) },
+      ];
+
+      it('says the earlier plan is in the way when the shard has a plan on its own', () => {
+        const [first, second] = planRebalances(heavy, crowded);
+
+        expect(planOf(first).moves.map((move) => move.targetShardId)).toEqual(['d']);
+        expect(planRebalance({ ...heavy[1], shards: crowded })).toMatchObject({ kind: 'plan' });
+        expect(second).toEqual(conflictsWithA);
+      });
+
+      it('gives the answer from the measured loads when the shard has no plan on its own', () => {
+        const third = planRebalances(heavy, crowded)[2];
+
+        expect(third).toEqual(planRebalance({ ...heavy[2], shards: crowded }));
+        expect(third).toMatchObject({ kind: 'no_plan', reason: 'key_level' });
+      });
+    });
+
     it('gives no plan to a shard when no move from it fits next to the earlier plan', () => {
       const verdicts = planRebalances(threeHot, fewSlots);
 
       expect(planOf(verdicts[0]).effect).toBe('resolves');
       expect(verdicts.slice(1)).toEqual([conflictsWithA, conflictsWithA]);
       expectPlansToHoldTogether(fewSlots, verdicts);
+    });
+
+    it('names only the earlier plan whose target the move would take over the line', () => {
+      const cool = [141_000, 140_000, 63_000, 145_000, 96_000, 161_000];
+      const wide = [
+        shard('a', 365_000, { slotCount: 9 }),
+        shard('b', 377_000, { hot: true, slotCount: 9 }),
+        shard('c', 692_000, { hot: true, slotCount: 6 }),
+        ...fleet(6, 0).map((each, index) => ({ ...each, cpuUsecPerSecond: cool[index] })),
+      ];
+      const three = [
+        {
+          hotShardId: 'a',
+          slots: slots(0, [69_000, 26_000, 48_000, 17_000, 46_000, 17_000, 70_000, 37_000, 35_000]),
+        },
+        {
+          hotShardId: 'b',
+          slots: slots(
+            1_000,
+            [42_000, 15_000, 63_000, 26_000, 28_000, 70_000, 64_000, 28_000, 41_000],
+          ),
+        },
+        {
+          hotShardId: 'c',
+          slots: slots(2_000, [147_000, 61_000, 110_000, 98_000, 155_000, 121_000]),
+        },
+      ];
+
+      const [first, second, third] = planRebalances(three, wide);
+
+      expect(planOf(first).moves.map((move) => move.targetShardId)).toEqual(['s03', 's05']);
+      expect(planOf(second).moves.map((move) => move.targetShardId)).toEqual(['s05', 's02']);
+      expect(third).toEqual(conflictsWithA);
     });
 
     it('keeps every target and every resolved source under the line, whatever the load', () => {
