@@ -157,7 +157,7 @@ describe('RebalanceSuggestion', () => {
     const region = await panel();
     expect(within(region).getByText('Headroom')).toBeInTheDocument();
     expect(region).toHaveTextContent(
-      "This frees 28% of the shard's CPU. The shard stays at 2.2x the median, but its hot slots get the node mostly to themselves.",
+      "This frees 28% of the shard's CPU. The shard stays at 2.2x the median, but the load that stays has more of the node to itself.",
     );
   });
 
@@ -358,7 +358,7 @@ describe('RebalanceSuggestion', () => {
     ['cluster_hot', 'No other shard has room for this load. Consider adding a shard.'],
     [
       'too_many_targets',
-      'This load would have to be spread over more shards than one suggestion covers. Consider adding a shard.',
+      'This load would have to be spread over too many shards for one suggestion.',
     ],
     ['no_target', 'No other primary can take slots.'],
     [

@@ -3318,6 +3318,19 @@ describe('AnomalyService', () => {
 
             expect(plan()).toMatchObject({ support: 'provider_managed', commands: [] });
           });
+
+          it('knows a managed service behind a private host name by what the hot shard reports', async () => {
+            spreadLoad();
+            const managed = server('redis_version:7.2.4\r\nvalkey_version:9.0.1\r\nos:Amazon ElastiCache');
+            dialMemory({
+              a0000000: managed + info(4 * GB, 8 * GB, 200),
+              b0000000: managed + info(GB, 8 * GB, 50),
+            });
+
+            await step(HOT, 6);
+
+            expect(plan()).toMatchObject({ support: 'provider_managed', commands: [] });
+          });
         });
 
         it('gives up on a target that does not answer and drops its client', async () => {

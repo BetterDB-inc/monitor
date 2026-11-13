@@ -79,8 +79,7 @@ const NO_COMMAND: Record<Exclude<RebalanceSupport, 'valkey_atomic' | 'redis_atom
 
 const NO_PLAN_REASONS: Record<Exclude<RebalanceNoPlanReason, 'key_level'>, string> = {
   cluster_hot: 'No other shard has room for this load. Consider adding a shard.',
-  too_many_targets:
-    'This load would have to be spread over more shards than one suggestion covers. Consider adding a shard.',
+  too_many_targets: 'This load would have to be spread over too many shards for one suggestion.',
   no_target: 'No other primary can take slots.',
   unhealthy_node:
     'A primary is failed or suspect. A suggestion comes back when every primary is healthy.',
@@ -179,7 +178,7 @@ function Plan({ plan }: { plan: RebalancePlan }) {
           <p>
             {plan.effect === 'resolves'
               ? `This brings the shard from ${ratio(source.before.ratio)} to ${ratio(source.after.ratio)} the median.`
-              : `This frees ${percent(moved)} of the shard's CPU. The shard stays at ${ratio(source.after.ratio)} the median, but its hot slots get the node mostly to themselves.`}
+              : `This frees ${percent(moved)} of the shard's CPU. The shard stays at ${ratio(source.after.ratio)} the median, but the load that stays has more of the node to itself.`}
           </p>
         )}
         <ul className="list-disc pl-5">

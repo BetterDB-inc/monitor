@@ -6540,7 +6540,7 @@ export class AnomalyService
       if (reading) memory.set(shardIds[index], reading);
       if (server) servers.set(shardIds[index], server);
     }
-    const provider = detectProvider({}, ctx.host).provider;
+    const provider = detectProvider(readings[0]?.server ?? {}, ctx.host).provider;
     return withCommands(
       { ...verdict, warnings: [...verdict.warnings, ...memoryWarnings(verdict, memory)] },
       servers,
