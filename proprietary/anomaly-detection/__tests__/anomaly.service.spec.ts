@@ -3544,6 +3544,74 @@ describe('AnomalyService', () => {
         });
       });
 
+      describe('two plans that are not due at the same time', () => {
+        const ONE = [250_000, 100_000, 20_000, 100_000, 100_000];
+        const BOTH = [250_000, 250_000, 20_000, 100_000, 100_000];
+        const order = () =>
+          Object.fromEntries(
+            service
+              .getHotShards('conn-a')
+              .map((shard) => [
+                shard.shardId,
+                shard.rebalance?.kind === 'plan'
+                  ? shard.rebalance.plannedAfter
+                  : shard.rebalance?.reason,
+              ]),
+          );
+
+        beforeEach(() => {
+          IDS.push('d0000000', 'e0000000');
+          ADDRS.push('10.0.0.4:6379', '10.0.0.5:6379');
+          owners = [[...WIDE], WIDE.map((slot) => slot + 100), [20, 21], [30, 31], [40, 41]];
+          evenSlots = true;
+        });
+
+        afterEach(() => {
+          IDS.length = 3;
+          ADDRS.length = 3;
+        });
+
+        it('plans both again, in the same order, when the earlier plan is due', async () => {
+          await step(ONE, 6);
+          await step(BOTH, 22);
+
+          expect(order()).toEqual({ a0000000: [], b0000000: ['a0000000'] });
+
+          for (let round = 0; round < 30; round += 1) {
+            await step(BOTH);
+
+            expect(order()).toEqual({ a0000000: [], b0000000: ['a0000000'] });
+          }
+        });
+
+        it('plans a shard again when the plan that left it no room is planned again', async () => {
+          await step(ONE, 6);
+          await step(BOTH, 10);
+          const kept: Map<string, { verdict: unknown }> = (service as any).hotShardRebalance.get(
+            'conn-a',
+          );
+          const [signature, last] = [...kept].find(([key]) => key.includes('b0000000'))!;
+          kept.set(signature, {
+            ...last,
+            verdict: {
+              kind: 'no_plan',
+              action: 'spread',
+              reason: 'conflicts_with_other_plan',
+              pinnedSlots: [],
+              conflictsWith: [{ shardId: 'a0000000', nodeAddr: '10.0.0.1:6379' }],
+            },
+          });
+
+          await step(BOTH, 12);
+
+          expect(order()).toEqual({ a0000000: [], b0000000: 'conflicts_with_other_plan' });
+
+          await step(BOTH);
+
+          expect(order()).toEqual({ a0000000: [], b0000000: ['a0000000'] });
+        });
+      });
+
       describe('target memory', () => {
         const GB = 1024 ** 3;
         const info = (usedBytes: number, maxBytes: number, keys: number) =>

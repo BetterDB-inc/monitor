@@ -56,7 +56,8 @@ export type RebalanceNoPlanReason =
   | 'settling'
   | 'slots_scattered'
   | 'too_many_targets'
-  | 'covered_by_other_plan';
+  | 'covered_by_other_plan'
+  | 'conflicts_with_other_plan';
 
 export interface RebalanceCoveringShard {
   shardId: string;
@@ -124,6 +125,7 @@ export interface RebalanceNoPlan {
   reason: RebalanceNoPlanReason;
   pinnedSlots: RebalancePinnedSlot[];
   coveredBy?: RebalanceCoveringShard[];
+  conflictsWith?: RebalanceCoveringShard[];
 }
 
 export type RebalanceVerdict = RebalancePlan | RebalanceNoPlan;
@@ -635,28 +637,83 @@ export function planRebalances(
   const verdicts: RebalanceVerdict[] = [];
   for (const hotShard of hotShards) {
     const counted = [...earlier, ...verdicts].filter((verdict) => verdict.kind === 'plan');
-    const verdict = planRebalance({ ...hotShard, shards: shardsAfter(shards, counted) }, policy);
+    const left = shardsAfter(shards, counted);
+    const countedShards = () =>
+      counted.map((plan) => ({
+        shardId: plan.sourceShardId,
+        nodeAddr:
+          shards.find((shard) => shard.shardId === plan.sourceShardId)?.nodeAddr ??
+          plan.sourceShardId,
+      }));
+    const fits = (candidate: RebalanceVerdict): candidate is RebalancePlan =>
+      candidate.kind === 'plan' && holdTogether(shards, counted, candidate, policy);
+    const verdict = planRebalance({ ...hotShard, shards: left }, policy);
     if (verdict.kind === 'plan') {
-      verdicts.push({ ...verdict, plannedAfter: counted.map((plan) => plan.sourceShardId) });
+      const fitting = fits(verdict)
+        ? verdict
+        : planRebalance(
+            { ...hotShard, shards: left },
+            {
+              ...policy,
+              excludedShardIds: [
+                ...policy.excludedShardIds,
+                ...left.filter((shard) => shard.slotCount === 0).map((shard) => shard.shardId),
+              ],
+            },
+          );
+      verdicts.push(
+        fits(fitting)
+          ? { ...fitting, plannedAfter: counted.map((plan) => plan.sourceShardId) }
+          : { ...noRebalancePlan('conflicts_with_other_plan'), conflictsWith: countedShards() },
+      );
     } else if (
       verdict.reason === 'settling' &&
       counted.length > 0 &&
       isOverTheLine({ ...hotShard, shards }, policy)
     ) {
-      verdicts.push({
-        ...noRebalancePlan('covered_by_other_plan'),
-        coveredBy: counted.map((plan) => ({
-          shardId: plan.sourceShardId,
-          nodeAddr:
-            shards.find((shard) => shard.shardId === plan.sourceShardId)?.nodeAddr ??
-            plan.sourceShardId,
-        })),
-      });
+      verdicts.push({ ...noRebalancePlan('covered_by_other_plan'), coveredBy: countedShards() });
     } else {
       verdicts.push(verdict);
     }
   }
   return verdicts;
+}
+
+function holdTogether(
+  shards: readonly RebalanceShard[],
+  earlier: readonly RebalancePlan[],
+  latest: RebalancePlan,
+  policy: RebalancePolicy,
+): boolean {
+  if (earlier.length === 0) return true;
+  const already = new Set(shardsOverTheLine(shards, earlier, policy));
+  return shardsOverTheLine(shards, [...earlier, latest], policy).every((shardId) =>
+    already.has(shardId),
+  );
+}
+
+function shardsOverTheLine(
+  shards: readonly RebalanceShard[],
+  plans: readonly RebalancePlan[],
+  policy: RebalancePolicy,
+): string[] {
+  const after = shardsAfter(shards, plans);
+  const cpuByShard = new Map(after.map((shard) => [shard.shardId, shard.cpuUsecPerSecond]));
+  const sources = new Set(plans.map((plan) => plan.sourceShardId));
+  const medianAfter = median(
+    after
+      .filter((shard) => shard.slotCount > 0 || sources.has(shard.shardId))
+      .map((shard) => shard.cpuUsecPerSecond),
+  );
+  return plans
+    .flatMap((plan) => [
+      ...plan.moves.map((move) => move.targetShardId),
+      ...(plan.effect === 'resolves' ? [plan.sourceShardId] : []),
+    ])
+    .filter(
+      (shardId) =>
+        hotShardRatio(cpuByShard.get(shardId) ?? 0, medianAfter) > policy.resolveRatio + SLACK,
+    );
 }
 
 function shardsAfter(
@@ -765,6 +822,15 @@ const NO_PLAN_SENTENCES: Partial<Record<RebalanceNoPlanReason, string>> = {
     " No rebalance is suggested: this shard's slots are too scattered to move enough load in a few ranges.",
 };
 
+function describeConflict(conflictsWith: readonly RebalanceCoveringShard[]): string {
+  const several = conflictsWith.length > 1;
+  return (
+    ' No rebalance is suggested for this shard yet: no move from it fits next to the ' +
+    `suggestion${several ? 's' : ''} for ${listed(conflictsWith.map((shard) => shard.nodeAddr))}. ` +
+    `Apply ${several ? 'those' : 'that one'} first.`
+  );
+}
+
 function describeCovered(coveredBy: readonly RebalanceCoveringShard[]): string {
   const several = coveredBy.length > 1;
   return (
@@ -783,6 +849,9 @@ export function describeNoPlan(
   if (verdict.reason === 'key_level') return describeKeyLevel(verdict.pinnedSlots, topKeys);
   if (verdict.reason === 'covered_by_other_plan' && verdict.coveredBy?.length) {
     return describeCovered(verdict.coveredBy);
+  }
+  if (verdict.reason === 'conflicts_with_other_plan' && verdict.conflictsWith?.length) {
+    return describeConflict(verdict.conflictsWith);
   }
   return NO_PLAN_SENTENCES[verdict.reason] ?? '';
 }
