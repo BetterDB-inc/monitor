@@ -72,7 +72,7 @@ function isLivePrimary(node: ClusterNode): boolean {
   return node.flags.includes('master') && node.slots.length > 0 && unhealthy === false;
 }
 
-function canonicalSlotKey(slots: number[][]): string {
+export function canonicalSlotKey(slots: number[][]): string {
   const ranges = slots.map(([start, end]) => {
     return `${start}-${end}`;
   });

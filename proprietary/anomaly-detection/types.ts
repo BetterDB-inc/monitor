@@ -24,6 +24,8 @@ export enum MetricType {
   RAFT_HEALTH = 'raft_health',
   /** Gossip-mode failover churn: one shard re-electing repeatedly (valkey#3996) — state-based. */
   FAILOVER_CHURN = 'failover_churn',
+  /** A primary whose shard normally has replicas has no synced replica (#714) — state-based. */
+  PRIMARY_WITHOUT_REPLICAS = 'primary_without_replicas',
   /** Replica output buffer approaching client-output-buffer-limit slave (valkey#3963) — state-based. */
   REPL_BUFFER_PRESSURE = 'repl_buffer_pressure',
   /** Non-dataset memory overhead consuming the maxmemory budget / driving eviction (valkey#1792) — state-based. */
@@ -113,6 +115,7 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.EVICTED_CLIENTS,
   MetricType.RAFT_HEALTH,
   MetricType.FAILOVER_CHURN,
+  MetricType.PRIMARY_WITHOUT_REPLICAS,
   MetricType.REPL_BUFFER_PRESSURE,
   MetricType.MEMORY_OVERHEAD,
   MetricType.LOAD_SATURATION,
@@ -131,6 +134,31 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.RESYNC_ESCALATION,
   MetricType.SLOT_MIGRATION,
   MetricType.SLOT_MIGRATION_STUCK,
+]);
+
+/**
+ * Extractor metrics that read a lifetime INFO counter. A raw counter only grows,
+ * so its latest value always sits above the trailing mean and the z-score fires
+ * on steady load; AnomalyService feeds these detectors the per-second rate since
+ * the previous poll instead, and their readings print with a /s unit.
+ */
+export const COUNTER_RATE_METRICS: ReadonlySet<MetricType> = new Set([
+  MetricType.ACL_DENIED,
+  MetricType.EVICTED_KEYS,
+  MetricType.KEYSPACE_MISSES,
+]);
+
+/**
+ * Per-second floor below which a COUNTER_RATE_METRICS z-score spike is ignored,
+ * as ERROR_REPLIES_MIN_PER_SEC does for error_replies: on a server that only
+ * occasionally evicts or denies, the baseline sits near zero with a tiny spread
+ * and any non-zero rate would otherwise score as a spike. Absolute thresholds
+ * still fire below the floor.
+ */
+export const COUNTER_RATE_MIN_PER_SEC: ReadonlyMap<MetricType, number> = new Map([
+  [MetricType.ACL_DENIED, 1],
+  [MetricType.EVICTED_KEYS, 10],
+  [MetricType.KEYSPACE_MISSES, 50],
 ]);
 
 export enum AnomalySeverity {

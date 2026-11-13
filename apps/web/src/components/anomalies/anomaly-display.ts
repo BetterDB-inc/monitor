@@ -109,6 +109,7 @@ export const METRIC_LABELS: Record<string, string> = {
   resync_loop: 'Replica Resync Loop',
   orphaned_slot_keys: 'Orphaned Slot Keys',
   failover_churn: 'Failover Churn',
+  primary_without_replicas: 'Primary Without Replicas',
   repl_buffer_pressure: 'Replica Buffer Pressure',
   memory_overhead: 'Memory Overhead',
   load_saturation: 'Load Saturation',

@@ -151,11 +151,9 @@ describe('DetectorPanel', () => {
     expect(warningZ().value).toBe('2.7');
   });
 
-  it('warns about lifetime counters only on those metrics', () => {
-    const { unmount } = renderPanel({ metric: 'acl_denied', defaults: aclDenied, resolved: aclDenied });
-    expect(screen.getByText(/lifetime total since the server's last restart/)).toBeInTheDocument();
-    unmount();
-    renderPanel();
+  it('shows the per-second unit for counter-derived metrics', () => {
+    renderPanel({ metric: 'acl_denied', defaults: aclDenied, resolved: aclDenied });
+    expect(screen.getByText('Unit: denials/s')).toBeInTheDocument();
     expect(screen.queryByText(/lifetime total/)).not.toBeInTheDocument();
   });
 
