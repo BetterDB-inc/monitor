@@ -3247,6 +3247,68 @@ describe('AnomalyService', () => {
       expect(resolved).toEqual(['run-2', 'stuck-2']);
     });
 
+    describe('with entries open from before a restart', () => {
+      const resolvedIds = () =>
+        storage.resolveAnomaly.mock.calls.map(([id]: [string]) => id).sort();
+
+      beforeEach(() => {
+        const stored = (id: string, metricType: MetricType, dedupeKey: string) => ({
+          id,
+          metricType,
+          dedupeKey,
+          timestamp: BASE - 15 * MINUTE,
+          resolved: false,
+        });
+        storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) => {
+          if (offset) return [];
+          if (metricType === MetricType.SLOT_MIGRATION) {
+            return [stored('run-1', MetricType.SLOT_MIGRATION, 'running:job:job-1')];
+          }
+          if (metricType === MetricType.SLOT_MIGRATION_STUCK) {
+            return [stored('stuck-1', MetricType.SLOT_MIGRATION_STUCK, 'stuck:job:job-1')];
+          }
+          return [];
+        });
+        (service as any).connectionRegistry.getConfig.mockImplementation((id: string) => ({ id }));
+      });
+
+      it('keeps a stuck warning open until the job moves', async () => {
+        see([job()]);
+        await after(0);
+        await after(MINUTE);
+
+        expect(resolvedIds()).toEqual([]);
+
+        see([job({ lastAckAt: clock })]);
+        await after(MINUTE);
+
+        expect(resolvedIds()).toEqual(['stuck-1']);
+      });
+
+      it('keeps them open while the nodes cannot be read, then closes the ones that ended', async () => {
+        report = { migrations: [], failed: [], readNodeIds: ['c0000000'], complete: false };
+        await after(0);
+        await after(MINUTE);
+
+        expect(resolvedIds()).toEqual([]);
+
+        see([]);
+        await after(MINUTE);
+
+        expect(resolvedIds()).toEqual(['run-1', 'stuck-1']);
+      });
+
+      it('closes them when the connection is removed', async () => {
+        see([job()]);
+        await after(0);
+
+        await (service as any).onConnectionRemoved('conn-a');
+        await new Promise((resolve) => setImmediate(resolve));
+
+        expect(resolvedIds()).toEqual(['run-1', 'stuck-1']);
+      });
+    });
+
     it('forgets everything about a removed connection', async () => {
       see([job()]);
       await after(0);

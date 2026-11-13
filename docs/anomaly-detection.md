@@ -734,7 +734,7 @@ The cluster is read every 30 seconds, and every 5 seconds while a migration is r
 
 A connection through the BetterDB agent is not watched: the monitor reaches only that one node through the agent and cannot ask the primaries. When the monitor can open its own sockets but no primary answers on the address the cluster reports for it, as behind NAT or an SSH tunnel, it reads the connection's own node instead and tries the primaries again after 10 minutes. From one node it sees only the migrations that node is the source or the target of.
 
-While the nodes of a migration cannot be read, its events stay as they are: a read that fails does not close them.
+While the nodes of a migration cannot be read, its events stay as they are: a read that fails does not close them. The same holds after the monitor restarts: the entries that were open stay open until it has read the nodes.
 
 ### slot_migration_stuck
 **What it measures**: A slot migration that stopped making progress, or an atomic job that ended as `failed`
@@ -744,7 +744,7 @@ While the nodes of a migration cannot be read, its events stay as they are: a re
 
 | Case | Rule | Resolves |
 | --- | --- | --- |
-| Atomic job stuck | The job is still active and its state, `last_update_time` and `last_ack_time` have not changed for 10 minutes. A job for which the server sends neither time is never called stuck | When any of the three changes, or the job ends |
+| Atomic job stuck | The job is still active and its state, `last_update_time` and `last_ack_time` have not changed for 10 minutes. A job for which the server sends neither time is never called stuck. Neither is a job that is seen only from its target while the snapshot arrives (state `receiving-snapshot`): the source sends no heartbeat in that phase, so the target's times stand still on a healthy job | When any of the three changes, or the job ends |
 | Older markers stuck | The same slots carry `MIGRATING` / `IMPORTING` markers between the same two nodes for 30 minutes | When the set of slots changes, or the markers are gone |
 | Atomic job failed | The job is listed with state `failed`. The message carries what the server said, cut to 200 characters | Not by itself: it reports something that happened. Resolve it once you have read it |
 
@@ -754,9 +754,9 @@ WARNING: Slot migration stuck: slots 0-1365 from 10.0.0.1:6379 to 10.0.0.3:6379 
 
 `CLUSTER CANCELSLOTMIGRATIONS` has no job name: it cancels every active migration the node it runs on is the source of. Check what else that node is moving before you run it.
 
-The quiet time is counted on the monitor's clock from the moment it last saw a change, not by comparing the server's timestamps with it, so a clock difference between the two does not matter. It starts again when the monitor restarts.
+The quiet time is counted on the monitor's clock from the moment it last saw a change, not by comparing the server's timestamps with it, so a clock difference between the two does not matter. It starts again when the monitor restarts. A warning that was open before the restart stays open until the monitor sees the job's state or times change, the slots change, or the migration end.
 
-A failed job is reported once. Jobs that were already in a node's list when the monitor first read that node are not reported, so a restart does not repeat old failures; a job that failed while the monitor was down is missed. A job that starts and fails between two reads is still reported, because the server keeps finished jobs in its list.
+A failed job is reported once. Jobs that were already in a node's list when the monitor first read that node are not reported, so a restart does not repeat old failures; a job that failed while the monitor was down is missed. A job that starts and fails between two reads is still reported while a node the monitor can read still lists it. A node keeps finished jobs in memory only, up to `cluster-slot-migration-log-max-len` of them (1000 by default), and loses the list when it restarts.
 
 BetterDB never cancels or restarts a migration.
 

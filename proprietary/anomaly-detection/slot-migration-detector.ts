@@ -5,6 +5,7 @@ export const LEGACY_MIGRATION_STALL_MS = 30 * 60_000;
 
 const MAX_REASON_LENGTH = 200;
 const SHORT_NODE_ID_LENGTH = 8;
+const SNAPSHOT_ARRIVING_PHASE = 'receiving-snapshot';
 
 export type SlotMigrationFindingKind = 'running' | 'stuck' | 'failed';
 
@@ -27,12 +28,14 @@ interface WatchedMove {
   since: number;
   atomic: boolean;
   nodeIds: string[];
+  stuckBefore: boolean;
 }
 
 export interface SlotMigrationWatch {
   moves: ReadonlyMap<string, WatchedMove>;
   knownFailed: ReadonlySet<string>;
   seenNodes: ReadonlySet<string>;
+  adopted: ReadonlySet<string>;
 }
 
 export interface SlotMigrationJudgement {
@@ -41,6 +44,7 @@ export interface SlotMigrationJudgement {
   stuck: SlotMigrationFinding[];
   failed: SlotMigrationFinding[];
   unseen: Set<string>;
+  held: Set<string>;
 }
 
 interface Move {
@@ -60,7 +64,16 @@ const EMPTY_WATCH: SlotMigrationWatch = {
   moves: new Map(),
   knownFailed: new Set(),
   seenNodes: new Set(),
+  adopted: new Set(),
 };
+
+export function withAdoptedSlotMigrations(
+  watch: SlotMigrationWatch | undefined,
+  signatures: Iterable<string>,
+): SlotMigrationWatch {
+  const known = watch ?? EMPTY_WATCH;
+  return { ...known, adopted: new Set([...known.adopted, ...signatures]) };
+}
 
 function asRanges(slots: number[]): string {
   const sorted = [...new Set(slots)].sort((a, b) => a - b);
@@ -83,6 +96,11 @@ function endpoints(migration: SlotMigration) {
   };
 }
 
+function hasHeartbeat(migration: SlotMigration): boolean {
+  if (migration.lastUpdateAt === undefined && migration.lastAckAt === undefined) return false;
+  return !(migration.state === 'importing' && migration.phase === SNAPSHOT_ARRIVING_PHASE);
+}
+
 function movesOf(migrations: SlotMigration[]): Move[] {
   const moves: Move[] = [];
   const legacy = new Map<string, { first: SlotMigration; slots: number[] }>();
@@ -91,7 +109,7 @@ function movesOf(migrations: SlotMigration[]): Move[] {
       moves.push({
         id: `job:${migration.jobName}`,
         atomic: true,
-        timed: migration.lastUpdateAt !== undefined || migration.lastAckAt !== undefined,
+        timed: hasHeartbeat(migration),
         slots: migration.slotRange ?? `${migration.slot}`,
         stamp: `${migration.phase ?? ''}|${migration.lastUpdateAt ?? ''}|${migration.lastAckAt ?? ''}`,
         phase: migration.phase,
@@ -143,22 +161,34 @@ export function judgeSlotMigrations(
   const stuck: SlotMigrationFinding[] = [];
   const failed: SlotMigrationFinding[] = [];
   const unseen = new Set<string>();
+  const held = new Set<string>();
+  const listed = new Set<string>();
 
   for (const move of movesOf(report.migrations)) {
     const known = watch.moves.get(move.id);
-    const since = known && known.stamp === move.stamp ? known.since : now;
+    const unchanged = known?.stamp === move.stamp;
+    const since = known && unchanged ? known.since : now;
+    const stuckSignature = `stuck:${move.id}`;
+    const stuckBefore =
+      move.timed &&
+      (!known || unchanged) &&
+      (known?.stuckBefore === true || watch.adopted.has(stuckSignature));
+    listed.add(move.id);
     moves.set(move.id, {
       stamp: move.stamp,
       since,
       atomic: move.atomic,
       nodeIds: [move.sourceNodeId, move.targetNodeId].filter((nodeId) => nodeId !== ''),
+      stuckBefore,
     });
     const { id, stamp: _stamp, timed, ...shown } = move;
     running.push({ kind: 'running', signature: `running:${id}`, ...shown });
     const quietMs = now - since;
     const stallMs = move.atomic ? ATOMIC_MIGRATION_STALL_MS : LEGACY_MIGRATION_STALL_MS;
     if (timed && quietMs >= stallMs) {
-      stuck.push({ kind: 'stuck', signature: `stuck:${id}`, ...shown, quietMs });
+      stuck.push({ kind: 'stuck', signature: stuckSignature, ...shown, quietMs });
+    } else if (stuckBefore) {
+      held.add(stuckSignature);
     }
   }
 
@@ -167,6 +197,15 @@ export function judgeSlotMigrations(
     moves.set(id, move);
     unseen.add(`running:${id}`);
     unseen.add(`stuck:${id}`);
+  }
+
+  const wholeView = report.complete || (report.ownNodeOnly && readNow.size > 0);
+  const adopted = new Set<string>();
+  for (const signature of watch.adopted) {
+    const id = signature.slice(signature.indexOf(':') + 1);
+    if (listed.has(id) || wholeView) continue;
+    adopted.add(signature);
+    held.add(signature);
   }
 
   const knownFailed = new Set(report.complete ? [] : watch.knownFailed);
@@ -191,7 +230,14 @@ export function judgeSlotMigrations(
   }
 
   const seenNodes = new Set(report.complete ? readNow : [...watch.seenNodes, ...readNow]);
-  return { watch: { moves, knownFailed, seenNodes }, running, stuck, failed, unseen };
+  return {
+    watch: { moves, knownFailed, seenNodes, adopted },
+    running,
+    stuck,
+    failed,
+    unseen,
+    held,
+  };
 }
 
 function nodeLabel(address: string, nodeId: string): string {

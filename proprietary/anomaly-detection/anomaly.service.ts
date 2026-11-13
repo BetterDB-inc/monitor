@@ -154,6 +154,7 @@ import {
   SlotMigrationWatch,
   describeSlotMigration,
   judgeSlotMigrations,
+  withAdoptedSlotMigrations,
 } from './slot-migration-detector';
 import { GhostMember, detectGhostMembers, ghostMemberSignature } from './ghost-membership-detector';
 import { ForgetRejoin, GhostMembershipHistory } from './ghost-membership-history';
@@ -8236,6 +8237,7 @@ export class AnomalyService
   ): void {
     const eventIds = eventIdsByConn.get(connectionId) ?? new Map<string, string>();
     const tracked = new Set(eventIds.values());
+    const adopted: string[] = [];
     for (const event of [...open].sort((a, b) => b.timestamp - a.timestamp)) {
       if (tracked.has(event.id)) continue;
       const signature = event.dedupeKey;
@@ -8244,8 +8246,14 @@ export class AnomalyService
         continue;
       }
       eventIds.set(signature, event.id);
+      adopted.push(signature);
     }
     if (eventIds.size > 0) eventIdsByConn.set(connectionId, eventIds);
+    if (adopted.length === 0) return;
+    this.slotMigrationWatch.set(
+      connectionId,
+      withAdoptedSlotMigrations(this.slotMigrationWatch.get(connectionId), adopted),
+    );
   }
 
   private async detectSlotMigrations(ctx: ConnectionContext, timestamp: number): Promise<void> {
@@ -8268,7 +8276,11 @@ export class AnomalyService
       if (report.ownNodeOnly && !ownNodeOnly) {
         this.slotMigrationOwnNodeUntil.set(connectionId, timestamp + SLOT_MIGRATION_DIAL_RETRY_MS);
       }
-      const judged = judgeSlotMigrations(watched, report, timestamp);
+      const judged = judgeSlotMigrations(
+        this.slotMigrationWatch.get(connectionId),
+        report,
+        timestamp,
+      );
       this.slotMigrationWatch.set(connectionId, judged.watch);
 
       const gate = {
@@ -8276,7 +8288,8 @@ export class AnomalyService
         timestamp,
         signatureOf: (finding: SlotMigrationFinding) => finding.signature,
         minPersistMs: 0,
-        preserveSignature: (signature: string) => judged.unseen.has(signature),
+        preserveSignature: (signature: string) =>
+          judged.unseen.has(signature) || judged.held.has(signature),
         buildEvent: (finding: SlotMigrationFinding) =>
           this.buildSlotMigrationEvent(connectionId, timestamp, finding),
       };
@@ -11570,6 +11583,8 @@ export class AnomalyService
       ...(this.hotShardEventIds.get(connectionId)?.values() ?? []),
       ...(this.topologyDivergenceEventIds.get(connectionId)?.values() ?? []),
       ...(this.replicaSlotEventIds.get(connectionId)?.values() ?? []),
+      ...(this.slotMigrationEventIds.get(connectionId)?.values() ?? []),
+      ...(this.stuckSlotMigrationEventIds.get(connectionId)?.values() ?? []),
       ...(this.legacyReplicaSlotEvents.get(connectionId) ?? []).map((e) => e.id),
       this.adoptedReshardEventIds.get(connectionId),
       ...(this.adoptedNodeReshardEventIds.get(connectionId)?.values() ?? []),

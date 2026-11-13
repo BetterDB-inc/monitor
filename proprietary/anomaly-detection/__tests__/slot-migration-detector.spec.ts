@@ -10,6 +10,7 @@ import {
   type SlotMigrationWatch,
   describeSlotMigration,
   judgeSlotMigrations,
+  withAdoptedSlotMigrations,
 } from '../slot-migration-detector';
 
 const T0 = 1_700_000_000_000;
@@ -72,8 +73,11 @@ function report(overrides: Partial<SlotMigrationReport> = {}): SlotMigrationRepo
   };
 }
 
-function run(steps: Array<[number, SlotMigrationReport]>): SlotMigrationJudgement {
-  let watch: SlotMigrationWatch | undefined;
+function run(
+  steps: Array<[number, SlotMigrationReport]>,
+  from?: SlotMigrationWatch,
+): SlotMigrationJudgement {
+  let watch = from;
   let last: SlotMigrationJudgement | undefined;
   for (const [at, seen] of steps) {
     last = judgeSlotMigrations(watch, seen, at);
@@ -243,6 +247,146 @@ describe('judgeSlotMigrations', () => {
       ]);
 
       expect(judged.stuck).toHaveLength(1);
+    });
+
+    it('is not judged stuck from its target alone while the snapshot arrives', () => {
+      const importing = job({ state: 'importing', phase: 'receiving-snapshot' });
+
+      const judged = run([
+        [T0, report({ migrations: [importing] })],
+        [T0 + 2 * ATOMIC_MIGRATION_STALL_MS, report({ migrations: [importing] })],
+      ]);
+
+      expect(judged.running).toHaveLength(1);
+      expect(judged.stuck).toEqual([]);
+    });
+
+    it('is judged from its target again in the states that carry a heartbeat', () => {
+      const importing = job({ state: 'importing', phase: 'waiting-for-paused' });
+
+      const judged = run([
+        [T0, report({ migrations: [importing] })],
+        [T0 + ATOMIC_MIGRATION_STALL_MS, report({ migrations: [importing] })],
+      ]);
+
+      expect(judged.stuck).toHaveLength(1);
+    });
+  });
+
+  describe('entries open from before a restart', () => {
+    const RUNNING = 'running:job:job-1';
+    const STUCK = 'stuck:job:job-1';
+    const adopted = (...signatures: string[]) => withAdoptedSlotMigrations(undefined, signatures);
+    const unread = () => report({ readNodeIds: [C.id], complete: false });
+
+    it('keeps a stuck warning while the job is still as it was first read', () => {
+      const judged = run(
+        [
+          [T0, report({ migrations: [job()] })],
+          [T0 + MINUTE, report({ migrations: [job()] })],
+        ],
+        adopted(RUNNING, STUCK),
+      );
+
+      expect(judged.stuck).toEqual([]);
+      expect([...judged.held]).toEqual([STUCK]);
+    });
+
+    it('lets go of the stuck warning once the job moves', () => {
+      const judged = run(
+        [
+          [T0, report({ migrations: [job()] })],
+          [T0 + MINUTE, report({ migrations: [job({ lastAckAt: T0 + MINUTE })] })],
+          [T0 + 2 * MINUTE, report({ migrations: [job({ lastAckAt: T0 + MINUTE })] })],
+        ],
+        adopted(STUCK),
+      );
+
+      expect(judged.held.size).toBe(0);
+    });
+
+    it('lets go of the stuck warning when a full read no longer lists the job', () => {
+      const judged = run([[T0, report()]], adopted(RUNNING, STUCK));
+
+      expect(judged.held.size).toBe(0);
+      expect(judged.watch.adopted.size).toBe(0);
+    });
+
+    it('raises the job as stuck itself once it has watched it for 10 minutes', () => {
+      const judged = run(
+        [
+          [T0, report({ migrations: [job()] })],
+          [T0 + ATOMIC_MIGRATION_STALL_MS, report({ migrations: [job()] })],
+        ],
+        adopted(STUCK),
+      );
+
+      expect(judged.stuck).toHaveLength(1);
+    });
+
+    it('does not keep a stuck warning for a job it would not judge', () => {
+      const importing = job({ state: 'importing', phase: 'receiving-snapshot' });
+
+      const judged = run([[T0, report({ migrations: [importing] })]], adopted(STUCK));
+
+      expect(judged.held.size).toBe(0);
+    });
+
+    it('keeps both entries while the first reads cannot see every node', () => {
+      const judged = run(
+        [
+          [T0, unread()],
+          [T0 + MINUTE, unread()],
+        ],
+        adopted(RUNNING, STUCK),
+      );
+
+      expect([...judged.held].sort()).toEqual([RUNNING, STUCK]);
+    });
+
+    it('closes them on the first full read that does not list the job', () => {
+      const judged = run(
+        [
+          [T0, unread()],
+          [T0 + MINUTE, report()],
+        ],
+        adopted(RUNNING, STUCK),
+      );
+
+      expect(judged.held.size).toBe(0);
+    });
+
+    it('takes its own node as the whole view when that is all it can read', () => {
+      const judged = run(
+        [[T0, report({ readNodeIds: [A.id], complete: false, ownNodeOnly: true })]],
+        adopted(RUNNING, STUCK),
+      );
+
+      expect(judged.held.size).toBe(0);
+    });
+
+    it('keeps the stuck warning when the job is first seen after an incomplete read', () => {
+      const judged = run(
+        [
+          [T0, unread()],
+          [T0 + MINUTE, report({ migrations: [job()] })],
+        ],
+        adopted(RUNNING, STUCK),
+      );
+
+      expect([...judged.held]).toEqual([STUCK]);
+    });
+
+    it('takes entries that are adopted after the watch has started', () => {
+      const first = judgeSlotMigrations(undefined, report({ migrations: [job()] }), T0);
+
+      const judged = judgeSlotMigrations(
+        withAdoptedSlotMigrations(first.watch, [STUCK]),
+        report({ migrations: [job()] }),
+        T0 + MINUTE,
+      );
+
+      expect([...judged.held]).toEqual([STUCK]);
     });
   });
 
