@@ -116,7 +116,7 @@ function CommandLine({ command, label }: { command: RebalanceCommand; label?: st
     <div className="space-y-1">
       {label && <p className="text-muted-foreground">{label}</p>}
       <div className="flex items-start gap-2">
-        <code className="flex-1 rounded bg-muted px-2 py-1 font-mono text-xs break-all">
+        <code className="min-w-0 flex-1 rounded bg-muted px-2 py-1 font-mono text-xs break-words">
           {command.text}
         </code>
         <Button
@@ -209,13 +209,13 @@ function Plan({ plan }: { plan: RebalancePlan }) {
                     {row.nodeAddr} · {row.role === 'source' ? 'Hot shard' : 'Target'}
                   </span>
                 </TableCell>
-                <TableCell>
+                <TableCell className="whitespace-nowrap">
                   {ofCore(row.before.cpuUsecPerSecond)} → {ofCore(row.after.cpuUsecPerSecond)}
                 </TableCell>
-                <TableCell>
+                <TableCell className="whitespace-nowrap">
                   {percent(row.before.share)} → {percent(row.after.share)}
                 </TableCell>
-                <TableCell>
+                <TableCell className="whitespace-nowrap">
                   {ratio(row.before.ratio)} → {ratio(row.after.ratio)}
                 </TableCell>
               </TableRow>
