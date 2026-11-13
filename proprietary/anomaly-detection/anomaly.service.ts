@@ -6312,6 +6312,12 @@ export class AnomalyService
           this.hotShardTopSlots(connectionId, finding),
         ]),
       );
+      const slots = new Map(
+        (findings ?? []).map((finding) => [
+          finding.shardId,
+          this.shardLoad?.getSlots(connectionId, finding.shardId) ?? [],
+        ]),
+      );
       const held =
         findings === null ||
         (await this.isSlotMigrationInFlight(connectionId, sample.timestamp, findings));
@@ -6324,7 +6330,7 @@ export class AnomalyService
         return;
       }
       await this.refreshHotShardKeys(ctx, timestamp, sample.timestamp, findings, topSlots);
-      await this.refreshRebalance(ctx, timestamp, sample, findings, nodes ?? []);
+      await this.refreshRebalance(ctx, timestamp, sample, findings, nodes ?? [], slots);
       const judged = await this.withoutHotShardsResolvedSince(connectionId, findings, open);
       await this.applyHotShardGate(ctx, timestamp, sample.timestamp, judged, topSlots, selfId);
       this.rememberHotShards(connectionId, sample.timestamp, judged, topSlots);
@@ -6461,6 +6467,7 @@ export class AnomalyService
     sample: ShardLoadSample,
     findings: HotShardFinding[],
     nodes: ClusterNode[],
+    slots: ReadonlyMap<string, SlotLoadRate[]>,
   ): Promise<void> {
     const connectionId = ctx.connectionId;
     const eventIds = this.hotShardEventIds.get(connectionId);
@@ -6479,7 +6486,7 @@ export class AnomalyService
       string,
       { verdict: RebalanceVerdict; computedAt: number; ownership: string }
     >();
-    const due: Array<{ signature: string; shardId: string; slots: SlotLoadRate[] }> = [];
+    const due: Array<{ signature: string; shardId: string }> = [];
     const topologyBlocker = this.rebalanceTopologyBlocker(sample, nodes);
     let migrationsChecked = false;
     for (const finding of findings) {
@@ -6498,26 +6505,32 @@ export class AnomalyService
         kept.set(signature, last);
         continue;
       }
-      due.push({
-        signature,
-        shardId: finding.shardId,
-        slots: this.shardLoad?.getSlots(connectionId, finding.shardId) ?? [],
-      });
+      due.push({ signature, shardId: finding.shardId });
     }
-    if (due.length > 0) {
+    if (kept.size > 0 || due.length > 0) {
       const blocked =
         topologyBlocker ??
         (migrationsChecked || !(await this.isSlotMigrationRunning(ctx))
           ? undefined
           : 'migration_running');
-      const verdicts = blocked
-        ? due.map(() => noRebalancePlan(blocked))
-        : await this.withShardFacts(
-            ctx,
-            due.map(({ shardId, slots }) => planRebalance({ hotShardId: shardId, shards, slots })),
-          );
-      for (const [index, { signature }] of due.entries()) {
-        kept.set(signature, { verdict: verdicts[index], computedAt: timestamp, ownership });
+      if (blocked) {
+        for (const signature of [...kept.keys(), ...due.map((plan) => plan.signature)]) {
+          kept.set(signature, {
+            verdict: noRebalancePlan(blocked),
+            computedAt: timestamp,
+            ownership,
+          });
+        }
+      } else {
+        const verdicts = await this.withShardFacts(
+          ctx,
+          due.map(({ shardId }) =>
+            planRebalance({ hotShardId: shardId, shards, slots: slots.get(shardId) ?? [] }),
+          ),
+        );
+        for (const [index, verdict] of verdicts.entries()) {
+          kept.set(due[index].signature, { verdict, computedAt: timestamp, ownership });
+        }
       }
     }
     if (kept.size > 0) this.hotShardRebalance.set(connectionId, kept);
