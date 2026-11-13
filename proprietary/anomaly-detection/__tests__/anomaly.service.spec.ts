@@ -959,6 +959,192 @@ describe('AnomalyService', () => {
     });
   });
 
+  // ─── Lifetime counters fed as per-second rates ──────────────────────────
+
+  describe('lifetime counter rates (keyspace_misses, evicted_keys, acl_denied)', () => {
+    let now: number;
+    let spikes: any[];
+
+    function mockCounters(misses: number, evicted = 0, denied = 0, runId = 'run-a') {
+      dbClient.getInfoParsed = jest.fn().mockResolvedValue({
+        server: { role: 'master', run_id: runId },
+        clients: { connected_clients: '10', blocked_clients: '0' },
+        memory: { used_memory: '1000000', allocator_frag_ratio: '1.0' },
+        stats: {
+          instantaneous_ops_per_sec: '100',
+          instantaneous_input_kbps: '50',
+          instantaneous_output_kbps: '30',
+          evicted_keys: String(evicted),
+          keyspace_misses: String(misses),
+          rejected_connections: '0',
+          acl_access_denied_auth: String(denied),
+        },
+      });
+    }
+
+    async function pollAt(ms: number, misses: number, evicted = 0, denied = 0, runId = 'run-a') {
+      now = ms;
+      mockCounters(misses, evicted, denied, runId);
+      await poll();
+    }
+
+    const missesBuffer = () =>
+      (service as any).buffers.get('conn-1').get(MetricType.KEYSPACE_MISSES);
+    const missSpikes = () => spikes.filter((a) => a.metricType === MetricType.KEYSPACE_MISSES);
+
+    beforeEach(() => {
+      now = 1_000_000;
+      spikes = [];
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+      jest.spyOn(service as any, 'addAnomaly').mockImplementation(async (a: any) => {
+        spikes.push(a);
+      });
+    });
+
+    it('records no sample on the first poll', async () => {
+      await pollAt(now, 33_000);
+      expect(missesBuffer().getSampleCount()).toBe(0);
+    });
+
+    it('does not alert on a growing counter at a steady rate', async () => {
+      // The raw counter climbs every poll, which used to sit above the trailing
+      // mean and fire on steady load.
+      let misses = 33_000;
+      for (let i = 0; i <= 120; i++) {
+        misses += i % 2 === 0 ? 100 : 104;
+        await pollAt(1_000_000 + i * 1000, misses);
+      }
+      expect(missesBuffer().getSampleCount()).toBe(120);
+      expect(missesBuffer().getMax()).toBe(104);
+      expect(missSpikes()).toEqual([]);
+    });
+
+    it('alerts on a step change in the rate and reports it per second', async () => {
+      let misses = 33_000;
+      for (let i = 0; i <= 40; i++) {
+        misses += i % 2 === 0 ? 100 : 104;
+        await pollAt(1_000_000 + i * 1000, misses);
+      }
+      for (let i = 41; i <= 43; i++) {
+        misses += 1000;
+        await pollAt(1_000_000 + i * 1000, misses);
+      }
+      expect(missSpikes()).toHaveLength(1);
+      expect(missSpikes()[0].value).toBe(1000);
+      expect(missSpikes()[0].message).toContain('Value: 1.00K/s');
+    });
+
+    it('normalises the delta by the elapsed time, floored at the poll interval', async () => {
+      await pollAt(1_000_000, 0);
+      await pollAt(1_002_000, 200); // 2s gap
+      expect(missesBuffer().getLatest()).toBe(100);
+      await pollAt(1_002_500, 250); // early poll: divided by the 1s interval
+      expect(missesBuffer().getLatest()).toBe(50);
+    });
+
+    it('treats a counter that went backwards as a reset, not a spike', async () => {
+      let misses = 1_000_000;
+      for (let i = 0; i <= 40; i++) {
+        misses += 100 + (i % 2);
+        await pollAt(1_000_000 + i * 1000, misses);
+      }
+      const samples = missesBuffer().getSampleCount();
+      await pollAt(1_041_000, 5); // CONFIG RESETSTAT / restart
+      expect(missesBuffer().getSampleCount()).toBe(samples);
+      await pollAt(1_042_000, 105);
+      expect(missesBuffer().getLatest()).toBe(100);
+      expect(missesBuffer().getMin()).toBeGreaterThanOrEqual(0);
+      expect(missSpikes()).toEqual([]);
+    });
+
+    it('ignores small non-zero rates over a near-zero baseline', async () => {
+      // A quiet server: no misses or evictions, then a trickle below each floor.
+      let misses = 0;
+      let evicted = 0;
+      for (let i = 0; i <= 40; i++) await pollAt(1_000_000 + i * 1000, misses, evicted);
+      for (let i = 41; i <= 45; i++) {
+        misses += 20;
+        evicted += 3;
+        await pollAt(1_000_000 + i * 1000, misses, evicted);
+      }
+      expect(missesBuffer().getLatest()).toBe(20);
+      expect(
+        spikes.filter((a) =>
+          [MetricType.KEYSPACE_MISSES, MetricType.EVICTED_KEYS].includes(a.metricType),
+        ),
+      ).toEqual([]);
+    });
+
+    it('fires an absolute threshold for a rate that is below its moving mean', async () => {
+      // A 200/s denial burst lifts the mean; a sustained 60/s is below it but
+      // still over acl_denied's 50/s critical threshold.
+      let denied = 0;
+      for (let i = 0; i <= 40; i++) {
+        denied += 200;
+        await pollAt(1_000_000 + i * 1000, 0, 0, denied);
+      }
+      spikes = [];
+      (service as any).detectors.get('conn-1').get(MetricType.ACL_DENIED).lastAlertTime.clear();
+      for (let i = 41; i <= 43; i++) {
+        denied += 60;
+        await pollAt(1_000_000 + i * 1000, 0, 0, denied);
+      }
+      const denials = spikes.filter((a) => a.metricType === MetricType.ACL_DENIED);
+      expect(denials).toHaveLength(1);
+      expect(denials[0].value).toBe(60);
+      expect(denials[0].message).toContain('Threshold: 50/s');
+    });
+
+    it('treats a run_id change as a reset even when the counter is higher', async () => {
+      let misses = 1_000;
+      for (let i = 0; i <= 40; i++) {
+        misses += 100 + (i % 2);
+        await pollAt(1_000_000 + i * 1000, misses);
+      }
+      const samples = missesBuffer().getSampleCount();
+      // A different server process behind the same address, with a larger counter.
+      await pollAt(1_041_000, 9_000_000, 0, 0, 'run-b');
+      expect(missesBuffer().getSampleCount()).toBe(samples);
+      await pollAt(1_042_000, 9_000_100, 0, 0, 'run-b');
+      expect(missesBuffer().getLatest()).toBe(100);
+      expect(missSpikes()).toEqual([]);
+    });
+
+    it('warns once about stored absolute overrides on counter-rate metrics', () => {
+      const warn = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined);
+      (service as any).warnOnCounterRateOverrides({
+        acl_denied: { criticalAbsolute: 100 },
+        keyspace_misses: { warningZScore: 3 },
+        connections: { warningAbsolute: 500 },
+      });
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain('acl_denied');
+      expect(warn.mock.calls[0][0]).not.toContain('keyspace_misses');
+      expect(warn.mock.calls[0][0]).not.toContain('connections');
+
+      warn.mockClear();
+      (service as any).warnOnCounterRateOverrides({ keyspace_misses: { warningZScore: 3 } });
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('feeds evicted_keys and acl_access_denied_auth as rates too', async () => {
+      await pollAt(1_000_000, 0, 5_000, 70);
+      await pollAt(1_001_000, 0, 5_030, 72);
+      const buffers = (service as any).buffers.get('conn-1');
+      expect(buffers.get(MetricType.EVICTED_KEYS).getLatest()).toBe(30);
+      expect(buffers.get(MetricType.ACL_DENIED).getLatest()).toBe(2);
+      // acl_denied's absolute thresholds (10/50) apply to the rate, not the total of 72.
+      expect(spikes.filter((a) => a.metricType === MetricType.ACL_DENIED)).toEqual([]);
+    });
+
+    it('drops the previous readings when the connection is removed', async () => {
+      await pollAt(1_000_000, 100);
+      expect((service as any).lastCounterReadings.has('conn-1')).toBe(true);
+      (service as any).onConnectionRemoved('conn-1');
+      expect((service as any).lastCounterReadings.has('conn-1')).toBe(false);
+    });
+  });
+
   // ─── Buffer Initialization ──────────────────────────────────────────────
 
   describe('buffer initialization', () => {
@@ -5632,15 +5818,15 @@ describe('AnomalyService', () => {
     it('routes rejected_connections to its own delta metric and keeps ACL_DENIED auth-only', async () => {
       (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('42', '7'));
       await poll(); // baseline poll → delta 0
-      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('50', '7'));
-      await poll(); // 8 new refusals since last poll
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('50', '10'));
+      await poll(); // 8 new refusals and 3 new auth denials since last poll
 
       const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
       // Fed the per-poll DELTA (8), not the lifetime counter (50) — so a flat
       // elevated counter can't alert forever.
       expect(buffers.get(MetricType.REJECTED_CONNECTIONS).getLatest()).toBe(8);
-      // ACL_DENIED must NOT include rejected connections (would be 57 if bundled).
-      expect(buffers.get(MetricType.ACL_DENIED).getLatest()).toBe(7);
+      // ACL_DENIED must NOT include rejected connections (would be 11/s if bundled).
+      expect(buffers.get(MetricType.ACL_DENIED).getLatest()).toBe(3);
     });
   });
 

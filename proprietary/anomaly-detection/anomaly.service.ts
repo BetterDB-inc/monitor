@@ -440,6 +440,8 @@ import {
 import {
   MetricType,
   METRICS_HANDLED_OUTSIDE_EXTRACTOR,
+  COUNTER_RATE_METRICS,
+  COUNTER_RATE_MIN_PER_SEC,
   AnomalyEvent,
   CorrelatedAnomalyGroup,
   AnomalySeverity,
@@ -720,6 +722,12 @@ export class AnomalyService
   private lastEvictedClients = new Map<string, number>();
   private lastErrorReplies = new Map<string, { value: number; timestamp: number }>();
   private lastErrorstatCounts = new Map<string, { counts: Map<string, number>; timestamp: number }>();
+  // Last reading of each lifetime INFO counter in COUNTER_RATE_METRICS, per
+  // connection, so the extractor loop can feed a per-second rate instead.
+  private lastCounterReadings = new Map<
+    string,
+    Map<MetricType, { value: number; timestamp: number; runId?: string }>
+  >();
   private clientEvictionLimit = new Map<string, string>();
   // Last-logged count of unreachable replicas in the slot-state fan-out, per
   // connection — so the degraded-detection warning is emitted only on a change,
@@ -1181,6 +1189,7 @@ export class AnomalyService
 
   async onModuleInit() {
     this.detectorOverrides = await this.settingsService.getDetectorConfig();
+    this.warnOnCounterRateOverrides(this.detectorOverrides);
     this.unsubscribeDetectorConfig = this.settingsService.onDetectorConfigChange((c) =>
       this.reloadDetectorConfig(c),
     );
@@ -1242,6 +1251,8 @@ export class AnomalyService
       // maxclients-exhaustion signal) is tracked separately, as a per-poll delta,
       // so a connection-limit event is not misread as an auth attack. See the
       // REJECTED_CONNECTIONS rate-of-change block in pollConnection.
+      // ACL_DENIED, EVICTED_KEYS and KEYSPACE_MISSES read lifetime counters; the
+      // poll loop turns them into per-second rates (see counterRate).
       [MetricType.ACL_DENIED, (info) => this.parseNumber(info.acl_access_denied_auth)],
       [MetricType.EVICTED_KEYS, (info) => this.parseNumber(info.evicted_keys)],
       [MetricType.BLOCKED_CLIENTS, (info) => this.parseNumber(info.blocked_clients)],
@@ -1256,6 +1267,52 @@ export class AnomalyService
         },
       ],
     ]);
+  }
+
+  /**
+   * Per-second rate of a lifetime counter since this connection's previous poll,
+   * or null when there is no previous reading, the counter went backwards
+   * (server restart, CONFIG RESETSTAT), or the server's run_id changed (the
+   * connection now reaches a different process, e.g. after a failover behind a
+   * Service, whose counter may be higher); in each case the reading becomes the
+   * new baseline. The elapsed time is floored at the poll interval, as for
+   * error_replies, so a poll that runs early cannot inflate the rate.
+   */
+  private counterRate(
+    connectionId: string,
+    metricType: MetricType,
+    value: number,
+    timestamp: number,
+    runId: string | undefined,
+  ): number | null {
+    let readings = this.lastCounterReadings.get(connectionId);
+    if (readings === undefined) {
+      readings = new Map();
+      this.lastCounterReadings.set(connectionId, readings);
+    }
+    const last = readings.get(metricType);
+    readings.set(metricType, { value, timestamp, runId });
+    if (last === undefined || value < last.value) return null;
+    if (last.runId !== undefined && runId !== undefined && last.runId !== runId) return null;
+    const elapsedMs = Math.max(timestamp - last.timestamp, this.getIntervalMs());
+    return ((value - last.value) * 1000) / elapsedMs;
+  }
+
+  /**
+   * Absolute thresholds on COUNTER_RATE_METRICS used to be compared with the
+   * lifetime total and are now compared with the per-second rate. Stored
+   * overrides keep their numbers, so say once at startup that their meaning changed.
+   */
+  private warnOnCounterRateOverrides(overrides: DetectorConfigMap): void {
+    const affected = [...COUNTER_RATE_METRICS].filter((metric) => {
+      const override = overrides[metric as unknown as ApiMetricType];
+      return override?.warningAbsolute !== undefined || override?.criticalAbsolute !== undefined;
+    });
+    if (affected.length === 0) return;
+    this.logger.warn(
+      `Absolute threshold overrides for ${affected.join(', ')} are now compared with a per-second rate, ` +
+        'not the lifetime total since restart. Review them in Settings > Anomaly detectors.',
+    );
   }
 
   reloadDetectorConfig(overrides: DetectorConfigMap): void {
@@ -1298,7 +1355,10 @@ export class AnomalyService
       connectionBuffers.set(metricType, new MetricBuffer(metricType));
       connectionDetectors.set(
         metricType,
-        new SpikeDetector(metricType, this.resolveSpikeConfig(metricType)),
+        new SpikeDetector(metricType, this.resolveSpikeConfig(metricType), {
+          minValue: COUNTER_RATE_MIN_PER_SEC.get(metricType),
+          absoluteBelowMean: COUNTER_RATE_METRICS.has(metricType),
+        }),
       );
     }
 
@@ -1318,6 +1378,7 @@ export class AnomalyService
     this.lastEvictedClients.delete(connectionId);
     this.lastErrorReplies.delete(connectionId);
     this.lastErrorstatCounts.delete(connectionId);
+    this.lastCounterReadings.delete(connectionId);
     this.replicaFanoutUnreachable.delete(connectionId);
     this.clientEvictionLimit.delete(connectionId);
     this.lastReplicationRole.delete(connectionId);
@@ -1584,13 +1645,21 @@ export class AnomalyService
 
       // Process each metric from INFO
       for (const [metricType, extractor] of this.metricExtractors.entries()) {
-        const value = extractor(info);
-        if (value === null) continue;
+        const reading = extractor(info);
+        if (reading === null) continue;
 
         const buffer = buffers.get(metricType);
         const detector = detectors.get(metricType);
 
         if (!buffer || !detector) continue;
+
+        const value = COUNTER_RATE_METRICS.has(metricType)
+          ? this.counterRate(ctx.connectionId, metricType, reading, timestamp, info.run_id || undefined)
+          : reading;
+        if (value === null) {
+          detector.resetRun();
+          continue;
+        }
 
         buffer.addSample(value, timestamp);
 

@@ -549,12 +549,14 @@ Some metrics have custom thresholds beyond Z-score:
 
 | Metric | Warning Threshold | Critical Threshold | Consecutive Required | Cooldown |
 |--------|-------------------|-------------------|---------------------|----------|
-| `acl_denied` | 10 events | 50 events | 2 | 30s |
+| `acl_denied` | 10/s | 50/s | 2 | 30s |
 | `slowlog_last_id` | - | - | 1 | 30s |
 | `memory_used` | - | - | 3 | 60s |
 | `evicted_keys` | - | - | 2 | 30s |
 | `fragmentation_ratio` | 1.5 | 2.0 | 5 | 120s |
 | `error_replies` | 200/s | 2000/s | 2 | 60s |
+
+`acl_denied`, `evicted_keys` and `keyspace_misses` read lifetime counters from `INFO stats`, so the detectors see the per-second rate since the previous poll, and absolute thresholds apply to that rate. A z-score spike below a per-second floor (`acl_denied` 1/s, `evicted_keys` 10/s, `keyspace_misses` 50/s) is ignored, so an occasional eviction or denial on an otherwise quiet server does not alert; absolute thresholds still apply below the floor. The first poll of a connection only records the counter. A counter that goes backwards (server restart, `CONFIG RESETSTAT`), or a change in the server's `run_id` (the connection now reaches a different server process, for example after a failover behind a Service), is treated as a reset: that poll adds no sample and the next poll measures from the new value. Absolute threshold overrides saved before this change keep their numbers but now mean events per second; BetterDB logs a warning at startup when any exist for these metrics.
 
 `error_replies` needs at least 20/s to alert. On a quiet instance almost any burst scores a high Z-score, so a Z-score alone only reaches warning here, and critical needs the absolute threshold.
 
@@ -600,17 +602,17 @@ Some metrics have custom thresholds beyond Z-score:
 **Note**: Previous versions used `SLOWLOG LEN` (`slowlog_count`), which saturates at `slowlog-max-len` (default 128). Using `slowlog_last_id` delta avoids this blind spot.
 
 ### acl_denied
-**What it measures**: Sum of rejected connections and ACL auth denials
+**What it measures**: ACL authentication denials per second
 **Why anomalies matter**: Security concern - possible brute force or misconfig
-**Typical baseline**: 0-5 (should be very low normally)
-**Source**: `INFO stats.rejected_connections + stats.acl_access_denied_auth`
-**Config**: Custom thresholds (WARNING: 10, CRITICAL: 50, 2 consecutive, 30s cooldown)
+**Typical baseline**: 0 (should be very low normally)
+**Source**: `INFO stats.acl_access_denied_auth` (per-second rate between polls). Refused connections (`rejected_connections`, maxclients) have their own detector.
+**Config**: Custom thresholds (WARNING: 10/s, CRITICAL: 50/s, 2 consecutive, 30s cooldown)
 
 ### evicted_keys
-**What it measures**: Total number of keys evicted due to maxmemory
+**What it measures**: Keys evicted due to maxmemory, per second
 **Why anomalies matter**: Indicates memory pressure and cache thrashing
 **Typical baseline**: 0 (ideally), or consistent low rate
-**Source**: `INFO stats.evicted_keys`
+**Source**: `INFO stats.evicted_keys` (per-second rate between polls)
 **Config**: Custom thresholds (2 consecutive, 30s cooldown)
 
 ### blocked_clients
@@ -620,10 +622,10 @@ Some metrics have custom thresholds beyond Z-score:
 **Source**: `INFO clients.blocked_clients`
 
 ### keyspace_misses
-**What it measures**: Total number of failed key lookups
+**What it measures**: Failed key lookups per second
 **Why anomalies matter**: Poor cache hit rate impacts application performance
-**Typical baseline**: Varies widely (track hit ratio instead)
-**Source**: `INFO stats.keyspace_misses`
+**Typical baseline**: Varies widely with read load
+**Source**: `INFO stats.keyspace_misses` (per-second rate between polls)
 
 ### fragmentation_ratio
 **What it measures**: Allocator fragmentation ratio, preferring `allocator_frag_ratio` with fallback to `mem_fragmentation_ratio`
