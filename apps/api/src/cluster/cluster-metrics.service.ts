@@ -187,6 +187,10 @@ export interface SlotMigration {
   slotRange?: string;
   /** Atomic slot migration job state as Valkey reports it, e.g. "snapshotting". */
   phase?: string;
+  jobName?: string;
+  startedAt?: number;
+  lastUpdateAt?: number;
+  lastAckAt?: number;
 }
 
 export interface SlotMigrationCheck {
@@ -194,7 +198,30 @@ export interface SlotMigrationCheck {
   complete: boolean;
 }
 
+export interface FailedSlotMigration {
+  jobName: string;
+  slotRange: string;
+  sourceNodeId: string;
+  sourceAddress: string;
+  targetNodeId: string;
+  targetAddress: string;
+  message: string;
+  failedAt?: number;
+}
+
+export interface SlotMigrationReport extends SlotMigrationCheck {
+  failed: FailedSlotMigration[];
+  readNodeIds: string[];
+}
+
 const FINISHED_MIGRATION_STATES = new Set(['success', 'failed', 'cancelled']);
+const MIGRATION_JOBS_ASK_AGAIN_MS = 60 * 60_000;
+const MAX_REMEMBERED_NODES_WITHOUT_MIGRATION_JOBS = 1000;
+
+function epochSecondsToMs(value: string | undefined): number | undefined {
+  const seconds = Number(value);
+  return value !== undefined && Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined;
+}
 
 /** One CLUSTER GETSLOTMIGRATIONS job; RESP2 delivers each map as a flat name/value array. */
 export function parseSlotMigrationJobs(raw: unknown): Record<string, string>[] {
@@ -215,6 +242,7 @@ export class ClusterMetricsService {
   private readonly logger = new Logger(ClusterMetricsService.name);
   private loggedErrors: Set<string> = new Set();
   private readonly commandVerdicts: Map<string, boolean> = new Map();
+  private readonly migrationJobsAskAgainAt: Map<string, number> = new Map();
   private readonly MAX_LOGGED_ERRORS = 500;
   // Commands a fan-out gave up waiting for, by node socket. While they stay
   // queued on that socket the node is reported as not answering instead of
@@ -852,6 +880,11 @@ export class ClusterMetricsService {
   }
 
   async checkSlotMigrations(connectionId?: string): Promise<SlotMigrationCheck> {
+    const { migrations, complete } = await this.readSlotMigrations(connectionId);
+    return { migrations, complete };
+  }
+
+  async readSlotMigrations(connectionId?: string): Promise<SlotMigrationReport> {
     let nodes: DiscoveredNode[];
     try {
       nodes = await withTimeout(
@@ -863,7 +896,7 @@ export class ClusterMetricsService {
       this.logger.error(
         `Failed to check slot migrations: ${error instanceof Error ? error.message : error}`,
       );
-      return { migrations: [], complete: false };
+      return { migrations: [], failed: [], readNodeIds: [], complete: false };
     }
 
     const findNode = (idOrPrefix: string) =>
@@ -878,6 +911,8 @@ export class ClusterMetricsService {
     // Both ends of an atomic migration report the job; keep one per job name,
     // preferring the source's EXPORT view so the entry does not flip between polls.
     const atomicJobs = new Map<string, SlotMigration>();
+    const failedJobs = new Map<string, FailedSlotMigration>();
+    const readNodeIds = new Set<string>();
 
     const addLegacyMarkers = (nodesString: string) => {
       for (const line of nodesString.trim().split('\n')) {
@@ -918,14 +953,21 @@ export class ClusterMetricsService {
     let complete = true;
 
     const readNode = async (primary: DiscoveredNode, client: Valkey): Promise<void> => {
+      let markersRead = true;
       try {
         addLegacyMarkers((await client.call('CLUSTER', 'NODES')) as string);
         nodesRead++;
       } catch (error) {
         complete = false;
+        markersRead = false;
         this.logger.debug(`CLUSTER NODES failed on ${primary.address}: ${error}`);
       }
 
+      const withoutJobsKey = `${connectionId ?? ''}:${primary.id}`;
+      if ((this.migrationJobsAskAgainAt.get(withoutJobsKey) ?? 0) > Date.now()) {
+        if (markersRead) readNodeIds.add(primary.id);
+        return;
+      }
       let jobs: Record<string, string>[];
       try {
         jobs = parseSlotMigrationJobs(await client.call('CLUSTER', 'GETSLOTMIGRATIONS'));
@@ -934,19 +976,39 @@ export class ClusterMetricsService {
         // Before Valkey 9 the subcommand does not exist; anything else is worth a line.
         const errorKey = `getslotmigrations-${primary.id}-${message}`;
         const unsupported = /unknown (sub)?command/i.test(message);
-        if (!unsupported) complete = false;
+        if (unsupported) {
+          this.rememberNodeWithoutMigrationJobs(withoutJobsKey);
+          if (markersRead) readNodeIds.add(primary.id);
+        } else {
+          complete = false;
+        }
         if (!unsupported && !this.loggedErrors.has(errorKey)) {
           this.addLoggedError(errorKey);
           this.logger.warn(`CLUSTER GETSLOTMIGRATIONS failed on ${primary.address}: ${message}`);
         }
         return;
       }
+      this.migrationJobsAskAgainAt.delete(withoutJobsKey);
+      if (markersRead) readNodeIds.add(primary.id);
       for (const job of jobs) {
-        if (!job.name || FINISHED_MIGRATION_STATES.has(job.state)) continue;
+        if (!job.name) continue;
         const isImport = job.operation?.toUpperCase() === 'IMPORT';
-        if (isImport && atomicJobs.has(job.name)) continue;
         const source = findNode(job.source_node ?? '');
         const target = findNode(job.target_node ?? '');
+        if (job.state === 'failed' && !(isImport && failedJobs.has(job.name))) {
+          failedJobs.set(job.name, {
+            jobName: job.name,
+            slotRange: job.slot_ranges ?? '',
+            sourceNodeId: source?.id ?? job.source_node ?? '',
+            sourceAddress: source?.address ?? '',
+            targetNodeId: target?.id ?? job.target_node ?? '',
+            targetAddress: target?.address ?? '',
+            message: job.message ?? '',
+            failedAt: epochSecondsToMs(job.last_update_time),
+          });
+        }
+        if (FINISHED_MIGRATION_STATES.has(job.state)) continue;
+        if (isImport && atomicJobs.has(job.name)) continue;
         const firstSlot = parseInt((job.slot_ranges ?? '').split(/[-\s]/)[0], 10);
         atomicJobs.set(job.name, {
           slot: Number.isNaN(firstSlot) ? -1 : firstSlot,
@@ -957,6 +1019,10 @@ export class ClusterMetricsService {
           targetAddress: target?.address ?? '',
           state: isImport ? 'importing' : 'migrating',
           phase: job.state,
+          jobName: job.name,
+          startedAt: epochSecondsToMs(job.create_time),
+          lastUpdateAt: epochSecondsToMs(job.last_update_time),
+          lastAckAt: epochSecondsToMs(job.last_ack_time),
         });
       }
     };
@@ -1009,7 +1075,25 @@ export class ClusterMetricsService {
       this.loggedErrors.delete(`slotmigrations-${connectionId ?? ''}`);
     }
 
-    return { migrations: [...legacy.values(), ...atomicJobs.values()], complete };
+    return {
+      migrations: [...legacy.values(), ...atomicJobs.values()],
+      failed: [...failedJobs.values()],
+      readNodeIds: [...readNodeIds],
+      complete,
+    };
+  }
+
+  private rememberNodeWithoutMigrationJobs(key: string): void {
+    const now = Date.now();
+    if (this.migrationJobsAskAgainAt.size >= MAX_REMEMBERED_NODES_WITHOUT_MIGRATION_JOBS) {
+      for (const [known, askAgainAt] of this.migrationJobsAskAgainAt) {
+        if (askAgainAt <= now) this.migrationJobsAskAgainAt.delete(known);
+      }
+      if (this.migrationJobsAskAgainAt.size >= MAX_REMEMBERED_NODES_WITHOUT_MIGRATION_JOBS) {
+        this.migrationJobsAskAgainAt.clear();
+      }
+    }
+    this.migrationJobsAskAgainAt.set(key, now + MIGRATION_JOBS_ASK_AGAIN_MS);
   }
 
   private async getKeysInSlot(client: Valkey, slot: number): Promise<number | undefined> {

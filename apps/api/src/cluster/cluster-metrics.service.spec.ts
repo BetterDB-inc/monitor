@@ -578,6 +578,163 @@ used_cpu_user:20.3\r
       await expect(service.getSlotMigrations()).resolves.toEqual([]);
     });
 
+    describe('readSlotMigrations', () => {
+      const job = (fields: Record<string, string | number>) => Object.entries(fields).flat();
+      const running = {
+        name: 'job-1',
+        operation: 'EXPORT',
+        slot_ranges: '0-1365',
+        target_node: 'fff789node3',
+        source_node: 'abc123node1',
+        create_time: 1_700_000_000,
+        last_update_time: 1_700_000_060,
+        last_ack_time: 1_700_000_090,
+        state: 'snapshotting',
+        message: '',
+      };
+
+      it('gives a running job its name and its times in milliseconds', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({ abc123node1: { jobs: [job(running)] } });
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect(report.migrations).toEqual([
+          expect.objectContaining({
+            jobName: 'job-1',
+            startedAt: 1_700_000_000_000,
+            lastUpdateAt: 1_700_000_060_000,
+            lastAckAt: 1_700_000_090_000,
+            phase: 'snapshotting',
+          }),
+        ]);
+        expect(report.failed).toEqual([]);
+      });
+
+      it('leaves out a time the server did not send', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        const { last_ack_time: _ack, ...withoutAck } = running;
+        nodeClients({ abc123node1: { jobs: [job({ ...withoutAck, last_update_time: 'soon' })] } });
+
+        const [migration] = (await service.readSlotMigrations('conn-1')).migrations;
+
+        expect(migration.lastUpdateAt).toBeUndefined();
+        expect(migration.lastAckAt).toBeUndefined();
+      });
+
+      it('lists a failed job once, with what the server said about it', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        const failed = { ...running, state: 'failed', message: 'Connection lost to target' };
+        nodeClients({
+          abc123node1: { jobs: [job(failed)] },
+          fff789node3: { jobs: [job({ ...failed, operation: 'IMPORT' })] },
+        });
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect(report.migrations).toEqual([]);
+        expect(report.failed).toEqual([
+          {
+            jobName: 'job-1',
+            slotRange: '0-1365',
+            sourceNodeId: 'abc123node1',
+            sourceAddress: '192.168.1.10:6379',
+            targetNodeId: 'fff789node3',
+            targetAddress: '192.168.1.12:6379',
+            message: 'Connection lost to target',
+            failedAt: 1_700_000_060_000,
+          },
+        ]);
+      });
+
+      it.each(['success', 'cancelled'])('does not list a job that ended as %s', async (state) => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({ abc123node1: { jobs: [job({ ...running, state })] } });
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect(report.migrations).toEqual([]);
+        expect(report.failed).toEqual([]);
+      });
+
+      it('names the primaries that answered', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({ def456node2: { nodesError: new Error('timeout'), jobsError: new Error('timeout') } });
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect(report.complete).toBe(false);
+        expect([...report.readNodeIds].sort()).toEqual(['abc123node1', 'fff789node3']);
+      });
+
+      it('counts a primary without the command as one that answered', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({ def456node2: { jobsError: new Error("ERR unknown subcommand 'GETSLOTMIGRATIONS'") } });
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect(report.complete).toBe(true);
+        expect(report.readNodeIds).toHaveLength(3);
+      });
+
+      describe('a primary without the command', () => {
+        const HOUR_MS = 60 * 60_000;
+        let asked: string[];
+        let now: number;
+
+        beforeEach(() => {
+          asked = [];
+          now = 1_700_000_000_000;
+          jest.spyOn(Date, 'now').mockImplementation(() => now);
+          mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
+          mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => ({
+            status: 'ready',
+            call: jest.fn(async (_cmd: string, sub: string) => {
+              if (sub === 'NODES') return '';
+              asked.push(nodeId);
+              if (nodeId === 'def456node2') throw new Error("ERR unknown subcommand 'GETSLOTMIGRATIONS'");
+              return [];
+            }),
+          }));
+        });
+
+        afterEach(() => {
+          jest.restoreAllMocks();
+        });
+
+        it('is not asked again on the next read', async () => {
+          await service.readSlotMigrations('conn-1');
+          asked = [];
+          now += 30_000;
+
+          const report = await service.readSlotMigrations('conn-1');
+
+          expect(asked.sort()).toEqual(['abc123node1', 'fff789node3']);
+          expect(report.complete).toBe(true);
+          expect(report.readNodeIds).toHaveLength(3);
+        });
+
+        it('is asked again after an hour, in case it was upgraded', async () => {
+          await service.readSlotMigrations('conn-1');
+          asked = [];
+          now += HOUR_MS;
+
+          await service.readSlotMigrations('conn-1');
+
+          expect(asked.sort()).toEqual(['abc123node1', 'def456node2', 'fff789node3']);
+        });
+
+        it('is remembered per connection', async () => {
+          await service.readSlotMigrations('conn-1');
+          asked = [];
+
+          await service.readSlotMigrations('conn-2');
+
+          expect(asked).toContain('def456node2');
+        });
+      });
+    });
+
     describe('checkSlotMigrations', () => {
       it('is complete when every primary answered both questions', async () => {
         mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
