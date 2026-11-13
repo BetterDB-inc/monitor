@@ -6476,6 +6476,7 @@ export class AnomalyService
       { verdict: RebalanceVerdict; computedAt: number; ownership: string }
     >();
     const due: Array<{ signature: string; shardId: string; slots: SlotLoadRate[] }> = [];
+    const topologyBlocker = this.rebalanceTopologyBlocker(sample, nodes);
     let migrationsChecked = false;
     for (const finding of findings) {
       const signature = hotShardSignature(finding.shardId);
@@ -6484,6 +6485,7 @@ export class AnomalyService
       if (raising) migrationsChecked = true;
       const last = known?.get(signature);
       if (
+        !topologyBlocker &&
         last &&
         last.ownership === ownership &&
         timestamp - last.computedAt < REBALANCE_REFRESH_MS
@@ -6500,7 +6502,7 @@ export class AnomalyService
     if (due.length > 0) {
       const shards = this.rebalanceShards(sample, nodes, findings);
       const blocked =
-        this.rebalanceTopologyBlocker(sample, nodes) ??
+        topologyBlocker ??
         (migrationsChecked || !(await this.isSlotMigrationRunning(ctx))
           ? undefined
           : 'migration_running');

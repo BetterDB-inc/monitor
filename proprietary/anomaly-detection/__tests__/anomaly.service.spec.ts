@@ -3140,6 +3140,27 @@ describe('AnomalyService', () => {
         expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'settling' });
       });
 
+      it.each([
+        ['is now a replica', (node: { flags: string[]; master: string }) => {
+          node.flags = ['slave'];
+          node.master = 'c0000000';
+        }],
+        ['left the cluster', (node: { id: string }) => {
+          node.id = 'f0000000';
+        }],
+      ])('drops a kept plan when a measured shard %s by the next sample', async (_case, change) => {
+        spreadLoad();
+        await step(HOT, 6);
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+
+        const nodes = clusterNodes();
+        change(nodes[1]);
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(nodes);
+        await step(HOT);
+
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'settling' });
+      });
+
       it('counts replicas and takes an empty primary as a target', async () => {
         spreadLoad();
         const nodes = [
