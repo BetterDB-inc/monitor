@@ -71,6 +71,37 @@ function after(plan: RebalancePlan, shardId: string) {
   return row.after;
 }
 
+function expectPlansToHoldTogether(shards: RebalanceShard[], verdicts: RebalanceVerdict[]): void {
+  const plans = verdicts.filter((verdict) => verdict.kind === 'plan');
+  const load = new Map(shards.map((each) => [each.shardId, each.cpuUsecPerSecond]));
+  const owned = new Map(shards.map((each) => [each.shardId, each.slotCount]));
+  for (const plan of plans) {
+    for (const move of plan.moves) {
+      load.set(move.targetShardId, load.get(move.targetShardId)! + move.cpuUsecPerSecond);
+      load.set(plan.sourceShardId, load.get(plan.sourceShardId)! - move.cpuUsecPerSecond);
+      owned.set(move.targetShardId, owned.get(move.targetShardId)! + move.slotCount);
+      owned.set(plan.sourceShardId, owned.get(plan.sourceShardId)! - move.slotCount);
+    }
+  }
+  const sources = new Set(plans.map((plan) => plan.sourceShardId));
+  const sorted = shards
+    .filter((each) => owned.get(each.shardId)! > 0 || sources.has(each.shardId))
+    .map((each) => load.get(each.shardId)!)
+    .sort((x, y) => x - y);
+  const middle = Math.floor(sorted.length / 2);
+  const median =
+    sorted.length % 2 === 1 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+  const line = DEFAULT_REBALANCE_POLICY.resolveRatio + 1e-6;
+  for (const plan of plans) {
+    for (const move of plan.moves) {
+      expect(load.get(move.targetShardId)! / median).toBeLessThanOrEqual(line);
+    }
+    if (plan.effect === 'resolves') {
+      expect(load.get(plan.sourceShardId)! / median).toBeLessThanOrEqual(line);
+    }
+  }
+}
+
 function movedSlots(plan: RebalancePlan): number[] {
   return plan.moves.flatMap((move) =>
     move.ranges.flatMap(([start, end]) =>
@@ -780,6 +811,33 @@ describe('describeNoPlan', () => {
     );
   });
 
+  it('names the shard whose suggestion leaves no room for one here', () => {
+    const verdict = {
+      ...noPlan('conflicts_with_other_plan'),
+      conflictsWith: [{ shardId: 'a', nodeAddr: '10.0.0.1:6379' }],
+    } as RebalanceVerdict;
+
+    expect(describeNoPlan(verdict, [])).toBe(
+      ' No rebalance is suggested for this shard yet: no move from it fits next to the ' +
+        'suggestion for 10.0.0.1:6379. Apply that one first.',
+    );
+  });
+
+  it('names every shard whose suggestion leaves no room for one here', () => {
+    const verdict = {
+      ...noPlan('conflicts_with_other_plan'),
+      conflictsWith: [
+        { shardId: 'a', nodeAddr: '10.0.0.1:6379' },
+        { shardId: 'b', nodeAddr: '10.0.0.2:6379' },
+      ],
+    } as RebalanceVerdict;
+
+    expect(describeNoPlan(verdict, [])).toBe(
+      ' No rebalance is suggested for this shard yet: no move from it fits next to the ' +
+        'suggestions for 10.0.0.1:6379 and 10.0.0.2:6379. Apply those first.',
+    );
+  });
+
   it.each(['unhealthy_node', 'migration_running', 'settling'])(
     'says nothing about %s, which may pass while the event stays open',
     (reason) => {
@@ -938,6 +996,144 @@ describe('planRebalances', () => {
         reason: 'settling',
         pinnedSlots: [],
       });
+    });
+  });
+
+  describe('a later plan next to an earlier one', () => {
+    const twoEmpty = [
+      shard('a', 600_000),
+      shard('b', 400_000, { hot: true }),
+      shard('c', 0, { slotCount: 0 }),
+      shard('d', 0, { slotCount: 0 }),
+      shard('e', 100_000),
+      shard('f', 200_000),
+      shard('g', 250_000),
+    ];
+    const twoHot = [
+      { hotShardId: 'a', slots: slots(0, even(100, 6_000)) },
+      { hotShardId: 'b', slots: slots(200, even(100, 4_000)) },
+    ];
+    const fewSlots = [
+      shard('a', 285_221, { slotCount: 9 }),
+      shard('b', 219_489, { hot: true, slotCount: 12 }),
+      shard('c', 227_233, { hot: true, slotCount: 15 }),
+      shard('d', 0, { slotCount: 0 }),
+      shard('e', 126_146),
+      shard('f', 57_969),
+    ];
+    const threeHot = [
+      {
+        hotShardId: 'a',
+        slots: slots(0, [26_496, 37_887, 39_151, 12_249, 46_965, 36_501, 34_319, 32_903, 18_750]),
+      },
+      {
+        hotShardId: 'b',
+        slots: slots(
+          200,
+          [
+            27_314, 28_089, 18_699, 30_396, 10_127, 11_686, 9_121, 8_795, 25_450, 20_672, 17_207,
+            11_933,
+          ],
+        ),
+      },
+      {
+        hotShardId: 'c',
+        slots: slots(
+          400,
+          [
+            15_869, 8_647, 9_999, 13_061, 13_035, 8_923, 10_611, 14_575, 11_750, 5_720, 5_926,
+            24_765, 32_350, 26_226, 25_776,
+          ],
+        ),
+      },
+    ];
+    const conflictsWithA = {
+      kind: 'no_plan',
+      action: 'spread',
+      reason: 'conflicts_with_other_plan',
+      pinnedSlots: [],
+      conflictsWith: [{ shardId: 'a', nodeAddr: '10.0.0.1:6379' }],
+    };
+
+    it('leaves the second empty primary alone when filling it would undo the earlier plan', () => {
+      const verdicts = planRebalances(twoHot, twoEmpty);
+      const [first, second] = verdicts.map(planOf);
+
+      expect(first.moves.map((move) => move.targetShardId)).toEqual(['c']);
+      expect(first.effect).toBe('resolves');
+      expect(second.moves.map((move) => move.targetShardId)).toEqual(['e']);
+      expect(second.plannedAfter).toEqual(['a']);
+      expectPlansToHoldTogether(twoEmpty, verdicts);
+    });
+
+    it('holds a kept plan to the same check', () => {
+      const [first, second] = planRebalances(twoHot, twoEmpty);
+
+      expect(planRebalances([twoHot[1]], twoEmpty, [first])).toEqual([second]);
+    });
+
+    it('does not blame a later plan for a kept plan that the load has moved away from', () => {
+      const [kept] = planRebalances([twoHot[0]], twoEmpty);
+      const drifted = twoEmpty.map((each) =>
+        each.shardId === 'a' ? { ...each, cpuUsecPerSecond: 800_000 } : each,
+      );
+
+      const [later] = planRebalances([twoHot[1]], drifted, [kept]);
+
+      expect(planOf(later).plannedAfter).toEqual(['a']);
+    });
+
+    it('gives no plan to a shard when no move from it fits next to the earlier plan', () => {
+      const verdicts = planRebalances(threeHot, fewSlots);
+
+      expect(planOf(verdicts[0]).effect).toBe('resolves');
+      expect(verdicts.slice(1)).toEqual([conflictsWithA, conflictsWithA]);
+      expectPlansToHoldTogether(fewSlots, verdicts);
+    });
+
+    it('keeps every target and every resolved source under the line, whatever the load', () => {
+      let seed = 695;
+      const random = () => {
+        seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
+        return seed / 2_147_483_648;
+      };
+      let together = 0;
+      for (let round = 0; round < 400; round += 1) {
+        const others = fleet(4 + Math.floor(random() * 5), 0).map((other, index) =>
+          index < 1 + Math.floor(random() * 2)
+            ? { ...other, slotCount: 0 }
+            : { ...other, cpuUsecPerSecond: Math.floor(50_000 + random() * 250_000) },
+        );
+        const hotShards = ['a', 'b', 'c'].slice(0, 2 + Math.floor(random() * 2)).map((id, i) => {
+          const count =
+            random() < 0.3 ? 6 + Math.floor(random() * 10) : 20 + Math.floor(random() * 200);
+          const total = 300_000 + random() * 400_000;
+          const weights = Array.from({ length: count }, () => 0.2 + random());
+          const sum = weights.reduce((x, y) => x + y, 0);
+          const load = slots(
+            i * 1_000,
+            weights.map((weight) => Math.floor((total * weight) / sum)),
+          );
+          return {
+            shard: shard(
+              id,
+              load.reduce((x, slot) => x + slot.cpuUsecPerSecond, 0),
+              { hot: true, slotCount: count },
+            ),
+            input: { hotShardId: id, slots: load },
+          };
+        });
+        const shards = [...hotShards.map((each) => each.shard), ...others];
+
+        const verdicts = planRebalances(
+          hotShards.map((each) => each.input),
+          shards,
+        );
+
+        if (verdicts.filter((verdict) => verdict.kind === 'plan').length > 1) together += 1;
+        expectPlansToHoldTogether(shards, verdicts);
+      }
+      expect(together).toBeGreaterThan(200);
     });
   });
 

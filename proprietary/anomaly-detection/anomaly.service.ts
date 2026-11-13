@@ -6507,23 +6507,29 @@ export class AnomalyService
         kept.set(signature, last);
       }
     }
-    const coveredBy = (verdict: RebalanceVerdict) =>
-      verdict.kind === 'no_plan' && verdict.reason === 'covered_by_other_plan'
-        ? (verdict.coveredBy ?? [])
-        : [];
-    for (const [signature, last] of [...kept]) {
-      const covering = coveredBy(last.verdict);
-      if (
-        covering.some(
-          (shard) => kept.get(hotShardSignature(shard.shardId))?.verdict.kind !== 'plan',
-        )
-      ) {
-        kept.delete(signature);
+    const plannedWith = (verdict: RebalanceVerdict): string[] =>
+      verdict.kind === 'plan'
+        ? verdict.plannedAfter
+        : [...(verdict.coveredBy ?? []), ...(verdict.conflictsWith ?? [])].map(
+            (shard) => shard.shardId,
+          );
+    let settled = false;
+    while (!settled) {
+      settled = true;
+      for (const [signature, last] of [...kept]) {
+        if (
+          plannedWith(last.verdict).some(
+            (shardId) => kept.get(hotShardSignature(shardId))?.verdict.kind !== 'plan',
+          )
+        ) {
+          kept.delete(signature);
+          settled = false;
+        }
       }
     }
     due.push(...tracked.filter(({ signature }) => !kept.has(signature)));
     const withdrawable = [...kept]
-      .filter(([, last]) => last.verdict.kind === 'plan' || coveredBy(last.verdict).length > 0)
+      .filter(([, last]) => last.verdict.kind === 'plan' || plannedWith(last.verdict).length > 0)
       .map(([signature]) => signature);
     if (withdrawable.length > 0 || due.length > 0) {
       const blocked =
