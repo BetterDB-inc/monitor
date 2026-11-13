@@ -638,13 +638,17 @@ export function planRebalances(
   for (const hotShard of hotShards) {
     const counted = [...earlier, ...verdicts].filter((verdict) => verdict.kind === 'plan');
     const left = shardsAfter(shards, counted);
-    const countedShards = () =>
-      counted.map((plan) => ({
+    const named = (plans: readonly RebalancePlan[]) =>
+      plans.map((plan) => ({
         shardId: plan.sourceShardId,
         nodeAddr:
           shards.find((shard) => shard.shardId === plan.sourceShardId)?.nodeAddr ??
           plan.sourceShardId,
       }));
+    const conflict = (candidate: RebalancePlan): RebalanceVerdict => ({
+      ...noRebalancePlan('conflicts_with_other_plan'),
+      conflictsWith: named(plansInTheWay(shards, counted, candidate, policy)),
+    });
     const fits = (candidate: RebalanceVerdict): candidate is RebalancePlan =>
       candidate.kind === 'plan' && holdTogether(shards, counted, candidate, policy);
     const verdict = planRebalance({ ...hotShard, shards: left }, policy);
@@ -664,19 +668,40 @@ export function planRebalances(
       verdicts.push(
         fits(fitting)
           ? { ...fitting, plannedAfter: counted.map((plan) => plan.sourceShardId) }
-          : { ...noRebalancePlan('conflicts_with_other_plan'), conflictsWith: countedShards() },
+          : conflict(verdict),
       );
-    } else if (
-      verdict.reason === 'settling' &&
-      counted.length > 0 &&
-      isOverTheLine({ ...hotShard, shards }, policy)
-    ) {
-      verdicts.push({ ...noRebalancePlan('covered_by_other_plan'), coveredBy: countedShards() });
-    } else {
+    } else if (counted.length === 0) {
       verdicts.push(verdict);
+    } else if (verdict.reason === 'settling' && isOverTheLine({ ...hotShard, shards }, policy)) {
+      verdicts.push({ ...noRebalancePlan('covered_by_other_plan'), coveredBy: named(counted) });
+    } else {
+      const alone = planRebalance({ ...hotShard, shards }, policy);
+      verdicts.push(alone.kind === 'plan' ? conflict(alone) : alone);
     }
   }
   return verdicts;
+}
+
+function plansInTheWay(
+  shards: readonly RebalanceShard[],
+  earlier: readonly RebalancePlan[],
+  candidate: RebalancePlan,
+  policy: RebalancePolicy,
+): readonly RebalancePlan[] {
+  const already = new Set(shardsOverTheLine(shards, earlier, policy));
+  const pushed = new Set(
+    shardsOverTheLine(shards, [...earlier, candidate], policy).filter(
+      (shardId) => !already.has(shardId),
+    ),
+  );
+  const shared = new Set(candidate.moves.map((move) => move.targetShardId));
+  const touching = (shardIds: ReadonlySet<string>) =>
+    earlier.filter(
+      (plan) =>
+        shardIds.has(plan.sourceShardId) ||
+        plan.moves.some((move) => shardIds.has(move.targetShardId)),
+    );
+  return [touching(pushed), touching(shared), earlier].find((plans) => plans.length > 0) ?? earlier;
 }
 
 function holdTogether(
