@@ -121,7 +121,8 @@ export type RebalanceNoPlanReason =
   | 'settling'
   | 'slots_scattered'
   | 'too_many_targets'
-  | 'covered_by_other_plan';
+  | 'covered_by_other_plan'
+  | 'conflicts_with_other_plan';
 
 export interface RebalanceCoveringShard {
   shardId: string;
@@ -197,6 +198,7 @@ export interface RebalanceNoPlan {
   reason: RebalanceNoPlanReason;
   pinnedSlots: RebalancePinnedSlot[];
   coveredBy?: RebalanceCoveringShard[];
+  conflictsWith?: RebalanceCoveringShard[];
 }
 
 export type RebalanceVerdict = RebalancePlan | RebalanceNoPlan;

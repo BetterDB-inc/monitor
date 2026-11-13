@@ -78,7 +78,10 @@ const NO_COMMAND: Record<Exclude<RebalanceSupport, 'valkey_atomic' | 'redis_atom
 };
 
 const NO_PLAN_REASONS: Record<
-  Exclude<RebalanceNoPlanReason, 'key_level' | 'covered_by_other_plan'>,
+  Exclude<
+    RebalanceNoPlanReason,
+    'key_level' | 'covered_by_other_plan' | 'conflicts_with_other_plan'
+  >,
   string
 > = {
   cluster_hot: 'No other shard has room for this load. Consider adding a shard.',
@@ -98,6 +101,16 @@ function describeCovered(verdict: RebalanceNoPlan): string {
   return (
     `The suggestion${several ? 's' : ''} for ${covering.length > 0 ? listed(covering) : 'another hot shard'} ` +
     `already bring${several ? '' : 's'} this shard's load near the median. ` +
+    `Apply ${several ? 'those' : 'that one'} first.`
+  );
+}
+
+function describeConflict(verdict: RebalanceNoPlan): string {
+  const earlier = (verdict.conflictsWith ?? []).map((shard) => shard.nodeAddr);
+  const several = earlier.length > 1;
+  return (
+    `No move from this shard fits next to the suggestion${several ? 's' : ''} for ` +
+    `${earlier.length > 0 ? listed(earlier) : 'another hot shard'}. ` +
     `Apply ${several ? 'those' : 'that one'} first.`
   );
 }
@@ -266,6 +279,7 @@ function Plan({ plan }: { plan: RebalancePlan }) {
 
 function NoPlan({ verdict, shard }: { verdict: RebalanceNoPlan; shard: HotShardDetail }) {
   if (verdict.reason === 'covered_by_other_plan') return <p>{describeCovered(verdict)}</p>;
+  if (verdict.reason === 'conflicts_with_other_plan') return <p>{describeConflict(verdict)}</p>;
   if (verdict.reason !== 'key_level') return <p>{NO_PLAN_REASONS[verdict.reason]}</p>;
   return (
     <div className="space-y-2">

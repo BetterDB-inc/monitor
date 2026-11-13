@@ -410,6 +410,33 @@ describe('RebalanceSuggestion', () => {
     },
   );
 
+  it.each([
+    [
+      [{ shardId: OTHER, nodeAddr: '10.0.0.2:6379' }],
+      'No move from this shard fits next to the suggestion for 10.0.0.2:6379. Apply that one first.',
+    ],
+    [
+      [
+        { shardId: OTHER, nodeAddr: '10.0.0.2:6379' },
+        { shardId: TARGET, nodeAddr: '10.0.0.3:6379' },
+      ],
+      'No move from this shard fits next to the suggestions for 10.0.0.2:6379 and 10.0.0.3:6379. Apply those first.',
+    ],
+    [
+      undefined,
+      'No move from this shard fits next to the suggestion for another hot shard. Apply that one first.',
+    ],
+  ])(
+    'names the suggestion that leaves a hot shard no plan that fits',
+    async (conflictsWith, text) => {
+      await show([hotShard({ ...noPlan('conflicts_with_other_plan'), conflictsWith })]);
+
+      const region = await panel();
+      expect(within(region).getByText('No plan')).toBeInTheDocument();
+      expect(region).toHaveTextContent(text);
+    },
+  );
+
   it('shows one panel per open hot shard', async () => {
     await show(
       [
