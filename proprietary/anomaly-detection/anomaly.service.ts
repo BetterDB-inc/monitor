@@ -243,6 +243,7 @@ import {
   createShardReplicaState,
   endPrimaryReplicaEpisode,
   evaluatePrimaryWithoutReplicas,
+  keptSlotShare,
   syncedReplicaCount,
 } from './primary-without-replicas-detector';
 import {
@@ -7975,7 +7976,7 @@ export class AnomalyService
       const clusterKey = this.connectionClusterKeys.get(ctx.connectionId);
       if (!clusterKey || self.slots.length === 0) return;
       slots = canonicalSlotKey(self.slots);
-      key = `${clusterKey}:${slots}`;
+      key = this.clusterShardReplicaKey(clusterKey, self);
     } else {
       const path = nodeAddr ? `node:${nodeAddr}` : `connection:${ctx.connectionId}`;
       key = this.primaryReplicaKeyOf(path, info, timestamp);
@@ -7983,7 +7984,8 @@ export class AnomalyService
     await this.reconcilePrimaryReplicaAlert(key);
     const state = this.primaryReplicaState.get(key) ?? createShardReplicaState(timestamp);
     this.primaryReplicaState.set(key, state);
-    if (!self && info.master_replid) state.replid = info.master_replid;
+    const primaryId = self ? self.id : info.master_replid;
+    if (primaryId) state.primaryId = primaryId;
 
     // A node that has not learnt its own address yet announces `:port`.
     const announced = self ? this.clientAddress(self.address) : '';
@@ -8040,6 +8042,49 @@ export class AnomalyService
   }
 
   /**
+   * State key of a cluster shard: its cluster and slot ranges. A reshard
+   * changes the ranges, so a shard without a state of its own continues the
+   * state last seen with the same primary. It keeps the expected replica
+   * count and the open episode with its events, and a shard that took slots
+   * from it starts on its own. A state rebuilt from an open event after a
+   * restart has no primary yet: it is continued by the shard that kept more
+   * than half of the slots in its key.
+   */
+  private clusterShardReplicaKey(clusterKey: string, self: ClusterNode): string {
+    const prefix = `${clusterKey}:`;
+    const key = prefix + canonicalSlotKey(self.slots);
+    if (this.primaryReplicaState.has(key)) return key;
+    let former: string | undefined;
+    let formerShare = 0.5;
+    for (const [candidate, state] of this.primaryReplicaState) {
+      if (!candidate.startsWith(prefix)) continue;
+      if (state.primaryId === self.id) {
+        former = candidate;
+        break;
+      }
+      if (state.primaryId !== undefined) continue;
+      const ranges = candidate
+        .slice(prefix.length)
+        .split(',')
+        .map((range) => range.split('-').map(Number));
+      const share = keptSlotShare(ranges, self.slots);
+      if (share > formerShare) {
+        former = candidate;
+        formerShare = share;
+      }
+    }
+    if (former === undefined) return key;
+    this.primaryReplicaState.set(key, this.primaryReplicaState.get(former)!);
+    this.primaryReplicaState.delete(former);
+    const events = this.primaryReplicaEvents.get(former);
+    if (events) {
+      this.primaryReplicaEvents.set(key, events);
+      this.primaryReplicaEvents.delete(former);
+    }
+    return key;
+  }
+
+  /**
    * State key of a primary outside a cluster: the replication ID it was first
    * seen with. Fan-out and the primary's own connection both read that ID, so
    * every path to one primary shares one state, and an event picked up after a
@@ -8057,7 +8102,7 @@ export class AnomalyService
     let key = used !== undefined && this.primaryReplicaState.has(used) ? used : undefined;
     if (key === undefined && replid) {
       const withReplid = (id: string) =>
-        [...this.primaryReplicaState].find(([, state]) => state.replid === id);
+        [...this.primaryReplicaState].find(([, state]) => state.primaryId === id);
       key = withReplid(replid)?.[0] ?? `replid:${replid}`;
       // A promoted replica reports the ID it replicated from as
       // `master_replid2`. It starts with the replica count that primary was
@@ -8167,7 +8212,7 @@ export class AnomalyService
       if (level === 'critical' || state.alerted === 'none') state.alerted = level;
       // The key of a primary outside a cluster carries its replication ID, so
       // whichever connection reads that primary next finds this state.
-      if (key.startsWith('replid:')) state.replid ??= key.slice('replid:'.length);
+      if (key.startsWith('replid:')) state.primaryId ??= key.slice('replid:'.length);
       // Until the shard is observed again, the adopting connection answers for it.
       state.observers.add(connectionId);
       this.primaryReplicaState.set(key, state);

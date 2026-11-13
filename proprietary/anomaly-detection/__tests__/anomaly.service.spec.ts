@@ -10127,6 +10127,73 @@ describe('AnomalyService', () => {
       await detect(flatInfo(2), direct, (now += 1000), null);
       expect(storage.resolveAnomaly).toHaveBeenCalledWith('stored-1', expect.any(Number));
     });
+
+    /** The view of primA after a reshard left it with `slots`. */
+    const resharded = (slots: number[][]) =>
+      shardNodes('primA', 'primA').map((node) => (node.id === 'primA' ? { ...node, slots } : node));
+
+    it('keeps the episode of a shard whose slots change in a reshard', async () => {
+      await pollFor(1);
+      setReplicas([]);
+      await pollFor(10);
+      expect(events()).toHaveLength(1);
+
+      // The shard gives most of its slots away while it still has no replica.
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(resharded([[0, 1000]]));
+      await pollFor(25);
+
+      expect(events().map((e) => [e.severity, e.baseline])).toEqual([
+        [AnomalySeverity.WARNING, 2],
+        [AnomalySeverity.CRITICAL, 2],
+      ]);
+      expect(events()[1].message).toContain('for slots 0-1000 has had no synced replica for 30 s');
+      expect((service as any).persistenceOutbox.resolvedAt(events()[0].id)).toBeUndefined();
+      expect((service as any).primaryReplicaState.size).toBe(1);
+
+      setReplicas(SYNCED);
+      await pollFor(2);
+      expect(events().map((e) => e.resolved)).toEqual([true, true]);
+    });
+
+    it('starts a shard that took slots from another one on its own', async () => {
+      await pollFor(1);
+      const taker: ClusterNode = { ...clusterNode('primB', true, true), slots: [[0, 3000]] };
+      for (let s = 0; s < 10; s++) {
+        now += 1000;
+        await (service as any).detectPrimaryWithoutReplicas(flatInfo(0), mockCtx, now, taker);
+      }
+
+      expect(events()).toHaveLength(0);
+      expect((service as any).primaryReplicaState.size).toBe(2);
+    });
+
+    it('continues an open event after a restart when the slots changed since', async () => {
+      await pollFor(1);
+      const [key] = [...(service as any).primaryReplicaState.keys()];
+      const stored = {
+        id: 'stored-1',
+        timestamp: now - 10_000,
+        metricType: MetricType.PRIMARY_WITHOUT_REPLICAS,
+        severity: AnomalySeverity.WARNING,
+        baseline: 2,
+        dedupeKey: key,
+      };
+      storage.getAnomalyEvents.mockImplementation((query: { metricType?: string }) =>
+        Promise.resolve(query?.metricType === MetricType.PRIMARY_WITHOUT_REPLICAS ? [stored] : []),
+      );
+      // After the restart only the open event is left of the shard.
+      (service as any).primaryReplicaState.clear();
+      (service as any).adoptPrimaryReplicaEvents('conn-1', [stored], now);
+
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(resharded([[0, 5000]]));
+      setReplicas([]);
+      await pollFor(21);
+
+      expect(events().map((e) => [e.severity, e.baseline])).toEqual([
+        [AnomalySeverity.CRITICAL, 2],
+      ]);
+      expect((service as any).primaryReplicaState.size).toBe(1);
+    });
   });
 
   // ─── Replication output-buffer pressure (valkey#3963) ──────────────────────

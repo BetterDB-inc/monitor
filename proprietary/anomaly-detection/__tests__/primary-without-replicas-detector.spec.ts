@@ -5,6 +5,7 @@ import {
   ShardReplicaState,
   createShardReplicaState,
   evaluatePrimaryWithoutReplicas,
+  keptSlotShare,
   syncedReplicaCount,
 } from '../primary-without-replicas-detector';
 
@@ -291,6 +292,35 @@ describe('evaluatePrimaryWithoutReplicas', () => {
     run(state, START + config.expectationTtlMs + 1, 2, ZERO);
     expect(state.expectedReplicas).toBe(0);
     expect(state.alerted).toBe('none');
+  });
+});
+
+describe('keptSlotShare', () => {
+  it('is the share of the former slots that are still owned', () => {
+    expect(keptSlotShare([[0, 99]], [[0, 99]])).toBe(1);
+    expect(keptSlotShare([[0, 99]], [[0, 199]])).toBe(1);
+    expect(keptSlotShare([[0, 99]], [[0, 74]])).toBe(0.75);
+    expect(keptSlotShare([[0, 99]], [[100, 199]])).toBe(0);
+  });
+
+  it('adds up split ranges', () => {
+    expect(
+      keptSlotShare(
+        [
+          [0, 49],
+          [100, 149],
+        ],
+        [
+          [25, 49],
+          [100, 124],
+        ],
+      ),
+    ).toBe(0.5);
+  });
+
+  it('is 0 for ranges that cannot be read', () => {
+    expect(keptSlotShare([], [[0, 99]])).toBe(0);
+    expect(keptSlotShare([[NaN, NaN]], [[0, 99]])).toBe(0);
   });
 });
 

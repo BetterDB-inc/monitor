@@ -67,11 +67,12 @@ export interface ShardReplicaState {
   /** Connections that have observed the shard. */
   observers: Set<string>;
   /**
-   * Replication ID last seen on a primary outside a cluster, set by the anomaly
-   * service. It lets another connection that reads the same primary continue
-   * this state.
+   * The primary last seen, set by the anomaly service: its node ID in a
+   * cluster, its replication ID outside one. It lets the state be found again
+   * when the primary is read under another key: after a reshard changed its
+   * slots, or through another connection.
    */
-  replid?: string;
+  primaryId?: string;
 }
 
 export interface PrimaryWithoutReplicasFinding {
@@ -103,6 +104,23 @@ export function endPrimaryReplicaEpisode(state: ShardReplicaState): void {
   state.zeroSince = null;
   state.healthyPolls.clear();
   state.alerted = 'none';
+}
+
+/**
+ * How much of a shard's former slots it still owns: the share (0 to 1) of the
+ * slots in `former` that are also in `current`. Both are slot ranges as in
+ * CLUSTER NODES, `[start, end]` inclusive.
+ */
+export function keptSlotShare(former: number[][], current: number[][]): number {
+  let total = 0;
+  let kept = 0;
+  for (const [start, end] of former) {
+    total += end - start + 1;
+    for (const [from, to] of current) {
+      kept += Math.max(0, Math.min(end, to) - Math.max(start, from) + 1);
+    }
+  }
+  return total > 0 ? kept / total : 0;
 }
 
 /** Replicas a primary's own INFO reports as in sync (`state=online`). */
