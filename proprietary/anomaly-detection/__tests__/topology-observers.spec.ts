@@ -123,6 +123,13 @@ describe('selectObservers', () => {
     expect(picked.observers.sort()).toEqual(['a1', 'b1', 'c1']);
   });
 
+  it('keeps a node of a disagreement that was asked only because it was accused', () => {
+    const chosen = select(THREE_ZONES, { previous: ['a1', 'b1', 'c1'], frozen: new Set(['a1', 'b1', 'c1', 'c2']) });
+
+    expect(chosen.observers).toEqual(['a1', 'b1', 'c1', 'c2']);
+    expect(chosen.sampled).toContain('c2');
+  });
+
   it('prefers nodes the anchor sees as healthy but still asks a failing one', () => {
     const nodes = [
       node('a1', 'a'),

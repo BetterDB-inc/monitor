@@ -42,11 +42,18 @@ function harness(ids: string[] = IDS) {
     asked.push(node.id);
     return answers.has(node.id) ? (answers.get(node.id) ?? null) : viewOf(node.id, {}, ids);
   };
-  const poll = (connectionId: string, observerId: string, at: number, patches: Patches = {}, canRead = true) =>
+  const poll = (
+    connectionId: string,
+    observerId: string,
+    at: number,
+    patches: Patches = {},
+    canRead = true,
+    seen: string[] = ids,
+  ) =>
     monitor.poll({
       clusterKey: CLUSTER,
       connectionId,
-      nodes: viewOf(observerId, patches, ids),
+      nodes: viewOf(observerId, patches, seen),
       at,
       intervalMs: INTERVAL,
       nodesPerZone: 1,
@@ -317,6 +324,45 @@ describe('TopologyDivergenceMonitor', () => {
 
     expect(round?.observers).toContain('b1');
     expect(round?.disagreements).toMatchObject([{ key: 'failure_flags:c2', rounds: 1 }]);
+  });
+
+  it('keeps asking an accused node once it is part of a disagreement', async () => {
+    const { poll, answers } = harness();
+    const isolatedView = Object.fromEntries(IDS.filter((id) => id !== 'c2').map((id) => [id, failing]));
+    answers.set('c2', viewOf('c2', isolatedView));
+
+    await poll('conn-1', 'a1', 0, { c2: failing });
+    await poll('conn-1', 'a1', INTERVAL, { c2: failing });
+    const round = await poll('conn-1', 'a1', 2 * INTERVAL, { c2: failing });
+
+    expect(round?.observers).toContain('c2');
+    expect(round?.disagreements).toEqual(
+      expect.arrayContaining([expect.objectContaining({ key: 'failure_flags:a2', rounds: 2 })]),
+    );
+  });
+
+  it('holds the count of a disagreement while one of its nodes cannot be asked', async () => {
+    const { poll, answers } = harness();
+    answers.set('b1', viewOf('b1', { c2: failing }));
+
+    await poll('conn-1', 'a1', 0);
+    const round = await poll('conn-1', 'a1', INTERVAL, { b1: { flags: ['master', 'noaddr'] } });
+
+    expect(round?.observers).not.toContain('b1');
+    expect(round?.disagreements).toEqual(
+      expect.arrayContaining([expect.objectContaining({ key: 'failure_flags:c2', rounds: 1, lastSeenAt: 0 })]),
+    );
+  });
+
+  it('forgets a disagreement of a node that left the cluster', async () => {
+    const { poll, answers } = harness();
+    answers.set('b1', viewOf('b1', { c2: failing }));
+
+    await poll('conn-1', 'a1', 0);
+    const rest = IDS.filter((id) => id !== 'b1');
+    const round = await poll('conn-1', 'a1', INTERVAL, {}, true, rest);
+
+    expect(round?.disagreements.map((d) => d.key)).not.toContain('failure_flags:c2');
   });
 
   it('never sends more reads in a round than the observer limit allows', async () => {
