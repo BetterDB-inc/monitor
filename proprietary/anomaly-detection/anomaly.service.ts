@@ -243,7 +243,6 @@ import {
   createShardReplicaState,
   endPrimaryReplicaEpisode,
   evaluatePrimaryWithoutReplicas,
-  keptSlotShare,
   syncedReplicaCount,
 } from './primary-without-replicas-detector';
 import {
@@ -8023,7 +8022,8 @@ export class AnomalyService
         message: `${critical ? 'CRITICAL' : 'WARNING'}: ${finding.message}`,
         resolved: false,
         connectionId: ctx.connectionId,
-        dedupeKey: key,
+        // A cluster event also names its primary: see adoptPrimaryReplicaEvents.
+        dedupeKey: self ? `${key}@${self.id}` : key,
         ...(nodeAddr ? { nodeAddr } : {}),
       };
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
@@ -8046,33 +8046,17 @@ export class AnomalyService
    * changes the ranges, so a shard without a state of its own continues the
    * state last seen with the same primary. It keeps the expected replica
    * count and the open episode with its events, and a shard that took slots
-   * from it starts on its own. A state rebuilt from an open event after a
-   * restart has no primary yet: it is continued by the shard that kept more
-   * than half of the slots in its key.
+   * from it starts on its own. An event is stored with the node ID of its
+   * primary, so a state rebuilt from an open event after a restart is found
+   * in the same way.
    */
   private clusterShardReplicaKey(clusterKey: string, self: ClusterNode): string {
     const prefix = `${clusterKey}:`;
     const key = prefix + canonicalSlotKey(self.slots);
     if (this.primaryReplicaState.has(key)) return key;
-    let former: string | undefined;
-    let formerShare = 0.5;
-    for (const [candidate, state] of this.primaryReplicaState) {
-      if (!candidate.startsWith(prefix)) continue;
-      if (state.primaryId === self.id) {
-        former = candidate;
-        break;
-      }
-      if (state.primaryId !== undefined) continue;
-      const ranges = candidate
-        .slice(prefix.length)
-        .split(',')
-        .map((range) => range.split('-').map(Number));
-      const share = keptSlotShare(ranges, self.slots);
-      if (share > formerShare) {
-        former = candidate;
-        formerShare = share;
-      }
-    }
+    const former = [...this.primaryReplicaState].find(
+      ([candidate, state]) => candidate.startsWith(prefix) && state.primaryId === self.id,
+    )?.[0];
     if (former === undefined) return key;
     this.primaryReplicaState.set(key, this.primaryReplicaState.get(former)!);
     this.primaryReplicaState.delete(former);
@@ -8197,7 +8181,9 @@ export class AnomalyService
     timestamp: number,
   ): void {
     for (const event of open) {
-      const key = event.dedupeKey;
+      // A cluster event is stored as `<state key>@<node ID of its primary>`.
+      const [, shardKey, nodeId] = /^(cluster:.*)@(.*)$/.exec(event.dedupeKey ?? '') ?? [];
+      const key = shardKey ?? event.dedupeKey;
       const tracked = key ? (this.primaryReplicaEvents.get(key) ?? []) : [];
       if (tracked.some((t) => t.id === event.id)) continue;
       if (!key) {
@@ -8210,8 +8196,10 @@ export class AnomalyService
       state.expectedReplicas = Math.max(state.expectedReplicas, event.baseline);
       state.zeroSince ??= event.timestamp;
       if (level === 'critical' || state.alerted === 'none') state.alerted = level;
-      // The key of a primary outside a cluster carries its replication ID, so
-      // whichever connection reads that primary next finds this state.
+      // Restore the primary, so the next poll finds this state: a cluster
+      // shard whose slots changed since, or a primary outside a cluster read
+      // through another connection. The key of the latter is its replication ID.
+      if (nodeId) state.primaryId ??= nodeId;
       if (key.startsWith('replid:')) state.primaryId ??= key.slice('replid:'.length);
       // Until the shard is observed again, the adopting connection answers for it.
       state.observers.add(connectionId);

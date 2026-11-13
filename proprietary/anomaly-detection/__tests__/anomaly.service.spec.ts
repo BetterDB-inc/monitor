@@ -10167,32 +10167,30 @@ describe('AnomalyService', () => {
       expect((service as any).primaryReplicaState.size).toBe(2);
     });
 
-    it('continues an open event after a restart when the slots changed since', async () => {
+    it('continues an open event after a restart when the shard lost most of its slots since', async () => {
       await pollFor(1);
-      const [key] = [...(service as any).primaryReplicaState.keys()];
-      const stored = {
-        id: 'stored-1',
-        timestamp: now - 10_000,
-        metricType: MetricType.PRIMARY_WITHOUT_REPLICAS,
-        severity: AnomalySeverity.WARNING,
-        baseline: 2,
-        dedupeKey: key,
-      };
-      storage.getAnomalyEvents.mockImplementation((query: { metricType?: string }) =>
-        Promise.resolve(query?.metricType === MetricType.PRIMARY_WITHOUT_REPLICAS ? [stored] : []),
-      );
+      setReplicas([]);
+      await pollFor(10);
+      const [warning] = events();
+      expect(warning.dedupeKey).toMatch(/^cluster:[0-9a-f]+:0-5460@primA$/);
+
       // After the restart only the open event is left of the shard.
       (service as any).primaryReplicaState.clear();
-      (service as any).adoptPrimaryReplicaEvents('conn-1', [stored], now);
-
-      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(resharded([[0, 5000]]));
-      setReplicas([]);
-      await pollFor(21);
+      (service as any).primaryReplicaEvents.clear();
+      (service as any).adoptPrimaryReplicaEvents('conn-1', [warning], now);
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(resharded([[0, 1000]]));
+      await pollFor(30);
 
       expect(events().map((e) => [e.severity, e.baseline])).toEqual([
+        [AnomalySeverity.WARNING, 2],
         [AnomalySeverity.CRITICAL, 2],
       ]);
+      expect((service as any).persistenceOutbox.resolvedAt(warning.id)).toBeUndefined();
       expect((service as any).primaryReplicaState.size).toBe(1);
+
+      setReplicas(SYNCED);
+      await pollFor(2);
+      expect(events().map((e) => e.resolved)).toEqual([true, true]);
     });
   });
 
