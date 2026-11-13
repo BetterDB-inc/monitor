@@ -1754,7 +1754,11 @@ describe('AnomalyService', () => {
     let bytesOut: Map<number, number>;
     let owners: number[][];
     let migrating: boolean;
+    let evenSlots: boolean;
     let ctx: ConnectionContext;
+    const NO_PLAN_SENTENCE =
+      " Rebalancing will not help: slots 0 and 1 are 100% of this shard's CPU. " +
+      'Consider client-side caching, reads from replicas, or splitting the hot keys.';
 
     function clusterNodes() {
       return IDS.map((id, i) => ({
@@ -1795,7 +1799,8 @@ describe('AnomalyService', () => {
         cpuPerSecond.forEach((rate, shard) => {
           const slots = owners[shard];
           slots.forEach((slot, i) => {
-            const part = slots.length === 1 ? 1 : i === 0 ? 0.75 : 0.25 / (slots.length - 1);
+            const skewed = slots.length === 1 ? 1 : i === 0 ? 0.75 : 0.25 / (slots.length - 1);
+            const part = evenSlots ? 1 / slots.length : skewed;
             counters.set(slot, (counters.get(slot) ?? 0) + (rate * part * STEP_MS) / 1000);
           });
         });
@@ -1826,6 +1831,7 @@ describe('AnomalyService', () => {
         [20, 21],
       ];
       migrating = false;
+      evenSlots = false;
       const info = {
         server: { redis_version: '8.0.0' },
         replication: { role: 'master' },
@@ -1870,7 +1876,7 @@ describe('AnomalyService', () => {
         resolved: false,
         message:
           "Hot shard a0000000 at 10.0.0.1:6379: CPU 9.0x the cluster median (82% of the cluster's slot CPU) for 60s. " +
-          'Top slots by CPU: 0 (75% of the shard), 1 (25%).',
+          `Top slots by CPU: 0 (75% of the shard), 1 (25%).${NO_PLAN_SENTENCE}`,
       });
       expect(hotEvents()[0].nodeAddr).toBeUndefined();
     });
@@ -1959,6 +1965,15 @@ describe('AnomalyService', () => {
           keysSampledAt: BASE + 6 * STEP_MS,
           eventId: hotEvents()[0].id,
           captureAvailable: false,
+          rebalance: {
+            kind: 'no_plan',
+            action: 'spread',
+            reason: 'key_level',
+            pinnedSlots: [
+              { slot: 0, shareOfShard: 0.75 },
+              { slot: 1, shareOfShard: 0.25 },
+            ],
+          },
         },
       ]);
       expect(service.getHotShards('conn-other')).toEqual([]);
@@ -2326,7 +2341,7 @@ describe('AnomalyService', () => {
         "Hot shard a0000000 at 10.0.0.1:6379: CPU 9.0x the cluster median (82% of the cluster's slot CPU) for 60s. " +
         'Top slots by CPU: 0 (75% of the shard), 1 (25%).';
       const capture = (reason: string) =>
-        `${RAISED} Key names are not available (${reason}); a capture on this primary can show them.`;
+        `${RAISED} Key names are not available (${reason}); a capture on this primary can show them.${NO_PLAN_SENTENCE}`;
       let keys: KeysBySlot;
 
       function hotNode() {
@@ -2386,7 +2401,7 @@ describe('AnomalyService', () => {
 
         expect(hotEvents()).toHaveLength(1);
         expect(hotEvents()[0].message).toBe(
-          `${RAISED} Hot keys: "user:42" (freq 255), "cart:{9}" (freq 201), "user:1" (freq 40).`,
+          `${RAISED} Hot keys: "user:42" (freq 255), "cart:{9}" (freq 201), "user:1" (freq 40).${NO_PLAN_SENTENCE}`,
         );
         expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledWith(
           expect.objectContaining({
@@ -2424,7 +2439,7 @@ describe('AnomalyService', () => {
         await step(HOT, 6);
 
         expect(hotEvents()[0].message).toBe(
-          `${RAISED} Hot keys: "<!channel>\\x0a\\"x\\"" (freq 255).`,
+          `${RAISED} Hot keys: "<!channel>\\x0a\\"x\\"" (freq 255).${NO_PLAN_SENTENCE}`,
         );
         expect(service.getHotShards('conn-a')[0].topKeys[0].key).toBe('<!channel>\n"x"');
       });
@@ -2809,7 +2824,7 @@ describe('AnomalyService', () => {
 
         await step(HOT, 6);
 
-        expect(hotEvents()[0].message).toBe(RAISED);
+        expect(hotEvents()[0].message).toBe(`${RAISED}${NO_PLAN_SENTENCE}`);
         expect(discovery.getNodeConnection).not.toHaveBeenCalled();
         expect(service.getHotShards('conn-a')[0]).toMatchObject({
           captureAvailable: false,
@@ -2863,6 +2878,184 @@ describe('AnomalyService', () => {
           'Hot keys: "second" (freq 7).',
         );
         expect(client.callBuffer).toHaveBeenCalledTimes(4);
+      });
+    });
+
+    describe('rebalance suggestion', () => {
+      const WIDE = Array.from({ length: 20 }, (_, i) => 100 + i);
+      const rebalance = () => service.getHotShards('conn-a')[0]?.rebalance;
+
+      function spreadLoad() {
+        owners[0] = [...WIDE];
+        evenSlots = true;
+      }
+
+      it('suggests which slots of a broadly hot shard to move, and where', async () => {
+        spreadLoad();
+
+        await step(HOT, 6);
+
+        expect(hotEvents()).toHaveLength(1);
+        expect(hotEvents()[0].message).not.toContain('ebalanc');
+        expect(rebalance()).toMatchObject({
+          kind: 'plan',
+          action: 'spread',
+          effect: 'resolves',
+          sourceShardId: 'a0000000',
+          moves: [
+            {
+              targetShardId: 'b0000000',
+              targetAddr: ADDRS[1],
+              ranges: [[100, 107]],
+              slotCount: 8,
+              keyCount: 80,
+              cpuUsecPerSecond: 360_000,
+            },
+          ],
+          warnings: [{ code: 'source_fork', shardId: 'a0000000' }],
+        });
+      });
+
+      it('says in the event why moving slots will not help', async () => {
+        await step(HOT, 6);
+
+        expect(hotEvents()[0].message).toBe(
+          "Hot shard a0000000 at 10.0.0.1:6379: CPU 9.0x the cluster median (82% of the cluster's slot CPU) for 60s. " +
+            'Top slots by CPU: 0 (75% of the shard), 1 (25%).' +
+            NO_PLAN_SENTENCE,
+        );
+        expect(rebalance()).toEqual({
+          kind: 'no_plan',
+          action: 'spread',
+          reason: 'key_level',
+          pinnedSlots: [
+            { slot: 0, shareOfShard: 0.75 },
+            { slot: 1, shareOfShard: 0.25 },
+          ],
+        });
+      });
+
+      it('keeps a plan for five minutes, then plans again from the load it has by then', async () => {
+        spreadLoad();
+        await step(HOT, 6);
+
+        await step([1_300_000, 100_000, 100_000], 19);
+
+        expect(rebalance()).toMatchObject({ moves: [{ ranges: [[100, 107]] }] });
+
+        await step([1_300_000, 100_000, 100_000], 2);
+
+        expect(rebalance()).toMatchObject({ moves: [{ ranges: [[100, 108]] }] });
+      });
+
+      it('plans again as soon as the load has settled after a slot changed owner', async () => {
+        spreadLoad();
+        await step(HOT, 6);
+
+        owners[0] = WIDE.slice(0, 19);
+        owners[1] = [10, 11, 119];
+        await step(HOT);
+
+        expect(rebalance()).toEqual({
+          kind: 'no_plan',
+          action: 'spread',
+          reason: 'settling',
+          pinnedSlots: [],
+        });
+
+        await step(HOT, 3);
+
+        expect(hotEvents()).toHaveLength(1);
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+      });
+
+      it('suggests nothing during a reshard', async () => {
+        spreadLoad();
+        await step(HOT, 6);
+
+        migrating = true;
+        await step(HOT);
+
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'migration_running' });
+      });
+
+      it('suggests nothing when a refresh finds a slot migration, without asking twice at the raise', async () => {
+        const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: true });
+        (service as any).clusterMetrics = { checkSlotMigrations };
+        spreadLoad();
+        await step(HOT, 6);
+
+        expect(checkSlotMigrations).toHaveBeenCalledTimes(1);
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+
+        checkSlotMigrations.mockResolvedValue({ migrations: [{ slot: 5 }], complete: true });
+        await step(HOT, 21);
+
+        expect(checkSlotMigrations).toHaveBeenCalledTimes(2);
+        expect(hotEvents()[0].resolved).toBe(false);
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'migration_running' });
+      });
+
+      it('still judges the shard when the migration check of a refresh fails', async () => {
+        const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: true });
+        (service as any).clusterMetrics = { checkSlotMigrations };
+        spreadLoad();
+        await step(HOT, 6);
+
+        checkSlotMigrations.mockRejectedValue(new Error('connection lost'));
+        await step(HOT, 21);
+
+        expect(service.getHotShards('conn-a')).toHaveLength(1);
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'migration_running' });
+      });
+
+      it('plans nothing while a primary is suspect', async () => {
+        spreadLoad();
+        const nodes = clusterNodes();
+        nodes[2].flags = ['master', 'fail?'];
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(nodes);
+
+        await step(HOT, 6);
+
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'unhealthy_node' });
+        expect(hotEvents()[0].message).toContain(
+          ' No rebalance is suggested while a primary is failed or suspect.',
+        );
+      });
+
+      it('counts replicas and takes an empty primary as a target', async () => {
+        spreadLoad();
+        const nodes = [
+          ...clusterNodes(),
+          { ...clusterNodes()[1], id: 'd0000000', address: '10.0.0.4:6379@16379,node-4' },
+          { ...clusterNodes()[1], id: 'e0000000', address: '10.0.0.5:6379@16379', master: 'a0000000', flags: ['slave'] },
+        ];
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(nodes);
+
+        await step(HOT, 6);
+
+        expect(rebalance()).toMatchObject({
+          kind: 'plan',
+          moves: [
+            { targetShardId: 'd0000000', targetAddr: '10.0.0.4:6379', ranges: [[100, 107]] },
+            { targetShardId: 'b0000000', ranges: [[108, 111]] },
+          ],
+          warnings: [
+            { code: 'source_fork', shardId: 'a0000000' },
+            { code: 'fewer_replicas', shardId: 'd0000000' },
+            { code: 'fewer_replicas', shardId: 'b0000000' },
+          ],
+        });
+      });
+
+      it('drops the suggestion with the event', async () => {
+        spreadLoad();
+        await step(HOT, 6);
+
+        await step(FLAT, 25);
+
+        expect(service.getHotShards('conn-a')).toEqual([]);
+        expect((service as any).hotShardRebalance.get('conn-a')).toBeUndefined();
       });
     });
 

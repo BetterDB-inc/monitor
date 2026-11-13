@@ -1,6 +1,7 @@
 import type { ShardLoad, ShardLoadSample, SlotLoadRate } from '@app/cluster/shard-load';
 import { median } from '../latency-regression/regression-detector';
 import { type HotShardKey, type HotShardKeyDetail, describeHotKeys } from './hot-shard-keys';
+import type { RebalanceVerdict } from './rebalance-planner';
 
 export const HOT_SHARD_MIN_PRIMARIES = 3;
 export const HOT_SHARD_RAISE_FACTOR = 2;
@@ -49,6 +50,7 @@ export interface HotShardDetail extends HotShardKeyDetail {
   cpu: HotShardLoad;
   network: HotShardNetwork;
   topSlots: HotShardSlot[];
+  rebalance?: RebalanceVerdict;
 }
 
 function networkOf(shard: ShardLoad): number {

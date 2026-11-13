@@ -35,6 +35,7 @@ import {
   ClientCaptureSummary,
   ReplicationRecoveredData,
   WebhookEventType,
+  clusterNodeState,
 } from '@betterdb/shared';
 import { AnomalySavedBus, SavedAnomaly } from '@app/common/services/anomaly-saved-bus';
 import { ClientListCache } from '@app/common/services/client-list-cache';
@@ -106,6 +107,15 @@ import {
   hotKeysUnavailable,
   sampleHotKeys,
 } from './hot-shard-keys';
+import {
+  REBALANCE_REFRESH_MS,
+  type RebalanceNoPlanReason,
+  type RebalanceShard,
+  type RebalanceVerdict,
+  describeNoPlan,
+  noRebalancePlan,
+  planRebalance,
+} from './rebalance-planner';
 import {
   BACKLOG_COVERAGE_CRITICAL_SEC,
   BACKLOG_COVERAGE_WARNING_SEC,
@@ -213,6 +223,8 @@ import {
 import { ClusterDiscoveryService } from '@app/cluster/cluster-discovery.service';
 import { ClusterMetricsService } from '@app/cluster/cluster-metrics.service';
 import { ShardLoadService } from '@app/cluster/shard-load.service';
+import type { ShardLoadSample, SlotLoadRate } from '@app/cluster/shard-load';
+import { parseNodeAddress } from '@app/topology/membership-diff';
 import { isWriteCommand } from '@app/cluster/write-commands';
 import { parseLatencyStatsSection } from '@app/metrics/latencystats-parser';
 import {
@@ -727,6 +739,10 @@ export class AnomalyService
   private hotShardJudgedAt = new Map<string, number>();
   private hotShardDetails = new Map<string, Map<string, HotShardDetail>>();
   private hotShardSince = new Map<string, Map<string, number>>();
+  private hotShardRebalance = new Map<
+    string,
+    Map<string, { verdict: RebalanceVerdict; computedAt: number; ownership: string }>
+  >();
   private hotShardKeys = new Map<
     string,
     Map<string, { detail: HotShardKeyDetail; checkedAt: number }>
@@ -1309,6 +1325,7 @@ export class AnomalyService
     this.hotShardDetails.delete(connectionId);
     this.hotShardSince.delete(connectionId);
     this.hotShardKeys.delete(connectionId);
+    this.hotShardRebalance.delete(connectionId);
     this.hotKeyNoteLogged.delete(connectionId);
     this.forgetNodeWriteP99(connectionId);
     this.reshardWriteP99.delete(connectionId);
@@ -6273,9 +6290,8 @@ export class AnomalyService
       if (this.shardLoad.getLatest(connectionId) !== sample) return;
       const eventIds = this.hotShardEventIds.get(connectionId);
       const open = new Set(shardIds.filter((nodeId) => eventIds?.has(hotShardSignature(nodeId))));
-      const findings = this.isReshardWindowOpen(connectionId, timestamp)
-        ? null
-        : judgeHotShards(sample, open);
+      const resharding = this.isReshardWindowOpen(connectionId, timestamp);
+      const findings = resharding ? null : judgeHotShards(sample, open);
       const topSlots = new Map(
         (findings ?? []).map((finding) => [
           finding.shardId,
@@ -6287,9 +6303,16 @@ export class AnomalyService
         (await this.isSlotMigrationInFlight(connectionId, sample.timestamp, findings));
       if (held) {
         this.restartHotShardHold(connectionId);
+        this.holdRebalance(
+          connectionId,
+          findings === null && !resharding ? 'settling' : 'migration_running',
+        );
         return;
       }
-      await this.refreshHotShardKeys(ctx, timestamp, sample.timestamp, findings, topSlots);
+      await Promise.all([
+        this.refreshHotShardKeys(ctx, timestamp, sample.timestamp, findings, topSlots),
+        this.refreshRebalance(ctx, timestamp, sample, findings, nodes ?? []),
+      ]);
       const judged = await this.withoutHotShardsResolvedSince(connectionId, findings, open);
       await this.applyHotShardGate(ctx, timestamp, sample.timestamp, judged, topSlots, selfId);
       this.rememberHotShards(connectionId, sample.timestamp, judged, topSlots);
@@ -6319,6 +6342,7 @@ export class AnomalyService
       this.activeHotShards.get(connectionId)?.delete(signature);
       this.hotShardDetails.get(connectionId)?.delete(signature);
       this.hotShardKeys.get(connectionId)?.delete(signature);
+      this.hotShardRebalance.get(connectionId)?.delete(signature);
     }
   }
 
@@ -6408,6 +6432,124 @@ export class AnomalyService
     }
     if (kept.size > 0) this.hotShardKeys.set(connectionId, kept);
     else this.hotShardKeys.delete(connectionId);
+  }
+
+  private holdRebalance(connectionId: string, reason: RebalanceNoPlanReason): void {
+    this.hotShardRebalance.delete(connectionId);
+    const details = this.hotShardDetails.get(connectionId);
+    if (!details) return;
+    for (const [signature, detail] of details) {
+      details.set(signature, { ...detail, rebalance: noRebalancePlan(reason) });
+    }
+  }
+
+  private async refreshRebalance(
+    ctx: ConnectionContext,
+    timestamp: number,
+    sample: ShardLoadSample,
+    findings: HotShardFinding[],
+    nodes: ClusterNode[],
+  ): Promise<void> {
+    const connectionId = ctx.connectionId;
+    const eventIds = this.hotShardEventIds.get(connectionId);
+    const known = this.hotShardRebalance.get(connectionId);
+    const ownership = sample.shards
+      .map((shard) => `${shard.nodeId}:${shard.slotCount}`)
+      .sort()
+      .join(',');
+    const kept = new Map<
+      string,
+      { verdict: RebalanceVerdict; computedAt: number; ownership: string }
+    >();
+    const due: Array<{ signature: string; shardId: string; slots: SlotLoadRate[] }> = [];
+    let migrationsChecked = false;
+    for (const finding of findings) {
+      const signature = hotShardSignature(finding.shardId);
+      const raising = this.isHotShardAboutToRaise(connectionId, sample.timestamp, finding);
+      if (!eventIds?.has(signature) && !raising) continue;
+      if (raising) migrationsChecked = true;
+      const last = known?.get(signature);
+      if (
+        last &&
+        last.ownership === ownership &&
+        timestamp - last.computedAt < REBALANCE_REFRESH_MS
+      ) {
+        kept.set(signature, last);
+        continue;
+      }
+      due.push({
+        signature,
+        shardId: finding.shardId,
+        slots: this.shardLoad?.getSlots(connectionId, finding.shardId) ?? [],
+      });
+    }
+    if (due.length > 0) {
+      const shards = this.rebalanceShards(sample, nodes, findings);
+      const migrating = migrationsChecked ? false : await this.isSlotMigrationRunning(ctx);
+      for (const { signature, shardId, slots } of due) {
+        const verdict = migrating
+          ? noRebalancePlan('migration_running')
+          : planRebalance({ hotShardId: shardId, shards, slots });
+        kept.set(signature, { verdict, computedAt: timestamp, ownership });
+      }
+    }
+    if (kept.size > 0) this.hotShardRebalance.set(connectionId, kept);
+    else this.hotShardRebalance.delete(connectionId);
+  }
+
+  private async isSlotMigrationRunning(ctx: ConnectionContext): Promise<boolean> {
+    if (!this.clusterMetrics) return false;
+    try {
+      const check = await this.clusterMetrics.checkSlotMigrations(ctx.connectionId);
+      return !check.complete || check.migrations.length > 0;
+    } catch (err) {
+      this.logger.warn(
+        `Slot migration check failed for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
+      );
+      return true;
+    }
+  }
+
+  private rebalanceShards(
+    sample: ShardLoadSample,
+    nodes: ClusterNode[],
+    findings: HotShardFinding[],
+  ): RebalanceShard[] {
+    const byId = new Map(nodes.map((node) => [node.id, node]));
+    const hot = new Set(findings.map((finding) => finding.shardId));
+    const measured = new Set(sample.shards.map((shard) => shard.nodeId));
+    const replicaCount = (shardId: string) =>
+      nodes.length > 0 ? nodes.filter((node) => node.master === shardId).length : undefined;
+    const shards: RebalanceShard[] = sample.shards.map((shard) => {
+      const node = byId.get(shard.nodeId);
+      return {
+        shardId: shard.nodeId,
+        nodeAddr: shard.address,
+        cpuUsecPerSecond: shard.cpuUsecPerSecond,
+        slotCount: shard.slotCount,
+        state: clusterNodeState(node?.flags ?? []),
+        hot: hot.has(shard.nodeId),
+        replicaCount: replicaCount(shard.nodeId),
+        availabilityZone: node?.availabilityZone,
+      };
+    });
+    for (const node of nodes) {
+      const empty = node.flags.includes('master') && node.slots.length === 0;
+      if (!empty || measured.has(node.id)) continue;
+      const parsed = parseNodeAddress(node.address);
+      if (!parsed) continue;
+      shards.push({
+        shardId: node.id,
+        nodeAddr: `${parsed.host}:${parsed.port}`,
+        cpuUsecPerSecond: 0,
+        slotCount: 0,
+        state: clusterNodeState(node.flags),
+        hot: false,
+        replicaCount: replicaCount(node.id),
+        availabilityZone: node.availabilityZone,
+      });
+    }
+    return shards;
   }
 
   private async readHotShardKeys(
@@ -6525,6 +6667,7 @@ export class AnomalyService
     );
     sinceBySignature.set(signature, since);
     const keys = this.hotShardKeys.get(ctx.connectionId)?.get(signature)?.detail;
+    const rebalance = this.hotShardRebalance.get(ctx.connectionId)?.get(signature)?.verdict;
     return {
       id: randomUUID(),
       timestamp,
@@ -6536,15 +6679,16 @@ export class AnomalyService
       zScore: 0,
       stdDev: 0,
       threshold: HOT_SHARD_RAISE_FACTOR,
-      message: describeHotShard(
-        finding,
-        topSlots,
-        sampledAt - since,
-        keys?.topKeys,
-        this.canCaptureMissingKeys(ctx.connectionId, keys)
-          ? describeMissingKeys(keys?.keyNote)
-          : '',
-      ),
+      message:
+        describeHotShard(
+          finding,
+          topSlots,
+          sampledAt - since,
+          keys?.topKeys,
+          this.canCaptureMissingKeys(ctx.connectionId, keys)
+            ? describeMissingKeys(keys?.keyNote)
+            : '',
+        ) + describeNoPlan(rebalance, keys?.topKeys ?? []),
       resolved: false,
       connectionId: ctx.connectionId,
       ...(nodeAddr ? { nodeAddr } : {}),
@@ -6562,7 +6706,11 @@ export class AnomalyService
     const since = this.hotShardSince.get(connectionId);
     const details = new Map<string, HotShardDetail>();
     const keys = this.hotShardKeys.get(connectionId);
-    if (findings.length === 0) this.hotShardKeys.delete(connectionId);
+    const rebalance = this.hotShardRebalance.get(connectionId);
+    if (findings.length === 0) {
+      this.hotShardKeys.delete(connectionId);
+      this.hotShardRebalance.delete(connectionId);
+    }
     for (const finding of findings) {
       const signature = hotShardSignature(finding.shardId);
       const eventId = eventIds?.get(signature);
@@ -6581,6 +6729,7 @@ export class AnomalyService
         network: finding.network,
         topSlots: topSlots.get(finding.shardId) ?? [],
         ...read,
+        ...(rebalance?.has(signature) ? { rebalance: rebalance.get(signature)!.verdict } : {}),
       });
     }
     if (details.size > 0) this.hotShardDetails.set(connectionId, details);
