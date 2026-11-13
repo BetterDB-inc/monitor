@@ -188,7 +188,6 @@ export interface SlotMigration {
   /** Atomic slot migration job state as Valkey reports it, e.g. "snapshotting". */
   phase?: string;
   jobName?: string;
-  startedAt?: number;
   lastUpdateAt?: number;
   lastAckAt?: number;
 }
@@ -206,12 +205,12 @@ export interface FailedSlotMigration {
   targetNodeId: string;
   targetAddress: string;
   message: string;
-  failedAt?: number;
 }
 
 export interface SlotMigrationReport extends SlotMigrationCheck {
   failed: FailedSlotMigration[];
   readNodeIds: string[];
+  ownNodeOnly: boolean;
 }
 
 const FINISHED_MIGRATION_STATES = new Set(['success', 'failed', 'cancelled']);
@@ -884,7 +883,10 @@ export class ClusterMetricsService {
     return { migrations, complete };
   }
 
-  async readSlotMigrations(connectionId?: string): Promise<SlotMigrationReport> {
+  async readSlotMigrations(
+    connectionId?: string,
+    options: { ownNodeOnly?: boolean } = {},
+  ): Promise<SlotMigrationReport> {
     let nodes: DiscoveredNode[];
     try {
       nodes = await withTimeout(
@@ -896,7 +898,7 @@ export class ClusterMetricsService {
       this.logger.error(
         `Failed to check slot migrations: ${error instanceof Error ? error.message : error}`,
       );
-      return { migrations: [], failed: [], readNodeIds: [], complete: false };
+      return { migrations: [], failed: [], readNodeIds: [], complete: false, ownNodeOnly: false };
     }
 
     const findNode = (idOrPrefix: string) =>
@@ -1004,7 +1006,6 @@ export class ClusterMetricsService {
             targetNodeId: target?.id ?? job.target_node ?? '',
             targetAddress: target?.address ?? '',
             message: job.message ?? '',
-            failedAt: epochSecondsToMs(job.last_update_time),
           });
         }
         if (FINISHED_MIGRATION_STATES.has(job.state)) continue;
@@ -1020,7 +1021,6 @@ export class ClusterMetricsService {
           state: isImport ? 'importing' : 'migrating',
           phase: job.state,
           jobName: job.name,
-          startedAt: epochSecondsToMs(job.create_time),
           lastUpdateAt: epochSecondsToMs(job.last_update_time),
           lastAckAt: epochSecondsToMs(job.last_ack_time),
         });
@@ -1032,21 +1032,25 @@ export class ClusterMetricsService {
     const primaries = masters.filter((node) => node.state !== 'failed');
     if (primaries.length === 0) complete = false;
     if (masters.some((node) => node.state === 'failed' && node.slots.length > 0)) complete = false;
-    await Promise.all(
-      primaries.map((primary) =>
-        this.onNode(primary, connectionId, NODE_COMMAND_TIMEOUT_MS, (client) => readNode(primary, client)).catch((error) => {
-          complete = false;
-          this.logger.debug(`Slot migration check skipped ${primary.address}: ${error}`);
-        }),
-      ),
-    );
+    if (!options.ownNodeOnly) {
+      await Promise.all(
+        primaries.map((primary) =>
+          this.onNode(primary, connectionId, NODE_COMMAND_TIMEOUT_MS, (client) => readNode(primary, client)).catch((error) => {
+            complete = false;
+            this.logger.debug(`Slot migration check skipped ${primary.address}: ${error}`);
+          }),
+        ),
+      );
+    }
 
     // No primary could be read directly, as behind an SSH tunnel or NAT: the
     // connection's own node still shows its own markers and migration jobs.
+    let ownNodeOnly = false;
     if (primaries.length > 0 && nodesRead === 0) {
       complete = false;
+      ownNodeOnly = true;
       const errorKey = `slotmigrations-${connectionId ?? ''}`;
-      if (!this.loggedErrors.has(errorKey)) {
+      if (!options.ownNodeOnly && !this.loggedErrors.has(errorKey)) {
         this.logger.warn(
           'Slot migration check could not read any primary directly; reading the connection\'s own node instead',
         );
@@ -1080,6 +1084,7 @@ export class ClusterMetricsService {
       failed: [...failedJobs.values()],
       readNodeIds: [...readNodeIds],
       complete,
+      ownNodeOnly,
     };
   }
 

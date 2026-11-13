@@ -46,6 +46,7 @@ export interface SlotMigrationJudgement {
 interface Move {
   id: string;
   atomic: boolean;
+  timed: boolean;
   slots: string;
   stamp: string;
   phase?: string;
@@ -90,6 +91,7 @@ function movesOf(migrations: SlotMigration[]): Move[] {
       moves.push({
         id: `job:${migration.jobName}`,
         atomic: true,
+        timed: migration.lastUpdateAt !== undefined || migration.lastAckAt !== undefined,
         slots: migration.slotRange ?? `${migration.slot}`,
         stamp: `${migration.phase ?? ''}|${migration.lastUpdateAt ?? ''}|${migration.lastAckAt ?? ''}`,
         phase: migration.phase,
@@ -107,6 +109,7 @@ function movesOf(migrations: SlotMigration[]): Move[] {
     moves.push({
       id: `legacy:${pair}`,
       atomic: false,
+      timed: true,
       slots: ranges,
       stamp: ranges,
       ...endpoints(first),
@@ -150,10 +153,11 @@ export function judgeSlotMigrations(
       atomic: move.atomic,
       nodeIds: [move.sourceNodeId, move.targetNodeId].filter((nodeId) => nodeId !== ''),
     });
-    const { id, stamp: _stamp, ...shown } = move;
+    const { id, stamp: _stamp, timed, ...shown } = move;
     running.push({ kind: 'running', signature: `running:${id}`, ...shown });
     const quietMs = now - since;
-    if (quietMs >= (move.atomic ? ATOMIC_MIGRATION_STALL_MS : LEGACY_MIGRATION_STALL_MS)) {
+    const stallMs = move.atomic ? ATOMIC_MIGRATION_STALL_MS : LEGACY_MIGRATION_STALL_MS;
+    if (timed && quietMs >= stallMs) {
       stuck.push({ kind: 'stuck', signature: `stuck:${id}`, ...shown, quietMs });
     }
   }
@@ -228,7 +232,8 @@ export function describeSlotMigration(finding: SlotMigrationFinding): string {
     return (
       `WARNING: Slot migration stuck: ${move} has reported no state change and no heartbeat ` +
       `for ${quiet}${state}. Check that the two nodes reach each other and that the target has ` +
-      `memory for the slots. To stop it, run CLUSTER CANCELSLOTMIGRATIONS on ${source}.`
+      `memory for the slots. To stop it, run CLUSTER CANCELSLOTMIGRATIONS on ${source}. ` +
+      `That cancels every migration that node is the source of, not only this one.`
     );
   }
   return (

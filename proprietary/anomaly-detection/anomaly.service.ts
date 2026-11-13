@@ -537,6 +537,7 @@ const ADOPTED_METRICS: MetricType[] = [
 
 const SLOT_MIGRATION_IDLE_CHECK_MS = 30_000;
 const SLOT_MIGRATION_BUSY_CHECK_MS = 5_000;
+const SLOT_MIGRATION_DIAL_RETRY_MS = 10 * 60_000;
 const STUCK_SLOT_MIGRATION_KEY = 'stuck:';
 
 const NODE_ADOPTED_METRICS: MetricType[] = [MetricType.FORK_MEMORY_RISK, MetricType.REPL_BUFFER_PRESSURE];
@@ -836,6 +837,7 @@ export class AnomalyService
   private orphanedSlotFirstSeen = new Map<string, Map<string, number>>();
   private slotMigrationWatch = new Map<string, SlotMigrationWatch>();
   private slotMigrationCheckedAt = new Map<string, number>();
+  private slotMigrationOwnNodeUntil = new Map<string, number>();
   private slotMigrationFirstSeen = new Map<string, Map<string, number>>();
   private activeSlotMigrations = new Map<string, Set<string>>();
   private slotMigrationEventIds = new Map<string, Map<string, string>>();
@@ -1370,6 +1372,7 @@ export class AnomalyService
     this.orphanedSlotLastProbe.delete(connectionId);
     this.slotMigrationWatch.delete(connectionId);
     this.slotMigrationCheckedAt.delete(connectionId);
+    this.slotMigrationOwnNodeUntil.delete(connectionId);
     this.slotMigrationFirstSeen.delete(connectionId);
     this.activeSlotMigrations.delete(connectionId);
     this.slotMigrationEventIds.delete(connectionId);
@@ -7820,7 +7823,8 @@ export class AnomalyService
   private async detectSlotMigrations(ctx: ConnectionContext, timestamp: number): Promise<void> {
     const connectionId = ctx.connectionId;
     try {
-      if (!this.clusterMetrics || this.clusterMetrics.coveredBySeed(connectionId)) return;
+      if (!this.clusterMetrics || !this.dialsDataNodes(connectionId)) return;
+      if (this.clusterMetrics.coveredBySeed(connectionId)) return;
       const checkedAt = this.slotMigrationCheckedAt.get(connectionId);
       const watched = this.slotMigrationWatch.get(connectionId);
       const every =
@@ -7828,8 +7832,14 @@ export class AnomalyService
       if (checkedAt !== undefined && timestamp - checkedAt < every) return;
       this.slotMigrationCheckedAt.set(connectionId, timestamp);
 
-      const report = await this.clusterMetrics.readSlotMigrations(connectionId);
+      const ownNodeOnly = (this.slotMigrationOwnNodeUntil.get(connectionId) ?? 0) > timestamp;
+      const report = ownNodeOnly
+        ? await this.clusterMetrics.readSlotMigrations(connectionId, { ownNodeOnly })
+        : await this.clusterMetrics.readSlotMigrations(connectionId);
       if (this.slotMigrationCheckedAt.get(connectionId) !== timestamp) return;
+      if (report.ownNodeOnly && !ownNodeOnly) {
+        this.slotMigrationOwnNodeUntil.set(connectionId, timestamp + SLOT_MIGRATION_DIAL_RETRY_MS);
+      }
       const judged = judgeSlotMigrations(watched, report, timestamp);
       this.slotMigrationWatch.set(connectionId, judged.watch);
 

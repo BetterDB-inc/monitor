@@ -2925,6 +2925,7 @@ describe('AnomalyService', () => {
       failed: unknown[];
       readNodeIds: string[];
       complete: boolean;
+      ownNodeOnly?: boolean;
     };
     let readSlotMigrations: jest.Mock;
     let coveredBySeed: jest.Mock;
@@ -2939,7 +2940,6 @@ describe('AnomalyService', () => {
       state: 'migrating',
       phase: 'snapshotting',
       jobName: 'job-1',
-      startedAt: BASE,
       lastUpdateAt: BASE,
       lastAckAt: BASE,
       ...overrides,
@@ -2953,7 +2953,6 @@ describe('AnomalyService', () => {
       targetNodeId: B.id,
       targetAddress: B.address,
       message: 'Connection lost to target',
-      failedAt: BASE,
     });
 
     function see(migrations: unknown[], failed: unknown[] = []): void {
@@ -3172,6 +3171,33 @@ describe('AnomalyService', () => {
 
       expect(readSlotMigrations).not.toHaveBeenCalled();
       expect(running()).toEqual([]);
+    });
+
+    it('does not watch a connection that cannot open its own sockets to the nodes', async () => {
+      (service as any).connectionRegistry.getConfig.mockReturnValue({ host: 'agent' });
+      see([job()]);
+      await after(0);
+
+      expect(readSlotMigrations).not.toHaveBeenCalled();
+      expect(running()).toEqual([]);
+    });
+
+    it('reads only its own node for 10 minutes after no primary could be dialed', async () => {
+      report = { ...report, readNodeIds: [A.id], complete: false, ownNodeOnly: true };
+      await after(0);
+
+      expect(readSlotMigrations).toHaveBeenLastCalledWith('conn-a');
+
+      await after(30_000);
+      await after(9 * MINUTE);
+
+      expect(readSlotMigrations).toHaveBeenCalledTimes(3);
+      expect(readSlotMigrations).toHaveBeenNthCalledWith(2, 'conn-a', { ownNodeOnly: true });
+      expect(readSlotMigrations).toHaveBeenNthCalledWith(3, 'conn-a', { ownNodeOnly: true });
+
+      await after(MINUTE);
+
+      expect(readSlotMigrations).toHaveBeenLastCalledWith('conn-a');
     });
 
     it('survives a read that throws and tries again later', async () => {

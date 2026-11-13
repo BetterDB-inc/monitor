@@ -602,7 +602,6 @@ used_cpu_user:20.3\r
         expect(report.migrations).toEqual([
           expect.objectContaining({
             jobName: 'job-1',
-            startedAt: 1_700_000_000_000,
             lastUpdateAt: 1_700_000_060_000,
             lastAckAt: 1_700_000_090_000,
             phase: 'snapshotting',
@@ -642,7 +641,6 @@ used_cpu_user:20.3\r
             targetNodeId: 'fff789node3',
             targetAddress: '192.168.1.12:6379',
             message: 'Connection lost to target',
-            failedAt: 1_700_000_060_000,
           },
         ]);
       });
@@ -665,6 +663,41 @@ used_cpu_user:20.3\r
 
         expect(report.complete).toBe(false);
         expect([...report.readNodeIds].sort()).toEqual(['abc123node1', 'fff789node3']);
+      });
+
+      it('says that it read the primaries when it did', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({});
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect(report.ownNodeOnly).toBe(false);
+      });
+
+      it('says so when no primary could be dialed and it read its own node instead', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
+        mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));
+        ownNodeClient(async (_cmd: string, sub: string) => (sub === 'NODES' ? '' : [job(running)]));
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect(report.ownNodeOnly).toBe(true);
+        expect(report.complete).toBe(false);
+        expect(report.migrations).toHaveLength(1);
+      });
+
+      it("reads only the connection's own node when asked to", async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
+        mockDiscoveryService.getNodeConnection.mockClear();
+        ownNodeClient(async (_cmd: string, sub: string) => (sub === 'NODES' ? '' : [job(running)]));
+
+        const report = await service.readSlotMigrations('conn-1', { ownNodeOnly: true });
+
+        expect(mockDiscoveryService.getNodeConnection).not.toHaveBeenCalled();
+        expect(report.ownNodeOnly).toBe(true);
+        expect(report.complete).toBe(false);
+        expect(report.readNodeIds).toHaveLength(1);
+        expect(report.migrations).toHaveLength(1);
       });
 
       it('counts a primary without the command as one that answered', async () => {

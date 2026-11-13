@@ -732,6 +732,8 @@ INFO: Slot migration running: slots 0-1365 from 10.0.0.1:6379 to 10.0.0.3:6379 (
 
 The cluster is read every 30 seconds, and every 5 seconds while a migration is running, so a job that starts and ends between two reads gets no entry. A migration is watched whoever started it. A primary without `CLUSTER GETSLOTMIGRATIONS` is asked for it once an hour, not on every read. On a cluster registered through a seed, the seed connection watches and its member connections do not; nodes registered one by one as separate connections each raise their own events.
 
+A connection through the BetterDB agent is not watched: the monitor reaches only that one node through the agent and cannot ask the primaries. When the monitor can open its own sockets but no primary answers on the address the cluster reports for it, as behind NAT or an SSH tunnel, it reads the connection's own node instead and tries the primaries again after 10 minutes. From one node it sees only the migrations that node is the source or the target of.
+
 While the nodes of a migration cannot be read, its events stay as they are: a read that fails does not close them.
 
 ### slot_migration_stuck
@@ -742,13 +744,15 @@ While the nodes of a migration cannot be read, its events stay as they are: a re
 
 | Case | Rule | Resolves |
 | --- | --- | --- |
-| Atomic job stuck | The job is still active and its state, `last_update_time` and `last_ack_time` have not changed for 10 minutes | When any of the three changes, or the job ends |
+| Atomic job stuck | The job is still active and its state, `last_update_time` and `last_ack_time` have not changed for 10 minutes. A job for which the server sends neither time is never called stuck | When any of the three changes, or the job ends |
 | Older markers stuck | The same slots carry `MIGRATING` / `IMPORTING` markers between the same two nodes for 30 minutes | When the set of slots changes, or the markers are gone |
 | Atomic job failed | The job is listed with state `failed`. The message carries what the server said, cut to 200 characters | Not by itself: it reports something that happened. Resolve it once you have read it |
 
 ```
-WARNING: Slot migration stuck: slots 0-1365 from 10.0.0.1:6379 to 10.0.0.3:6379 has reported no state change and no heartbeat for 10 minutes (state: snapshotting). Check that the two nodes reach each other and that the target has memory for the slots. To stop it, run CLUSTER CANCELSLOTMIGRATIONS on 10.0.0.1:6379.
+WARNING: Slot migration stuck: slots 0-1365 from 10.0.0.1:6379 to 10.0.0.3:6379 has reported no state change and no heartbeat for 10 minutes (state: snapshotting). Check that the two nodes reach each other and that the target has memory for the slots. To stop it, run CLUSTER CANCELSLOTMIGRATIONS on 10.0.0.1:6379. That cancels every migration that node is the source of, not only this one.
 ```
+
+`CLUSTER CANCELSLOTMIGRATIONS` has no job name: it cancels every active migration the node it runs on is the source of. Check what else that node is moving before you run it.
 
 The quiet time is counted on the monitor's clock from the moment it last saw a change, not by comparing the server's timestamps with it, so a clock difference between the two does not matter. It starts again when the monitor restarts.
 

@@ -30,7 +30,6 @@ function job(overrides: Partial<SlotMigration> = {}): SlotMigration {
     state: 'migrating',
     phase: 'snapshotting',
     jobName: 'job-1',
-    startedAt: T0,
     lastUpdateAt: T0,
     lastAckAt: T0,
     ...overrides,
@@ -58,13 +57,19 @@ function failedJob(overrides: Partial<FailedSlotMigration> = {}): FailedSlotMigr
     targetNodeId: B.id,
     targetAddress: B.address,
     message: 'Connection lost to target',
-    failedAt: T0,
     ...overrides,
   };
 }
 
 function report(overrides: Partial<SlotMigrationReport> = {}): SlotMigrationReport {
-  return { migrations: [], failed: [], readNodeIds: ALL, complete: true, ...overrides };
+  return {
+    migrations: [],
+    failed: [],
+    readNodeIds: ALL,
+    complete: true,
+    ownNodeOnly: false,
+    ...overrides,
+  };
 }
 
 function run(steps: Array<[number, SlotMigrationReport]>): SlotMigrationJudgement {
@@ -142,6 +147,29 @@ describe('judgeSlotMigrations', () => {
       ]);
 
       expect(judged.stuck).toEqual([]);
+    });
+
+    it('is never judged stuck when the server sends neither time', () => {
+      const untimed = job({ lastUpdateAt: undefined, lastAckAt: undefined });
+
+      const judged = run([
+        [T0, report({ migrations: [untimed] })],
+        [T0 + 60 * MINUTE, report({ migrations: [untimed] })],
+      ]);
+
+      expect(judged.running).toHaveLength(1);
+      expect(judged.stuck).toEqual([]);
+    });
+
+    it('is still judged when the server sends only one of the two times', () => {
+      const heartbeatOnly = job({ lastUpdateAt: undefined });
+
+      const judged = run([
+        [T0, report({ migrations: [heartbeatOnly] })],
+        [T0 + ATOMIC_MIGRATION_STALL_MS, report({ migrations: [heartbeatOnly] })],
+      ]);
+
+      expect(judged.stuck).toHaveLength(1);
     });
 
     it('measures the quiet time on the monitor clock, not against the server times', () => {
@@ -425,7 +453,10 @@ describe('describeSlotMigration', () => {
       'WARNING: Slot migration stuck: slots 0-100 from 10.0.0.1:6379 to 10.0.0.2:6379',
     );
     expect(text).toContain('no state change and no heartbeat for 12 minutes (state: snapshotting)');
-    expect(text).toContain('CLUSTER CANCELSLOTMIGRATIONS on 10.0.0.1:6379');
+    expect(text).toContain(
+      'To stop it, run CLUSTER CANCELSLOTMIGRATIONS on 10.0.0.1:6379. ' +
+        'That cancels every migration that node is the source of, not only this one.',
+    );
   });
 
   it('describes stuck legacy markers without the atomic cancel command', () => {
