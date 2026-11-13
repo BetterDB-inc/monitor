@@ -1048,6 +1048,26 @@ describe('AnomalyService', () => {
       ).toEqual([]);
     });
 
+    it('fires an absolute threshold for a rate that is below its moving mean', async () => {
+      // A 200/s denial burst lifts the mean; a sustained 60/s is below it but
+      // still over acl_denied's 50/s critical threshold.
+      let denied = 0;
+      for (let i = 0; i <= 40; i++) {
+        denied += 200;
+        await pollAt(1_000_000 + i * 1000, 0, 0, denied);
+      }
+      spikes = [];
+      (service as any).detectors.get('conn-1').get(MetricType.ACL_DENIED).lastAlertTime.clear();
+      for (let i = 41; i <= 43; i++) {
+        denied += 60;
+        await pollAt(1_000_000 + i * 1000, 0, 0, denied);
+      }
+      const denials = spikes.filter((a) => a.metricType === MetricType.ACL_DENIED);
+      expect(denials).toHaveLength(1);
+      expect(denials[0].value).toBe(60);
+      expect(denials[0].message).toContain('Threshold: 50/s');
+    });
+
     it('treats a run_id change as a reset even when the counter is higher', async () => {
       let misses = 1_000;
       for (let i = 0; i <= 40; i++) {

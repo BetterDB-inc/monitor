@@ -1259,6 +1259,7 @@ export class AnomalyService
         metricType,
         new SpikeDetector(metricType, this.resolveSpikeConfig(metricType), {
           minValue: COUNTER_RATE_MIN_PER_SEC.get(metricType),
+          absoluteBelowMean: COUNTER_RATE_METRICS.has(metricType),
         }),
       );
     }
