@@ -17,6 +17,7 @@ Complete reference for all metrics exposed by BetterDB Monitor at the `/api/prom
   - [Client Analytics Metrics](#client-analytics-metrics)
   - [Slowlog Metrics](#slowlog-metrics)
   - [COMMANDLOG Metrics](#commandlog-metrics-valkey-81)
+  - [Lost Log Entries](#lost-log-entries)
   - [Vector Index Metrics](#vector-index-metrics)
   - [Commandstats Metrics](#commandstats-metrics)
   - [KV Cache Metrics](#kv-cache-metrics)
@@ -184,6 +185,7 @@ A family marked **removed** tracks only its current label values: a value that d
 | `betterdb_client_connections_by_name`, `betterdb_client_connections_by_user`                 | K + L        | Distinct client names (K) and users (L) that have been inside the client analytics window (`CLIENT_ANALYTICS_WINDOW_MS`, default 24 hours) at any point since BetterDB started.| zeroed       |
 | `betterdb_slowlog_pattern_count`, `_avg_duration_us`, `_percentage`                          | 3 × S        | S is the number of distinct command/key patterns seen since start. Each poll reads the latest 128 slowlog entries, so one poll adds at most 128.                              | zeroed       |
 | `betterdb_commandlog_large_request_by_pattern`, `betterdb_commandlog_large_reply_by_pattern` | Q + Q′       | Q and Q′ are the distinct large-request and large-reply patterns seen since start. Each poll reads the latest 128 entries of each type, so one poll adds at most 128 to each. | zeroed       |
+| `betterdb_log_capture_lost_entries_total` | ≤ 4 | One per log the pollers have read: `slowlog`, plus `commandlog-slow`, `commandlog-large-request` and `commandlog-large-reply` on Valkey 8.1+. | removed |
 | `betterdb_kv_cache_hit_rate` | E × M | E is the number of enabled LMCache engines and M the models each reports a hit rate for in the last 15 minutes. | removed |
 | `betterdb_kv_cache_chunks`, `betterdb_kv_cache_bytes` | 2 × M | M is the number of models found in the sampled LMCache keys. | removed |
 | `betterdb_anomaly_events_total` (counter)                                                    | ≤ 240        | 3 severities × 40 metric types × 2 anomaly types.                                                                                                                             | counter      |
@@ -231,11 +233,12 @@ This example uses `full` with 5 standalone primaries and 2 cluster primaries, as
 | Forecast            | 4                  | 4               |
 | Slowlog patterns    | 60                 | 60              |
 | COMMANDLOG patterns | 20                 | 20              |
+| Lost log entries    | 4                  | 4               |
 | Client name/user    | 7                  | 7               |
 | ACL reason/user     | 5                  | 5               |
-| **Per connection**  | **270**            | **374**         |
+| **Per connection**  | **274**            | **378**         |
 
-The total with `full` is 55 + 5 × 270 + 2 × 374 = **2,153 series**. Add up to 120 more while anomaly detection runs, plus 9 per polled user-added connection (63 for this fleet, if all 7 are user-added) and up to 61 more for each connection with anomalies in the last hour. Anomaly detection also exports up to 5 node signal series per checked primary (connects per second, churn per op, retry state, write rate and backlog coverage; 35 for this fleet), 3 more for each replica those primaries report, 5 `betterdb_anomaly_fanout_primaries` series and up to 1 `betterdb_anomaly_fanout_gap` series per cluster or Sentinel connection, and `betterdb_incident_active` series while incidents are open. `betterdb_retry_amplification_state` is set on every poll, even with no anomaly events.
+The total with `full` is 55 + 5 × 274 + 2 × 378 = **2,181 series**. Add up to 120 more while anomaly detection runs, plus 9 per polled user-added connection (63 for this fleet, if all 7 are user-added) and up to 61 more for each connection with anomalies in the last hour. Anomaly detection also exports up to 5 node signal series per checked primary (connects per second, churn per op, retry state, write rate and backlog coverage; 35 for this fleet), 3 more for each replica those primaries report, 5 `betterdb_anomaly_fanout_primaries` series and up to 1 `betterdb_anomaly_fanout_gap` series per cluster or Sentinel connection, and `betterdb_incident_active` series while incidents are open. `betterdb_retry_amplification_state` is set on every poll, even with no anomaly events.
 
 The same fleet under `vitals` exports 55 + 5 × 33 + 2 × 39 = **298 series**, and that number does not change with key count, database count, pattern churn or cluster size.
 
@@ -303,6 +306,29 @@ Valkey-specific metrics for tracking large request/reply commands.
 | `betterdb_commandlog_large_reply_by_pattern`   | gauge | `pattern` | Large reply count by command pattern   | `3`     |
 
 **Availability**: Only populated when connected to Valkey 8.1+. Returns no data for Redis or older Valkey versions.
+
+### Lost Log Entries
+
+The server keeps only the newest `slowlog-max-len` / `commandlog-*-max-len` entries, and BetterDB reads the newest 128 of each log every 30 seconds. Entry ids are a per-process counter that `SLOWLOG RESET` and `COMMANDLOG RESET` do not restart, so when the oldest id of a poll is more than one above the newest id of the poll before it, the ids in between were logged and never read by BetterDB. That happens in two ways:
+
+- the server dropped them: more entries were logged between two polls than the log's max-len holds, or the log was reset
+- more than 128 entries were logged between two polls: the older ones may still be on the server, but a poll reads only the newest 128
+
+| Metric                                    | Type  | Labels | Description                                                                                                                  | Example |
+| ----------------------------------------- | ----- | ------ | ---------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `betterdb_log_capture_lost_entries_total` | gauge | `log`  | Entries BetterDB never read, dropped by the server or outside the newest 128 a poll reads, since BetterDB started            | `72`    |
+
+**Labels**: `log` is `slowlog`, `commandlog-slow`, `commandlog-large-request` or `commandlog-large-reply`.
+
+The value only grows while BetterDB runs and starts again at `0` when BetterDB restarts or the connection is removed and added back, so read it with `increase()`. It is kept in memory and exported as a gauge, like the INFO-derived `_total` families, so its series are removed with the connection and while the connection is stale. A series appears at `0` after the first completed poll of that log.
+
+Not counted, because the previous id is not one this process read from the same server process:
+
+- every poll after BetterDB starts, up to and including the first one that returns an entry (whatever was logged while it was down)
+- a server restart, seen as a changed `run_id`, or as ids starting over when `INFO` is refused
+- a log that was empty with nothing stored for it at the poll before
+
+Each log is counted on its own. A non-zero increase means the stored history of the log named by the `log` label is incomplete for that window, and so are the pattern metrics and analysis built from that log; the other logs are not affected. Raising that log's max-len (`slowlog-max-len`, or the matching `commandlog-*-max-len`) helps only up to the 128 entries one poll reads. Beyond that, raise its logging threshold (`slowlog-log-slower-than`, or the matching `commandlog-*` threshold) so fewer commands are logged.
 
 ### Vector Index Metrics
 
@@ -896,6 +922,9 @@ topk(5, betterdb_slowlog_pattern_avg_duration_us)
 
 # Slowlog growth rate
 rate(betterdb_slowlog_length[5m])
+
+# Entries BetterDB never read, per log, in the last hour
+sum by (connection, log) (increase(betterdb_log_capture_lost_entries_total[1h])) > 0
 ```
 
 ### Cluster Health

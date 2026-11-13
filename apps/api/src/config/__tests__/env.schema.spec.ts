@@ -296,6 +296,30 @@ describe('envSchema', () => {
       }
     });
 
+    it('ignores BetterDB slowlog clients by default and accepts the ignore lists', () => {
+      const defaults = envSchema.safeParse({});
+      expect(defaults.success).toBe(true);
+      if (defaults.success) {
+        expect(defaults.data.ANOMALY_SLOWLOG_IGNORE_OWN_CLIENTS).toBe(true);
+        expect(defaults.data.ANOMALY_SLOWLOG_IGNORE_CLIENT_PREFIXES).toBe('');
+        expect(defaults.data.ANOMALY_SLOWLOG_IGNORE_COMMANDS).toBe('');
+      }
+
+      const disabled = envSchema.safeParse({
+        ANOMALY_SLOWLOG_IGNORE_OWN_CLIENTS: 'false',
+        ANOMALY_SLOWLOG_IGNORE_CLIENT_PREFIXES: 'valkey-operator',
+        ANOMALY_SLOWLOG_IGNORE_COMMANDS: 'cluster|slot-stats,latency|histogram',
+      });
+      expect(disabled.success).toBe(true);
+      if (disabled.success) {
+        expect(disabled.data.ANOMALY_SLOWLOG_IGNORE_OWN_CLIENTS).toBe(false);
+        expect(disabled.data.ANOMALY_SLOWLOG_IGNORE_CLIENT_PREFIXES).toBe('valkey-operator');
+        expect(disabled.data.ANOMALY_SLOWLOG_IGNORE_COMMANDS).toBe(
+          'cluster|slot-stats,latency|histogram',
+        );
+      }
+    });
+
     it('reads BETTERDB_TELEMETRY through the shared negative set, trimming like CLOUD_MODE', () => {
       // Parity guard for the isNegativeEnvValue helper CLOUD_MODE also uses: a
       // padded ' off ' opts out here exactly as ' off ' reads self-hosted for
@@ -378,6 +402,34 @@ describe('envSchema', () => {
     it.each(['false', '0', ' FALSE ', '0\n'])('parses OTEL_INGEST_ENABLED=%j as disabled', (value) => {
       const result = envSchema.safeParse({ OTEL_INGEST_ENABLED: value });
       expect(result.success && result.data.OTEL_INGEST_ENABLED).toBe(false);
+    });
+  });
+
+  describe('webhook private-network allowlist', () => {
+    it('accepts valid lists and treats blank values as unset', () => {
+      expect(
+        envSchema.safeParse({
+          WEBHOOK_ALLOWED_PRIVATE_CIDRS: '10.244.0.0/16, 10.96.0.0/12,fd12:3456::/32',
+          WEBHOOK_ALLOWED_PRIVATE_HOSTS: '*.svc.cluster.local, relay.internal',
+        }).success,
+      ).toBe(true);
+      expect(envSchema.safeParse({ WEBHOOK_ALLOWED_PRIVATE_CIDRS: '', WEBHOOK_ALLOWED_PRIVATE_HOSTS: ' ' }).success).toBe(true);
+    });
+
+    it.each(['0.0.0.0/0', '169.254.0.0/16', '10.0.0.0', '10.0.0.0/8,nope'])('rejects WEBHOOK_ALLOWED_PRIVATE_CIDRS=%s', (value) => {
+      const result = envSchema.safeParse({ WEBHOOK_ALLOWED_PRIVATE_CIDRS: value });
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues[0].path).toContain('WEBHOOK_ALLOWED_PRIVATE_CIDRS');
+      }
+    });
+
+    it.each(['*', '10.0.0.1', 'relay.internal,*'])('rejects WEBHOOK_ALLOWED_PRIVATE_HOSTS=%s', (value) => {
+      const result = envSchema.safeParse({ WEBHOOK_ALLOWED_PRIVATE_HOSTS: value });
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues[0].path).toContain('WEBHOOK_ALLOWED_PRIVATE_HOSTS');
+      }
     });
   });
 

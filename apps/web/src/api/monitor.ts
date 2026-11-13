@@ -1,5 +1,6 @@
 import type {
   CaptureTriggerStatus,
+  ClusterNodeState,
   ScheduledCaptureStatus,
   StoredCaptureSession,
   StoredCaptureTrigger,
@@ -102,6 +103,7 @@ export interface MonitorNodeDescriptor {
   id: string;
   address: string;
   role: 'master' | 'replica';
+  state: ClusterNodeState;
   healthy: boolean;
 }
 

@@ -95,6 +95,7 @@ describe('planSemconvInstruments', () => {
     ['betterdb_commandlog_large_reply', 'betterdb.commandlog.large_reply', 'gauge', '{entry}'],
     ['betterdb_commandlog_large_request_by_pattern', 'betterdb.commandlog.large_request_by_pattern', 'gauge', '{entry}'],
     ['betterdb_commandlog_large_reply_by_pattern', 'betterdb.commandlog.large_reply_by_pattern', 'gauge', '{entry}'],
+    ['betterdb_log_capture_lost_entries_total', 'betterdb.log_capture.lost_entries', 'counter', '{entry}'],
     ['betterdb_acl_denied', 'betterdb.acl.denied', 'gauge', '{event}'],
     ['betterdb_acl_denied_by_reason', 'betterdb.acl.denied_by_reason', 'gauge', '{event}'],
     ['betterdb_acl_denied_by_user', 'betterdb.acl.denied_by_user', 'gauge', '{event}'],

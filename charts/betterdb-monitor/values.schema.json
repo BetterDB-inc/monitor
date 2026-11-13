@@ -67,6 +67,28 @@
       }
     },
     "telemetry": { "type": "boolean" },
+    "webhooks": {
+      "type": "object",
+      "description": "Private receivers webhooks may deliver to. Empty lists = public receivers only.",
+      "properties": {
+        "allowedPrivateCidrs": {
+          "type": "array",
+          "description": "IPv4/IPv6 CIDRs, e.g. 10.244.0.0/16. Rendered to WEBHOOK_ALLOWED_PRIVATE_CIDRS.",
+          "items": {
+            "type": "string",
+            "pattern": "^(([0-9]{1,3}\\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])|[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*/([0-9]|[1-9][0-9]|1[01][0-9]|12[0-8]))$"
+          }
+        },
+        "allowedPrivateHosts": {
+          "type": "array",
+          "description": "Exact hostnames or *.suffix patterns, e.g. *.svc.cluster.local. Rendered to WEBHOOK_ALLOWED_PRIVATE_HOSTS.",
+          "items": {
+            "type": "string",
+            "pattern": "^(\\*\\.)?[A-Za-z0-9_]([A-Za-z0-9_-]*[A-Za-z0-9_])?(\\.[A-Za-z0-9_]([A-Za-z0-9_-]*[A-Za-z0-9_])?)*\\.?$"
+          }
+        }
+      }
+    },
     "persistence": {
       "type": "object",
       "properties": {

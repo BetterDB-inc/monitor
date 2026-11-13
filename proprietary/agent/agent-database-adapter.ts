@@ -7,6 +7,7 @@ import {
 import { InfoParser } from '../../apps/api/src/database/parsers/info.parser';
 import { MetricsParser } from '../../apps/api/src/database/parsers/metrics.parser';
 import { CLUSTER_TOTAL_SLOTS } from '../../apps/api/src/common/constants/cluster.constants';
+import { isBetterDbClientName } from '../../apps/api/src/common/utils/own-clients';
 import type {
   InfoResponse,
   SlowLogEntry,
@@ -192,7 +193,7 @@ export class AgentDatabaseAdapter implements DatabasePort {
     let entries = MetricsParser.parseSlowLog(raw as unknown[]);
 
     if (excludeClientName) {
-      entries = entries.filter((e) => e.clientName !== excludeClientName);
+      entries = entries.filter((e) => !isBetterDbClientName(e.clientName));
     }
     if (startTime) {
       entries = entries.filter((e) => e.timestamp >= startTime);

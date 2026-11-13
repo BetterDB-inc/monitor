@@ -51,7 +51,7 @@ const SLOT_RANGE_BATCH_SIZE = 16;
 export interface ClusterSlotStatsResult {
   stats: SlotStats;
   /**
-   * Slot-owning primaries that were unhealthy or did not answer for all their
+   * Slot-owning primaries that were failed or did not answer for all their
    * ranges; the slots in `failedSlotRanges` are missing from `stats`.
    */
   failedNodes: string[];
@@ -624,7 +624,7 @@ export class ClusterMetricsService {
       `Cluster discovery did not answer within ${timeoutMs}ms`,
     );
     const owners = discovered.filter((node) => node.role === 'master' && node.slots.length > 0);
-    const primaries = owners.filter((node) => node.healthy);
+    const primaries = owners.filter((node) => node.state !== 'failed');
     const remainingMs = Math.max(0, budgetEnd - Date.now());
     const nodeTimeoutMs = slotStatsNodeBudget(remainingMs);
     // A node's timeout says something about it only when this call had at
@@ -701,9 +701,9 @@ export class ClusterMetricsService {
     const perNode: SlotStats[] = [];
     const nodeStats: NodeSlotStats[] = [];
     let ownershipDrifted = false;
-    const unhealthy = owners.filter((node) => !node.healthy);
-    const failedNodes = unhealthy.map((node) => node.address);
-    const failedSlotRanges = unhealthy.flatMap((node) => node.slots);
+    const failedOwners = owners.filter((node) => node.state === 'failed');
+    const failedNodes = failedOwners.map((node) => node.address);
+    const failedSlotRanges = failedOwners.flatMap((node) => node.slots);
     for (const [i, result] of results.entries()) {
       const node = primaries[i];
       // Each scrape and dashboard poll lands here, so log a failing node once
@@ -963,9 +963,9 @@ export class ClusterMetricsService {
 
     // A new primary has no slots until its first import lands, so include every primary.
     const masters = nodes.filter((node) => node.role === 'master');
-    const primaries = masters.filter((node) => node.healthy);
+    const primaries = masters.filter((node) => node.state !== 'failed');
     if (primaries.length === 0) complete = false;
-    if (masters.some((node) => !node.healthy && node.slots.length > 0)) complete = false;
+    if (masters.some((node) => node.state === 'failed' && node.slots.length > 0)) complete = false;
     await Promise.all(
       primaries.map((primary) =>
         this.onNode(primary, connectionId, NODE_COMMAND_TIMEOUT_MS, (client) => readNode(primary, client)).catch((error) => {
