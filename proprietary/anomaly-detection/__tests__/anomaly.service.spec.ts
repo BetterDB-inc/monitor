@@ -3911,6 +3911,30 @@ describe('AnomalyService', () => {
             expect(plan()).toMatchObject({ support: 'provider_managed', commands: [] });
           });
 
+          it.each([
+            ['the hot shard', 'a0000000'],
+            ['a target', 'b0000000'],
+          ])(
+            'gives no command when %s reports a Redis Software build on its own host name',
+            async (_, reporting) => {
+              spreadLoad();
+              const reported = (shardId: string) =>
+                server(
+                  shardId === reporting
+                    ? 'redis_version:8.4.0\r\nredis_build_id:RedisLabs-5f0e1b2c3d4a'
+                    : 'redis_version:8.4.0\r\nredis_build_id:5f0e1b2c3d4a',
+                );
+              dialMemory({
+                a0000000: reported('a0000000') + info(4 * GB, 8 * GB, 200),
+                b0000000: reported('b0000000') + info(GB, 8 * GB, 50),
+              });
+
+              await step(HOT, 6);
+
+              expect(plan()).toMatchObject({ support: 'provider_managed', commands: [] });
+            },
+          );
+
           it.each(['Amazon Linux 2023', 'Amazon ElastiCache'])(
             'keeps the command when the host is not a managed one and the shards report %s',
             async (os) => {

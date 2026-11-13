@@ -1,4 +1,8 @@
-import { detectProvider, isManagedProviderHost } from '../provider-detector';
+import {
+  detectProvider,
+  isManagedProviderBuild,
+  isManagedProviderHost,
+} from '../provider-detector';
 
 describe('detectProvider', () => {
   describe('host-based detection', () => {
@@ -109,6 +113,22 @@ describe('detectProvider', () => {
       expect(detectProvider({}).provider).toBe('aws-elasticache');
     });
   });
+});
+
+describe('isManagedProviderBuild', () => {
+  it.each(['redislabs-5f0e1b2c', 'RedisLabs-5f0e1b2c'])(
+    'knows the build %s as a managed one',
+    (buildId) => {
+      expect(isManagedProviderBuild({ redis_build_id: buildId })).toBe(true);
+    },
+  );
+
+  it.each([[{ redis_build_id: '5f0e1b2c3d4a' }], [{ os: 'Amazon Linux 2023' }], [{}], [undefined]])(
+    'does not call %j a managed build',
+    (server) => {
+      expect(isManagedProviderBuild(server)).toBe(false);
+    },
+  );
 });
 
 describe('isManagedProviderHost', () => {

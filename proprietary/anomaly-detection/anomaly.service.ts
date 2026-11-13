@@ -123,7 +123,7 @@ import {
   shardServerFromInfo,
   withCommands,
 } from './rebalance-planner';
-import { isManagedProviderHost } from '@app/monitor/provider-detector';
+import { isManagedProviderBuild, isManagedProviderHost } from '@app/monitor/provider-detector';
 import {
   BACKLOG_COVERAGE_CRITICAL_SEC,
   BACKLOG_COVERAGE_WARNING_SEC,
@@ -6604,7 +6604,9 @@ export class AnomalyService
       if (reading) memory.set(shardIds[index], reading);
       if (server) servers.set(shardIds[index], server);
     }
-    const providerManaged = isManagedProviderHost(ctx.host);
+    const providerManaged =
+      isManagedProviderHost(ctx.host) ||
+      readings.some((info) => isManagedProviderBuild(info?.server));
     return verdicts.map((verdict) =>
       verdict.kind === 'plan'
         ? withCommands(
