@@ -103,6 +103,11 @@ export function detectProvider(
   return { provider: 'self-hosted', restrictions: [] };
 }
 
+export function isManagedProviderHost(host: string | undefined): boolean {
+  const provider = matchByHost(host);
+  return provider !== null && provider !== 'unknown';
+}
+
 function matchByHost(host: string | undefined): Provider | null {
   if (!host) return null;
   const lower = host.toLowerCase();

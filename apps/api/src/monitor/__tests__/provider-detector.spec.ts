@@ -1,4 +1,4 @@
-import { detectProvider } from '../provider-detector';
+import { detectProvider, isManagedProviderHost } from '../provider-detector';
 
 describe('detectProvider', () => {
   describe('host-based detection', () => {
@@ -108,5 +108,48 @@ describe('detectProvider', () => {
       process.env.MONITOR_PROVIDER_OVERRIDE = 'ELASTICACHE';
       expect(detectProvider({}).provider).toBe('aws-elasticache');
     });
+  });
+});
+
+describe('isManagedProviderHost', () => {
+  let original: string | undefined;
+
+  beforeEach(() => {
+    original = process.env.MONITOR_PROVIDER_OVERRIDE;
+    delete process.env.MONITOR_PROVIDER_OVERRIDE;
+  });
+
+  afterEach(() => {
+    if (original === undefined) delete process.env.MONITOR_PROVIDER_OVERRIDE;
+    else process.env.MONITOR_PROVIDER_OVERRIDE = original;
+  });
+
+  it.each([
+    'my-cluster.abc123.clustercfg.use1.cache.amazonaws.com',
+    'my-cluster.serverless.cache.amazonaws.com',
+    'redis-12345.c123.us-east-1.gcp.cloud.rlrcp.com',
+    'my-cache.redis-cloud.com',
+    'fly-rabbit-12345.upstash.io',
+    'my-instance.internal.memorystore.googleapis.com',
+    'MY.CACHE.AMAZONAWS.COM',
+  ])('knows %s as a managed service', (host) => {
+    expect(isManagedProviderHost(host)).toBe(true);
+  });
+
+  it.each(['redis.internal.example.com', '10.0.0.1', '', undefined])(
+    'does not call %s a managed service',
+    (host) => {
+      expect(isManagedProviderHost(host)).toBe(false);
+    },
+  );
+
+  it('does not call a host managed while its provider is unknown', () => {
+    expect(isManagedProviderHost('my-cache.redis.cache.windows.net')).toBe(false);
+  });
+
+  it('ignores the MONITOR provider override', () => {
+    process.env.MONITOR_PROVIDER_OVERRIDE = 'elasticache';
+
+    expect(isManagedProviderHost('redis.internal.example.com')).toBe(false);
   });
 });

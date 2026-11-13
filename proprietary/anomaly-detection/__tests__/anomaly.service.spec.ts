@@ -3749,27 +3749,39 @@ describe('AnomalyService', () => {
             expect(plan()).toMatchObject({ support: 'provider_managed', commands: [] });
           });
 
-          it('knows a managed service behind a private host name by what the hot shard reports', async () => {
-            spreadLoad();
-            const managed = server('redis_version:7.2.4\r\nvalkey_version:9.0.1\r\nos:Amazon ElastiCache');
-            dialMemory({
-              a0000000: managed + info(4 * GB, 8 * GB, 200),
-              b0000000: managed + info(GB, 8 * GB, 50),
-            });
+          it.each(['Amazon Linux 2023', 'Amazon ElastiCache'])(
+            'keeps the command when the host is not a managed one and the shards report %s',
+            async (os) => {
+              spreadLoad();
+              const reported = server(`redis_version:7.2.4\r\nvalkey_version:9.0.1\r\nos:${os}`);
+              dialMemory({
+                a0000000: reported + info(4 * GB, 8 * GB, 200),
+                b0000000: reported + info(GB, 8 * GB, 50),
+              });
 
-            await step(HOT, 6);
+              await step(HOT, 6);
 
-            expect(plan()).toMatchObject({ support: 'provider_managed', commands: [] });
-          });
+              expect(plan()).toMatchObject({ support: 'valkey_atomic', commands: [{}] });
+            },
+          );
 
-          it('knows a managed service by what a target reports when the hot shard cannot be read', async () => {
-            spreadLoad();
-            const managed = server('redis_version:7.2.4\r\nvalkey_version:9.0.1\r\nos:Amazon ElastiCache');
-            dialMemory({ b0000000: managed + info(GB, 8 * GB, 50) });
+          it('keeps the command when the MONITOR provider override names a managed service', async () => {
+            const original = process.env.MONITOR_PROVIDER_OVERRIDE;
+            process.env.MONITOR_PROVIDER_OVERRIDE = 'elasticache';
+            try {
+              spreadLoad();
+              dialMemory({
+                a0000000: VALKEY_9 + info(4 * GB, 8 * GB, 200),
+                b0000000: VALKEY_9 + info(GB, 8 * GB, 50),
+              });
 
-            await step(HOT, 6);
+              await step(HOT, 6);
 
-            expect(plan()).toMatchObject({ support: 'provider_managed', commands: [] });
+              expect(plan()).toMatchObject({ support: 'valkey_atomic', commands: [{}] });
+            } finally {
+              if (original === undefined) delete process.env.MONITOR_PROVIDER_OVERRIDE;
+              else process.env.MONITOR_PROVIDER_OVERRIDE = original;
+            }
           });
         });
 
