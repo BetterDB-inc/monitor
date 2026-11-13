@@ -3012,6 +3012,40 @@ describe('AnomalyService', () => {
         expect(checkSlotMigrations).toHaveBeenCalledTimes(2);
         expect(hotEvents()[0].resolved).toBe(false);
         expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'migration_running' });
+
+        checkSlotMigrations.mockResolvedValue({ migrations: [], complete: true });
+        await step(HOT);
+
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+      });
+
+      it('plans from the slot load it took before the key read', async () => {
+        spreadLoad();
+        const client = {
+          callBuffer: jest.fn(async () => {
+            if (client.callBuffer.mock.calls.length === 1) {
+              counters.set(119, (counters.get(119) ?? 0) + 90_000_000);
+              shardLoad.record('conn-a', reading(), clock + 5_000);
+            }
+            return [];
+          }),
+        };
+        (service as any).clusterDiscovery = {
+          getNodeConnection: jest.fn().mockResolvedValue(client),
+          evictNodeClient: jest.fn(),
+          retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+          releaseConnection: jest.fn().mockResolvedValue(undefined),
+        };
+
+        await step(HOT, 6);
+
+        expect(client.callBuffer).toHaveBeenCalled();
+        expect(shardLoad.getTopSlots('conn-a', IDS[0], 1)[0].slot).toBe(119);
+        expect(rebalance()).toMatchObject({
+          kind: 'plan',
+          moves: [{ ranges: [[100, 107]] }],
+          pinnedSlots: [],
+        });
       });
 
       it('plans from the slot load of the sample it judged', async () => {
@@ -3359,6 +3393,24 @@ describe('AnomalyService', () => {
 
           await step(HOT, 20);
 
+          expect(memoryReads(clients.b0000000)).toBe(1);
+        });
+
+        it('reads no memory for a kept plan when the migration check finds nothing', async () => {
+          const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: true });
+          (service as any).clusterMetrics = { checkSlotMigrations };
+          spreadLoad();
+          const { clients } = dialMemory({
+            a0000000: info(4 * GB, 8 * GB, 200),
+            b0000000: info(GB, 8 * GB, 50),
+          });
+          await step(HOT, 6);
+          const asked = checkSlotMigrations.mock.calls.length;
+
+          await step(HOT, 5);
+
+          expect(checkSlotMigrations).toHaveBeenCalledTimes(asked + 5);
+          expect(memoryReads(clients.a0000000)).toBe(1);
           expect(memoryReads(clients.b0000000)).toBe(1);
         });
 
