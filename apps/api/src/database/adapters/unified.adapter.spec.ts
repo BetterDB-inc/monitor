@@ -1170,3 +1170,46 @@ describe('UnifiedDatabaseAdapter — deferred TLS setup and single WHOAMI per co
     expect(probe).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('UnifiedDatabaseAdapter.getSlowLog excludeMonitor', () => {
+  function row(id: number, clientName: string): unknown[] {
+    return [id, 1_700_000_000, 15_000, ['GET', 'k'], '10.0.0.1:1', clientName];
+  }
+
+  function makeSlowlogAdapter(rows: unknown[][]) {
+    const adapter = Object.create(UnifiedDatabaseAdapter.prototype) as UnifiedDatabaseAdapter;
+    const slowlog = jest.fn(async () => rows);
+    (adapter as unknown as { _client: { slowlog: typeof slowlog } })._client = { slowlog };
+    return adapter;
+  }
+
+  const rows = [
+    row(1, 'BetterDB-Monitor'),
+    row(2, 'BetterDB-Monitor-Node-aafa23fc'),
+    row(3, 'BetterDB-Agent'),
+    row(4, 'app'),
+    row(5, 'BetterDB-Migration-Source'),
+  ];
+
+  it('hides every BetterDB client, including suffixed names, when excludeClientName is set', async () => {
+    const adapter = makeSlowlogAdapter(rows);
+
+    const entries = await adapter.getSlowLog(10, 'BetterDB-Monitor');
+
+    expect(entries.map((entry) => entry.clientName)).toEqual(['app', 'BetterDB-Migration-Source']);
+  });
+
+  it('returns monitor entries when excludeClientName is omitted', async () => {
+    const adapter = makeSlowlogAdapter(rows);
+
+    const entries = await adapter.getSlowLog(10);
+
+    expect(entries.map((entry) => entry.clientName)).toEqual([
+      'BetterDB-Monitor',
+      'BetterDB-Monitor-Node-aafa23fc',
+      'BetterDB-Agent',
+      'app',
+      'BetterDB-Migration-Source',
+    ]);
+  });
+});

@@ -59,7 +59,7 @@ import { ExternalMetricsAdapter } from '@app/external-metrics/external-metrics.a
 
 describe('AnomalyService', () => {
   let service: AnomalyService;
-  let slowLogAnalytics: { getLastSeenId: jest.Mock };
+  let slowLogAnalytics: { getLastSeenId: jest.Mock; getExternalEntryCount: jest.Mock };
   let commandLogAnalytics: { getCachedEntries: jest.Mock };
   let storage: Record<string, jest.Mock>;
   let prometheusService: Record<string, jest.Mock>;
@@ -86,6 +86,7 @@ describe('AnomalyService', () => {
   beforeEach(async () => {
     slowLogAnalytics = {
       getLastSeenId: jest.fn().mockReturnValue(null),
+      getExternalEntryCount: jest.fn().mockReturnValue(null),
     };
 
     commandLogAnalytics = {
@@ -496,22 +497,25 @@ describe('AnomalyService', () => {
   // ─── Slowlog Delta from SlowLogAnalyticsService ─────────────────────────
 
   describe('slowlog delta detection', () => {
-    it('does not create buffer when getLastSeenId returns null', async () => {
-      slowLogAnalytics.getLastSeenId.mockReturnValue(null);
+    const slowlogEvents = () =>
+      service.getRecentEvents().filter((event) => event.metricType === MetricType.SLOWLOG_LAST_ID);
+
+    it('does not create buffer when getExternalEntryCount returns null', async () => {
+      slowLogAnalytics.getExternalEntryCount.mockReturnValue(null);
       await poll();
       const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
       expect(buffers.has(MetricType.SLOWLOG_LAST_ID)).toBe(false);
     });
 
     it('lazily creates buffer on first non-null data', async () => {
-      slowLogAnalytics.getLastSeenId.mockReturnValue(100);
+      slowLogAnalytics.getExternalEntryCount.mockReturnValue(100);
       await poll();
       const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
       expect(buffers.has(MetricType.SLOWLOG_LAST_ID)).toBe(true);
     });
 
     it('records delta=0 on first sample', async () => {
-      slowLogAnalytics.getLastSeenId.mockReturnValue(100);
+      slowLogAnalytics.getExternalEntryCount.mockReturnValue(100);
       await poll();
       const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
       const buf = buffers.get(MetricType.SLOWLOG_LAST_ID);
@@ -519,9 +523,9 @@ describe('AnomalyService', () => {
     });
 
     it('computes correct delta between consecutive polls', async () => {
-      slowLogAnalytics.getLastSeenId.mockReturnValue(100);
+      slowLogAnalytics.getExternalEntryCount.mockReturnValue(100);
       await poll();
-      slowLogAnalytics.getLastSeenId.mockReturnValue(105);
+      slowLogAnalytics.getExternalEntryCount.mockReturnValue(105);
       await poll();
       const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
       const buf = buffers.get(MetricType.SLOWLOG_LAST_ID);
@@ -529,9 +533,9 @@ describe('AnomalyService', () => {
     });
 
     it('clamps negative delta to 0 (e.g. server restart / SLOWLOG RESET)', async () => {
-      slowLogAnalytics.getLastSeenId.mockReturnValue(100);
+      slowLogAnalytics.getExternalEntryCount.mockReturnValue(100);
       await poll();
-      slowLogAnalytics.getLastSeenId.mockReturnValue(50); // lower than before
+      slowLogAnalytics.getExternalEntryCount.mockReturnValue(50); // lower than before
       await poll();
       const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
       const buf = buffers.get(MetricType.SLOWLOG_LAST_ID);
@@ -539,7 +543,7 @@ describe('AnomalyService', () => {
     });
 
     it('uses a low-threshold spike detector config for SLOWLOG_LAST_ID', async () => {
-      slowLogAnalytics.getLastSeenId.mockReturnValue(100);
+      slowLogAnalytics.getExternalEntryCount.mockReturnValue(100);
       await poll();
       const config = (service as any).detectors
         .get('conn-1')
@@ -549,9 +553,29 @@ describe('AnomalyService', () => {
       expect(config.cooldownMs).toBeLessThanOrEqual(30000);
     });
 
-    it('calls getLastSeenId with the correct connectionId', async () => {
+    it('calls getExternalEntryCount with the correct connectionId', async () => {
       await poll();
-      expect(slowLogAnalytics.getLastSeenId).toHaveBeenCalledWith('conn-1');
+      expect(slowLogAnalytics.getExternalEntryCount).toHaveBeenCalledWith('conn-1');
+    });
+
+    it('does not raise slowlog_last_id when only BetterDB entries move the slowlog id', async () => {
+      slowLogAnalytics.getExternalEntryCount.mockReturnValue(0);
+      slowLogAnalytics.getLastSeenId.mockReturnValue(0);
+      for (let i = 0; i < 30; i++) await poll();
+      slowLogAnalytics.getLastSeenId.mockReturnValue(3);
+      await poll();
+      expect(slowlogEvents()).toHaveLength(0);
+    });
+
+    it('raises one critical slowlog_last_id when the external count rises by 2', async () => {
+      slowLogAnalytics.getExternalEntryCount.mockReturnValue(0);
+      for (let i = 0; i < 30; i++) await poll();
+      slowLogAnalytics.getExternalEntryCount.mockReturnValue(2);
+      await poll();
+      const events = slowlogEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.CRITICAL);
+      expect(events[0].value).toBe(2);
     });
   });
 
@@ -964,7 +988,7 @@ describe('AnomalyService', () => {
     it('excludes SLOWLOG_LAST_ID from initial buffer loop', async () => {
       await poll();
       // Without slowlog data, SLOWLOG_LAST_ID should not be present
-      slowLogAnalytics.getLastSeenId.mockReturnValue(null);
+      slowLogAnalytics.getExternalEntryCount.mockReturnValue(null);
       const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
       expect(buffers.has(MetricType.SLOWLOG_LAST_ID)).toBe(false);
     });
@@ -985,7 +1009,7 @@ describe('AnomalyService', () => {
 
   describe('connection cleanup (onConnectionRemoved)', () => {
     it('clears lastSlowlogId, lastReplicationRole, and lastClusterState maps', async () => {
-      slowLogAnalytics.getLastSeenId.mockReturnValue(100);
+      slowLogAnalytics.getExternalEntryCount.mockReturnValue(100);
       await poll(); // populates state
 
       expect((service as any).lastSlowlogId.has('conn-1')).toBe(true);

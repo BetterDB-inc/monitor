@@ -9,6 +9,7 @@ import { InfoParser } from '../parsers/info.parser';
 import { MetricsParser } from '../parsers/metrics.parser';
 import { parseKeyspaceDatabases, type KeyspaceDatabase } from '../parsers/keyspace-databases';
 import { CLUSTER_TOTAL_SLOTS } from '../../common/constants/cluster.constants';
+import { isBetterDbClientName } from '../../common/utils/own-clients';
 import {
   InfoResponse,
   SlowLogEntry,
@@ -832,9 +833,10 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     const rawLog = await this.client.slowlog('GET', fetchCount);
     let entries = MetricsParser.parseSlowLog(rawLog as unknown[]);
 
-    // Filter out entries from specified client (e.g., monitor's own commands)
+    // excludeMonitor passes the seed name as a flag. Hide every BetterDB client,
+    // including BetterDB-Monitor-Node-*, not only that exact name.
     if (excludeClientName) {
-      entries = entries.filter((entry) => entry.clientName !== excludeClientName);
+      entries = entries.filter((entry) => !isBetterDbClientName(entry.clientName));
     }
 
     if (startTime) {

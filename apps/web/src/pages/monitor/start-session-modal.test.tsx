@@ -15,6 +15,7 @@ vi.mock('../../api/monitor', async (importOriginal) => {
 vi.mock('./preflight-panel', () => ({ PreflightPanel: () => <div>pre-flight report</div> }));
 
 import { StartSessionModal } from './start-session-modal';
+import { clusterNodeLabel } from './cluster-node-label';
 
 function renderModal(props: Partial<Parameters<typeof StartSessionModal>[0]> = {}) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -45,9 +46,9 @@ describe('StartSessionModal', () => {
     listConnectionNodes.mockReset().mockResolvedValue({
       isCluster: true,
       nodes: [
-        { id: 'r1', address: '10.0.0.9:6379', role: 'replica', healthy: true },
-        { id: 'm1', address: '10.0.0.1:6379', role: 'master', healthy: true },
-        { id: 'm2', address: '10.0.0.2:6379', role: 'master', healthy: true },
+        { id: 'r1', address: '10.0.0.9:6379', role: 'replica', state: 'healthy', healthy: true },
+        { id: 'm1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', healthy: true },
+        { id: 'm2', address: '10.0.0.2:6379', role: 'master', state: 'healthy', healthy: true },
       ],
     });
     preflight.mockReset().mockResolvedValue({});
@@ -66,6 +67,24 @@ describe('StartSessionModal', () => {
       durationMs: 30_000,
       targetNodeId: 'm1',
     });
+  });
+
+  it('labels the selected node its peers suspect', async () => {
+    listConnectionNodes.mockResolvedValue({
+      isCluster: true,
+      nodes: [{ id: 'm1', address: '10.0.0.1:6379', role: 'master', state: 'suspect', healthy: false }],
+    });
+    renderModal();
+
+    expect(await screen.findByText('10.0.0.1:6379 · master (suspect)')).toBeInTheDocument();
+  });
+
+  it.each([
+    ['healthy', '10.0.0.1:6379 · master'],
+    ['suspect', '10.0.0.1:6379 · master (suspect)'],
+    ['failed', '10.0.0.1:6379 · master (failed)'],
+  ] as const)('labels a %s node as "%s"', (state, label) => {
+    expect(clusterNodeLabel({ id: 'm1', address: '10.0.0.1:6379', role: 'master', state })).toBe(label);
   });
 
   it('starts at 10 seconds on the hot primary it is given', async () => {

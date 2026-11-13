@@ -36,6 +36,8 @@ interface CanonicalRange {
   vulnerableBelow: string | null;
   vulnerableFrom: string | null;
   patchedAt: string | null;
+  // Present only when true.
+  fallback?: true;
 }
 
 type OptionalAdvisoryNumber = 'cvssScore' | 'epssScore' | 'epssPercentile';
@@ -206,6 +208,7 @@ function mergeAffected(ordered: SourceView[], winner: SourceView): MergedRanges 
   const winnerPinsBranches = [...covered].some((branch) => {
     return branch !== WILDCARD_BRANCH;
   });
+  const winnerHasWildcard = covered.has(WILDCARD_BRANCH);
   const contributors: CveSourceId[] = [];
 
   for (const view of ordered) {
@@ -213,13 +216,25 @@ function mergeAffected(ordered: SourceView[], winner: SourceView): MergedRanges 
       continue;
     }
 
-    const additions = view.advisory.affected.filter((range) => {
-      if (covered.has(range.branch)) {
-        return false;
-      }
+    const additions = view.advisory.affected
+      .filter((range) => {
+        if (covered.has(range.branch)) {
+          return false;
+        }
 
-      return range.branch !== WILDCARD_BRANCH || winnerPinsBranches === false;
-    });
+        return range.branch !== WILDCARD_BRANCH || winnerPinsBranches === false;
+      })
+      .concat(
+        winnerPinsBranches && !winnerHasWildcard && view.owner === 'nvd'
+          ? view.advisory.affected
+              .filter((range) => {
+                return range.branch === WILDCARD_BRANCH;
+              })
+              .map((range) => {
+                return { ...range, fallback: true as const };
+              })
+          : [],
+      );
 
     if (additions.length === 0) {
       continue;
@@ -384,6 +399,7 @@ function canonicalRanges(ranges: BranchRange[]): CanonicalRange[] {
         vulnerableBelow: range.vulnerableBelow ?? null,
         vulnerableFrom: range.vulnerableFrom ?? null,
         patchedAt: range.patchedAt ?? null,
+        ...(range.fallback === true ? { fallback: true as const } : {}),
       };
     })
     .sort((a, b) => {
@@ -400,7 +416,12 @@ function canonicalRanges(ranges: BranchRange[]): CanonicalRange[] {
         return byBound;
       }
 
-      return compareStrings(a.patchedAt ?? '', b.patchedAt ?? '');
+      const byPatch = compareStrings(a.patchedAt ?? '', b.patchedAt ?? '');
+      if (byPatch !== 0) {
+        return byPatch;
+      }
+
+      return Number(a.fallback === true) - Number(b.fallback === true);
     });
 }
 

@@ -18,6 +18,7 @@ import { MetricsService } from '../metrics/metrics.service';
 import { CommandLogAnalyticsService } from '../commandlog-analytics/commandlog-analytics.service';
 import { ClientAnalyticsAnalysisService } from '../client-analytics/client-analytics-analysis.service';
 import { ClusterDiscoveryService } from '../cluster/cluster-discovery.service';
+import { withHealthy } from '../cluster/node-health-response';
 import { ClusterMetricsService } from '../cluster/cluster-metrics.service';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { KEY_ANALYTICS_FETCH_CAP, rankHotKeys } from '@betterdb/shared';
@@ -270,7 +271,7 @@ export class McpController {
   @Get('instance/:id/cluster/nodes')
   async getClusterNodes(@Param('id', ValidateInstanceIdPipe) id: string) {
     try {
-      return await this.clusterDiscoveryService.discoverNodes(id);
+      return (await this.clusterDiscoveryService.discoverNodes(id)).map(withHealthy);
     } catch (error) {
       const msg = error instanceof Error ? error.message : '';
       if (msg.includes('CLUSTERDOWN') || msg.includes('cluster mode')) {

@@ -390,7 +390,19 @@ export class DiscoveredNodeDto {
   @ApiProperty({ description: 'Slot ranges [[start, end], ...]', type: 'array', example: [[0, 5460]] })
   slots: number[][];
 
-  @ApiProperty({ description: 'Node health status', example: true })
+  @ApiProperty({
+    description:
+      'Node state from its CLUSTER NODES flags: failed when its peers agreed it is down (fail), suspect when they only suspect it (fail?) or it is not a full member yet (handshake, noaddr), healthy otherwise',
+    enum: ['healthy', 'suspect', 'failed'],
+    example: 'healthy',
+  })
+  state: 'healthy' | 'suspect' | 'failed';
+
+  @ApiProperty({
+    description: 'True only when state is healthy. Kept for older clients; read state instead',
+    example: true,
+    deprecated: true,
+  })
   healthy: boolean;
 
   @ApiPropertyOptional({

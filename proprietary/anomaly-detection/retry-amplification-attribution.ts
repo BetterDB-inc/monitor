@@ -6,6 +6,7 @@ import type {
   ClientSnapshotGroupRow,
   NewClientConnectionGroup,
 } from '@betterdb/shared';
+import { isBetterDbClientName } from '@app/common/utils/own-clients';
 import {
   CLIENT_REOPEN_TOLERANCE_MS,
   clientAddrIp,
@@ -37,15 +38,6 @@ export const RETRY_AMP_MAX_ATTRIBUTION_SPAN_MS = RETRY_AMP_BASELINE_WINDOWS * RE
  * after this many rows, and the span is shortened to fit (fitAttributionSpan).
  */
 export const RETRY_AMP_MAX_CAPTURE_ROWS = 250_000;
-// Names of the connections BetterDB itself opens: the monitor (and its
-// -keyscan, -Node-..., -Discovery clients), the agent and the CLI.
-// BetterDB-Migration-* stays visible on purpose.
-const OWN_CLIENT_NAMES = ['BetterDB-Monitor', 'BetterDB-Agent', 'BetterDB-CLI'];
-
-function isMonitorClientName(name: string): boolean {
-  return OWN_CLIENT_NAMES.some((own) => name === own || name.startsWith(`${own}-`));
-}
-
 export type ContributorKeyKind = 'name' | 'user' | 'ip';
 
 export interface RetryAmplificationContributor {
@@ -524,7 +516,7 @@ export function rankRetryAmplificationContributors(
   }
   addReconnects(map, input.newConnections, input.capture, input.baselineConnections ?? []);
   for (const [id, acc] of map) {
-    if (acc.keyKind === 'name' && isMonitorClientName(acc.key)) map.delete(id);
+    if (acc.keyKind === 'name' && isBetterDbClientName(acc.key)) map.delete(id);
   }
 
   const contributorOf = new Map(

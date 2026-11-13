@@ -12,6 +12,7 @@ import {
 import { parseActivityRetentionDays } from '../activity/activity-config';
 import { isCloudModeValue } from '../common/utils/cloud-mode';
 import { isNegativeEnvValue } from '../common/utils/env-bool';
+import { parseAllowedCidrs, parseAllowedHosts } from '../common/utils/outbound-url-guard';
 import { DEFAULT_AUTH_BROKER_URL, isTrueFlag, normalizeOptionalUrl } from './env-normalize';
 
 function optionalUrl(value: unknown): unknown {
@@ -47,6 +48,20 @@ const topNEnv = (max: number, def: number) =>
       .default(def)
       .catch(def),
   );
+
+// A comma-separated allowlist validated with the parser the runtime uses, so a
+// typo fails startup instead of becoming an empty or over-broad list.
+const allowlistEnv = (parse: (raw: string) => unknown) =>
+  z
+    .string()
+    .optional()
+    .superRefine((value, ctx) => {
+      try {
+        parse(value ?? '');
+      } catch (error) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: (error as Error).message });
+      }
+    });
 
 /**
  * Environment variable validation schema
@@ -191,6 +206,16 @@ export const envSchema = z
     ANOMALY_POLL_INTERVAL_MS: z.coerce.number().int().min(100).default(1000),
     ANOMALY_CACHE_TTL_MS: z.coerce.number().int().min(1000).default(3600000),
     ANOMALY_PROMETHEUS_INTERVAL_MS: z.coerce.number().int().min(1000).default(30000),
+    // Slowlog anomalies ignore BetterDB's own clients unless this is `false`.
+    ANOMALY_SLOWLOG_IGNORE_OWN_CLIENTS: z
+      .string()
+      .default('true')
+      .transform((v) => v !== 'false'),
+    // Comma-separated client-name prefixes, for example `valkey-operator`.
+    ANOMALY_SLOWLOG_IGNORE_CLIENT_PREFIXES: z.string().default(''),
+    // Comma-separated lower-case `cmd` or `cmd|subcmd`, for example
+    // `cluster|slot-stats,latency|histogram`.
+    ANOMALY_SLOWLOG_IGNORE_COMMANDS: z.string().default(''),
 
     KV_CACHE_FOOTPRINT_INTERVAL_MS: z.string().optional(),
     KV_CACHE_SCAN_MAX_KEYS: z.string().optional(),
@@ -238,6 +263,10 @@ export const envSchema = z
     WEBHOOK_MAX_RESPONSE_BODY_BYTES: z.coerce.number().int().min(0).optional(),
     // Max in-memory alert hysteresis entries (alert type × connection × webhook).
     WEBHOOK_ALERT_STATE_MAX: z.coerce.number().int().min(1).optional(),
+    // Private receivers webhooks may reach (comma-separated). Empty = public
+    // receivers only. Ignored in cloud mode. A malformed entry fails startup.
+    WEBHOOK_ALLOWED_PRIVATE_CIDRS: allowlistEnv(parseAllowedCidrs),
+    WEBHOOK_ALLOWED_PRIVATE_HOSTS: allowlistEnv(parseAllowedHosts),
     // Public base URL of the web UI (e.g. https://monitor.example.com).
     // Used to build "View in BetterDB" links in Slack/Discord payloads.
     // Unset = chat messages render without the link button.
