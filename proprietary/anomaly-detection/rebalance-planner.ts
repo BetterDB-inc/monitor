@@ -160,6 +160,15 @@ export function noRebalancePlan(
   return { kind: 'no_plan', action: 'spread', reason, pinnedSlots };
 }
 
+const TRANSIENT_NO_PLAN_REASONS: readonly RebalanceNoPlanReason[] = [
+  'migration_running',
+  'settling',
+];
+
+export function isTransientNoPlan(verdict: RebalanceVerdict): boolean {
+  return verdict.kind === 'no_plan' && TRANSIENT_NO_PLAN_REASONS.includes(verdict.reason);
+}
+
 function cpuOf(slots: readonly SlotLoadRate[]): number {
   return slots.reduce((total, slot) => total + slot.cpuUsecPerSecond, 0);
 }
@@ -181,26 +190,26 @@ function waterFill(levels: readonly number[], amount: number): number[] {
   return fills;
 }
 
-function smallestThat(holds: (amount: number) => boolean, most: number): number {
+function edgeThat(
+  holds: (amount: number) => boolean,
+  most: number,
+  edge: 'smallest' | 'largest',
+): number {
+  const fromAbove = edge === 'smallest';
   let low = 0;
   let high = most;
   for (let step = 0; step < SOLVE_STEPS; step += 1) {
     const middle = (low + high) / 2;
-    if (holds(middle)) high = middle;
+    if (holds(middle) === fromAbove) high = middle;
     else low = middle;
   }
-  return high;
+  return fromAbove ? high : low;
 }
 
-function largestThat(holds: (amount: number) => boolean, most: number): number {
-  let low = 0;
-  let high = most;
-  for (let step = 0; step < SOLVE_STEPS; step += 1) {
-    const middle = (low + high) / 2;
-    if (holds(middle)) low = middle;
-    else high = middle;
-  }
-  return low;
+function pinnedSlotsOf(kept: readonly SlotLoadRate[], sourceCpu: number): RebalancePinnedSlot[] {
+  return [...kept]
+    .sort((a, b) => b.cpuUsecPerSecond - a.cpuUsecPerSecond || a.slot - b.slot)
+    .map((slot) => ({ slot: slot.slot, shareOfShard: slot.cpuUsecPerSecond / sourceCpu }));
 }
 
 function segmentsOf(slots: readonly SlotLoadRate[]): SlotLoadRate[][] {
@@ -322,9 +331,7 @@ interface Spread {
 
 function spread(ctx: Spread): RebalanceVerdict | SlotLoadRate[] {
   const { input, policy, source, sourceCpu, medianBefore, candidates } = ctx;
-  const pinnedSlots = [...ctx.kept]
-    .sort((a, b) => b.cpuUsecPerSecond - a.cpuUsecPerSecond || a.slot - b.slot)
-    .map((slot) => ({ slot: slot.slot, shareOfShard: slot.cpuUsecPerSecond / sourceCpu }));
+  const pinnedSlots = pinnedSlotsOf(ctx.kept, sourceCpu);
   const kept = new Set([...ctx.kept.map((slot) => slot.slot), ...policy.excludedSlots]);
   const movable = input.slots
     .filter((slot) => !kept.has(slot.slot))
@@ -425,7 +432,7 @@ function spread(ctx: Spread): RebalanceVerdict | SlotLoadRate[] {
     const tried = candidates.slice(0, count);
     const resolves = (moved: number) => outlook(tried, moved).sourceRatio <= policy.resolveRatio;
     if (!resolves(movableCpu)) continue;
-    const needed = smallestThat(resolves, movableCpu);
+    const needed = edgeThat(resolves, movableCpu, 'smallest');
     if (!outlook(tried, needed).targetsFit) continue;
     let aim = needed;
     for (let step = 0; step < AIM_STEPS; step += 1) {
@@ -443,7 +450,7 @@ function spread(ctx: Spread): RebalanceVerdict | SlotLoadRate[] {
   if (!chosen) {
     const roomOf = (pool: readonly RebalanceShard[]) => {
       const fits = (moved: number) => outlook(pool, moved).targetsFit;
-      return fits(movableCpu) ? movableCpu : largestThat(fits, movableCpu);
+      return fits(movableCpu) ? movableCpu : edgeThat(fits, movableCpu, 'largest');
     };
     const enough = policy.headroomShare * sourceCpu - SLACK;
     const pool = candidates.slice(0, most);
@@ -552,7 +559,7 @@ export function planRebalance(
     (slot) => slot.cpuUsecPerSecond >= policy.pinnedSlotShare * sourceCpu,
   );
   if (cpuOf(pinned) >= policy.nodeCpuLimitUsecPerSecond) {
-    return spreadless('key_level', pinned, sourceCpu);
+    return noRebalancePlan('key_level', pinnedSlotsOf(pinned, sourceCpu));
   }
 
   const sameZone = (shard: RebalanceShard) =>
@@ -569,7 +576,9 @@ export function planRebalance(
         sameZone(a) - sameZone(b) ||
         (a.shardId < b.shardId ? -1 : 1),
     );
-  if (candidates.length === 0) return spreadless('no_target', pinned, sourceCpu);
+  if (candidates.length === 0) {
+    return noRebalancePlan('no_target', pinnedSlotsOf(pinned, sourceCpu));
+  }
 
   const kept = [...pinned];
   for (let round = 0; ; round += 1) {
@@ -586,19 +595,6 @@ export function planRebalance(
     if (!Array.isArray(outcome)) return outcome;
     kept.push(...outcome);
   }
-}
-
-function spreadless(
-  reason: RebalanceNoPlanReason,
-  kept: readonly SlotLoadRate[],
-  sourceCpu: number,
-): RebalanceNoPlan {
-  return noRebalancePlan(
-    reason,
-    [...kept]
-      .sort((a, b) => b.cpuUsecPerSecond - a.cpuUsecPerSecond || a.slot - b.slot)
-      .map((slot) => ({ slot: slot.slot, shareOfShard: slot.cpuUsecPerSecond / sourceCpu })),
-  );
 }
 
 export function shardMemoryFromInfo(

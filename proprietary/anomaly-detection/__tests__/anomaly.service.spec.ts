@@ -2884,6 +2884,10 @@ describe('AnomalyService', () => {
     describe('rebalance suggestion', () => {
       const WIDE = Array.from({ length: 20 }, (_, i) => 100 + i);
       const rebalance = () => service.getHotShards('conn-a')[0]?.rebalance;
+      const targets = () => {
+        const verdict = rebalance();
+        return verdict?.kind === 'plan' ? verdict.moves.map((move) => move.targetShardId) : [];
+      };
 
       function spreadLoad() {
         owners[0] = [...WIDE];
@@ -3003,11 +3007,84 @@ describe('AnomalyService', () => {
         expect(rebalance()).toMatchObject({ kind: 'plan' });
 
         checkSlotMigrations.mockResolvedValue({ migrations: [{ slot: 5 }], complete: true });
-        await step(HOT, 21);
+        await step(HOT, 20);
 
         expect(checkSlotMigrations).toHaveBeenCalledTimes(2);
         expect(hotEvents()[0].resolved).toBe(false);
         expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'migration_running' });
+      });
+
+      it('asks again at the next sample while a slot migration blocks the plan', async () => {
+        const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: true });
+        (service as any).clusterMetrics = { checkSlotMigrations };
+        spreadLoad();
+        await step(HOT, 6);
+        checkSlotMigrations.mockResolvedValue({ migrations: [{ slot: 5 }], complete: true });
+        await step(HOT, 20);
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'migration_running' });
+
+        checkSlotMigrations.mockResolvedValue({ migrations: [], complete: true });
+        await step(HOT);
+
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+      });
+
+      it('plans from the next sample after a migration check that failed', async () => {
+        const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: true });
+        (service as any).clusterMetrics = { checkSlotMigrations };
+        spreadLoad();
+        await step(HOT, 6);
+        checkSlotMigrations.mockRejectedValue(new Error('connection lost'));
+        await step(HOT, 20);
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'migration_running' });
+
+        checkSlotMigrations.mockResolvedValue({ migrations: [], complete: true });
+        await step(HOT);
+
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+      });
+
+      it('plans from the next sample once the slot load of the shard is measured', async () => {
+        spreadLoad();
+        jest.spyOn(shardLoad, 'getSlots').mockReturnValueOnce([]);
+        await step(HOT, 6);
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'settling' });
+
+        await step(HOT);
+
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+      });
+
+      it('plans again as soon as an empty primary joins', async () => {
+        spreadLoad();
+        await step(HOT, 6);
+        expect(targets()).toEqual(['b0000000']);
+
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue([
+          ...clusterNodes(),
+          { ...clusterNodes()[1], id: 'd0000000', address: '10.0.0.4:6379@16379' },
+        ]);
+        await step(HOT);
+
+        expect(targets()[0]).toBe('d0000000');
+      });
+
+      it('plans again as soon as a target of the plan turns hot', async () => {
+        IDS.push('d0000000', 'e0000000');
+        ADDRS.push('10.0.0.4:6379', '10.0.0.5:6379');
+        owners = [[...WIDE], [10, 11], [20, 21], [30, 31], [40, 41]];
+        evenSlots = true;
+        try {
+          await step([900_000, 100_000, 100_000, 100_000, 100_000], 6);
+          expect(targets()).toContain('b0000000');
+
+          await step([900_000, 900_000, 100_000, 100_000, 100_000]);
+
+          expect(targets()).not.toContain('b0000000');
+        } finally {
+          IDS.length = 3;
+          ADDRS.length = 3;
+        }
       });
 
       it('still judges the shard when the migration check of a refresh fails', async () => {
@@ -3194,8 +3271,8 @@ describe('AnomalyService', () => {
           `# Memory\r\nused_memory:${usedBytes}\r\nmaxmemory:${maxBytes}\r\n` +
           `# Keyspace\r\ndb0:keys=${keys},expires=0,avg_ttl=0\r\n`;
         const warnings = () => (rebalance() as { warnings: unknown[] }).warnings;
-        const fullReads = (client: { info: jest.Mock }) =>
-          client.info.mock.calls.filter((args) => args.length === 0).length;
+        const memoryReads = (client: { info: jest.Mock }) =>
+          client.info.mock.calls.filter((args) => args.join() === 'memory,keyspace').length;
 
         function dialMemory(replies: Record<string, string | Error | Promise<string>>) {
           const clients = Object.fromEntries(
@@ -3236,7 +3313,7 @@ describe('AnomalyService', () => {
             { code: 'source_fork', shardId: 'a0000000' },
             { code: 'target_memory', shardId: 'b0000000', memoryShare: expect.closeTo(0.825) },
           ]);
-          expect(fullReads(clients.c0000000)).toBe(0);
+          expect(memoryReads(clients.c0000000)).toBe(0);
         });
 
         it('adds no warning when the target keeps room', async () => {
@@ -3257,7 +3334,78 @@ describe('AnomalyService', () => {
 
           await step(HOT, 20);
 
-          expect(fullReads(clients.b0000000)).toBe(1);
+          expect(memoryReads(clients.b0000000)).toBe(1);
+        });
+
+        it('reads a shard once when several plans name it', async () => {
+          IDS.push('d0000000', 'e0000000');
+          ADDRS.push('10.0.0.4:6379', '10.0.0.5:6379');
+          owners = [[...WIDE], WIDE.map((slot) => slot + 100), [20, 21], [30, 31], [40, 41]];
+          evenSlots = true;
+          try {
+            const { clients } = dialMemory(
+              Object.fromEntries(IDS.map((id) => [id, info(GB, 8 * GB, 200)])),
+            );
+
+            await step([900_000, 900_000, 100_000, 100_000, 100_000], 6);
+
+            const plans = service.getHotShards('conn-a').map((shard) => shard.rebalance);
+            expect(plans).toMatchObject([
+              { kind: 'plan', moves: [{ targetShardId: 'c0000000' }] },
+              { kind: 'plan', moves: [{ targetShardId: 'c0000000' }] },
+            ]);
+            expect(IDS.map((id) => memoryReads(clients[id]))).toEqual([1, 1, 1, 0, 0]);
+          } finally {
+            IDS.length = 3;
+            ADDRS.length = 3;
+          }
+        });
+
+        it('reads the memory of the hot shard after its key read gave up', async () => {
+          const budget = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+          (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;
+          try {
+            spreadLoad();
+            const { clients, discovery } = dialMemory({
+              a0000000: info(4 * GB, 8 * GB, 200),
+              b0000000: info(GB, 8 * GB, 50),
+            });
+            let closed!: (err: Error) => void;
+            const busy = new Promise<never>((_, reject) => {
+              closed = reject;
+            });
+            busy.catch(() => undefined);
+            let reading = false;
+            const stuck = {
+              callBuffer: jest.fn(() => {
+                reading = true;
+                return busy;
+              }),
+              info: jest.fn(async () => {
+                if (reading) await busy;
+                return info(4 * GB, 8 * GB, 200);
+              }),
+            };
+            let hot: (typeof clients)[string] = stuck;
+            discovery.getNodeConnection.mockImplementation(async (nodeId: string) =>
+              nodeId === 'a0000000' ? hot : clients[nodeId],
+            );
+            discovery.evictNodeClient.mockImplementation((client: unknown) => {
+              if (client !== stuck) return;
+              hot = clients.a0000000;
+              closed(new Error('Connection is closed.'));
+            });
+
+            await step(HOT, 6);
+
+            expect(service.getHotShards('conn-a')[0]).toMatchObject({
+              keySource: 'unavailable',
+              keyNote: 'reading the keys from the hot primary timed out',
+            });
+            expect(warnings()).toEqual([{ code: 'source_fork', shardId: 'a0000000' }]);
+          } finally {
+            (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = budget;
+          }
         });
 
         it('says the room is unknown when the target cannot be read', async () => {
