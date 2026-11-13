@@ -66,6 +66,14 @@ license:
 # Set false to disable anonymous telemetry (BETTERDB_TELEMETRY).
 telemetry: true
 
+webhooks:
+  # Private ranges/hostnames webhooks may deliver to. Empty = public receivers
+  # only. Keep these as narrow as possible: anyone who can create a webhook can
+  # make the monitor POST to anything listed. Cloud metadata and link-local
+  # addresses can never be allowed. See docs/webhooks.md.
+  allowedPrivateCidrs: []      # e.g. ["10.244.0.0/16", "10.96.0.0/12"]
+  allowedPrivateHosts: []      # e.g. ["*.svc.cluster.local"]
+
 # PVC mounted at /app/data (BETTERDB_DATA_DIR): persisted license state and
 # the online outage-grace token. NOT the metrics history - that lives in
 # storage.type above. Off by default; the app runs fine without it.

@@ -48,6 +48,8 @@ The full annotated reference is [values.yaml](values.yaml). The ones that matter
 | `license.offline.existingSecretKey` | `license.jwt` | Key within that Secret; also the mounted filename. Must match the Secret's key. |
 | `resources` | requests `100m`/`256Mi`, limits `1`/`1Gi` | Pod CPU/memory. The 1Gi limit is a hard cap — raise it for busy instances. |
 | `telemetry` | `true` | Set `false` to disable anonymous telemetry. |
+| `webhooks.allowedPrivateCidrs` | `[]` | Private CIDRs webhooks may deliver to, e.g. `["10.244.0.0/16"]`. Empty = public receivers only. See [docs/webhooks.md](../../docs/webhooks.md#receivers-on-a-private-network). |
+| `webhooks.allowedPrivateHosts` | `[]` | Hostnames (exact or `*.suffix`) that may resolve to a private address, e.g. `["*.svc.cluster.local"]`. |
 | `extraEnv` / `extraEnvFrom` | `[]` | Any other env from [docs/configuration.md](../../docs/configuration.md). |
 
 ## Persistence

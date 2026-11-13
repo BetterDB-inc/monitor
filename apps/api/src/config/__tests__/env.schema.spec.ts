@@ -405,6 +405,34 @@ describe('envSchema', () => {
     });
   });
 
+  describe('webhook private-network allowlist', () => {
+    it('accepts valid lists and treats blank values as unset', () => {
+      expect(
+        envSchema.safeParse({
+          WEBHOOK_ALLOWED_PRIVATE_CIDRS: '10.244.0.0/16, 10.96.0.0/12,fd12:3456::/32',
+          WEBHOOK_ALLOWED_PRIVATE_HOSTS: '*.svc.cluster.local, relay.internal',
+        }).success,
+      ).toBe(true);
+      expect(envSchema.safeParse({ WEBHOOK_ALLOWED_PRIVATE_CIDRS: '', WEBHOOK_ALLOWED_PRIVATE_HOSTS: ' ' }).success).toBe(true);
+    });
+
+    it.each(['0.0.0.0/0', '169.254.0.0/16', '10.0.0.0', '10.0.0.0/8,nope'])('rejects WEBHOOK_ALLOWED_PRIVATE_CIDRS=%s', (value) => {
+      const result = envSchema.safeParse({ WEBHOOK_ALLOWED_PRIVATE_CIDRS: value });
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues[0].path).toContain('WEBHOOK_ALLOWED_PRIVATE_CIDRS');
+      }
+    });
+
+    it.each(['*', '10.0.0.1', 'relay.internal,*'])('rejects WEBHOOK_ALLOWED_PRIVATE_HOSTS=%s', (value) => {
+      const result = envSchema.safeParse({ WEBHOOK_ALLOWED_PRIVATE_HOSTS: value });
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues[0].path).toContain('WEBHOOK_ALLOWED_PRIVATE_HOSTS');
+      }
+    });
+  });
+
   describe('Prometheus poll interval validation', () => {
     it('should coerce a numeric poll interval', () => {
       const result = envSchema.safeParse({ PROMETHEUS_POLL_INTERVAL_MS: '2000' });

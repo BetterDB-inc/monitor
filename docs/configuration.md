@@ -322,6 +322,8 @@ Client analytics keeps two stores. Raw client snapshots (`client_snapshots`) fol
 | Variable       | Required | Default | Description                                                                                                                                                                    |
 | -------------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `FRONTEND_URL` | No       | -       | Public base URL of the web UI (e.g. `https://monitor.example.com`). Used to build "View in BetterDB" links in Slack/Discord messages and the `incidentUrl` field of `anomaly.detected` and `anomaly.sequence.detected`; unset = messages render without the link and the field is left out |
+| `WEBHOOK_ALLOWED_PRIVATE_CIDRS` | No | _(empty)_ | Comma-separated IPv4/IPv6 CIDRs that webhooks may deliver to even though they are private, e.g. `10.244.0.0/16,10.96.0.0/12`. Empty = public receivers only. An invalid entry, or one that overlaps a cloud metadata or link-local range, fails startup. Ignored in cloud mode. See [Receivers on a Private Network](webhooks.md#receivers-on-a-private-network) |
+| `WEBHOOK_ALLOWED_PRIVATE_HOSTS` | No | _(empty)_ | Comma-separated hostnames, exact (`relay.internal`) or suffix wildcards (`*.svc.cluster.local`), that may resolve to a private address. Never unblocks loopback or metadata addresses. An invalid entry fails startup. Ignored in cloud mode |
 
 ### License Configuration
 
