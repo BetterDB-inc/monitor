@@ -728,7 +728,7 @@ The suggestion is one of two things:
   | `no_target` | No other healthy primary can take slots. |
   | `unhealthy_node` | A primary is failed or suspect. |
   | `migration_running` | A slot migration or reshard is running, or the monitor could not ask every primary. |
-  | `settling` | Slots changed owner and the slot load is still being measured. |
+  | `settling` | Slots changed owner and the slot load is still being measured, or a shard in the last measurement is no longer a primary. |
   | `slots_scattered` | The shard's slots are in too many small ranges to move enough load in 8 ranges. |
 
   For `key_level` and `cluster_hot` the event message ends with the reason, for example `Rebalancing will not help: slot 9189 alone is 81% of this shard's CPU. Consider client-side caching, reads from replicas, or splitting key "session:global".` For the other reasons it ends with a short `No rebalance is suggested ...` sentence. The message is written once, when the event is raised.
@@ -737,7 +737,7 @@ A slot that is at least 20% of the shard's CPU is never part of a plan: it would
 
 A plan lists `warnings`, none of which block it: `source_fork` (the hot shard forks for the snapshot while it is the busiest node), `fewer_replicas` (the target has fewer replicas than the hot shard), `target_memory` (the keys moved, at the hot shard's average key size, would take the target past 80% of its `maxmemory`; `memoryShare` is the estimate) and `memory_unknown` (the target has no `maxmemory`, or `INFO` could not be read on it or on the hot shard).
 
-The suggestion is computed right before the event is raised and again every 5 minutes, or sooner when slots change owner or a primary turns suspect, failed or healthy again. Each computation asks every primary whether a slot is migrating, unless a primary is failed or suspect (the answer is then `unhealthy_node` without asking), and for a plan reads `INFO` once on the hot shard and on each target.
+The suggestion is computed right before the event is raised and again every 5 minutes, or sooner when slots change owner or a primary turns suspect, failed or healthy again. A plan is withdrawn at once, without waiting for a new measurement, when a primary turns failed or suspect or a measured shard stops being a primary. Each computation asks every primary whether a slot is migrating, unless a primary is failed or suspect (the answer is then `unhealthy_node` without asking), and for a plan reads `INFO` once on the hot shard and on each target.
 
 Before you start one:
 

@@ -6278,6 +6278,8 @@ export class AnomalyService
         sample.timestamp > (this.hotShardSampleAt.get(connectionId) ?? -Infinity) &&
         timestamp - sample.timestamp <= HOT_SHARD_BLIND_MS;
       if (!isNew) {
+        const blocked = nodes && this.rebalanceTopologyBlocker(sample, nodes);
+        if (blocked) this.holdRebalance(connectionId, blocked);
         const judgedAt = this.hotShardJudgedAt.get(connectionId);
         if (judgedAt === undefined) this.hotShardJudgedAt.set(connectionId, timestamp);
         else if (timestamp - judgedAt > HOT_SHARD_BLIND_MS && this.tracksHotShards(connectionId)) {
@@ -6494,7 +6496,11 @@ export class AnomalyService
     }
     if (due.length > 0) {
       const shards = this.rebalanceShards(sample, nodes, findings);
-      const blocked = await this.rebalanceBlocker(ctx, unhealthy.length > 0, migrationsChecked);
+      const blocked =
+        this.rebalanceTopologyBlocker(sample, nodes) ??
+        (migrationsChecked || !(await this.isSlotMigrationRunning(ctx))
+          ? undefined
+          : 'migration_running');
       const verdicts = await Promise.all(
         due.map(({ shardId, slots }) =>
           blocked
@@ -6578,14 +6584,17 @@ export class AnomalyService
     }
   }
 
-  private async rebalanceBlocker(
-    ctx: ConnectionContext,
-    unhealthy: boolean,
-    migrationsChecked: boolean,
-  ): Promise<RebalanceNoPlanReason | undefined> {
-    if (unhealthy) return 'unhealthy_node';
-    if (migrationsChecked) return undefined;
-    return (await this.isSlotMigrationRunning(ctx)) ? 'migration_running' : undefined;
+  private rebalanceTopologyBlocker(
+    sample: ShardLoadSample | null,
+    nodes: ClusterNode[],
+  ): RebalanceNoPlanReason | undefined {
+    const primaries = nodes.filter((node) => node.flags.includes('master'));
+    if (primaries.some((node) => clusterNodeState(node.flags) !== 'healthy')) {
+      return 'unhealthy_node';
+    }
+    const primaryIds = new Set(primaries.map((node) => node.id));
+    if (sample?.shards.some((shard) => !primaryIds.has(shard.nodeId))) return 'settling';
+    return undefined;
   }
 
   private async isSlotMigrationRunning(ctx: ConnectionContext): Promise<boolean> {

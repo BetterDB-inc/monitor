@@ -3073,6 +3073,62 @@ describe('AnomalyService', () => {
         });
       });
 
+      it('withdraws the plan when a primary turns suspect and no new sample comes', async () => {
+        spreadLoad();
+        await step(HOT, 6);
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+
+        const nodes = clusterNodes();
+        nodes[1].flags = ['master', 'fail?'];
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(nodes);
+        await idle(STEP_MS);
+
+        expect(rebalance()).toEqual({
+          kind: 'no_plan',
+          action: 'spread',
+          reason: 'unhealthy_node',
+          pinnedSlots: [],
+        });
+      });
+
+      it('plans again from the next sample once the suspect primary is healthy', async () => {
+        spreadLoad();
+        await step(HOT, 6);
+        const nodes = clusterNodes();
+        nodes[1].flags = ['master', 'fail?'];
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(nodes);
+        await idle(STEP_MS);
+
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(clusterNodes());
+        await step(HOT);
+
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+      });
+
+      it.each([
+        ['is now a replica', (node: { flags: string[]; master: string }) => {
+          node.flags = ['slave'];
+          node.master = 'c0000000';
+        }],
+        ['left the cluster', (node: { id: string }) => {
+          node.id = 'f0000000';
+        }],
+      ])('waits for a new sample when a measured shard %s', async (_case, change) => {
+        spreadLoad();
+        await step(HOT, 6);
+
+        const nodes = clusterNodes();
+        change(nodes[1]);
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(nodes);
+        await idle(STEP_MS);
+
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'settling' });
+
+        await step(HOT);
+
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'settling' });
+      });
+
       it('counts replicas and takes an empty primary as a target', async () => {
         spreadLoad();
         const nodes = [
