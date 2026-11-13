@@ -6525,13 +6525,15 @@ export class AnomalyService
           });
         }
       } else {
+        const earlier = [...kept.values()].map((last) => last.verdict);
         const verdicts = await this.withShardFacts(
           ctx,
           planRebalances(
             due.map(({ shardId }) => ({ hotShardId: shardId, slots: slots.get(shardId) ?? [] })),
             shards,
-            [...kept.values()].map((last) => last.verdict),
+            earlier,
           ),
+          earlier,
         );
         for (const [index, verdict] of verdicts.entries()) {
           kept.set(due[index].signature, { verdict, computedAt: timestamp, ownership });
@@ -6545,14 +6547,29 @@ export class AnomalyService
   private async withShardFacts(
     ctx: ConnectionContext,
     verdicts: RebalanceVerdict[],
+    earlier: readonly RebalanceVerdict[],
   ): Promise<RebalanceVerdict[]> {
+    const plans = verdicts.filter((verdict) => verdict.kind === 'plan');
+    const applied = [...earlier, ...verdicts].filter((verdict) => verdict.kind === 'plan');
+    const countedBy = new Map(
+      plans.map((plan) => [
+        plan,
+        applied.filter(
+          (other) =>
+            plan.plannedAfter.includes(other.sourceShardId) &&
+            other.moves.some((move) =>
+              plan.moves.some((mine) => mine.targetShardId === move.targetShardId),
+            ),
+        ),
+      ]),
+    );
     const shardIds = [
       ...new Set(
-        verdicts.flatMap((verdict) =>
-          verdict.kind === 'plan'
-            ? [verdict.sourceShardId, ...verdict.moves.map((move) => move.targetShardId)]
-            : [],
-        ),
+        plans.flatMap((plan) => [
+          plan.sourceShardId,
+          ...plan.moves.map((move) => move.targetShardId),
+          ...(countedBy.get(plan) ?? []).map((other) => other.sourceShardId),
+        ]),
       ),
     ];
     const readings = await Promise.all(
@@ -6572,7 +6589,13 @@ export class AnomalyService
     return verdicts.map((verdict) =>
       verdict.kind === 'plan'
         ? withCommands(
-            { ...verdict, warnings: [...verdict.warnings, ...memoryWarnings(verdict, memory)] },
+            {
+              ...verdict,
+              warnings: [
+                ...verdict.warnings,
+                ...memoryWarnings(verdict, memory, countedBy.get(verdict) ?? []),
+              ],
+            },
             servers,
             providerManaged,
           )

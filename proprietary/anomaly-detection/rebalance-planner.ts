@@ -645,19 +645,25 @@ function shardsAfter(
   shards: readonly RebalanceShard[],
   plans: readonly RebalancePlan[],
 ): RebalanceShard[] {
-  const change = new Map<string, number>();
-  const add = (shardId: string, cpu: number) =>
-    change.set(shardId, (change.get(shardId) ?? 0) + cpu);
+  const change = new Map<string, { cpu: number; slots: number }>();
+  const add = (shardId: string, cpu: number, slots: number) => {
+    const last = change.get(shardId) ?? { cpu: 0, slots: 0 };
+    change.set(shardId, { cpu: last.cpu + cpu, slots: last.slots + slots });
+  };
   for (const plan of plans) {
     for (const move of plan.moves) {
-      add(move.targetShardId, move.cpuUsecPerSecond);
-      add(plan.sourceShardId, -move.cpuUsecPerSecond);
+      add(move.targetShardId, move.cpuUsecPerSecond, move.slotCount);
+      add(plan.sourceShardId, -move.cpuUsecPerSecond, -move.slotCount);
     }
   }
-  return shards.map((shard) => ({
-    ...shard,
-    cpuUsecPerSecond: Math.max(0, shard.cpuUsecPerSecond + (change.get(shard.shardId) ?? 0)),
-  }));
+  return shards.map((shard) => {
+    const moved = change.get(shard.shardId) ?? { cpu: 0, slots: 0 };
+    return {
+      ...shard,
+      cpuUsecPerSecond: Math.max(0, shard.cpuUsecPerSecond + moved.cpu),
+      slotCount: Math.max(0, shard.slotCount + moved.slots),
+    };
+  });
 }
 
 export function shardMemoryFromInfo(
@@ -676,16 +682,26 @@ export function shardMemoryFromInfo(
 export function memoryWarnings(
   plan: RebalancePlan,
   memoryByShard: ReadonlyMap<string, ShardMemory>,
+  earlier: readonly RebalancePlan[] = [],
   policy: RebalancePolicy = DEFAULT_REBALANCE_POLICY,
 ): RebalanceWarning[] {
-  const source = memoryByShard.get(plan.sourceShardId);
   return plan.moves.flatMap((move): RebalanceWarning[] => {
     const target = memoryByShard.get(move.targetShardId);
-    if (!source || source.keyCount <= 0 || !target || target.maxBytes <= 0) {
+    const arriving = [plan, ...earlier].flatMap((from) => {
+      const source = memoryByShard.get(from.sourceShardId);
+      return from.moves
+        .filter((other) => other.targetShardId === move.targetShardId)
+        .map((other) =>
+          source && source.keyCount > 0
+            ? (other.keyCount * source.usedBytes) / source.keyCount
+            : undefined,
+        );
+    });
+    if (!target || target.maxBytes <= 0 || arriving.includes(undefined)) {
       return [{ code: 'memory_unknown', shardId: move.targetShardId }];
     }
-    const bytesPerKey = source.usedBytes / source.keyCount;
-    const memoryShare = (target.usedBytes + move.keyCount * bytesPerKey) / target.maxBytes;
+    const bytes = arriving.reduce<number>((total, each) => total + (each ?? 0), 0);
+    const memoryShare = (target.usedBytes + bytes) / target.maxBytes;
     return memoryShare > policy.targetMemoryShare
       ? [{ code: 'target_memory', shardId: move.targetShardId, memoryShare }]
       : [];
