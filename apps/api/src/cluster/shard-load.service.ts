@@ -30,6 +30,10 @@ export class ShardLoadService {
     return this.trackers.get(connectionId)?.topSlots(nodeId, limit) ?? [];
   }
 
+  getSlots(connectionId: string, nodeId: string): SlotLoadRate[] {
+    return this.trackers.get(connectionId)?.slotsOf(nodeId) ?? [];
+  }
+
   forget(connectionId: string): void {
     this.trackers.delete(connectionId);
     this.latest.delete(connectionId);

@@ -345,6 +345,55 @@ describe('ShardLoadTracker', () => {
     ]);
   });
 
+  it('lists every measured slot of a shard in slot order', () => {
+    const tracker = new ShardLoadTracker();
+    tracker.observe(
+      [node('n1', { 7: [0, 0, 0], 2: [0, 0, 0], 5: [0, 0, 0] }), node('n2', { 3: [0, 0, 0] })],
+      0,
+    );
+    tracker.observe(
+      [
+        node('n1', { 7: [100, 10, 20], 2: [900, 0, 0], 5: [0, 0, 0] }),
+        node('n2', { 3: [5_000, 0, 0] }),
+      ],
+      1_000,
+    );
+
+    expect(tracker.slotsOf('n1')).toEqual([
+      {
+        slot: 2,
+        cpuUsecPerSecond: 900,
+        networkBytesInPerSecond: 0,
+        networkBytesOutPerSecond: 0,
+        keyCount: 10,
+      },
+      {
+        slot: 5,
+        cpuUsecPerSecond: 0,
+        networkBytesInPerSecond: 0,
+        networkBytesOutPerSecond: 0,
+        keyCount: 10,
+      },
+      {
+        slot: 7,
+        cpuUsecPerSecond: 100,
+        networkBytesInPerSecond: 10,
+        networkBytesOutPerSecond: 20,
+        keyCount: 10,
+      },
+    ]);
+    expect(tracker.slotsOf('n3')).toEqual([]);
+  });
+
+  it('leaves a slot it has not measured yet out of the list', () => {
+    const tracker = new ShardLoadTracker();
+    tracker.observe([node('n1', { 0: [0, 0, 0] })], 0);
+
+    tracker.observe([node('n1', { 0: [100, 0, 0], 1: [100, 0, 0] })], 1_000);
+
+    expect(tracker.slotsOf('n1').map((slot) => slot.slot)).toEqual([0]);
+  });
+
   it('separates a shard under skewed write load from an evenly loaded cluster', () => {
     const readings = (perShardCpu: number[], step: number) =>
       perShardCpu.map((cpu, i) => node(`n${i + 1}`, { [i]: [cpu * step, cpu * step, 0] }));

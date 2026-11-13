@@ -158,9 +158,7 @@ export class ShardLoadTracker {
     return { timestamp, shards: this.summarize(nodes, settling), settling };
   }
 
-  topSlots(nodeId: string, limit: number): SlotLoadRate[] {
-    const network = (rate: SlotLoadRate) =>
-      rate.networkBytesInPerSecond + rate.networkBytesOutPerSecond;
+  slotsOf(nodeId: string): SlotLoadRate[] {
     return (this.slotsByNode.get(nodeId) ?? [])
       .filter((slot) => this.measured[slot])
       .map((slot) => ({
@@ -170,6 +168,13 @@ export class ShardLoadTracker {
         networkBytesOutPerSecond: this.bytesOutRate[slot],
         keyCount: this.keyCount[slot],
       }))
+      .sort((a, b) => a.slot - b.slot);
+  }
+
+  topSlots(nodeId: string, limit: number): SlotLoadRate[] {
+    const network = (rate: SlotLoadRate) =>
+      rate.networkBytesInPerSecond + rate.networkBytesOutPerSecond;
+    return this.slotsOf(nodeId)
       .sort(
         (a, b) =>
           b.cpuUsecPerSecond - a.cpuUsecPerSecond || network(b) - network(a) || a.slot - b.slot,
