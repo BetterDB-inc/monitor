@@ -807,6 +807,8 @@ describe('planRebalances', () => {
     const [first, second] = planRebalances(hot, hotPair(5)).map(planOf);
     const moved = first.moves.find((move) => move.targetShardId === 'c')!.cpuUsecPerSecond;
 
+    expect(first.plannedAfter).toEqual([]);
+    expect(second.plannedAfter).toEqual(['a']);
     expect(after(first, 'c').cpuUsecPerSecond).toBe(20_000 + moved);
     expect(second.projection.find((row) => row.shardId === 'c')?.before.cpuUsecPerSecond).toBe(
       20_000 + moved,
@@ -821,6 +823,16 @@ describe('planRebalances', () => {
     const [first, second] = planRebalances(hot, shards);
 
     expect(planRebalances([hot[1]], shards, [first])).toEqual([second]);
+  });
+
+  it('names only the shards whose plans it counts, not one with no plan', () => {
+    const shards = hotPair(5);
+    const pinned = { hotShardId: 'a', slots: slots(0, [150_000, 50_000]) };
+
+    const [first, second] = planRebalances([pinned, hot[1]], shards);
+
+    expect(first).toMatchObject({ kind: 'no_plan' });
+    expect(planOf(second).plannedAfter).toEqual([]);
   });
 
   it('plans one hot shard as planRebalance does', () => {

@@ -3286,6 +3286,8 @@ describe('AnomalyService', () => {
           await step([200_000, 200_000, 20_000, 100_000, 100_000], 6);
 
           const [first, second] = plans();
+          expect(first.plannedAfter).toEqual([]);
+          expect(second.plannedAfter).toEqual(['a0000000']);
           const moved = first.moves.find((move) => move.targetShardId === 'c0000000');
           expect(moved).toBeDefined();
           expect(
