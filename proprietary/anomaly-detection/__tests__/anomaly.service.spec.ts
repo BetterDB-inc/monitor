@@ -9840,6 +9840,573 @@ describe('AnomalyService', () => {
     });
   });
 
+  // ─── Primary without replicas (#714) ───────────────────────────────────────
+
+  describe('primary without replicas detection', () => {
+    type ReplicaState = 'online' | 'wait_bgsave';
+
+    const infoWith = (
+      replicas: ReplicaState[],
+      opts: { cluster?: boolean; replication?: Record<string, string> } = {},
+    ) => ({
+      server: { role: 'master' },
+      clients: { connected_clients: '10', blocked_clients: '0' },
+      memory: { used_memory: '1000000', allocator_frag_ratio: '1.1' },
+      stats: {
+        instantaneous_ops_per_sec: '100',
+        instantaneous_input_kbps: '50',
+        instantaneous_output_kbps: '30',
+        evicted_keys: '0',
+        keyspace_misses: '5',
+        rejected_connections: '0',
+        acl_access_denied_auth: '0',
+        ...(opts.cluster === false ? {} : { cluster_enabled: '1' }),
+      },
+      replication: {
+        connected_slaves: String(replicas.length),
+        ...Object.fromEntries(
+          replicas.map((state, i) => [
+            `slave${i}`,
+            `ip=10.0.1.${i},port=6379,state=${state},offset=100,lag=0`,
+          ]),
+        ),
+        ...opts.replication,
+      },
+    });
+
+    const clusterNode = (id: string, myself: boolean, primary: boolean): ClusterNode => ({
+      id,
+      address: `10.0.0.${id === 'primA' ? 1 : 2}:6379@16379`,
+      flags: [...(myself ? ['myself'] : []), primary ? 'master' : 'slave'],
+      master: primary ? '-' : 'other',
+      pingSent: 0,
+      pongReceived: 0,
+      configEpoch: 1,
+      linkState: 'connected',
+      slots: primary ? [[0, 5460]] : [],
+    });
+
+    /** The view of the node `self`, in a shard whose primary is `primary`. */
+    const shardNodes = (self: string, primary: string) =>
+      ['primA', 'primB'].map((id) => clusterNode(id, id === self, id === primary));
+
+    const SYNCED: ReplicaState[] = ['online', 'online'];
+    let now: number;
+
+    beforeEach(() => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(SYNCED));
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue({ cluster_state: 'ok' });
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(shardNodes('primA', 'primA'));
+      dbClient.getCapabilities = jest
+        .fn()
+        .mockReturnValue({ hasConfig: false, hasClusterSlotStats: false }) as never;
+      dbClient.getClients = jest.fn().mockResolvedValue([]);
+      dbClient.getConfigValue = jest.fn().mockResolvedValue(null);
+      now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+    });
+
+    const events = () =>
+      service
+        .getRecentEvents(1000)
+        .filter((e) => e.metricType === MetricType.PRIMARY_WITHOUT_REPLICAS)
+        .reverse();
+
+    const setReplicas = (replicas: ReplicaState[], opts?: Parameters<typeof infoWith>[1]) => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(replicas, opts));
+    };
+
+    /** Flattened INFO of one non-cluster primary, as the detector receives it. */
+    const flatInfo = (replicas: number) => ({
+      role: 'master',
+      master_replid: 'replid-1',
+      connected_slaves: String(replicas),
+      ...Object.fromEntries(
+        Array.from({ length: replicas }, (_, i) => [
+          `slave${i}`,
+          `ip=10.0.1.${i},port=6379,state=online,offset=100,lag=0`,
+        ]),
+      ),
+    });
+
+    /** Polls once per second, `seconds` times. */
+    const pollFor = async (seconds: number, ctx: ConnectionContext = mockCtx) => {
+      for (let s = 0; s < seconds; s++) {
+        await poll(ctx);
+        now += 1000;
+      }
+    };
+
+    it('raises one WARNING at 5 seconds and one CRITICAL at 30 seconds', async () => {
+      await pollFor(3);
+      setReplicas([]);
+      await pollFor(5);
+      expect(events()).toHaveLength(0);
+
+      await pollFor(1);
+      expect(events().map((e) => e.severity)).toEqual([AnomalySeverity.WARNING]);
+      expect(events()[0]).toMatchObject({
+        anomalyType: AnomalyType.DROP,
+        value: 0,
+        baseline: 2,
+        threshold: 2,
+        connectionId: 'conn-1',
+        resolved: false,
+      });
+      expect(events()[0].message).toContain(
+        'WARNING: Primary 10.0.0.1:6379 (primA) for slots 0-5460 has had no synced replica for 5 s ' +
+          '(0 attached, 0 synced, 2 expected)',
+      );
+
+      await pollFor(40);
+      expect(events().map((e) => e.severity)).toEqual([
+        AnomalySeverity.WARNING,
+        AnomalySeverity.CRITICAL,
+      ]);
+      expect(events()[1].dedupeKey).toBe(events()[0].dedupeKey);
+    });
+
+    it('resolves both events two polls after a replica is back in sync', async () => {
+      await pollFor(1);
+      setReplicas([]);
+      await pollFor(35);
+      expect(events()).toHaveLength(2);
+
+      setReplicas(['online']);
+      await pollFor(1);
+      expect(events().map((e) => e.resolved)).toEqual([false, false]);
+      await pollFor(1);
+      expect(events().map((e) => e.resolved)).toEqual([true, true]);
+
+      setReplicas([]);
+      await pollFor(10);
+      expect(events().map((e) => e.severity)).toEqual([
+        AnomalySeverity.WARNING,
+        AnomalySeverity.CRITICAL,
+        AnomalySeverity.WARNING,
+      ]);
+    });
+
+    it('counts a replica that is attached but still syncing as no replica', async () => {
+      await pollFor(1);
+      setReplicas(['wait_bgsave']);
+      await pollFor(10);
+
+      expect(events()).toHaveLength(1);
+      expect(events()[0].message).toContain('(1 attached, 0 synced, 2 expected)');
+    });
+
+    it('does not fire for a node that reports role:master without slots', async () => {
+      await pollFor(1);
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(shardNodes('primA', 'primB'));
+      setReplicas([]);
+      await pollFor(60);
+
+      expect(events()).toHaveLength(0);
+    });
+
+    it('does not fire for a shard that never had a replica', async () => {
+      setReplicas([]);
+      await pollFor(60);
+
+      expect(events()).toHaveLength(0);
+    });
+
+    it('raises one event when two connections observe the same shard', async () => {
+      const second: ConnectionContext = { ...mockCtx, connectionId: 'conn-2' };
+      const pollBoth = async (seconds: number) => {
+        for (let s = 0; s < seconds; s++) {
+          await poll(mockCtx);
+          await poll(second);
+          now += 1000;
+        }
+      };
+      await pollBoth(1);
+      setReplicas([]);
+      await pollBoth(10);
+
+      expect(events()).toHaveLength(1);
+    });
+
+    it('continues the episode after a failover onto another connection', async () => {
+      const newPrimaryClient = {
+        ...dbClient,
+        getClusterNodes: jest.fn().mockResolvedValue(shardNodes('primB', 'primB')),
+      };
+      const newPrimary: ConnectionContext = {
+        ...mockCtx,
+        connectionId: 'conn-2',
+        client: newPrimaryClient as any,
+      };
+      await pollFor(1);
+      setReplicas([]);
+      await pollFor(10);
+      expect(events()).toHaveLength(1);
+
+      // primA is demoted: its own connection no longer reports the shard.
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(shardNodes('primA', 'primB'));
+      for (let s = 0; s < 30; s++) {
+        await poll(mockCtx);
+        await poll(newPrimary);
+        now += 1000;
+      }
+
+      expect(events().map((e) => [e.severity, e.connectionId])).toEqual([
+        [AnomalySeverity.WARNING, 'conn-1'],
+        [AnomalySeverity.CRITICAL, 'conn-2'],
+      ]);
+    });
+
+    it('raises CRITICAL at 5 seconds when persistence is known to be off', async () => {
+      dbClient.getCapabilities = jest
+        .fn()
+        .mockReturnValue({ hasConfig: true, hasClusterSlotStats: false }) as never;
+      dbClient.getConfigValues = jest.fn((key: string) =>
+        Promise.resolve(key === 'save' ? { save: '' } : {}),
+      ) as never;
+      const replication = { master_replid: 'replid-1', aof_enabled: '0' };
+      setReplicas(SYNCED, { replication });
+      await pollFor(2);
+      setReplicas([], { replication });
+      await pollFor(10);
+
+      expect(events().map((e) => e.severity)).toEqual([AnomalySeverity.CRITICAL]);
+      expect(events()[0].message).toContain('Persistence is off');
+    });
+
+    it('fires for a standalone primary that had replicas, and never for one that had none', async () => {
+      setReplicas([], { cluster: false });
+      await pollFor(60);
+      expect(events()).toHaveLength(0);
+
+      setReplicas(SYNCED, { cluster: false });
+      await pollFor(1);
+      setReplicas([], { cluster: false });
+      await pollFor(10);
+
+      expect(events()).toHaveLength(1);
+      expect(events()[0].message).toContain('Primary localhost:6379 has had no synced replica');
+    });
+
+    it('continues an open event after a restart instead of raising a second one', async () => {
+      await pollFor(1);
+      const [key] = [...(service as any).primaryReplicaState.keys()];
+      const stored = {
+        id: 'stored-1',
+        timestamp: now - 10_000,
+        metricType: MetricType.PRIMARY_WITHOUT_REPLICAS,
+        severity: AnomalySeverity.WARNING,
+        baseline: 2,
+        dedupeKey: key,
+      };
+      // The event is open in storage, and not in memory after the restart.
+      storage.getAnomalyEvents.mockImplementation((query: { metricType?: string }) =>
+        Promise.resolve(query?.metricType === MetricType.PRIMARY_WITHOUT_REPLICAS ? [stored] : []),
+      );
+      (service as any).adoptPrimaryReplicaEvents('conn-1', [stored], now);
+      setReplicas([]);
+      await pollFor(10);
+      expect(events()).toHaveLength(0);
+
+      setReplicas(SYNCED);
+      await pollFor(2);
+      expect(storage.resolveAnomaly).toHaveBeenCalledWith('stored-1', expect.any(Number));
+    });
+
+    it('closes the events of a shard nobody observes any more, and keeps its expectation', async () => {
+      await pollFor(1);
+      setReplicas([]);
+      await pollFor(10);
+      expect(events()).toHaveLength(1);
+
+      // The node stops owning the shard, and no other connection reports it.
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(shardNodes('primA', 'primB'));
+      now += 6 * 60_000;
+      await pollFor(1);
+      expect((service as any).primaryReplicaEvents.size).toBe(0);
+
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(shardNodes('primA', 'primA'));
+      await pollFor(10);
+      expect(events().map((e) => e.severity)).toEqual([
+        AnomalySeverity.WARNING,
+        AnomalySeverity.WARNING,
+      ]);
+    });
+
+    it('closes the event of a standalone primary when its connection is removed', async () => {
+      setReplicas(SYNCED, { cluster: false });
+      await pollFor(1);
+      setReplicas([], { cluster: false });
+      await pollFor(10);
+      expect(events()).toHaveLength(1);
+
+      (service as any).onConnectionRemoved('conn-1');
+      expect((service as any).persistenceOutbox.resolvedAt(events()[0].id)).toEqual(
+        expect.any(Number),
+      );
+      expect((service as any).primaryReplicaState.get('connection:conn-1')).toMatchObject({
+        expectedReplicas: 2,
+        alerted: 'none',
+      });
+    });
+
+    it('closes the events of a cluster shard when its last observing connection is removed', async () => {
+      const second: ConnectionContext = { ...mockCtx, connectionId: 'conn-2' };
+      await pollFor(1);
+      await poll(second);
+      setReplicas([]);
+      await pollFor(10);
+      expect(events()).toHaveLength(1);
+      const closedAt = () => (service as any).persistenceOutbox.resolvedAt(events()[0].id);
+
+      // conn-2 still observes the shard, so its state and event stay.
+      (service as any).onConnectionRemoved('conn-1');
+      expect((service as any).primaryReplicaState.size).toBe(1);
+      expect(closedAt()).toBeUndefined();
+
+      (service as any).onConnectionRemoved('conn-2');
+      expect((service as any).primaryReplicaEvents.size).toBe(0);
+      expect(closedAt()).toEqual(expect.any(Number));
+    });
+
+    it('still alerts on a connection that replaces the last observer of a shard', async () => {
+      const replacement: ConnectionContext = { ...mockCtx, connectionId: 'conn-2' };
+      await pollFor(1);
+      (service as any).onConnectionRemoved('conn-1');
+
+      // The replicas are already gone when the replacement first sees the shard.
+      setReplicas([]);
+      await pollFor(6, replacement);
+
+      expect(events()).toHaveLength(1);
+      expect(events()[0]).toMatchObject({
+        severity: AnomalySeverity.WARNING,
+        baseline: 2,
+        connectionId: 'conn-2',
+      });
+    });
+
+    it('raises the alert again when its event is resolved while there is still no replica', async () => {
+      await pollFor(1);
+      setReplicas([]);
+      await pollFor(35);
+      expect(events()).toHaveLength(2);
+
+      await service.resolveAnomaly(events()[1].id);
+      await pollFor(5);
+
+      expect(events().map((e) => [e.severity, e.resolved])).toEqual([
+        [AnomalySeverity.WARNING, false],
+        [AnomalySeverity.CRITICAL, true],
+        [AnomalySeverity.CRITICAL, false],
+      ]);
+    });
+
+    it('needs two poll cycles to resolve when two connections observe the shard', async () => {
+      const second: ConnectionContext = { ...mockCtx, connectionId: 'conn-2' };
+      const pollBoth = async (seconds: number) => {
+        for (let s = 0; s < seconds; s++) {
+          await poll(mockCtx);
+          await poll(second);
+          now += 1000;
+        }
+      };
+      await pollBoth(1);
+      setReplicas([]);
+      await pollBoth(10);
+      expect(events()).toHaveLength(1);
+
+      setReplicas(SYNCED);
+      await pollBoth(1);
+      expect(events()[0].resolved).toBe(false);
+      await pollBoth(1);
+      expect(events()[0].resolved).toBe(true);
+    });
+
+    it('keeps what was learnt about a fan-out primary when another connection takes it over', async () => {
+      const second: ConnectionContext = { ...mockCtx, connectionId: 'conn-2' };
+      const observe = (ctx: ConnectionContext, replicas: number) =>
+        (service as any).detectPrimaryWithoutReplicas(
+          flatInfo(replicas),
+          ctx,
+          now,
+          null,
+          '10.0.0.9:6379',
+        );
+
+      await observe(mockCtx, 2);
+      for (let s = 0; s < 6; s++) {
+        now += 1000;
+        await observe(second, 0);
+      }
+
+      expect(events()).toHaveLength(1);
+      expect(events()[0]).toMatchObject({
+        severity: AnomalySeverity.WARNING,
+        baseline: 2,
+        connectionId: 'conn-2',
+        nodeAddr: '10.0.0.9:6379',
+      });
+    });
+
+    it('keeps what fan-out learnt about a primary that is then registered as its own connection', async () => {
+      const direct: ConnectionContext = { ...mockCtx, connectionId: 'conn-2' };
+      const detect = (service as any).detectPrimaryWithoutReplicas.bind(service);
+
+      await detect(flatInfo(2), mockCtx, now, null, '10.0.0.9:6379');
+      for (let s = 0; s < 6; s++) {
+        now += 1000;
+        await detect(flatInfo(0), direct, now, null);
+      }
+
+      expect(events()).toHaveLength(1);
+      expect(events()[0]).toMatchObject({
+        severity: AnomalySeverity.WARNING,
+        baseline: 2,
+        connectionId: 'conn-2',
+        dedupeKey: 'replid:replid-1',
+      });
+      expect(events()[0].nodeAddr).toBeUndefined();
+    });
+
+    it('keeps a primary on its state when it restarts with a new replication ID', async () => {
+      const detect = (service as any).detectPrimaryWithoutReplicas.bind(service);
+
+      await detect(flatInfo(2), mockCtx, now, null);
+      for (let s = 0; s < 6; s++) {
+        now += 1000;
+        await detect({ ...flatInfo(0), master_replid: 'replid-2' }, mockCtx, now, null);
+      }
+
+      expect(events()).toHaveLength(1);
+      expect(events()[0]).toMatchObject({ baseline: 2, dedupeKey: 'replid:replid-1' });
+    });
+
+    it('expects replicas on a promoted replica, as on the primary it replicated from', async () => {
+      const detect = (service as any).detectPrimaryWithoutReplicas.bind(service);
+      const alone = (replid: string, replid2: string) => ({
+        ...flatInfo(0),
+        master_replid: replid,
+        master_replid2: replid2,
+      });
+
+      await detect(flatInfo(2), mockCtx, now, null, '10.0.0.9:6379');
+      for (let s = 0; s < 6; s++) {
+        now += 1000;
+        // Promoted from the primary above, and an unrelated primary without replicas.
+        await detect(alone('replid-2', 'replid-1'), mockCtx, now, null, '10.0.0.10:6379');
+        await detect(alone('replid-3', '0'.repeat(40)), mockCtx, now, null, '10.0.0.11:6379');
+      }
+
+      expect(events()).toHaveLength(1);
+      expect(events()[0]).toMatchObject({
+        severity: AnomalySeverity.WARNING,
+        baseline: 2,
+        dedupeKey: 'replid:replid-2',
+        nodeAddr: '10.0.0.10:6379',
+      });
+    });
+
+    it('continues a fan-out WARNING on the primary’s own connection after a restart', async () => {
+      const direct: ConnectionContext = { ...mockCtx, connectionId: 'conn-2' };
+      const detect = (service as any).detectPrimaryWithoutReplicas.bind(service);
+      // Raised through fan-out by conn-1 before the restart, 10 seconds ago.
+      const stored = {
+        id: 'stored-1',
+        timestamp: now - 10_000,
+        metricType: MetricType.PRIMARY_WITHOUT_REPLICAS,
+        severity: AnomalySeverity.WARNING,
+        baseline: 2,
+        dedupeKey: 'replid:replid-1',
+        nodeAddr: '10.0.0.9:6379',
+      };
+      storage.getAnomalyEvents.mockImplementation((query: { metricType?: string }) =>
+        Promise.resolve(query?.metricType === MetricType.PRIMARY_WITHOUT_REPLICAS ? [stored] : []),
+      );
+
+      // The primary's own connection polls before conn-1 picks its event up.
+      await detect(flatInfo(0), direct, now, null);
+      (service as any).adoptPrimaryReplicaEvents('conn-1', [stored], now);
+      for (let s = 0; s < 20; s++) {
+        now += 1000;
+        await detect(flatInfo(0), direct, now, null);
+      }
+
+      expect(events().map((e) => [e.severity, e.baseline, e.connectionId])).toEqual([
+        [AnomalySeverity.CRITICAL, 2, 'conn-2'],
+      ]);
+
+      await detect(flatInfo(2), direct, (now += 1000), null);
+      await detect(flatInfo(2), direct, (now += 1000), null);
+      expect(storage.resolveAnomaly).toHaveBeenCalledWith('stored-1', expect.any(Number));
+    });
+
+    /** The view of primA after a reshard left it with `slots`. */
+    const resharded = (slots: number[][]) =>
+      shardNodes('primA', 'primA').map((node) => (node.id === 'primA' ? { ...node, slots } : node));
+
+    it('keeps the episode of a shard whose slots change in a reshard', async () => {
+      await pollFor(1);
+      setReplicas([]);
+      await pollFor(10);
+      expect(events()).toHaveLength(1);
+
+      // The shard gives most of its slots away while it still has no replica.
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(resharded([[0, 1000]]));
+      await pollFor(25);
+
+      expect(events().map((e) => [e.severity, e.baseline])).toEqual([
+        [AnomalySeverity.WARNING, 2],
+        [AnomalySeverity.CRITICAL, 2],
+      ]);
+      expect(events()[1].message).toContain('for slots 0-1000 has had no synced replica for 30 s');
+      expect((service as any).persistenceOutbox.resolvedAt(events()[0].id)).toBeUndefined();
+      expect((service as any).primaryReplicaState.size).toBe(1);
+
+      setReplicas(SYNCED);
+      await pollFor(2);
+      expect(events().map((e) => e.resolved)).toEqual([true, true]);
+    });
+
+    it('starts a shard that took slots from another one on its own', async () => {
+      await pollFor(1);
+      const taker: ClusterNode = { ...clusterNode('primB', true, true), slots: [[0, 3000]] };
+      for (let s = 0; s < 10; s++) {
+        now += 1000;
+        await (service as any).detectPrimaryWithoutReplicas(flatInfo(0), mockCtx, now, taker);
+      }
+
+      expect(events()).toHaveLength(0);
+      expect((service as any).primaryReplicaState.size).toBe(2);
+    });
+
+    it('continues an open event after a restart when the shard lost most of its slots since', async () => {
+      await pollFor(1);
+      setReplicas([]);
+      await pollFor(10);
+      const [warning] = events();
+      expect(warning.dedupeKey).toMatch(/^cluster:[0-9a-f]+:0-5460@primA$/);
+
+      // After the restart only the open event is left of the shard.
+      (service as any).primaryReplicaState.clear();
+      (service as any).primaryReplicaEvents.clear();
+      (service as any).adoptPrimaryReplicaEvents('conn-1', [warning], now);
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(resharded([[0, 1000]]));
+      await pollFor(30);
+
+      expect(events().map((e) => [e.severity, e.baseline])).toEqual([
+        [AnomalySeverity.WARNING, 2],
+        [AnomalySeverity.CRITICAL, 2],
+      ]);
+      expect((service as any).persistenceOutbox.resolvedAt(warning.id)).toBeUndefined();
+      expect((service as any).primaryReplicaState.size).toBe(1);
+
+      setReplicas(SYNCED);
+      await pollFor(2);
+      expect(events().map((e) => e.resolved)).toEqual([true, true]);
+    });
+  });
+
   // ─── Replication output-buffer pressure (valkey#3963) ──────────────────────
 
   describe('saved anomaly webhooks', () => {
@@ -14766,6 +15333,7 @@ describe('AnomalyService', () => {
             MetricType.RAFT_HEALTH,
             MetricType.RESHARD_SHARD_SKEW,
             MetricType.HOT_SHARD,
+            MetricType.PRIMARY_WITHOUT_REPLICAS,
             MetricType.TOPOLOGY_DIVERGENCE,
             MetricType.REPLICA_SLOT_STATE,
             MetricType.REPLICATION_DIVERGENCE,

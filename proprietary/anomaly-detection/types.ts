@@ -24,6 +24,8 @@ export enum MetricType {
   RAFT_HEALTH = 'raft_health',
   /** Gossip-mode failover churn: one shard re-electing repeatedly (valkey#3996) — state-based. */
   FAILOVER_CHURN = 'failover_churn',
+  /** A primary whose shard normally has replicas has no synced replica (#714) — state-based. */
+  PRIMARY_WITHOUT_REPLICAS = 'primary_without_replicas',
   /** Replica output buffer approaching client-output-buffer-limit slave (valkey#3963) — state-based. */
   REPL_BUFFER_PRESSURE = 'repl_buffer_pressure',
   /** Non-dataset memory overhead consuming the maxmemory budget / driving eviction (valkey#1792) — state-based. */
@@ -111,6 +113,7 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.EVICTED_CLIENTS,
   MetricType.RAFT_HEALTH,
   MetricType.FAILOVER_CHURN,
+  MetricType.PRIMARY_WITHOUT_REPLICAS,
   MetricType.REPL_BUFFER_PRESSURE,
   MetricType.MEMORY_OVERHEAD,
   MetricType.LOAD_SATURATION,
