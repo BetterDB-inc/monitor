@@ -109,6 +109,7 @@ import {
 } from './hot-shard-keys';
 import {
   REBALANCE_REFRESH_MS,
+  isTransientNoPlan,
   type RebalanceNoPlanReason,
   type RebalanceShard,
   type RebalanceVerdict,
@@ -6322,10 +6323,8 @@ export class AnomalyService
         );
         return;
       }
-      await Promise.all([
-        this.refreshHotShardKeys(ctx, timestamp, sample.timestamp, findings, topSlots),
-        this.refreshRebalance(ctx, timestamp, sample, findings, nodes ?? []),
-      ]);
+      await this.refreshHotShardKeys(ctx, timestamp, sample.timestamp, findings, topSlots);
+      await this.refreshRebalance(ctx, timestamp, sample, findings, nodes ?? []);
       const judged = await this.withoutHotShardsResolvedSince(connectionId, findings, open);
       await this.applyHotShardGate(ctx, timestamp, sample.timestamp, judged, topSlots, selfId);
       this.rememberHotShards(connectionId, sample.timestamp, judged, topSlots);
@@ -6469,8 +6468,9 @@ export class AnomalyService
     const unhealthy = nodes
       .filter((node) => node.flags.includes('master') && clusterNodeState(node.flags) !== 'healthy')
       .map((node) => `${node.id}:${clusterNodeState(node.flags)}`);
+    const shards = this.rebalanceShards(sample, nodes, findings);
     const ownership = [
-      ...sample.shards.map((shard) => `${shard.nodeId}:${shard.slotCount}`),
+      ...shards.map((shard) => `${shard.shardId}:${shard.slotCount}:${shard.hot ? 'hot' : ''}`),
       ...unhealthy,
     ]
       .sort()
@@ -6480,6 +6480,7 @@ export class AnomalyService
       { verdict: RebalanceVerdict; computedAt: number; ownership: string }
     >();
     const due: Array<{ signature: string; shardId: string; slots: SlotLoadRate[] }> = [];
+    const topologyBlocker = this.rebalanceTopologyBlocker(sample, nodes);
     let migrationsChecked = false;
     for (const finding of findings) {
       const signature = hotShardSignature(finding.shardId);
@@ -6488,7 +6489,9 @@ export class AnomalyService
       if (raising) migrationsChecked = true;
       const last = known?.get(signature);
       if (
+        !topologyBlocker &&
         last &&
+        !isTransientNoPlan(last.verdict) &&
         last.ownership === ownership &&
         timestamp - last.computedAt < REBALANCE_REFRESH_MS
       ) {
@@ -6502,19 +6505,17 @@ export class AnomalyService
       });
     }
     if (due.length > 0) {
-      const shards = this.rebalanceShards(sample, nodes, findings);
       const blocked =
-        this.rebalanceTopologyBlocker(sample, nodes) ??
+        topologyBlocker ??
         (migrationsChecked || !(await this.isSlotMigrationRunning(ctx))
           ? undefined
           : 'migration_running');
-      const verdicts = await Promise.all(
-        due.map(({ shardId, slots }) =>
-          blocked
-            ? noRebalancePlan(blocked)
-            : this.withShardFacts(ctx, planRebalance({ hotShardId: shardId, shards, slots })),
-        ),
-      );
+      const verdicts = blocked
+        ? due.map(() => noRebalancePlan(blocked))
+        : await this.withShardFacts(
+            ctx,
+            due.map(({ shardId, slots }) => planRebalance({ hotShardId: shardId, shards, slots })),
+          );
       for (const [index, { signature }] of due.entries()) {
         kept.set(signature, { verdict: verdicts[index], computedAt: timestamp, ownership });
       }
@@ -6525,10 +6526,17 @@ export class AnomalyService
 
   private async withShardFacts(
     ctx: ConnectionContext,
-    verdict: RebalanceVerdict,
-  ): Promise<RebalanceVerdict> {
-    if (verdict.kind !== 'plan') return verdict;
-    const shardIds = [verdict.sourceShardId, ...verdict.moves.map((move) => move.targetShardId)];
+    verdicts: RebalanceVerdict[],
+  ): Promise<RebalanceVerdict[]> {
+    const shardIds = [
+      ...new Set(
+        verdicts.flatMap((verdict) =>
+          verdict.kind === 'plan'
+            ? [verdict.sourceShardId, ...verdict.moves.map((move) => move.targetShardId)]
+            : [],
+        ),
+      ),
+    ];
     const readings = await Promise.all(
       shardIds.map((shardId) => this.readShardInfo(ctx.connectionId, shardId)),
     );
@@ -6540,11 +6548,17 @@ export class AnomalyService
       if (reading) memory.set(shardIds[index], reading);
       if (server) servers.set(shardIds[index], server);
     }
-    const provider = detectProvider(readings[0]?.server ?? {}, ctx.host).provider;
-    return withCommands(
-      { ...verdict, warnings: [...verdict.warnings, ...memoryWarnings(verdict, memory)] },
-      servers,
-      provider !== 'self-hosted' && provider !== 'unknown',
+    const reported = readings.find((info) => info?.server)?.server ?? {};
+    const provider = detectProvider(reported, ctx.host).provider;
+    const providerManaged = provider !== 'self-hosted' && provider !== 'unknown';
+    return verdicts.map((verdict) =>
+      verdict.kind === 'plan'
+        ? withCommands(
+            { ...verdict, warnings: [...verdict.warnings, ...memoryWarnings(verdict, memory)] },
+            servers,
+            providerManaged,
+          )
+        : verdict,
     );
   }
 
@@ -6558,7 +6572,7 @@ export class AnomalyService
         connectionId,
         shardId,
         'reading INFO on the shard timed out',
-        (client) => client.info(),
+        (client) => client.info('memory', 'keyspace', 'server'),
       );
       return InfoParser.parse(raw) as Record<string, Record<string, string> | undefined>;
     } catch (err) {

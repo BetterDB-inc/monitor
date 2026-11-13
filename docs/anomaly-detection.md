@@ -744,10 +744,10 @@ A plan also says whether the cluster has one command that does the move, in `sup
 | `valkey_atomic` | The hot shard and every target run Valkey 9.0 or later. | One `CLUSTER MIGRATESLOTS` for the whole plan, to run on the hot shard. The server starts all of its moves or none. |
 | `redis_atomic` | The hot shard and every target run Redis 8.4 or later. | One `CLUSTER MIGRATION IMPORT` per target, to run on that target. |
 | `none` | A shard of the plan runs an older version, or they run different servers. There is no atomic command; BetterDB does not script the `SETSLOT` and `MIGRATE` steps. | Empty. |
-| `provider_managed` | The connection is a managed service, known by its host name or by what the hot shard reports about itself in `INFO`. Use the provider's own resharding. | Empty. |
+| `provider_managed` | The connection is a managed service, known by its host name or by what a shard of the plans reports about itself in `INFO`. Use the provider's own resharding. | Empty. |
 | `unknown` | `INFO` could not be read on a shard of the plan, so the version is not known. | Empty. |
 
-The suggestion is computed right before the event is raised and again every 5 minutes, or sooner when slots change owner or a primary turns suspect, failed or healthy again. A plan is withdrawn at once, without waiting for a new measurement, when a primary turns failed or suspect or a measured shard stops being a primary. Each computation asks every primary whether a slot is migrating, unless a primary is failed or suspect (the answer is then `unhealthy_node` without asking), and for a plan reads `INFO` once on the hot shard and on each target.
+The suggestion is computed right before the event is raised and again every 5 minutes, or sooner when slots change owner, an empty primary joins or leaves, another shard turns hot or stops being hot, or a primary turns suspect, failed or healthy again. A `migration_running` or `settling` answer is not kept: it is computed again from every new measurement. A plan is withdrawn at once, without waiting for a new measurement, when a primary turns failed or suspect or a measured shard stops being a primary. Each computation asks every primary whether a slot is migrating, unless a primary is failed or suspect (the answer is then `unhealthy_node` without asking). For the plans it then reads the `memory`, `keyspace` and `server` sections of `INFO`, once on each hot shard and each target, after the hot key read has finished.
 
 Before you start one:
 
