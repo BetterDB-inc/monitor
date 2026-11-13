@@ -80,7 +80,7 @@ export function selectObservers(input: ObserverSelectionInput): ObserverSelectio
 
   take(input.anchorId);
   const priority = new Set(taken);
-  for (const id of input.previous) {
+  for (const id of [...input.previous, ...[...input.frozen].sort(compareText)]) {
     if (!input.frozen.has(id)) continue;
     take(id);
     if (taken.has(id)) priority.add(id);

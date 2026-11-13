@@ -244,10 +244,12 @@ export class TopologyDivergenceMonitor {
     }
     state.unanswered = unanswered;
 
+    const viewed = new Set(views.map((view) => view.observerId));
+    const unasked = [...frozen].filter((id) => byId.has(id) && !viewed.has(id));
     state.tracker.observe({
       at,
       disagreements: compareTopologyViews(views),
-      unanswered: [...unanswered],
+      unanswered: [...new Set([...unanswered, ...unasked])],
       views: views.length,
     });
     state.accused = this.accusedBy(views);
