@@ -196,6 +196,7 @@ describe('AnomalyService', () => {
             listMembers: jest.fn().mockReturnValue([]),
             sentinelDataNodeCredentials: jest.fn().mockReturnValue(null),
             findIdByHostPort: jest.fn().mockReturnValue(null),
+            getNodeAvailabilityZones: jest.fn().mockReturnValue(undefined),
           },
         },
         { provide: 'STORAGE_CLIENT', useValue: storage },
@@ -5613,6 +5614,8 @@ describe('AnomalyService', () => {
       ]);
       const getNodeConnection = jest.fn().mockResolvedValue({ call: jest.fn() });
       (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection };
+      // The view-divergence sampler asks an accused node for its own view on purpose.
+      (service as any).topologyDivergenceSettings.enabled = false;
 
       await poll();
       now += 31_000;
@@ -14932,6 +14935,7 @@ describe('AnomalyService', () => {
             MetricType.RAFT_HEALTH,
             MetricType.RESHARD_SHARD_SKEW,
             MetricType.HOT_SHARD,
+            MetricType.TOPOLOGY_DIVERGENCE,
             MetricType.REPLICA_SLOT_STATE,
             MetricType.REPLICATION_DIVERGENCE,
             MetricType.BACKLOG_COVERAGE_RISK,
@@ -23454,6 +23458,457 @@ describe('AnomalyService', () => {
       } finally {
         jest.useRealTimers();
       }
+    });
+  });
+
+  describe('topology divergence', () => {
+    const PRIMARIES: Record<string, { host: string; epoch: number; slots: string }> = {
+      a: { host: '10.0.0.1', epoch: 1, slots: '0-5460' },
+      b: { host: '10.0.0.2', epoch: 2, slots: '5461-10922' },
+      c: { host: '10.0.0.3', epoch: 3, slots: '10923-16383' },
+    };
+    type LinePatch = { flags?: string; epoch?: number; slots?: string };
+    let now: number;
+    let views: Record<string, Record<string, LinePatch>>;
+    let migrations: Record<string, unknown>;
+    let silent: Set<string>;
+    let discovery: Record<'getNodeConnection' | 'retainAddressConnections' | 'releaseConnection', jest.Mock>;
+    let reads: jest.SpyInstance;
+
+    function viewsReadBy(connectionId: string): string[] {
+      return reads.mock.calls.filter(([ctx]) => ctx.connectionId === connectionId).map(([, node]) => node.id);
+    }
+
+    function rawView(myself: string, patch: Record<string, LinePatch> = {}): string {
+      return Object.entries(PRIMARIES)
+        .map(([id, node]) => {
+          const flags = `${id === myself ? 'myself,' : ''}${patch[id]?.flags ?? 'master'}`;
+          const epoch = patch[id]?.epoch ?? node.epoch;
+          const slots = patch[id]?.slots ?? node.slots;
+          return `${id} ${node.host}:6379@16379 ${flags} - 0 0 ${epoch} connected ${slots}`.trim();
+        })
+        .join('\n');
+    }
+
+    function divergenceEvents() {
+      return service.getRecentEvents().filter((e) => e.metricType === MetricType.TOPOLOGY_DIVERGENCE);
+    }
+
+    async function rounds(count: number, ctx: ConnectionContext = mockCtx): Promise<void> {
+      for (let i = 0; i < count; i++) {
+        now += 5_000;
+        await poll(ctx);
+      }
+    }
+
+    function clusterClient(myself: string) {
+      return {
+        ...dbClient,
+        getClusterNodes: jest.fn(async () => MetricsParser.parseClusterNodes(rawView(myself, views[myself]))),
+      };
+    }
+
+    beforeEach(() => {
+      now = 1_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+      views = { a: {}, b: {}, c: {} };
+      migrations = {};
+      silent = new Set();
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+        server: { role: 'master' },
+        clients: { connected_clients: '10', blocked_clients: '0' },
+        memory: { used_memory: '1000000', allocator_frag_ratio: '1.1' },
+        stats: { instantaneous_ops_per_sec: '100', cluster_enabled: '1' },
+      });
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue({ cluster_state: 'ok' });
+      dbClient.getConfigValues = jest.fn().mockResolvedValue({ 'cluster-node-timeout': '15000' });
+      dbClient.getClusterNodes = clusterClient('a').getClusterNodes;
+      reads = jest.spyOn(service as any, 'readTopologyView');
+      discovery = {
+        retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+        releaseConnection: jest.fn().mockResolvedValue(undefined),
+        getNodeConnection: jest.fn(async (nodeId: string) => ({
+          disconnect: jest.fn(),
+          call: jest.fn(async (...args: string[]) => {
+            if (silent.has(nodeId)) throw new Error('ECONNREFUSED');
+            const command = args.join(' ');
+            if (command === 'CLUSTER NODES') return rawView(nodeId, views[nodeId]);
+            if (command === 'CLUSTER GETSLOTMIGRATIONS') return migrations[nodeId] ?? [];
+            throw new Error('ERR unknown command');
+          }),
+        })),
+      };
+      (service as any).clusterDiscovery = discovery;
+    });
+
+    it('raises nothing while every sampled node tells the same story', async () => {
+      await rounds(5);
+
+      expect(divergenceEvents()).toHaveLength(0);
+      expect(service.getTopologyDivergence('conn-1')).toMatchObject({
+        status: 'ok',
+        sampledAt: now,
+        unanswered: [],
+        divergences: [],
+      });
+      expect(service.getTopologyDivergence('conn-1').observers.map((n) => n.nodeId).sort()).toEqual(['a', 'b', 'c']);
+    });
+
+    it('samples on its own round, not on every poll', async () => {
+      await poll();
+      expect(viewsReadBy('conn-1').sort()).toEqual(['b', 'c']);
+      now += 1_000;
+      await poll();
+      now += 1_000;
+      await poll();
+      expect(reads).toHaveBeenCalledTimes(2);
+
+      now += 3_000;
+      await poll();
+      expect(reads).toHaveBeenCalledTimes(4);
+    });
+
+    it('raises one warning once a node has disagreed for the configured rounds', async () => {
+      views.b = { a: { epoch: 9 } };
+
+      await rounds(2);
+      expect(divergenceEvents()).toHaveLength(0);
+      expect(service.getTopologyDivergence('conn-1').divergences).toMatchObject([
+        { eventId: null, confirmed: false, sides: [{ nodes: [{ nodeId: 'b' }] }, {}] },
+      ]);
+
+      await rounds(1);
+      const events = divergenceEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        severity: AnomalySeverity.WARNING,
+        connectionId: 'conn-1',
+        nodeAddr: '10.0.0.2:6379',
+        dedupeKey: 'topology_divergence:b',
+        resolved: false,
+        message:
+          'Cluster views diverge for 10s: 10.0.0.2:6379 disagrees with 10.0.0.1:6379, 10.0.0.3:6379 ' +
+          'about the config epoch of 10.0.0.1:6379.',
+      });
+
+      await rounds(4);
+      expect(divergenceEvents()).toHaveLength(1);
+      expect(service.getTopologyDivergence('conn-1').divergences).toMatchObject([
+        { eventId: events[0].id, confirmed: true, disagreements: [{ kind: 'config_epoch' }] },
+      ]);
+    });
+
+    it('waits out the node timeout before reporting a disputed failure', async () => {
+      (dbClient.getConfigValues as jest.Mock).mockResolvedValue({ 'cluster-node-timeout': '20000' });
+      views.b = { c: { flags: 'master,fail?' } };
+
+      await rounds(4);
+      expect(divergenceEvents()).toHaveLength(0);
+
+      await rounds(1);
+      expect(divergenceEvents()).toHaveLength(1);
+      expect(divergenceEvents()[0].message).toContain('about the failure state of 10.0.0.3:6379.');
+    });
+
+    it('is critical when nodes disagree about who owns slots', async () => {
+      views.b = { a: { slots: '' }, b: { slots: '0-10922' } };
+
+      await rounds(3);
+
+      expect(divergenceEvents()).toHaveLength(1);
+      expect(divergenceEvents()[0].severity).toBe(AnomalySeverity.CRITICAL);
+      expect(divergenceEvents()[0].message).toContain('the owner of slots 0-5460');
+    });
+
+    it('replaces the warning with a critical when the same nodes start to dispute slot owners', async () => {
+      views.b = { c: { epoch: 9 } };
+      await rounds(3);
+      expect(divergenceEvents()).toMatchObject([{ severity: AnomalySeverity.WARNING, resolved: false }]);
+      const warning = divergenceEvents()[0];
+
+      views.b = { c: { epoch: 9 }, a: { slots: '' }, b: { slots: '0-10922' } };
+      await rounds(3);
+
+      expect(divergenceEvents()).toHaveLength(2);
+      expect(divergenceEvents().find((e) => e.id === warning.id)?.resolved).toBe(true);
+      const open = divergenceEvents().filter((e) => !e.resolved);
+      expect(open).toMatchObject([{ severity: AnomalySeverity.CRITICAL, dedupeKey: 'topology_divergence:b' }]);
+      expect(open[0].message).toContain('the owner of slots 0-5460');
+      expect(service.getTopologyDivergence('conn-1').divergences).toMatchObject([
+        { eventId: open[0].id, confirmed: true },
+      ]);
+
+      views.b = { c: { epoch: 9 } };
+      await rounds(4);
+
+      expect(divergenceEvents()).toHaveLength(2);
+      expect(divergenceEvents().filter((e) => !e.resolved)).toMatchObject([{ id: open[0].id }]);
+    });
+
+    it('still closes the replaced warning when storage refuses the close once', async () => {
+      views.b = { c: { epoch: 9 } };
+      await rounds(3);
+      const warning = divergenceEvents()[0];
+      views.b = { c: { epoch: 9 }, a: { slots: '' }, b: { slots: '0-10922' } };
+      await rounds(2);
+      storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+
+      await rounds(1);
+      expect(divergenceEvents().filter((e) => e.severity === AnomalySeverity.CRITICAL)).toHaveLength(1);
+      expect(divergenceEvents().find((e) => e.id === warning.id)?.resolved).toBe(false);
+
+      await (service as any).drainPersistenceOutbox();
+      await rounds(2);
+
+      expect(divergenceEvents()).toHaveLength(2);
+      expect(divergenceEvents().find((e) => e.id === warning.id)?.resolved).toBe(true);
+      expect(divergenceEvents().filter((e) => !e.resolved)).toMatchObject([
+        { severity: AnomalySeverity.CRITICAL, dedupeKey: 'topology_divergence:b' },
+      ]);
+    });
+
+    it('holds a slot dispute while an owner is still moving those slots', async () => {
+      views.b = { a: { slots: '' }, b: { slots: '0-10922' } };
+      migrations.b = [['name', 'job-1', 'state', 'running', 'slot_ranges', '0-5460']];
+
+      await rounds(6);
+
+      expect(divergenceEvents()).toHaveLength(0);
+    });
+
+    it('keeps the event open while the disagreement keeps coming back past the blind limit', async () => {
+      views.b = { a: { epoch: 9 } };
+      await rounds(3);
+      expect(divergenceEvents()).toHaveLength(1);
+
+      for (let round = 0; round < 66; round++) {
+        views.b = round % 2 === 0 ? {} : { a: { epoch: 9 } };
+        await rounds(1);
+      }
+
+      expect(divergenceEvents()).toHaveLength(1);
+      expect(divergenceEvents()[0].resolved).toBe(false);
+    });
+
+    it('closes the event after the views agree for the configured rounds', async () => {
+      views.b = { a: { epoch: 9 } };
+      await rounds(3);
+      views.b = {};
+
+      await rounds(2);
+      expect(divergenceEvents().filter((e) => !e.resolved)).toHaveLength(1);
+
+      await rounds(1);
+      expect(divergenceEvents().filter((e) => !e.resolved)).toHaveLength(0);
+      expect(service.getTopologyDivergence('conn-1').divergences).toEqual([]);
+    });
+
+    it('keeps the event open while the dissenting node stops answering', async () => {
+      views.b = { a: { epoch: 9 } };
+      await rounds(3);
+      silent.add('b');
+
+      await rounds(6);
+
+      expect(divergenceEvents().filter((e) => !e.resolved)).toHaveLength(1);
+      expect(service.getTopologyDivergence('conn-1').unanswered).toMatchObject([{ nodeId: 'b' }]);
+    });
+
+    it('raises again when the event is dismissed while the views still differ', async () => {
+      views.b = { a: { epoch: 9 } };
+      await rounds(3);
+      await service.resolveAnomaly(divergenceEvents()[0].id);
+
+      await rounds(1);
+
+      expect(divergenceEvents().filter((e) => !e.resolved)).toHaveLength(1);
+      expect(divergenceEvents()).toHaveLength(2);
+    });
+
+    it('reports one divergence for a cluster watched through two connections', async () => {
+      views.c = { a: { epoch: 9 } };
+      const second: ConnectionContext = {
+        ...mockCtx,
+        connectionId: 'conn-2',
+        connectionName: 'Second',
+        client: clusterClient('b') as any,
+      };
+
+      for (let i = 0; i < 4; i++) {
+        now += 5_000;
+        await poll(mockCtx);
+        await poll(second);
+      }
+
+      expect(divergenceEvents()).toHaveLength(1);
+      expect(divergenceEvents()[0].connectionId).toBe('conn-1');
+      expect(viewsReadBy('conn-2')).toEqual([]);
+      expect(viewsReadBy('conn-1').filter((id) => id === 'b')).toHaveLength(1);
+      expect(service.getTopologyDivergence('conn-2').divergences).toHaveLength(1);
+    });
+
+    it('leaves the sampling to a connection that can dial when an agent watches the same cluster', async () => {
+      views.c = { a: { epoch: 9 } };
+      const agent: ConnectionContext = {
+        ...mockCtx,
+        connectionId: 'conn-agent',
+        connectionName: 'Agent',
+        client: clusterClient('b') as any,
+      };
+      const getConfig = (service as any).connectionRegistry.getConfig as jest.Mock;
+      const configOf = getConfig.getMockImplementation();
+      getConfig.mockImplementation((id: string) => (id === 'conn-agent' ? { host: 'agent' } : configOf?.(id)));
+
+      try {
+        for (let i = 0; i < 4; i++) {
+          now += 5_000;
+          await poll(agent);
+          await poll(mockCtx);
+          await poll(agent);
+        }
+      } finally {
+        getConfig.mockImplementation(configOf);
+      }
+
+      expect(viewsReadBy('conn-agent')).toEqual([]);
+      expect(viewsReadBy('conn-1')).toContain('c');
+      expect(divergenceEvents()).toMatchObject([{ connectionId: 'conn-1', resolved: false }]);
+      expect(service.getTopologyDivergence('conn-agent')).toMatchObject({ status: 'ok' });
+    });
+
+    it('adds the slots that join an owner dispute to the report once they have disagreed long enough', async () => {
+      const disputedSlots = () =>
+        service.getTopologyDivergence('conn-1').divergences.flatMap((d) => d.disagreements.map((x) => x.slots));
+      views.b = { a: { slots: '100-5460' }, b: { slots: '0-99 5461-10922' } };
+      await rounds(3);
+      expect(divergenceEvents()).toHaveLength(1);
+      expect(divergenceEvents()[0].message).toContain('the owner of slots 0-99');
+      expect(disputedSlots()).toEqual([[[0, 99]]]);
+
+      views.b = { a: { slots: '' }, b: { slots: '0-10922' } };
+      await rounds(2);
+      expect(disputedSlots()).toEqual([[[0, 99]]]);
+
+      await rounds(1);
+      expect(disputedSlots()).toEqual([[[0, 5460]]]);
+      expect(divergenceEvents()).toHaveLength(1);
+    });
+
+    it('hands the open event to another connection when the first one goes quiet', async () => {
+      views.c = { a: { epoch: 9 } };
+      const second: ConnectionContext = {
+        ...mockCtx,
+        connectionId: 'conn-2',
+        connectionName: 'Second',
+        client: clusterClient('b') as any,
+      };
+      for (let i = 0; i < 3; i++) {
+        now += 5_000;
+        await poll(mockCtx);
+        await poll(second);
+      }
+      expect(divergenceEvents()).toHaveLength(1);
+
+      await rounds(6, second);
+      expect(viewsReadBy('conn-2').length).toBeGreaterThan(0);
+      expect(divergenceEvents()).toHaveLength(1);
+      expect(divergenceEvents()[0].resolved).toBe(false);
+
+      views.c = {};
+      await rounds(4, second);
+      expect(divergenceEvents().filter((e) => !e.resolved)).toHaveLength(0);
+    });
+
+    describe('after a restart', () => {
+      beforeEach(() => {
+        storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
+          metricType === MetricType.TOPOLOGY_DIVERGENCE && !offset
+            ? [
+                {
+                  id: 'stored-1',
+                  metricType: MetricType.TOPOLOGY_DIVERGENCE,
+                  dedupeKey: 'topology_divergence:b',
+                  timestamp: now - 120_000,
+                  resolved: false,
+                },
+                {
+                  id: 'stored-0',
+                  metricType: MetricType.TOPOLOGY_DIVERGENCE,
+                  dedupeKey: 'topology_divergence:b',
+                  timestamp: now - 900_000,
+                  resolved: false,
+                },
+              ]
+            : [],
+        );
+        (service as any).connectionRegistry.getConfig.mockImplementation((id: string) => ({ id }));
+      });
+
+      it('adopts its open event instead of raising a second one', async () => {
+        views.b = { a: { epoch: 9 } };
+
+        await rounds(5);
+
+        expect(divergenceEvents()).toEqual([]);
+        expect((service as any).persistenceOutbox.resolvedAt('stored-0')).toEqual(expect.any(Number));
+        expect((service as any).persistenceOutbox.resolvedAt('stored-1')).toBeUndefined();
+        expect(storage.resolveAnomaly).not.toHaveBeenCalledWith('stored-1', expect.anything());
+        expect(service.getTopologyDivergence('conn-1').divergences).toMatchObject([
+          { eventId: 'stored-1', confirmed: true },
+        ]);
+      });
+
+      it('closes an adopted event once the views have agreed for the configured rounds', async () => {
+        await rounds(2);
+        expect(storage.resolveAnomaly).not.toHaveBeenCalledWith('stored-1', expect.anything());
+
+        await rounds(2);
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith('stored-1', expect.any(Number));
+      });
+    });
+
+    it('does not sample a Raft cluster', async () => {
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue({ cluster_state: 'ok', cluster_raft_role: 'leader' });
+      views.b = { a: { epoch: 9 } };
+
+      await rounds(4);
+
+      expect(divergenceEvents()).toHaveLength(0);
+      expect(service.getTopologyDivergence('conn-1').status).toBe('not_sampled');
+    });
+
+    it('does nothing when switched off', async () => {
+      (service as any).topologyDivergenceSettings.enabled = false;
+      views.b = { a: { epoch: 9 } };
+
+      await rounds(4);
+
+      expect(divergenceEvents()).toHaveLength(0);
+      expect(service.getTopologyDivergence('conn-1').status).toBe('not_sampled');
+    });
+
+    it('says it could not compare when no other node can be dialed', async () => {
+      discovery.getNodeConnection.mockRejectedValue(new Error('ECONNREFUSED'));
+
+      await rounds(3);
+
+      expect(divergenceEvents()).toHaveLength(0);
+      expect(service.getTopologyDivergence('conn-1')).toMatchObject({ status: 'insufficient_views', divergences: [] });
+    });
+
+    it('forgets the cluster when its connection is removed', async () => {
+      views.b = { a: { epoch: 9 } };
+      await rounds(3);
+      const [{ id }] = divergenceEvents();
+
+      (service as any).onConnectionRemoved('conn-1');
+
+      expect(service.getTopologyDivergence('conn-1').status).toBe('not_sampled');
+      expect((service as any).topologyDivergenceOpen.size).toBe(0);
+      expect((service as any).topologyDivergenceEventIds.size).toBe(0);
+      expect((service as any).topologyDivergenceEventOwners.size).toBe(0);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(storage.resolveAnomaly.mock.calls.map(([eventId]) => eventId)).toContain(id);
     });
   });
 });

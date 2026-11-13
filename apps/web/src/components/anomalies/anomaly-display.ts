@@ -130,6 +130,7 @@ export const METRIC_LABELS: Record<string, string> = {
   hot_shard: 'Hot Shard',
   slot_migration: 'Slot Migration',
   slot_migration_stuck: 'Slot Migration Stuck or Failed',
+  topology_divergence: 'Topology Divergence',
   backlog_coverage_risk: 'Backlog Coverage Risk',
   resync_escalation: 'Resync Escalation',
   retry_amplification: 'Retry Amplification',
