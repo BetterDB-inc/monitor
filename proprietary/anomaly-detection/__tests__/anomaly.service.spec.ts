@@ -3564,6 +3564,64 @@ describe('AnomalyService', () => {
           }
         });
 
+        describe('with a second hot shard', () => {
+          const warningsOf = (verdict: unknown) => (verdict as { warnings: unknown[] }).warnings;
+          const planWarnings = () =>
+            Object.fromEntries(
+              service
+                .getHotShards('conn-a')
+                .map((shard) => [shard.shardId, warningsOf(shard.rebalance)]),
+            );
+          const full = (memoryShare: number) => ({
+            code: 'target_memory',
+            shardId: 'c0000000',
+            memoryShare: expect.closeTo(memoryShare, 4),
+          });
+          const memoryOf = (targetUsed: number) =>
+            dialMemory({
+              ...Object.fromEntries(IDS.map((id) => [id, info(GB, 8 * GB, 200)])),
+              c0000000: info(targetUsed, 8 * GB, 200),
+            });
+
+          beforeEach(() => {
+            IDS.push('d0000000', 'e0000000');
+            ADDRS.push('10.0.0.4:6379', '10.0.0.5:6379');
+            owners = [[...WIDE], WIDE.map((slot) => slot + 100), [20, 21], [30, 31], [40, 41]];
+            evenSlots = true;
+          });
+
+          afterEach(() => {
+            IDS.length = 3;
+            ADDRS.length = 3;
+          });
+
+          it('counts the keys the earlier plan brings to the same target', async () => {
+            memoryOf(5.8 * GB);
+
+            await step([200_000, 200_000, 20_000, 100_000, 100_000], 6);
+
+            expect(planWarnings()).toEqual({
+              a0000000: [{ code: 'source_fork', shardId: 'a0000000' }],
+              b0000000: [{ code: 'source_fork', shardId: 'b0000000' }, full(0.80625)],
+            });
+          });
+
+          it('counts the keys of a kept plan, reading its source once more', async () => {
+            const { clients } = memoryOf(5.9 * GB);
+            await step([200_000, 100_000, 20_000, 100_000, 100_000], 6);
+            await step([200_000, 300_000, 20_000, 100_000, 100_000], 2);
+            const before = memoryReads(clients.a0000000);
+
+            await step([200_000, 300_000, 20_000, 100_000, 100_000], 4);
+
+            expect(planWarnings()).toEqual({
+              a0000000: [{ code: 'source_fork', shardId: 'a0000000' }],
+              b0000000: [{ code: 'source_fork', shardId: 'b0000000' }, full(0.8125)],
+            });
+            expect(memoryReads(clients.a0000000)).toBe(before + 1);
+          });
+        });
+
         it('reads the memory of the hot shard after its key read gave up', async () => {
           const budget = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
           (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;

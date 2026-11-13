@@ -832,6 +832,35 @@ describe('planRebalances', () => {
     expect(planOf(second).plannedAfter).toEqual([]);
   });
 
+  it('counts an empty primary among the owners once an earlier plan fills it', () => {
+    const shards = [
+      shard('a', 300_000),
+      shard('b', 300_000, { hot: true }),
+      shard('c', 0, { slotCount: 0 }),
+      shard('d', 100_000),
+      shard('e', 100_000),
+    ];
+    const pair = [
+      { hotShardId: 'a', slots: slots(0, even(100, 3_000)) },
+      { hotShardId: 'b', slots: slots(200, even(100, 3_000)) },
+    ];
+
+    const [first, second] = planRebalances(pair, shards).map(planOf);
+
+    expect(first.moves.map((move) => move.targetShardId)).toContain('c');
+    const load = new Map(shards.map((each) => [each.shardId, each.cpuUsecPerSecond]));
+    for (const plan of [first, second]) {
+      for (const move of plan.moves) {
+        load.set(move.targetShardId, load.get(move.targetShardId)! + move.cpuUsecPerSecond);
+        load.set(plan.sourceShardId, load.get(plan.sourceShardId)! - move.cpuUsecPerSecond);
+      }
+    }
+    const sorted = [...load.values()].sort((x, y) => x - y);
+    expect(second.projection.find((row) => row.shardId === 'c')?.before.ratio).toBeGreaterThan(0);
+    expect(second.medianAfter).toBeCloseTo(sorted[2]);
+    expect(after(second, 'b').ratio).toBeCloseTo(load.get('b')! / sorted[2]);
+  });
+
   it('plans one hot shard as planRebalance does', () => {
     const shards = [shard('a', 300_000), shard('b', 100_000), shard('c', 100_000)];
     const input = { hotShardId: 'a', slots: slots(0, even(100, 3_000)) };
@@ -883,8 +912,47 @@ describe('memoryWarnings', () => {
     ]);
 
     expect(
-      memoryWarnings(plan(), memory, { ...DEFAULT_REBALANCE_POLICY, targetMemoryShare: 0.3 }),
+      memoryWarnings(plan(), memory, [], { ...DEFAULT_REBALANCE_POLICY, targetMemoryShare: 0.3 }),
     ).toEqual([{ code: 'target_memory', shardId: 'b', memoryShare: expect.closeTo(0.38) }]);
+  });
+
+  it('counts the keys an earlier plan brings to the same target', () => {
+    const memory = new Map([
+      ['a', source],
+      ['c', source],
+      ['b', { usedBytes: 4.5 * GB, maxBytes: 8 * GB, keyCount: 50_000 }],
+    ]);
+    const earlier = { ...plan(), sourceShardId: 'c' };
+
+    expect(memoryWarnings(plan(), memory)).toEqual([]);
+    expect(memoryWarnings(plan(), memory, [earlier])).toEqual([
+      { code: 'target_memory', shardId: 'b', memoryShare: expect.closeTo(0.8225) },
+    ]);
+  });
+
+  it('leaves out an earlier plan that fills another target', () => {
+    const memory = new Map([
+      ['a', source],
+      ['b', { usedBytes: 4.5 * GB, maxBytes: 8 * GB, keyCount: 50_000 }],
+    ]);
+    const elsewhere = {
+      ...plan(),
+      sourceShardId: 'c',
+      moves: plan().moves.map((move) => ({ ...move, targetShardId: 'd' })),
+    };
+
+    expect(memoryWarnings(plan(), memory, [elsewhere])).toEqual([]);
+  });
+
+  it('says the memory room is unknown when the source of an earlier plan could not be read', () => {
+    const memory = new Map([
+      ['a', source],
+      ['b', { usedBytes: GB, maxBytes: 8 * GB, keyCount: 50_000 }],
+    ]);
+
+    expect(memoryWarnings(plan(), memory, [{ ...plan(), sourceShardId: 'c' }])).toEqual([
+      { code: 'memory_unknown', shardId: 'b' },
+    ]);
   });
 
   it.each([
