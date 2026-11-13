@@ -3450,6 +3450,100 @@ describe('AnomalyService', () => {
         });
       });
 
+      describe('a hot shard that the plan of another covers', () => {
+        const COVERED = [700_000, 300_000, 100_000, 120_000, 120_000];
+        const verdicts = () =>
+          Object.fromEntries(
+            service.getHotShards('conn-a').map((shard) => [shard.shardId, shard.rebalance]),
+          );
+        const messageOf = (shardId: string) =>
+          hotEvents().find((event) => event.message.includes(shardId))?.message;
+        const coveredByA = {
+          kind: 'no_plan',
+          action: 'spread',
+          reason: 'covered_by_other_plan',
+          pinnedSlots: [],
+          coveredBy: [{ shardId: 'a0000000', nodeAddr: '10.0.0.1:6379' }],
+        };
+
+        beforeEach(() => {
+          IDS.push('d0000000', 'e0000000');
+          ADDRS.push('10.0.0.4:6379', '10.0.0.5:6379');
+          owners = [[...WIDE], WIDE.map((slot) => slot + 100), [20, 21], [30, 31], [40, 41]];
+          evenSlots = true;
+        });
+
+        afterEach(() => {
+          IDS.length = 3;
+          ADDRS.length = 3;
+        });
+
+        it('names the plan that covers it, in the answer and in its event', async () => {
+          await step(COVERED, 6);
+
+          expect(verdicts()).toEqual({
+            a0000000: expect.objectContaining({ kind: 'plan', plannedAfter: [] }),
+            b0000000: coveredByA,
+          });
+          expect(messageOf('b0000000')).toMatch(
+            / No rebalance is suggested for this shard: the suggestion for 10\.0\.0\.1:6379 already brings its load near the median\. Apply that one first\.$/,
+          );
+          expect(messageOf('a0000000')).not.toContain('ebalanc');
+        });
+
+        it('keeps that answer for five minutes, then plans again from the load it has by then', async () => {
+          const heavier = [700_000, 900_000, 100_000, 120_000, 120_000];
+          await step(COVERED, 6);
+
+          await step(heavier, 19);
+
+          expect(verdicts().b0000000).toEqual(coveredByA);
+
+          await step(heavier, 2);
+
+          expect(verdicts().b0000000).toMatchObject({ kind: 'plan', plannedAfter: ['a0000000'] });
+        });
+
+        it('plans it again as soon as the plan that covers it is planned again', async () => {
+          const lighter = [250_000, 300_000, 100_000, 120_000, 120_000];
+          await step([700_000, 100_000, 100_000, 120_000, 120_000], 6);
+          await step(COVERED, 16);
+
+          await step(lighter, 6);
+
+          expect(verdicts().b0000000).toEqual(coveredByA);
+
+          await step(lighter);
+
+          expect(verdicts()).toMatchObject({
+            a0000000: { kind: 'plan', plannedAfter: [] },
+            b0000000: { kind: 'plan', plannedAfter: ['a0000000'] },
+          });
+        });
+
+        it('withdraws it with the plan that covers it when a slot migration is found', async () => {
+          const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: true });
+          (service as any).clusterMetrics = { checkSlotMigrations };
+          await step(COVERED, 6);
+
+          checkSlotMigrations.mockResolvedValue({ migrations: [{ slot: 5 }], complete: true });
+          await step(COVERED);
+
+          expect(verdicts()).toMatchObject({
+            a0000000: { kind: 'no_plan', reason: 'migration_running' },
+            b0000000: { kind: 'no_plan', reason: 'migration_running' },
+          });
+
+          checkSlotMigrations.mockResolvedValue({ migrations: [], complete: true });
+          await step(COVERED);
+
+          expect(verdicts()).toEqual({
+            a0000000: expect.objectContaining({ kind: 'plan' }),
+            b0000000: coveredByA,
+          });
+        });
+      });
+
       describe('target memory', () => {
         const GB = 1024 ** 3;
         const info = (usedBytes: number, maxBytes: number, keys: number) =>
