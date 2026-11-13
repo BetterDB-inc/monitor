@@ -1,11 +1,13 @@
+import { KEY_NAME_DISPLAY_LIMIT, displayKeyName } from '@betterdb/shared';
+
 export const HOT_KEY_SLOTS = 3;
 export const HOT_KEY_NAMES_PER_SLOT = 500;
 export const HOT_KEY_TOP = 10;
 export const HOT_KEY_REFRESH_MS = 5 * 60_000;
-export const HOT_KEY_NAME_LIMIT = 64;
+export const HOT_KEY_NAME_LIMIT = KEY_NAME_DISPLAY_LIMIT;
+export { displayKeyName };
 
 const MESSAGE_KEYS = 3;
-const UNSAFE_IN_DISPLAY = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}"\\]/gu;
 const SLOT_MOVED = /^(MOVED|ASK) /;
 const SHORT_NOTES: ReadonlyArray<[RegExp, string]> = [
   [/LFU/, 'no LFU policy'],
@@ -147,19 +149,6 @@ export async function sampleHotKeys(
       .slice(0, HOT_KEY_TOP)
       .map(({ key, slot, freq }) => ({ key, slot, freq })),
   };
-}
-
-export function displayKeyName(name: string): string {
-  const points = Array.from(name);
-  const cut = points.length > HOT_KEY_NAME_LIMIT;
-  const kept = cut ? points.slice(0, HOT_KEY_NAME_LIMIT).join('') : name;
-  const shown = kept.replace(UNSAFE_IN_DISPLAY, (char) => {
-    if (char === '"' || char === '\\') return `\\${char}`;
-    const code = char.codePointAt(0) ?? 0;
-    const hex = code.toString(16);
-    return code < 0x100 ? `\\x${hex.padStart(2, '0')}` : `\\u{${hex}}`;
-  });
-  return cut ? `${shown}…` : shown;
 }
 
 export function describeHotKeys(keys: readonly HotShardKey[]): string {

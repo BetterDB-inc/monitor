@@ -306,6 +306,23 @@ describe('RebalanceSuggestion', () => {
     expect(within(region).queryByRole('button', { name: 'Copy command' })).not.toBeInTheDocument();
   });
 
+  it.each([
+    ['evil\u202egnp.exe', 'Its hottest key is "evil\\u{202e}gnp.exe".'],
+    ['say "hi"\n', 'Its hottest key is "say \\"hi\\"\\x0a".'],
+    ['k'.repeat(200), `Its hottest key is "${'k'.repeat(64)}…".`],
+  ])('shows the name of the hot key %j safely and lets it wrap', async (key, text) => {
+    await show([
+      hotShard(noPlan('key_level', [{ slot: 9189, shareOfShard: 0.81 }]), {
+        topKeys: [{ key, slot: 9189, freq: 255 }],
+      }),
+    ]);
+
+    const region = await panel();
+    const sentence = within(region).getByText(/Rebalancing will not help/);
+    expect(sentence).toHaveTextContent(text);
+    expect(sentence).toHaveClass('break-words');
+  });
+
   it('says a single slot is the load and names its key', async () => {
     await show([
       hotShard(noPlan('key_level', [{ slot: 9189, shareOfShard: 0.81 }]), {

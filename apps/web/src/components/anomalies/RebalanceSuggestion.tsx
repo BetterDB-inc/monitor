@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Check, Copy } from 'lucide-react';
+import { displayKeyName } from '@betterdb/shared';
 import { useOpenHotShards } from '../../hooks/useOpenHotShards';
 import { copyToClipboard } from '../../lib/clipboard';
 import type {
@@ -128,7 +129,7 @@ function describeKeyLevel(verdict: RebalanceNoPlan, shard: HotShardDetail): stri
   const key = shard.topKeys.find((top) => top.slot === slots[0].slot);
   return (
     `Rebalancing will not help: slot ${slots[0].slot} alone is ${share} of this shard's CPU.` +
-    (key ? ` Its hottest key is "${key.key}".` : '')
+    (key ? ` Its hottest key is "${displayKeyName(key.key)}".` : '')
   );
 }
 
@@ -283,7 +284,7 @@ function NoPlan({ verdict, shard }: { verdict: RebalanceNoPlan; shard: HotShardD
   if (verdict.reason !== 'key_level') return <p>{NO_PLAN_REASONS[verdict.reason]}</p>;
   return (
     <div className="space-y-2">
-      <p>{describeKeyLevel(verdict, shard)}</p>
+      <p className="break-words">{describeKeyLevel(verdict, shard)}</p>
       <ul aria-label="What can help" className="list-disc pl-5">
         <li>Client-side caching for the hot keys.</li>
         <li>Reads from replicas.</li>
