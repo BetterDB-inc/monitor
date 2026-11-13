@@ -426,6 +426,69 @@ describe('planRebalance', () => {
     expectTargetsToFit(plan);
   });
 
+  it('keeps a plan that fits even when a slot is heavier than an even share', () => {
+    const load = [
+      ...slots(0, [24_000, 18_000, 18_000]),
+      ...[4, 6, 8, 10, 12].flatMap((slot) => slots(slot, [25_000])),
+    ];
+
+    const plan = planOf(
+      planRebalance({
+        hotShardId: 'a',
+        shards: [shard('a', 185_000), ...fleet(8, 100_000)],
+        slots: load,
+      }),
+    );
+
+    expect(plan.effect).toBe('resolves');
+    expect(plan.pinnedSlots).toEqual([]);
+    expect(plan.moves.map((move) => move.ranges)).toEqual([[[0, 0]], [[1, 1]], [[2, 2]]]);
+    expect(after(plan, 'a').cpuUsecPerSecond).toBe(125_000);
+    expectTargetsToFit(plan);
+  });
+
+  it('keeps headroom that fits even when a slot is heavier than an even share', () => {
+    const loads = [40_000, 30_000, 12_000, 22_000, 27_000, 48_000, 37_000, 17_000];
+
+    const plan = planOf(
+      planRebalance({
+        hotShardId: 'a',
+        shards: [
+          shard('a', 100_000),
+          ...fleet(8, 0).map((target, i) => ({ ...target, cpuUsecPerSecond: loads[i] })),
+        ],
+        slots: slots(1, [30_000, 45_000, 14_000, 11_000]),
+      }),
+    );
+
+    expect(plan.effect).toBe('headroom');
+    expect(plan.pinnedSlots.map((pinned) => pinned.slot)).toEqual([2, 1]);
+    expect(plan.moves.map((move) => [move.targetShardId, move.ranges])).toEqual([
+      ['s03', [[3, 3]]],
+      ['s08', [[4, 4]]],
+    ]);
+    expectTargetsToFit(plan);
+  });
+
+  it.each([1, 2, 3])('never plans more ranges than the limit of %i', (maxRanges) => {
+    const ids = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
+
+    const verdict = planRebalance(
+      {
+        hotShardId: 'a',
+        shards: ids.map((id) => shard(id, id === 'a' ? 250_000 : 100_000)),
+        slots: slots(0, even(100, 2_500)),
+      },
+      { ...DEFAULT_REBALANCE_POLICY, maxRanges },
+    );
+
+    if (maxRanges < 3) {
+      expect(verdict).toMatchObject({ kind: 'no_plan', reason: 'too_many_targets' });
+      return;
+    }
+    expect(planOf(verdict).moves.flatMap((move) => move.ranges)).toHaveLength(3);
+  });
+
   it('gives every planned target its share, so a plan that resolves is labelled so', () => {
     const plan = planOf(
       planRebalance({

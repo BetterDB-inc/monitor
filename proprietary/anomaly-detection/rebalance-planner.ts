@@ -419,7 +419,7 @@ function spread(ctx: Spread): RebalanceVerdict | SlotLoadRate[] {
     };
   };
 
-  const most = Math.min(Math.max(1, policy.maxTargets), candidates.length);
+  const most = Math.max(1, Math.min(policy.maxTargets, policy.maxRanges, candidates.length));
   let chosen: Realized | undefined;
   for (let count = 1; count <= most && !chosen; count += 1) {
     const tried = candidates.slice(0, count);
@@ -430,11 +430,11 @@ function spread(ctx: Spread): RebalanceVerdict | SlotLoadRate[] {
     let aim = needed;
     for (let step = 0; step < AIM_STEPS; step += 1) {
       const real = realize(tried, aim);
-      if (real.oversized.length > 0) return real.oversized;
       if (real.freed > 0 && real.sourceRatio <= policy.resolveRatio + SLACK) {
         chosen = real;
         break;
       }
+      if (real.oversized.length > 0) return real.oversized;
       if (real.selected >= movableCpu - SLACK) break;
       const short = sourceCpu - real.freed - policy.resolveRatio * real.medianAfter;
       aim = Math.min(movableCpu, real.selected + Math.max(short, 2 * SLACK));
@@ -456,7 +456,7 @@ function spread(ctx: Spread): RebalanceVerdict | SlotLoadRate[] {
       );
     }
     chosen = realize(pool, amount);
-    if (chosen.oversized.length > 0) return chosen.oversized;
+    if (chosen.oversized.length > 0 && chosen.freed < enough) return chosen.oversized;
   }
 
   const takers = chosen.takers.filter((taker) => taker.slots.length > 0);
