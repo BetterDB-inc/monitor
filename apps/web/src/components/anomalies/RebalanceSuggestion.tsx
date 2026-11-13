@@ -82,7 +82,7 @@ const NO_PLAN_REASONS: Record<Exclude<RebalanceNoPlanReason, 'key_level'>, strin
   too_many_targets: 'This load would have to be spread over too many shards for one suggestion.',
   no_target: 'No other primary can take slots.',
   unhealthy_node:
-    'A primary is failed or suspect. A suggestion comes back when every primary is healthy.',
+    'A primary that owns slots is failed or suspect. A suggestion comes back when it is healthy again.',
   migration_running:
     'A slot migration is running, or the monitor could not ask every primary whether one is. A suggestion comes back when no migration is running and every primary answers.',
   settling: 'Slots changed owner and the load is still being measured.',

@@ -363,7 +363,7 @@ describe('RebalanceSuggestion', () => {
     ['no_target', 'No other primary can take slots.'],
     [
       'unhealthy_node',
-      'A primary is failed or suspect. A suggestion comes back when every primary is healthy.',
+      'A primary that owns slots is failed or suspect. A suggestion comes back when it is healthy again.',
     ],
     [
       'migration_running',
