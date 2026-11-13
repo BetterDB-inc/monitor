@@ -2997,7 +2997,7 @@ describe('AnomalyService', () => {
         expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'migration_running' });
       });
 
-      it('suggests nothing when a refresh finds a slot migration, without asking twice at the raise', async () => {
+      it('withdraws a kept plan at the next sample that finds a slot migration, asking once per sample', async () => {
         const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: true });
         (service as any).clusterMetrics = { checkSlotMigrations };
         spreadLoad();
@@ -3007,11 +3007,31 @@ describe('AnomalyService', () => {
         expect(rebalance()).toMatchObject({ kind: 'plan' });
 
         checkSlotMigrations.mockResolvedValue({ migrations: [{ slot: 5 }], complete: true });
-        await step(HOT, 20);
+        await step(HOT);
 
         expect(checkSlotMigrations).toHaveBeenCalledTimes(2);
         expect(hotEvents()[0].resolved).toBe(false);
         expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'migration_running' });
+      });
+
+      it('plans from the slot load of the sample it judged', async () => {
+        (service as any).clusterMetrics = {
+          checkSlotMigrations: jest.fn().mockImplementation(async () => {
+            counters.set(119, (counters.get(119) ?? 0) + 90_000_000);
+            shardLoad.record('conn-a', reading(), clock + 5_000);
+            return { migrations: [], complete: true };
+          }),
+        };
+        spreadLoad();
+
+        await step(HOT, 6);
+
+        expect(shardLoad.getTopSlots('conn-a', IDS[0], 1)[0].slot).toBe(119);
+        expect(rebalance()).toMatchObject({
+          kind: 'plan',
+          moves: [{ ranges: [[100, 107]] }],
+          pinnedSlots: [],
+        });
       });
 
       it('asks again at the next sample while a slot migration blocks the plan', async () => {
@@ -3046,10 +3066,15 @@ describe('AnomalyService', () => {
 
       it('plans from the next sample once the slot load of the shard is measured', async () => {
         spreadLoad();
-        jest.spyOn(shardLoad, 'getSlots').mockReturnValueOnce([]);
+        const slotsOf = shardLoad.getSlots.bind(shardLoad);
+        let measured = false;
+        jest
+          .spyOn(shardLoad, 'getSlots')
+          .mockImplementation((...args) => (measured ? slotsOf(...args) : []));
         await step(HOT, 6);
         expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'settling' });
 
+        measured = true;
         await step(HOT);
 
         expect(rebalance()).toMatchObject({ kind: 'plan' });
