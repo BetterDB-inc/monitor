@@ -117,7 +117,7 @@ import {
   describeNoPlan,
   memoryWarnings,
   noRebalancePlan,
-  planRebalance,
+  planRebalances,
   shardMemoryFromInfo,
 } from './rebalance-planner';
 import {
@@ -6468,9 +6468,9 @@ export class AnomalyService
     const connectionId = ctx.connectionId;
     const eventIds = this.hotShardEventIds.get(connectionId);
     const known = this.hotShardRebalance.get(connectionId);
-    const unhealthy = nodes
-      .filter((node) => node.flags.includes('master') && clusterNodeState(node.flags) !== 'healthy')
-      .map((node) => `${node.id}:${clusterNodeState(node.flags)}`);
+    const unhealthy = this.unhealthySlotOwners(sample, nodes).map(
+      (node) => `${node.id}:${clusterNodeState(node.flags)}`,
+    );
     const shards = this.rebalanceShards(sample, nodes, findings);
     const ownership = [
       ...shards.map((shard) => `${shard.shardId}:${shard.slotCount}:${shard.hot ? 'hot' : ''}`),
@@ -6523,8 +6523,10 @@ export class AnomalyService
       } else {
         const verdicts = await this.withMemoryWarnings(
           connectionId,
-          due.map(({ shardId }) =>
-            planRebalance({ hotShardId: shardId, shards, slots: slots.get(shardId) ?? [] }),
+          planRebalances(
+            due.map(({ shardId }) => ({ hotShardId: shardId, slots: slots.get(shardId) ?? [] })),
+            shards,
+            [...kept.values()].map((last) => last.verdict),
           ),
         );
         for (const [index, verdict] of verdicts.entries()) {
@@ -6616,13 +6618,22 @@ export class AnomalyService
     sample: ShardLoadSample | null,
     nodes: ClusterNode[],
   ): RebalanceNoPlanReason | undefined {
-    const primaries = nodes.filter((node) => node.flags.includes('master'));
-    if (primaries.some((node) => clusterNodeState(node.flags) !== 'healthy')) {
-      return 'unhealthy_node';
-    }
-    const primaryIds = new Set(primaries.map((node) => node.id));
+    if (this.unhealthySlotOwners(sample, nodes).length > 0) return 'unhealthy_node';
+    const primaryIds = new Set(
+      nodes.filter((node) => node.flags.includes('master')).map((node) => node.id),
+    );
     if (sample?.shards.some((shard) => !primaryIds.has(shard.nodeId))) return 'settling';
     return undefined;
+  }
+
+  private unhealthySlotOwners(sample: ShardLoadSample | null, nodes: ClusterNode[]): ClusterNode[] {
+    const measured = new Set(sample?.shards.map((shard) => shard.nodeId));
+    return nodes.filter(
+      (node) =>
+        node.flags.includes('master') &&
+        clusterNodeState(node.flags) !== 'healthy' &&
+        (node.slots.length > 0 || measured.has(node.id)),
+    );
   }
 
   private async isSlotMigrationRunning(ctx: ConnectionContext): Promise<boolean> {
@@ -6663,7 +6674,7 @@ export class AnomalyService
     });
     for (const node of nodes) {
       const empty = node.flags.includes('master') && node.slots.length === 0;
-      if (!empty || measured.has(node.id)) continue;
+      if (!empty || measured.has(node.id) || clusterNodeState(node.flags) !== 'healthy') continue;
       const parsed = parseNodeAddress(node.address);
       if (!parsed) continue;
       shards.push({

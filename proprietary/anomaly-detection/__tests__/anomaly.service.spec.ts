@@ -3212,9 +3212,89 @@ describe('AnomalyService', () => {
         await step(HOT, 6);
 
         expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'unhealthy_node' });
-        expect(hotEvents()[0].message).toContain(
-          ' No rebalance is suggested while a primary is failed or suspect.',
-        );
+      });
+
+      it('keeps a reason that may pass out of the event message', async () => {
+        spreadLoad();
+        const nodes = clusterNodes();
+        nodes[2].flags = ['master', 'fail?'];
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(nodes);
+        await step(HOT, 6);
+
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'unhealthy_node' });
+        expect(hotEvents()[0].message).not.toContain('ebalanc');
+
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(clusterNodes());
+        await step(HOT);
+
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+        expect(hotEvents()).toHaveLength(1);
+      });
+
+      it.each([[['master', 'fail']], [['master', 'fail', 'noaddr']], [['master', 'noaddr']]])(
+        'plans around a primary flagged %j that owns no slots',
+        async (flags) => {
+          spreadLoad();
+          const nodes = [
+            ...clusterNodes(),
+            { ...clusterNodes()[1], id: 'f0000000', address: '10.0.0.9:6379@16379', flags },
+          ];
+          (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(nodes);
+
+          await step(HOT, 6);
+
+          const verdict = rebalance();
+          expect(verdict).toMatchObject({ kind: 'plan' });
+          expect(targets()).toEqual(['b0000000']);
+          expect(
+            verdict?.kind === 'plan' ? verdict.projection.map((row) => row.shardId) : [],
+          ).not.toContain('f0000000');
+        },
+      );
+
+      it('keeps a plan when a primary that owns no slots fails and no new sample comes', async () => {
+        spreadLoad();
+        await step(HOT, 6);
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+
+        const nodes = [
+          ...clusterNodes(),
+          {
+            ...clusterNodes()[1],
+            id: 'f0000000',
+            address: '10.0.0.9:6379@16379',
+            flags: ['master', 'fail'],
+          },
+        ];
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(nodes);
+        await idle(STEP_MS);
+        await step(HOT);
+
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+      });
+
+      it('plans the second hot shard on top of the plan for the first', async () => {
+        const plans = () =>
+          service.getHotShards('conn-a').flatMap(({ rebalance: verdict }) =>
+            verdict?.kind === 'plan' ? [verdict] : [],
+          );
+        IDS.push('d0000000', 'e0000000');
+        ADDRS.push('10.0.0.4:6379', '10.0.0.5:6379');
+        owners = [[...WIDE], WIDE.map((slot) => slot + 100), [20, 21], [30, 31], [40, 41]];
+        evenSlots = true;
+        try {
+          await step([200_000, 200_000, 20_000, 100_000, 100_000], 6);
+
+          const [first, second] = plans();
+          const moved = first.moves.find((move) => move.targetShardId === 'c0000000');
+          expect(moved).toBeDefined();
+          expect(
+            second.projection.find((row) => row.shardId === 'c0000000')?.before.cpuUsecPerSecond,
+          ).toBeCloseTo(20_000 + (moved?.cpuUsecPerSecond ?? 0), 0);
+        } finally {
+          IDS.length = 3;
+          ADDRS.length = 3;
+        }
       });
 
       it('plans as soon as the suspect primary is healthy again', async () => {
@@ -3468,7 +3548,7 @@ describe('AnomalyService', () => {
               Object.fromEntries(IDS.map((id) => [id, info(GB, 8 * GB, 200)])),
             );
 
-            await step([900_000, 900_000, 100_000, 100_000, 100_000], 6);
+            await step([200_000, 200_000, 20_000, 100_000, 100_000], 6);
 
             const plans = service.getHotShards('conn-a').map((shard) => shard.rebalance);
             expect(plans).toMatchObject([
