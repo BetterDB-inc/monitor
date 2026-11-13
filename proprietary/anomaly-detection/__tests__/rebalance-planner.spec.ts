@@ -8,6 +8,7 @@ import {
   describeNoPlan,
   memoryWarnings,
   planRebalance,
+  planRebalances,
   shardMemoryFromInfo,
   shardServerFromInfo,
   withCommands,
@@ -280,6 +281,26 @@ describe('planRebalance', () => {
 
     expect(verdict).toMatchObject({ kind: 'no_plan', reason: 'unhealthy_node' });
   });
+
+  it.each(['suspect', 'failed'] as const)(
+    'plans around a %s primary that owns no slots',
+    (state) => {
+      const plan = planOf(
+        planRebalance({
+          hotShardId: 'a',
+          shards: [
+            shard('a', 300_000),
+            shard('b', 100_000),
+            shard('c', 100_000),
+            shard('e', 0, { slotCount: 0, state }),
+          ],
+          slots: slots(0, even(100, 3_000)),
+        }),
+      );
+
+      expect(plan.moves.map((move) => move.targetShardId)).not.toContain('e');
+    },
+  );
 
   it('plans nothing without slot load or for a shard that is not hot', () => {
     const shards = [shard('a', 300_000), shard('b', 100_000), shard('c', 100_000)];
@@ -720,9 +741,6 @@ describe('describeNoPlan', () => {
       ' Rebalancing will not help: no other shard has room for this load. Consider adding a shard.',
     ],
     ['no_target', ' No rebalance is suggested: no other primary can take slots.'],
-    ['unhealthy_node', ' No rebalance is suggested while a primary is failed or suspect.'],
-    ['migration_running', ' No rebalance is suggested while a slot migration is running.'],
-    ['settling', ' No rebalance is suggested until the slot load settles.'],
     [
       'too_many_targets',
       ' No rebalance is suggested: this load would have to be spread over too many shards.',
@@ -733,6 +751,83 @@ describe('describeNoPlan', () => {
     ],
   ])('explains %s', (reason, sentence) => {
     expect(describeNoPlan(noPlan(reason), [])).toBe(sentence);
+  });
+
+  it.each(['unhealthy_node', 'migration_running', 'settling'])(
+    'says nothing about %s, which may pass while the event stays open',
+    (reason) => {
+      expect(describeNoPlan(noPlan(reason), [])).toBe('');
+    },
+  );
+});
+
+describe('planRebalances', () => {
+  const hotPair = (count: number): RebalanceShard[] => [
+    shard('a', 200_000),
+    shard('b', 200_000, { hot: true }),
+    shard('c', 20_000),
+    ...['d', 'e', 'f', 'g'].slice(0, count - 3).map((id) => shard(id, 100_000)),
+  ];
+  const hot = [
+    { hotShardId: 'a', slots: slots(0, even(100, 2_000)) },
+    { hotShardId: 'b', slots: slots(200, even(100, 2_000)) },
+  ];
+
+  it.each([5, 6, 7])(
+    'keeps every target under the line when both plans of %i shards are applied',
+    (count) => {
+      const shards = hotPair(count);
+
+      const plans = planRebalances(hot, shards).map(planOf);
+
+      const load = new Map(shards.map((each) => [each.shardId, each.cpuUsecPerSecond]));
+      for (const plan of plans) {
+        for (const move of plan.moves) {
+          load.set(move.targetShardId, load.get(move.targetShardId)! + move.cpuUsecPerSecond);
+          load.set(plan.sourceShardId, load.get(plan.sourceShardId)! - move.cpuUsecPerSecond);
+        }
+      }
+      const sorted = [...load.values()].sort((a, b) => a - b);
+      const middle = Math.floor(sorted.length / 2);
+      const median =
+        sorted.length % 2 === 1 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+      const targetIds = new Set(
+        plans.flatMap((plan) => plan.moves.map((move) => move.targetShardId)),
+      );
+      expect(targetIds.size).toBeGreaterThan(0);
+      for (const targetId of targetIds) {
+        expect(load.get(targetId)! / median).toBeLessThanOrEqual(
+          DEFAULT_REBALANCE_POLICY.resolveRatio + 1e-9,
+        );
+      }
+    },
+  );
+
+  it('shows the later plan the loads the earlier plan leaves', () => {
+    const [first, second] = planRebalances(hot, hotPair(5)).map(planOf);
+    const moved = first.moves.find((move) => move.targetShardId === 'c')!.cpuUsecPerSecond;
+
+    expect(after(first, 'c').cpuUsecPerSecond).toBe(20_000 + moved);
+    expect(second.projection.find((row) => row.shardId === 'c')?.before.cpuUsecPerSecond).toBe(
+      20_000 + moved,
+    );
+    expect(second.projection.find((row) => row.shardId === 'a')?.before.cpuUsecPerSecond).toBe(
+      after(first, 'a').cpuUsecPerSecond,
+    );
+  });
+
+  it('plans a shard on top of the plans that are kept', () => {
+    const shards = hotPair(5);
+    const [first, second] = planRebalances(hot, shards);
+
+    expect(planRebalances([hot[1]], shards, [first])).toEqual([second]);
+  });
+
+  it('plans one hot shard as planRebalance does', () => {
+    const shards = [shard('a', 300_000), shard('b', 100_000), shard('c', 100_000)];
+    const input = { hotShardId: 'a', slots: slots(0, even(100, 3_000)) };
+
+    expect(planRebalances([input], shards)).toEqual([planRebalance({ ...input, shards })]);
   });
 });
 

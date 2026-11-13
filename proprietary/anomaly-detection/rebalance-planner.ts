@@ -558,7 +558,7 @@ export function planRebalance(
   input: RebalanceInput,
   policy: RebalancePolicy = DEFAULT_REBALANCE_POLICY,
 ): RebalanceVerdict {
-  if (input.shards.some((shard) => shard.state !== 'healthy')) {
+  if (input.shards.some((shard) => shard.state !== 'healthy' && shard.slotCount > 0)) {
     return noRebalancePlan('unhealthy_node');
   }
   const source = input.shards.find((shard) => shard.shardId === input.hotShardId);
@@ -587,7 +587,11 @@ export function planRebalance(
       : 1;
   const candidates = input.shards
     .filter(
-      (shard) => shard !== source && !shard.hot && !policy.excludedShardIds.includes(shard.shardId),
+      (shard) =>
+        shard !== source &&
+        !shard.hot &&
+        shard.state === 'healthy' &&
+        !policy.excludedShardIds.includes(shard.shardId),
     )
     .sort(
       (a, b) =>
@@ -614,6 +618,40 @@ export function planRebalance(
     if (!Array.isArray(outcome)) return outcome;
     kept.push(...outcome);
   }
+}
+
+export function planRebalances(
+  hotShards: ReadonlyArray<Omit<RebalanceInput, 'shards'>>,
+  shards: readonly RebalanceShard[],
+  earlier: readonly RebalanceVerdict[] = [],
+  policy: RebalancePolicy = DEFAULT_REBALANCE_POLICY,
+): RebalanceVerdict[] {
+  const verdicts: RebalanceVerdict[] = [];
+  for (const hotShard of hotShards) {
+    const left = shardsAfter(shards, [...earlier, ...verdicts]);
+    verdicts.push(planRebalance({ ...hotShard, shards: left }, policy));
+  }
+  return verdicts;
+}
+
+function shardsAfter(
+  shards: readonly RebalanceShard[],
+  verdicts: readonly RebalanceVerdict[],
+): RebalanceShard[] {
+  const change = new Map<string, number>();
+  const add = (shardId: string, cpu: number) =>
+    change.set(shardId, (change.get(shardId) ?? 0) + cpu);
+  for (const verdict of verdicts) {
+    if (verdict.kind !== 'plan') continue;
+    for (const move of verdict.moves) {
+      add(move.targetShardId, move.cpuUsecPerSecond);
+      add(verdict.sourceShardId, -move.cpuUsecPerSecond);
+    }
+  }
+  return shards.map((shard) => ({
+    ...shard,
+    cpuUsecPerSecond: Math.max(0, shard.cpuUsecPerSecond + (change.get(shard.shardId) ?? 0)),
+  }));
 }
 
 export function shardMemoryFromInfo(
@@ -746,13 +784,10 @@ function describeKeyLevel(
   );
 }
 
-const NO_PLAN_SENTENCES: Record<Exclude<RebalanceNoPlanReason, 'key_level'>, string> = {
+const NO_PLAN_SENTENCES: Partial<Record<RebalanceNoPlanReason, string>> = {
   cluster_hot:
     ' Rebalancing will not help: no other shard has room for this load. Consider adding a shard.',
   no_target: ' No rebalance is suggested: no other primary can take slots.',
-  unhealthy_node: ' No rebalance is suggested while a primary is failed or suspect.',
-  migration_running: ' No rebalance is suggested while a slot migration is running.',
-  settling: ' No rebalance is suggested until the slot load settles.',
   too_many_targets:
     ' No rebalance is suggested: this load would have to be spread over too many shards.',
   slots_scattered:
@@ -765,5 +800,5 @@ export function describeNoPlan(
 ): string {
   if (!verdict || verdict.kind === 'plan') return '';
   if (verdict.reason === 'key_level') return describeKeyLevel(verdict.pinnedSlots, topKeys);
-  return NO_PLAN_SENTENCES[verdict.reason];
+  return NO_PLAN_SENTENCES[verdict.reason] ?? '';
 }
