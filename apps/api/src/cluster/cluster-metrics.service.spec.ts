@@ -28,14 +28,14 @@ describe('ClusterMetricsService', () => {
       id: 'node1',
       address: '192.168.1.10:6379',
       role: 'master' as const,
-      healthy: true,
+      state: 'healthy',
       slots: [[0, 5460]],
     },
     {
       id: 'node2',
       address: '192.168.1.11:6379',
       role: 'replica' as const,
-      healthy: true,
+      state: 'healthy',
       masterId: 'node1',
       slots: [],
     },
@@ -462,9 +462,9 @@ used_cpu_user:20.3\r
 
   describe('getSlotMigrations', () => {
     const primaries = [
-      { id: 'abc123node1', address: '192.168.1.10:6379', flags: ['master'], role: 'master' as const, healthy: true, slots: [[0, 5460]] },
-      { id: 'def456node2', address: '192.168.1.11:6379', flags: ['master'], role: 'master' as const, healthy: true, slots: [[5461, 10922]] },
-      { id: 'fff789node3', address: '192.168.1.12:6379', flags: ['master'], role: 'master' as const, healthy: true, slots: [] },
+      { id: 'abc123node1', address: '192.168.1.10:6379', flags: ['master'], role: 'master' as const, state: 'healthy', slots: [[0, 5460]] },
+      { id: 'def456node2', address: '192.168.1.11:6379', flags: ['master'], role: 'master' as const, state: 'healthy', slots: [[5461, 10922]] },
+      { id: 'fff789node3', address: '192.168.1.12:6379', flags: ['master'], role: 'master' as const, state: 'healthy', slots: [] },
     ];
 
     function nodeClients(
@@ -669,7 +669,7 @@ used_cpu_user:20.3\r
       it('is incomplete when a failed primary that still owns slots is not asked', async () => {
         mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
           primaries[0],
-          { ...primaries[1], flags: ['master', 'fail'], healthy: false },
+          { ...primaries[1], flags: ['master', 'fail'], state: 'failed' },
           primaries[2],
         ]);
         nodeClients({});
@@ -681,11 +681,23 @@ used_cpu_user:20.3\r
         );
       });
 
+      it('still asks a primary its peers only suspect, and stays complete when it answers', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+          primaries[0],
+          { ...primaries[1], flags: ['master', 'fail?'], state: 'suspect' },
+          primaries[2],
+        ]);
+        nodeClients({});
+
+        await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: true });
+        expect(mockDiscoveryService.getNodeConnection).toHaveBeenCalledWith('def456node2', undefined);
+      });
+
       it('stays complete when the failed primary it skips owns no slots', async () => {
         mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
           primaries[0],
           primaries[1],
-          { ...primaries[2], flags: ['master', 'fail'], healthy: false },
+          { ...primaries[2], flags: ['master', 'fail'], state: 'failed' },
         ]);
         nodeClients({});
 
@@ -937,10 +949,10 @@ used_cpu_user:20.3\r
   describe('getClusterSlotStats', () => {
     it('merges the slots of every primary and keeps the overall top N', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 8191]] },
-        { id: 'r1', address: '10.0.0.2:6379', role: 'replica', healthy: true, slots: [] },
-        { id: 'p2', address: '10.0.0.3:6379', role: 'master', healthy: true, slots: [[8192, 16383]] },
-        { id: 'ghost', address: '10.0.0.4:6379', role: 'master', healthy: false, slots: [[0, 100]] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 8191]] },
+        { id: 'r1', address: '10.0.0.2:6379', role: 'replica', state: 'healthy', slots: [] },
+        { id: 'p2', address: '10.0.0.3:6379', role: 'master', state: 'healthy', slots: [[8192, 16383]] },
+        { id: 'ghost', address: '10.0.0.4:6379', role: 'master', state: 'failed', slots: [[0, 100]] },
       ]);
       const replies: Record<string, unknown> = {
         // p2 still reports slot 2 it just handed over; p1 owns it.
@@ -971,10 +983,30 @@ used_cpu_user:20.3\r
       expect(result.failedSlotRanges).toEqual([[0, 100]]);
     });
 
+    it('still asks a primary its peers only suspect, and does not report it as failed', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 8191]] },
+        { id: 'p2', address: '10.0.0.3:6379', role: 'master', state: 'suspect', slots: [[8192, 16383]] },
+      ]);
+      const replies: Record<string, unknown> = {
+        p1: [[1, ['key-count', 50]]],
+        p2: [[9000, ['key-count', 70]]],
+      };
+      mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => ({
+        call: jest.fn(async () => replies[nodeId]),
+      }));
+
+      const result = await service.getClusterSlotStatsResult('key-count', 3, 'conn-1');
+
+      expect(Object.keys(result.stats).sort()).toEqual(['1', '9000']);
+      expect(result.failedNodes).toEqual([]);
+      expect(result.failedSlotRanges).toEqual([]);
+    });
+
     it('returns every owned slot of each primary that answered in full, whatever the limit', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[1, 2]] },
-        { id: 'p2', address: '10.0.0.3:6379', role: 'master', healthy: true, slots: [[9000, 9000]] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[1, 2]] },
+        { id: 'p2', address: '10.0.0.3:6379', role: 'master', state: 'healthy', slots: [[9000, 9000]] },
       ]);
       const replies: Record<string, unknown> = {
         p1: [[1, ['key-count', 50]], [2, ['key-count', 5]]],
@@ -995,7 +1027,7 @@ used_cpu_user:20.3\r
 
     it('gives the per-node stats the client address, without the cluster bus port', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
-        { id: 'p1', address: '10.0.0.1:6379@16379', role: 'master', healthy: true, slots: [[7, 7]] },
+        { id: 'p1', address: '10.0.0.1:6379@16379', role: 'master', state: 'healthy', slots: [[7, 7]] },
       ]);
       mockDiscoveryService.getNodeConnection.mockResolvedValue({
         call: jest.fn(async () => [[7, ['key-count', 3]]]),
@@ -1010,8 +1042,8 @@ used_cpu_user:20.3\r
 
     it('forgets the cached topology and gives no per-node stats when a primary answers for fewer slots than it was asked for', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 1], [5, 5]] },
-        { id: 'p2', address: '10.0.0.3:6379', role: 'master', healthy: true, slots: [[9, 9]] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 1], [5, 5]] },
+        { id: 'p2', address: '10.0.0.3:6379', role: 'master', state: 'healthy', slots: [[9, 9]] },
       ]);
       const replies: Record<string, Record<number, unknown>> = {
         p1: { 0: [[0, ['key-count', 1]], [1, ['key-count', 1]]], 5: [] },
@@ -1032,7 +1064,7 @@ used_cpu_user:20.3\r
 
     it('gives no per-node stats when the topology lists no primary that owns slots', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [] },
       ]);
 
       const result = await service.getClusterSlotStatsResult('key-count', 10, 'conn-1');
@@ -1043,7 +1075,7 @@ used_cpu_user:20.3\r
 
     it('keeps the cached topology while every primary answers for all its slots', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 1], [5, 5]] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 1], [5, 5]] },
       ]);
       const replies: Record<number, unknown> = {
         0: [[0, ['key-count', 1]], [1, ['key-count', 0]]],
@@ -1060,7 +1092,7 @@ used_cpu_user:20.3\r
 
     it('keeps the cached topology when a range could not be read', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 0], [5, 5]] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 0], [5, 5]] },
       ]);
       mockDiscoveryService.getNodeConnection.mockResolvedValue({
         call: jest.fn(async (_c: string, _s: string, _r: string, start: number) => {
@@ -1076,8 +1108,8 @@ used_cpu_user:20.3\r
 
     it('leaves a primary with an unread range out of the per-node stats', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 99], [200, 299]] },
-        { id: 'p2', address: '10.0.0.3:6379', role: 'master', healthy: true, slots: [[300, 300]] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 99], [200, 299]] },
+        { id: 'p2', address: '10.0.0.3:6379', role: 'master', state: 'healthy', slots: [[300, 300]] },
       ]);
       mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => ({
         call: jest.fn(async (_c: string, _s: string, _r: string, start: number) => {
@@ -1093,7 +1125,7 @@ used_cpu_user:20.3\r
 
     it('does not let a slot a primary is handing off push out the slots it owns', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 99], [200, 299]] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 99], [200, 299]] },
       ]);
       const byRange: Record<string, unknown> = {
         // Slot 150 was handed off but is still reported, at the top of the ranking.
@@ -1111,7 +1143,7 @@ used_cpu_user:20.3\r
 
     it('keeps the ranges a primary answered and reports only the range that failed', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 99], [200, 299]] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 99], [200, 299]] },
       ]);
       mockDiscoveryService.getNodeConnection.mockResolvedValue({
         call: jest.fn(async (_c: string, _s: string, _r: string, start: number) => {
@@ -1131,7 +1163,7 @@ used_cpu_user:20.3\r
       jest.useFakeTimers();
       try {
         mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
-          { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 0], [2, 2], [4, 4]] },
+          { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 0], [2, 2], [4, 4]] },
         ]);
         mockDiscoveryService.getNodeConnection.mockResolvedValue({
           call: jest.fn((_c: string, _s: string, _r: string, start: number) =>
@@ -1155,7 +1187,7 @@ used_cpu_user:20.3\r
       try {
         const slots = Array.from({ length: 17 }, (_, i): [number, number] => [i * 2, i * 2]);
         mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
-          { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots },
+          { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots },
         ]);
         mockDiscoveryService.getNodeConnection.mockResolvedValue({
           call: jest.fn((_c: string, _s: string, _r: string, start: number) =>
@@ -1179,8 +1211,8 @@ used_cpu_user:20.3\r
       jest.useFakeTimers();
       try {
         mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
-          { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 8191]] },
-          { id: 'p2', address: '10.0.0.3:6379', role: 'master', healthy: true, slots: [[8192, 16383]] },
+          { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 8191]] },
+          { id: 'p2', address: '10.0.0.3:6379', role: 'master', state: 'healthy', slots: [[8192, 16383]] },
         ]);
         mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => ({
           call: nodeId === 'p1'
@@ -1204,8 +1236,8 @@ used_cpu_user:20.3\r
       jest.useFakeTimers();
       try {
         mockDiscoveryService.discoverNodes.mockResolvedValue([
-          { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 8191]] },
-          { id: 'p2', address: '10.0.0.3:6379', role: 'master', healthy: true, slots: [[8192, 16383]] },
+          { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 8191]] },
+          { id: 'p2', address: '10.0.0.3:6379', role: 'master', state: 'healthy', slots: [[8192, 16383]] },
         ]);
         const stuckClient = { call: jest.fn(() => new Promise(() => undefined)) };
         const freshClient = { call: jest.fn().mockResolvedValue([[8192, ['key-count', 7]]]) };
@@ -1236,7 +1268,7 @@ used_cpu_user:20.3\r
       jest.useFakeTimers();
       try {
         mockDiscoveryService.discoverNodes.mockResolvedValue([
-          { id: 'p1', address: '10.0.0.1:6379', flags: ['master'], role: 'master', healthy: true, slots: [[0, 16383]] },
+          { id: 'p1', address: '10.0.0.1:6379', flags: ['master'], role: 'master', state: 'healthy', slots: [[0, 16383]] },
         ]);
         mockDiscoveryService.getNodeConnection.mockImplementation(() => new Promise(() => undefined));
 
@@ -1256,7 +1288,7 @@ used_cpu_user:20.3\r
       jest.useFakeTimers();
       try {
         mockDiscoveryService.discoverNodes.mockResolvedValue([
-          { id: 'p1', address: '10.0.0.1:6379', flags: ['master'], role: 'master', healthy: true, slots: [[0, 16383]] },
+          { id: 'p1', address: '10.0.0.1:6379', flags: ['master'], role: 'master', state: 'healthy', slots: [[0, 16383]] },
         ]);
         const late = { call: jest.fn() };
         mockDiscoveryService.getNodeConnection.mockImplementation(
@@ -1284,8 +1316,8 @@ used_cpu_user:20.3\r
     it('falls back to the connection\'s own node when no primary can be reached directly', async () => {
       // Behind an SSH tunnel the announced addresses are unreachable.
       mockDiscoveryService.discoverNodes.mockResolvedValue([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 8191]], flags: ['myself', 'master'] },
-        { id: 'p2', address: '10.0.0.3:6379', role: 'master', healthy: true, slots: [[8192, 16383]], flags: ['master'] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 8191]], flags: ['myself', 'master'] },
+        { id: 'p2', address: '10.0.0.3:6379', role: 'master', state: 'healthy', slots: [[8192, 16383]], flags: ['master'] },
       ]);
       mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));
       const getClusterSlotStats = jest.fn().mockResolvedValue({ '1': { key_count: 50 } });
@@ -1303,7 +1335,7 @@ used_cpu_user:20.3\r
 
     it('fails with the connection\'s own error when neither a primary nor the connection answered', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValue([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 16383]] },
       ]);
       mockDiscoveryService.getNodeConnection.mockResolvedValue({ call: jest.fn().mockRejectedValue(new Error('boom')) });
       mockConnectionRegistry.get.mockReturnValue({
@@ -1316,7 +1348,7 @@ used_cpu_user:20.3\r
 
     it('does not drop the socket of a primary that missed a deadline the caller cut short', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValue([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 16383]] },
       ]);
       const slow = { call: jest.fn(() => new Promise(() => undefined)) };
       mockDiscoveryService.getNodeConnection.mockResolvedValue(slow);
@@ -1334,7 +1366,7 @@ used_cpu_user:20.3\r
       jest.useFakeTimers();
       try {
         mockDiscoveryService.discoverNodes.mockResolvedValue([
-          { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
+          { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 16383]] },
         ]);
         const silent = { call: jest.fn(() => new Promise(() => undefined)) };
         mockDiscoveryService.getNodeConnection.mockResolvedValue(silent);
@@ -1358,8 +1390,8 @@ used_cpu_user:20.3\r
       jest.useFakeTimers();
       try {
         mockDiscoveryService.discoverNodes.mockResolvedValue([
-          { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
-          { id: 'p2', address: '10.0.0.2:6379', role: 'master', healthy: true, slots: [[0, 0]] },
+          { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 16383]] },
+          { id: 'p2', address: '10.0.0.2:6379', role: 'master', state: 'healthy', slots: [[0, 0]] },
         ]);
         const slow = { call: jest.fn(() => new Promise(() => undefined)) };
         mockDiscoveryService.getNodeConnection.mockImplementation((nodeId: string) =>
@@ -1388,7 +1420,7 @@ used_cpu_user:20.3\r
       jest.useFakeTimers();
       try {
         mockDiscoveryService.discoverNodes.mockResolvedValue([
-          { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
+          { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 16383]] },
         ]);
         const silent = { call: jest.fn(() => new Promise(() => undefined)) };
         const fresh = { call: jest.fn().mockResolvedValue([[0, ['key-count', 5]]]) };
@@ -1430,7 +1462,7 @@ used_cpu_user:20.3\r
           () =>
             new Promise((resolve) =>
               setTimeout(
-                () => resolve([{ id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] }]),
+                () => resolve([{ id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 16383]] }]),
                 3_000,
               ),
             ),
@@ -1455,7 +1487,7 @@ used_cpu_user:20.3\r
       jest.useFakeTimers();
       try {
         mockDiscoveryService.discoverNodes.mockResolvedValue([
-          { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
+          { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 16383]] },
         ]);
         mockDiscoveryService.getNodeConnection.mockImplementation(() => new Promise(() => undefined));
         mockConnectionRegistry.get.mockReturnValue({ getClient: jest.fn(), getClusterSlotStats: jest.fn().mockResolvedValue({}) });
@@ -1475,7 +1507,7 @@ used_cpu_user:20.3\r
 
     it('does not back off a primary whose connect was cut off by a shortened budget', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValue([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 16383]] },
       ]);
       mockDiscoveryService.getNodeConnection.mockImplementationOnce(() => new Promise(() => undefined));
       mockConnectionRegistry.get.mockReturnValue({ getClient: jest.fn(), getClusterSlotStats: jest.fn().mockResolvedValue({}) });
@@ -1490,8 +1522,8 @@ used_cpu_user:20.3\r
 
     it('combines the top slots by key count and by CPU from one read per range', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValue([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 8191]] },
-        { id: 'p2', address: '10.0.0.3:6379', role: 'master', healthy: true, slots: [[8192, 16383]] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 8191]] },
+        { id: 'p2', address: '10.0.0.3:6379', role: 'master', state: 'healthy', slots: [[8192, 16383]] },
       ]);
       const replies: Record<string, unknown> = {
         p1: [[1, ['key-count', 50, 'cpu-usec', 10]], [2, ['key-count', 5, 'cpu-usec', 900]]],
@@ -1514,7 +1546,7 @@ used_cpu_user:20.3\r
 
     it('skips the CPU ranking of a combined request while no primary reports CPU', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValue([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 16383]] },
       ]);
       mockDiscoveryService.getNodeConnection.mockResolvedValue({
         call: jest.fn().mockResolvedValue([[1, ['key-count', 5]], [2, ['key-count', 9]]]),
@@ -1527,7 +1559,7 @@ used_cpu_user:20.3\r
 
     it('ranks the fallback node by key count for a combined request', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValue([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]], flags: ['myself', 'master'] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 16383]], flags: ['myself', 'master'] },
       ]);
       mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));
       const getClusterSlotStats = jest.fn().mockResolvedValue({
@@ -1545,7 +1577,7 @@ used_cpu_user:20.3\r
     it('rejects ordering by cpu-usec while no primary reports it', async () => {
       // cluster-slot-stats-enabled no: replies carry key-count only.
       mockDiscoveryService.discoverNodes.mockResolvedValue([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 16383]] },
       ]);
       mockDiscoveryService.getNodeConnection.mockResolvedValue({
         call: jest.fn().mockResolvedValue([[1, ['key-count', 5]], [2, ['key-count', 9]]]),
@@ -1560,8 +1592,8 @@ used_cpu_user:20.3\r
     it('warns once about a primary that keeps failing, and again after it recovered', async () => {
       const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
       mockDiscoveryService.discoverNodes.mockResolvedValue([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 8191]] },
-        { id: 'p2', address: '10.0.0.3:6379', role: 'master', healthy: true, slots: [[8192, 16383]] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 8191]] },
+        { id: 'p2', address: '10.0.0.3:6379', role: 'master', state: 'healthy', slots: [[8192, 16383]] },
       ]);
       let p2Up = false;
       mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) =>

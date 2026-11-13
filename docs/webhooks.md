@@ -17,6 +17,7 @@ BetterDB can send HTTP POST requests to your endpoints when monitoring events oc
 - [Per-Webhook Configuration](#per-webhook-configuration)
 - [Rate Limiting & Hysteresis](#rate-limiting--hysteresis)
 - [API Reference](#api-reference)
+- [Receivers on a Private Network](#receivers-on-a-private-network)
 - [Troubleshooting](#troubleshooting)
 
 ## Quick Start
@@ -454,7 +455,7 @@ If the replica alerts again, the old event closes with no `replication.recovered
 
 `incidentUrl` opens the incident that holds the event. It is only present when `FRONTEND_URL` is set.
 
-A finding on a primary that a cluster connection reads but that is not registered, such as `reshard_shard_skew` or `hot_shard`, also carries `nodeAddr`, and its `sourceHost` and `sourcePort` are that primary's address rather than the registered node's.
+A finding on a primary that a cluster connection reads but that is not registered, such as `reshard_shard_skew` or `hot_shard`, also carries `nodeAddr`, and its `sourceHost` and `sourcePort` are that primary's address rather than the registered node's. A `topology_divergence` event carries them too when exactly one node disagrees with the rest; when several nodes stand on each side it has no `nodeAddr`, and the nodes are named in the `message` (see [topology_divergence](anomaly-detection.md#topology_divergence)).
 
 **Key names in `hot_shard` messages.** On a cluster with an LFU `maxmemory-policy`, the `message` of a `hot_shard` event names up to 3 of the hottest keys it sampled on the shard, for example `Hot keys: "user:42" (freq 255), "cart:{9}" (freq 201).` (see [hot keys](anomaly-detection.md#hot_shard)). The sample is the first 500 names of each of the shard's top three slots, so a hotter key can be missing. If your key names hold personal or otherwise sensitive data, such as an email address or a session token, check where the webhook delivers before you subscribe a chat channel or a third-party tool to `anomaly.detected`. Each name is cut to 64 characters, and control and invisible characters are written as `\xNN` or `\u{NNNN}`, so a name cannot add a line. The Slack and Discord formats also escape mentions, links and markdown. The generic format carries the text as it is in a JSON string, so escape it yourself if you forward it to a chat tool.
 
@@ -514,6 +515,10 @@ Notes:
 - A single finding that is both critical and KEV-exploited emits both
   `cve.critical_detected` (Pro) and `cve.kev_detected` (Enterprise) plus one
   OTel event each, so subscribe accordingly.
+- Findings matched only through NVD data for a branch the vendor advisory
+  doesn't list (typically an end-of-life branch, shown with confidence `broad`)
+  are shown in the UI but don't fire these events unless
+  `CVE_ALERT_ON_BROAD=true`. Other findings fire regardless of confidence.
 
 ```json
 {
@@ -522,7 +527,7 @@ Notes:
   "fingerprint": "a1b2c3d4e5f60718",
   "datasetVersion": "2026-09-15T00:00:00Z",
   "topFindings": [
-    { "cveId": "CVE-2026-12345", "severity": "critical", "knownExploited": true, "fixedIn": "8.0.10" }
+    { "cveId": "CVE-2026-12345", "severity": "critical", "knownExploited": true, "fixedIn": "8.0.10", "confidence": "exact" }
   ],
   "drift": false,
   "partial": false,
@@ -638,7 +643,7 @@ previous stored scan, even when severity is below critical.
   "fingerprint": "a1b2c3d4e5f60718",
   "datasetVersion": "2026-09-15T00:00:00Z",
   "topFindings": [
-    { "cveId": "CVE-2026-54321", "severity": "high", "knownExploited": true, "fixedIn": "8.0.10" }
+    { "cveId": "CVE-2026-54321", "severity": "high", "knownExploited": true, "fixedIn": "8.0.10", "confidence": "exact" }
   ],
   "drift": false,
   "partial": false,
@@ -1318,6 +1323,57 @@ GET /api/webhooks/stats/retry-queue
 }
 ```
 
+## Receivers on a Private Network
+
+By default BetterDB only delivers webhooks to public addresses. In production (`NODE_ENV=production`, which the Docker image and the Helm chart set) a webhook URL is rejected when it points at a private, loopback or link-local address, or at a hostname that resolves to one. This protects against server-side request forgery (SSRF): without it, anyone who can create a webhook could make BetterDB call services on its own network.
+
+A self-hosted BetterDB often needs to reach a receiver on that network: an alert relay in the same Kubernetes cluster, an n8n instance, a self-hosted chat server. Two environment variables allow specific private targets. Both are empty by default.
+
+| Variable | Meaning |
+| --- | --- |
+| `WEBHOOK_ALLOWED_PRIVATE_CIDRS` | Comma-separated IPv4/IPv6 CIDRs, e.g. `10.244.0.0/16,10.96.0.0/12`. A webhook address inside one of them is accepted even though it is private. |
+| `WEBHOOK_ALLOWED_PRIVATE_HOSTS` | Comma-separated hostnames, exact (`relay.internal`) or suffix wildcards (`*.svc.cluster.local`). A URL whose hostname matches may resolve to a private address. |
+
+The same allowlist applies when a webhook is created, updated, tested and on every delivery and retry, so a webhook that saves also delivers.
+
+### Examples
+
+**Kubernetes**, by Service DNS name (the Helm chart values render the same variables):
+
+```yaml
+# values.yaml
+webhooks:
+  allowedPrivateHosts: ["*.svc.cluster.local"]
+```
+
+**Kubernetes**, by pod and Service CIDR:
+
+```yaml
+# values.yaml
+webhooks:
+  allowedPrivateCidrs: ["10.244.0.0/16", "10.96.0.0/12"]
+```
+
+**Docker**, a receiver on the default bridge network:
+
+```bash
+docker run -e WEBHOOK_ALLOWED_PRIVATE_CIDRS=172.17.0.0/16 ... betterdb/monitor
+```
+
+### Rules
+
+- **Metadata and link-local addresses stay blocked.** `169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`, `100.100.100.200` and `192.0.0.192` can never be allowed. A CIDR that overlaps one of them (for example `0.0.0.0/0`, `169.254.0.0/16`, or the whole `100.64.0.0/10` or `fd00::/8` range) is refused at startup; list narrower ranges instead.
+- **Loopback needs its own CIDR.** `127.0.0.0/8`, `::1` and `0.0.0.0/8` are accepted only when listed as a CIDR, and never through a hostname pattern, so a webhook cannot reach BetterDB's own API or a sidecar by accident. Use the IP literal (`http://127.0.0.1:9000/hook`); the name `localhost` stays rejected.
+- **The allowlist applies in every environment.** Without one, `localhost` and `127.x.x.x` are allowed when `NODE_ENV` is not `production`. Once either variable is set, that exception no longer applies and loopback must be listed like any other private range.
+- **A typo fails startup.** An invalid CIDR or hostname pattern stops BetterDB from starting with an error naming the entry. `*` alone is not a valid hostname pattern.
+- **Ignored in cloud mode.** With `CLOUD_MODE` set, both variables are ignored and a warning is logged at startup.
+- **Shrinking the allowlist blocks existing webhooks.** Deliveries to a target that is no longer allowed fail with `Webhook URL resolves to a blocked address` and are recorded as failed deliveries.
+
+### Security Considerations
+
+- Anyone who can create a webhook can make BetterDB send a POST request to anything in the allowlist. List the narrowest CIDR or hostname that works.
+- Allow a hostname only when you control its DNS, such as cluster DNS or a private zone. Whoever controls the DNS for an allowed name decides which private address it reaches. BetterDB checks the address it actually connects to and does not follow redirects, so a name that changes its answer between the check and the request (DNS rebinding) is still held to the allowlist.
+
 ## Troubleshooting
 
 ### Webhook Not Firing
@@ -1429,10 +1485,11 @@ BetterDB blocks private IP addresses to prevent SSRF attacks:
 - IPv6 private ranges
 
 **Allowed in development:**
-- `localhost` and `127.x.x.x` are allowed when `NODE_ENV !== 'production'`
+- `localhost` and `127.x.x.x` are allowed when `NODE_ENV !== 'production'` and no private-network allowlist is set
 
 **Solution:**
-- Use public endpoints or reverse proxy
+- For a receiver on your own network (same Kubernetes cluster, VPC or Docker network), allow it with `WEBHOOK_ALLOWED_PRIVATE_CIDRS` or `WEBHOOK_ALLOWED_PRIVATE_HOSTS`; see [Receivers on a Private Network](#receivers-on-a-private-network)
+- Otherwise use public endpoints or a reverse proxy
 - For testing, set `NODE_ENV=development`
 
 ### Delivery History Missing

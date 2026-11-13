@@ -312,6 +312,7 @@ Monitor sends one OTLP request per node plus one for the monitor each interval, 
 | `betterdb_commandlog_large_reply` | `betterdb.commandlog.large_reply` | `{entry}` |
 | `betterdb_commandlog_large_request_by_pattern` | `betterdb.commandlog.large_request_by_pattern` | `{entry}` |
 | `betterdb_commandlog_large_reply_by_pattern` | `betterdb.commandlog.large_reply_by_pattern` | `{entry}` |
+| `betterdb_log_capture_lost_entries_total` | `betterdb.log_capture.lost_entries` | `{entry}` |
 | `betterdb_acl_denied` | `betterdb.acl.denied` | `{event}` |
 | `betterdb_acl_denied_by_reason` | `betterdb.acl.denied_by_reason` | `{event}` |
 | `betterdb_acl_denied_by_user` | `betterdb.acl.denied_by_user` | `{event}` |

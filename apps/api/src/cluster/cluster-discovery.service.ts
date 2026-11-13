@@ -1,5 +1,6 @@
 import { Injectable, Logger, NotFoundException, OnModuleDestroy } from '@nestjs/common';
 import Valkey from 'iovalkey';
+import { clusterNodeState, type ClusterNodeState } from '@betterdb/shared';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { dialsDataNodes } from '../connections/data-node-reach';
 import { ClusterNode } from '../common/types/metrics.types';
@@ -15,7 +16,7 @@ export interface DiscoveredNode {
   masterId?: string;
   slots: number[][];
   configEpoch: number;
-  healthy: boolean;
+  state: ClusterNodeState;
   flags: string[];
   hostname?: string;
   availabilityZone?: string;
@@ -178,9 +179,11 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
 
     // A failed node lingers in CLUSTER NODES until it is forgotten; keep it out
     // of the role counts so a dead primary is not reported as a fourth master.
-    const failed = discovered.filter((n) => !n.healthy).length;
+    const live = discovered.filter((n) => n.state !== 'failed');
+    const failed = discovered.length - live.length;
+    const suspect = live.filter((n) => n.state === 'suspect').length;
     this.logger.log(
-      `Discovered ${discovered.length} nodes for connection ${cacheKey} (${discovered.filter(n => n.healthy && n.role === 'master').length} masters, ${discovered.filter(n => n.healthy && n.role === 'replica').length} replicas${failed > 0 ? `, ${failed} failed` : ''})`,
+      `Discovered ${discovered.length} nodes for connection ${cacheKey} (${live.filter(n => n.role === 'master').length} masters, ${live.filter(n => n.role === 'replica').length} replicas${suspect > 0 ? `, ${suspect} suspect` : ''}${failed > 0 ? `, ${failed} failed` : ''})`,
     );
 
     return discovered;
@@ -190,10 +193,6 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     const discovered: DiscoveredNode[] = [];
 
     for (const node of clusterNodes) {
-      // The link state is the answering node's own cluster-bus link to this
-      // one, not whether Monitor can reach it, so only a failure flag counts.
-      const isHealthy = !node.flags.includes('fail');
-
       const isMaster = node.flags.includes('master');
       const isReplica = node.flags.includes('slave') || node.flags.includes('replica');
 
@@ -208,7 +207,9 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         masterId: isMaster ? undefined : node.master,
         slots: node.slots,
         configEpoch: node.configEpoch,
-        healthy: isHealthy,
+        // The link state is the answering node's own cluster-bus link to this
+        // one, not whether Monitor can reach it, so only the flags count.
+        state: clusterNodeState(node.flags),
         flags: node.flags,
         ...(node.hostname ? { hostname: node.hostname } : {}),
         ...(node.availabilityZone ? { availabilityZone: node.availabilityZone } : {}),
@@ -280,7 +281,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       role: 'master',
       slots: [],
       configEpoch: 0,
-      healthy: true,
+      state: 'healthy',
       flags: [],
     };
     return this.openNodeClient(key, node, host, port, connectionId, {
@@ -305,7 +306,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       role: 'replica',
       slots: [],
       configEpoch: 0,
-      healthy: true,
+      state: 'healthy',
       flags: [],
       hostname,
     };

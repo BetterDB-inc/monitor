@@ -18,6 +18,7 @@ import {
 } from '../../components/ui/select';
 import { useQuery } from '@tanstack/react-query';
 import { MonitorNodeDescriptor, monitorApi, PreflightResult, StoredCaptureSession } from '../../api/monitor';
+import { clusterNodeLabel } from './cluster-node-label';
 import { PreflightPanel } from './preflight-panel';
 
 const FIVE_MINUTES_MS = 5 * 60 * 1000;
@@ -45,8 +46,7 @@ function ClusterNodeField({
         <SelectContent>
           {nodes.map((n) => (
             <SelectItem key={n.id} value={n.id}>
-              {n.address} · {n.role}
-              {n.healthy ? '' : ' (unhealthy)'}
+              {clusterNodeLabel(n)}
             </SelectItem>
           ))}
         </SelectContent>

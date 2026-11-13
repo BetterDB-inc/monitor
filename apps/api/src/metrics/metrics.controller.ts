@@ -3,6 +3,7 @@ import type { FastifyReply } from 'fastify';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery, ApiParam, ApiHeader } from '@nestjs/swagger';
 import { MetricsService, SLOT_STATS_FAILED_NODES_HEADER } from './metrics.service';
 import { ClusterDiscoveryService, DiscoveredNode } from '../cluster/cluster-discovery.service';
+import { withHealthy } from '../cluster/node-health-response';
 import { ClusterMetricsService, NodeStats, ClusterSlowlogEntry, ClusterClientEntry, ClusterCommandlogEntry, SlotMigration } from '../cluster/cluster-metrics.service';
 import { ConnectionId } from '../common/decorators';
 import { Roles } from '../auth/guards/roles.decorator';
@@ -92,7 +93,12 @@ export class MetricsController {
   @ApiOperation({ summary: 'Get slowlog entries', description: 'Retrieve slowlog entries from Valkey/Redis' })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
   @ApiQuery({ name: 'count', required: false, description: 'Number of entries to return' })
-  @ApiQuery({ name: 'excludeMonitor', required: false, description: 'Set to true to exclude BetterDB-Monitor commands' })
+  @ApiQuery({
+    name: 'excludeMonitor',
+    required: false,
+    description:
+      'Set to true to exclude BetterDB monitor, agent, and CLI commands, including suffixed client names',
+  })
   @ApiQuery({ name: 'startTime', required: false, description: 'Filter entries after this Unix timestamp (seconds)' })
   @ApiQuery({ name: 'endTime', required: false, description: 'Filter entries before this Unix timestamp (seconds)' })
   @ApiResponse({ status: 200, description: 'Slowlog entries retrieved successfully', type: [SlowLogEntryDto] })
@@ -717,9 +723,11 @@ export class MetricsController {
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
   @ApiResponse({ status: 200, description: 'Cluster nodes discovered successfully', type: [DiscoveredNodeDto] })
   @ApiResponse({ status: 500, description: 'Failed to discover cluster nodes' })
-  async discoverClusterNodes(@ConnectionId() connectionId?: string): Promise<DiscoveredNode[]> {
+  async discoverClusterNodes(
+    @ConnectionId() connectionId?: string,
+  ): Promise<Array<DiscoveredNode & { healthy: boolean }>> {
     try {
-      return await this.clusterDiscoveryService.discoverNodes(connectionId);
+      return (await this.clusterDiscoveryService.discoverNodes(connectionId)).map(withHealthy);
     } catch (error) {
       throw new HttpException(
         `Failed to discover cluster nodes: ${error instanceof Error ? error.message : 'Unknown error'}`,

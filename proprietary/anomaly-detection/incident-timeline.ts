@@ -140,6 +140,7 @@ export const RESOLVER_BACKED_METRICS: ReadonlySet<MetricType> = new Set([
   MetricType.RESHARD_SHARD_SKEW,
   MetricType.HOT_SHARD,
   MetricType.PRIMARY_WITHOUT_REPLICAS,
+  MetricType.TOPOLOGY_DIVERGENCE,
   MetricType.REPLICA_SLOT_STATE,
   MetricType.REPLICATION_DIVERGENCE,
   MetricType.BACKLOG_COVERAGE_RISK,
