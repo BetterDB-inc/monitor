@@ -206,6 +206,14 @@ export const envSchema = z
     ANOMALY_POLL_INTERVAL_MS: z.coerce.number().int().min(100).default(1000),
     ANOMALY_CACHE_TTL_MS: z.coerce.number().int().min(1000).default(3600000),
     ANOMALY_PROMETHEUS_INTERVAL_MS: z.coerce.number().int().min(1000).default(30000),
+    ANOMALY_TOPOLOGY_DIVERGENCE_ENABLED: z
+      .string()
+      .default('true')
+      .transform((v) => !isNegativeEnvValue(v)),
+    ANOMALY_TOPOLOGY_DIVERGENCE_NODES_PER_ZONE: z.coerce.number().int().min(1).max(11).default(1),
+    ANOMALY_TOPOLOGY_DIVERGENCE_RANDOM_NODES: z.coerce.number().int().min(2).max(12).default(3),
+    ANOMALY_TOPOLOGY_DIVERGENCE_MIN_POLLS: z.coerce.number().int().min(1).default(3),
+    ANOMALY_TOPOLOGY_DIVERGENCE_INTERVAL_MS: z.coerce.number().int().min(1000).default(5000),
     // Slowlog anomalies ignore BetterDB's own clients unless this is `false`.
     ANOMALY_SLOWLOG_IGNORE_OWN_CLIENTS: z
       .string()

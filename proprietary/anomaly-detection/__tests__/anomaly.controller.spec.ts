@@ -191,3 +191,25 @@ describe('AnomalyController hot shards', () => {
     expect(Object.values(args)).toEqual([expect.objectContaining({ data: { required: true } })]);
   });
 });
+
+describe('AnomalyController.getTopologyDivergence', () => {
+  const report = { status: 'ok', sampledAt: 1000, observers: [], unanswered: [], divergences: [] };
+  const service = { getTopologyDivergence: jest.fn().mockReturnValue(report) };
+  const controller = new AnomalyController(service as unknown as AnomalyService);
+
+  beforeEach(() => jest.clearAllMocks());
+
+  it('returns the divergence report of the connection in the header', () => {
+    expect(controller.getTopologyDivergence('c1')).toEqual(report);
+    expect(service.getTopologyDivergence).toHaveBeenCalledWith('c1');
+  });
+
+  it('is served at topology-divergence and requires the connection header', () => {
+    const args = Reflect.getMetadata('__routeArguments__', AnomalyController, 'getTopologyDivergence');
+
+    expect(Reflect.getMetadata('path', AnomalyController.prototype.getTopologyDivergence)).toBe(
+      'topology-divergence',
+    );
+    expect(Object.values(args)).toEqual([expect.objectContaining({ data: { required: true } })]);
+  });
+});
