@@ -6485,11 +6485,13 @@ export class AnomalyService
     const due: Array<{ signature: string; shardId: string }> = [];
     const topologyBlocker = this.rebalanceTopologyBlocker(sample, nodes);
     let migrationsChecked = false;
+    const tracked: Array<{ signature: string; shardId: string }> = [];
     for (const finding of findings) {
       const signature = hotShardSignature(finding.shardId);
       const raising = this.isHotShardAboutToRaise(connectionId, sample.timestamp, finding);
       if (!eventIds?.has(signature) && !raising) continue;
       if (raising) migrationsChecked = true;
+      tracked.push({ signature, shardId: finding.shardId });
       const last = known?.get(signature);
       if (
         !topologyBlocker &&
@@ -6499,21 +6501,34 @@ export class AnomalyService
         timestamp - last.computedAt < REBALANCE_REFRESH_MS
       ) {
         kept.set(signature, last);
-        continue;
       }
-      due.push({ signature, shardId: finding.shardId });
     }
-    const plans = [...kept]
-      .filter(([, last]) => last.verdict.kind === 'plan')
+    const coveredBy = (verdict: RebalanceVerdict) =>
+      verdict.kind === 'no_plan' && verdict.reason === 'covered_by_other_plan'
+        ? (verdict.coveredBy ?? [])
+        : [];
+    for (const [signature, last] of [...kept]) {
+      const covering = coveredBy(last.verdict);
+      if (
+        covering.some(
+          (shard) => kept.get(hotShardSignature(shard.shardId))?.verdict.kind !== 'plan',
+        )
+      ) {
+        kept.delete(signature);
+      }
+    }
+    due.push(...tracked.filter(({ signature }) => !kept.has(signature)));
+    const withdrawable = [...kept]
+      .filter(([, last]) => last.verdict.kind === 'plan' || coveredBy(last.verdict).length > 0)
       .map(([signature]) => signature);
-    if (plans.length > 0 || due.length > 0) {
+    if (withdrawable.length > 0 || due.length > 0) {
       const blocked =
         topologyBlocker ??
         (migrationsChecked || !(await this.isSlotMigrationRunning(ctx))
           ? undefined
           : 'migration_running');
       if (blocked) {
-        for (const signature of [...plans, ...due.map((plan) => plan.signature)]) {
+        for (const signature of [...withdrawable, ...due.map((plan) => plan.signature)]) {
           kept.set(signature, {
             verdict: noRebalancePlan(blocked),
             computedAt: timestamp,

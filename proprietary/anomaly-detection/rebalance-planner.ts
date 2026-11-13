@@ -55,7 +55,13 @@ export type RebalanceNoPlanReason =
   | 'migration_running'
   | 'settling'
   | 'slots_scattered'
-  | 'too_many_targets';
+  | 'too_many_targets'
+  | 'covered_by_other_plan';
+
+export interface RebalanceCoveringShard {
+  shardId: string;
+  nodeAddr: string;
+}
 
 export interface RebalancePinnedSlot {
   slot: number;
@@ -117,6 +123,7 @@ export interface RebalanceNoPlan {
   action: 'spread';
   reason: RebalanceNoPlanReason;
   pinnedSlots: RebalancePinnedSlot[];
+  coveredBy?: RebalanceCoveringShard[];
 }
 
 export type RebalanceVerdict = RebalancePlan | RebalanceNoPlan;
@@ -537,6 +544,26 @@ function spread(ctx: Spread): RebalanceVerdict | SlotLoadRate[] {
   };
 }
 
+function medianOfOwners(
+  shards: readonly RebalanceShard[],
+  source: RebalanceShard,
+  sourceCpu: number,
+): number {
+  return median(
+    shards
+      .filter((shard) => shard === source || shard.slotCount > 0)
+      .map((shard) => (shard === source ? sourceCpu : shard.cpuUsecPerSecond)),
+  );
+}
+
+function isOverTheLine(input: RebalanceInput, policy: RebalancePolicy): boolean {
+  const source = input.shards.find((shard) => shard.shardId === input.hotShardId);
+  const sourceCpu = cpuOf(input.slots);
+  if (!source || sourceCpu <= 0) return false;
+  const measured = medianOfOwners(input.shards, source, sourceCpu);
+  return hotShardRatio(sourceCpu, measured) > policy.resolveRatio;
+}
+
 export function planRebalance(
   input: RebalanceInput,
   policy: RebalancePolicy = DEFAULT_REBALANCE_POLICY,
@@ -548,11 +575,7 @@ export function planRebalance(
   const sourceCpu = cpuOf(input.slots);
   if (!source || sourceCpu <= 0) return noRebalancePlan('settling');
 
-  const medianBefore = median(
-    input.shards
-      .filter((shard) => shard === source || shard.slotCount > 0)
-      .map((shard) => (shard === source ? sourceCpu : shard.cpuUsecPerSecond)),
-  );
+  const medianBefore = medianOfOwners(input.shards, source, sourceCpu);
   if (hotShardRatio(sourceCpu, medianBefore) <= policy.resolveRatio) {
     return noRebalancePlan('settling');
   }
@@ -613,11 +636,25 @@ export function planRebalances(
   for (const hotShard of hotShards) {
     const counted = [...earlier, ...verdicts].filter((verdict) => verdict.kind === 'plan');
     const verdict = planRebalance({ ...hotShard, shards: shardsAfter(shards, counted) }, policy);
-    verdicts.push(
-      verdict.kind === 'plan'
-        ? { ...verdict, plannedAfter: counted.map((plan) => plan.sourceShardId) }
-        : verdict,
-    );
+    if (verdict.kind === 'plan') {
+      verdicts.push({ ...verdict, plannedAfter: counted.map((plan) => plan.sourceShardId) });
+    } else if (
+      verdict.reason === 'settling' &&
+      counted.length > 0 &&
+      isOverTheLine({ ...hotShard, shards }, policy)
+    ) {
+      verdicts.push({
+        ...noRebalancePlan('covered_by_other_plan'),
+        coveredBy: counted.map((plan) => ({
+          shardId: plan.sourceShardId,
+          nodeAddr:
+            shards.find((shard) => shard.shardId === plan.sourceShardId)?.nodeAddr ??
+            plan.sourceShardId,
+        })),
+      });
+    } else {
+      verdicts.push(verdict);
+    }
   }
   return verdicts;
 }
@@ -689,7 +726,7 @@ export function memoryWarnings(
   });
 }
 
-function listed(values: readonly number[]): string {
+function listed(values: readonly (number | string)[]): string {
   if (values.length < 2) return values.join('');
   return `${values.slice(0, -1).join(', ')} and ${values[values.length - 1]}`;
 }
@@ -728,11 +765,24 @@ const NO_PLAN_SENTENCES: Partial<Record<RebalanceNoPlanReason, string>> = {
     " No rebalance is suggested: this shard's slots are too scattered to move enough load in a few ranges.",
 };
 
+function describeCovered(coveredBy: readonly RebalanceCoveringShard[]): string {
+  const several = coveredBy.length > 1;
+  return (
+    ` No rebalance is suggested for this shard: the suggestion${several ? 's' : ''} for ` +
+    `${listed(coveredBy.map((shard) => shard.nodeAddr))} already ` +
+    `bring${several ? '' : 's'} its load near the median. ` +
+    `Apply ${several ? 'those' : 'that one'} first.`
+  );
+}
+
 export function describeNoPlan(
   verdict: RebalanceVerdict | undefined,
   topKeys: readonly HotShardKey[],
 ): string {
   if (!verdict || verdict.kind === 'plan') return '';
   if (verdict.reason === 'key_level') return describeKeyLevel(verdict.pinnedSlots, topKeys);
+  if (verdict.reason === 'covered_by_other_plan' && verdict.coveredBy?.length) {
+    return describeCovered(verdict.coveredBy);
+  }
   return NO_PLAN_SENTENCES[verdict.reason] ?? '';
 }

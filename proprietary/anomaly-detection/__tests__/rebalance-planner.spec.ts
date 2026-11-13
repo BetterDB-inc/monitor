@@ -750,6 +750,33 @@ describe('describeNoPlan', () => {
     expect(describeNoPlan(noPlan(reason), [])).toBe(sentence);
   });
 
+  it('names the shard whose suggestion covers this one', () => {
+    const verdict = {
+      ...noPlan('covered_by_other_plan'),
+      coveredBy: [{ shardId: 'a', nodeAddr: '10.0.0.1:6379' }],
+    } as RebalanceVerdict;
+
+    expect(describeNoPlan(verdict, [])).toBe(
+      ' No rebalance is suggested for this shard: the suggestion for 10.0.0.1:6379 already ' +
+        'brings its load near the median. Apply that one first.',
+    );
+  });
+
+  it('names every shard whose suggestion covers this one', () => {
+    const verdict = {
+      ...noPlan('covered_by_other_plan'),
+      coveredBy: [
+        { shardId: 'a', nodeAddr: '10.0.0.1:6379' },
+        { shardId: 'b', nodeAddr: '10.0.0.2:6379' },
+      ],
+    } as RebalanceVerdict;
+
+    expect(describeNoPlan(verdict, [])).toBe(
+      ' No rebalance is suggested for this shard: the suggestions for 10.0.0.1:6379 and ' +
+        '10.0.0.2:6379 already bring its load near the median. Apply those first.',
+    );
+  });
+
   it.each(['unhealthy_node', 'migration_running', 'settling'])(
     'says nothing about %s, which may pass while the event stays open',
     (reason) => {
@@ -859,6 +886,56 @@ describe('planRebalances', () => {
     expect(second.projection.find((row) => row.shardId === 'c')?.before.ratio).toBeGreaterThan(0);
     expect(second.medianAfter).toBeCloseTo(sorted[2]);
     expect(after(second, 'b').ratio).toBeCloseTo(load.get('b')! / sorted[2]);
+  });
+
+  describe('a hot shard that an earlier plan brings near the median', () => {
+    const covered = (cpu: number): RebalanceShard[] => [
+      shard('a', 700_000),
+      shard('b', cpu, { hot: true }),
+      shard('c', 100_000),
+      shard('d', 120_000),
+      shard('e', 120_000),
+    ];
+    const pair = (cpu: number) => [
+      { hotShardId: 'a', slots: slots(0, even(100, 7_000)) },
+      { hotShardId: 'b', slots: slots(200, even(100, cpu / 100)) },
+    ];
+    const coveredByA = {
+      kind: 'no_plan',
+      action: 'spread',
+      reason: 'covered_by_other_plan',
+      pinnedSlots: [],
+      coveredBy: [{ shardId: 'a', nodeAddr: '10.0.0.1:6379' }],
+    };
+
+    it.each([250_000, 300_000, 350_000])(
+      'says the earlier plan covers it at a load of %i',
+      (cpu) => {
+        const [first, second] = planRebalances(pair(cpu), covered(cpu));
+
+        expect(planOf(first).effect).toBe('resolves');
+        expect(second).toEqual(coveredByA);
+      },
+    );
+
+    it('says a kept plan covers it', () => {
+      const shards = covered(300_000);
+      const [first] = planRebalances(pair(300_000), shards);
+
+      expect(planRebalances([pair(300_000)[1]], shards, [first])).toEqual([coveredByA]);
+    });
+
+    it('still calls it settling when the measured load is under the line too', () => {
+      const [first, second] = planRebalances(pair(140_000), covered(140_000));
+
+      expect(first).toMatchObject({ kind: 'plan' });
+      expect(second).toEqual({
+        kind: 'no_plan',
+        action: 'spread',
+        reason: 'settling',
+        pinnedSlots: [],
+      });
+    });
   });
 
   it('plans one hot shard as planRebalance does', () => {
