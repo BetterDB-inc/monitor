@@ -15,8 +15,17 @@ import {
   LogSourceTracker,
 } from '../common/services/multi-connection-poller';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { isBetterDbClientName } from '../common/utils/own-clients';
 import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
 import { LogGapTracker, SLOWLOG_CAPTURE } from '../common/services/log-gap-tracker';
+
+function csvList(value: string | undefined): string[] {
+  if (!value) return [];
+  return value
+    .split(',')
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+}
 
 @Injectable()
 export class SlowLogAnalyticsService extends MultiConnectionPoller implements OnModuleInit {
@@ -24,6 +33,19 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
 
   // Per-connection state tracking
   private lastSeenIds = new Map<string, number | null>();
+  // New slowlog entries that anomaly detection should count. Own clients and
+  // the configured prefixes/commands are stored, but they do not move this.
+  // Entries logged but never read are estimated from the gap tracker's count.
+  // Absent means this connection has not completed a poll yet. It keeps
+  // running when the log source moves, so the difference of two readings is
+  // never taken across two sources.
+  private externalEntryCounts = new Map<string, number>();
+  // Connections whose log source moved. Their next completed poll adds
+  // nothing: what it reads may have been logged before the move.
+  private readonly baselineDue = new Set<string>();
+  private readonly ignoreOwnClients: boolean;
+  private readonly ignoreClientPrefixes: readonly string[];
+  private readonly ignoreCommands: ReadonlySet<string>;
   // Server process each connection's lastSeenId belongs to. Slowlog IDs are per
   // process, so when a connection lands on another one the tracker restarts
   // from that process's own last stored ID.
@@ -46,6 +68,12 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
   ) {
     super(connectionRegistry);
     this.logSources = new LogSourceTracker((id) => this.storage.hasRunIdLogEntries(id));
+    // Read once. A per-workspace setting can come later if someone asks for it.
+    this.ignoreOwnClients = (process.env.ANOMALY_SLOWLOG_IGNORE_OWN_CLIENTS ?? 'true') !== 'false';
+    this.ignoreClientPrefixes = csvList(process.env.ANOMALY_SLOWLOG_IGNORE_CLIENT_PREFIXES);
+    this.ignoreCommands = new Set(
+      csvList(process.env.ANOMALY_SLOWLOG_IGNORE_COMMANDS).map((command) => command.toLowerCase()),
+    );
   }
 
   protected getIntervalMs(): number {
@@ -75,6 +103,7 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
           this.logger.log(
             `Slow log source for ${ctx.connectionName} moved from ${moved.previous} to ${describeLogSource(source)}`,
           );
+          this.baselineDue.add(ctx.connectionId);
         }
         this.lastSeenIds.delete(ctx.connectionId);
         this.gaps.sourceChanged(ctx.connectionId);
@@ -119,6 +148,10 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
 
       if (newEntries.length === 0) {
         this.gaps.completePoll(ctx.connectionId, SLOWLOG_CAPTURE, entries, currentLastSeenId);
+        if (!this.externalEntryCounts.has(ctx.connectionId)) {
+          this.externalEntryCounts.set(ctx.connectionId, 0);
+        }
+        this.baselineDue.delete(ctx.connectionId);
         this.logger.debug(`No new slow log entries to save for ${ctx.connectionName}`);
         return;
       }
@@ -153,6 +186,21 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
         this.lastSeenIds.set(ctx.connectionId, maxId);
       }
 
+      // The entries that were never read have no known client. They are
+      // assumed to have the same mix as the ones read: a burst is then not
+      // capped at the fetch size, and a burst of ignored entries still adds
+      // nothing.
+      const externalRead = newEntries.filter((entry) => !this.isIgnoredSlowlogEntry(entry)).length;
+      const externalMissed = Math.round((missed * externalRead) / newEntries.length);
+      // Published only after the save: a failed first poll, or a failed first
+      // poll after a move, must still be that poll when it is retried.
+      const baseline = this.baselineDue.delete(ctx.connectionId);
+      const previous = this.externalEntryCounts.get(ctx.connectionId) ?? 0;
+      this.externalEntryCounts.set(
+        ctx.connectionId,
+        baseline ? previous : previous + externalRead + externalMissed,
+      );
+
       this.logger.debug(`Saved ${saved} new slow log entries for ${ctx.connectionName} (lastSeenId: ${this.lastSeenIds.get(ctx.connectionId)})`);
     } catch (error) {
       if (this.runtimeCapabilityTracker.recordFailure(ctx.connectionId, 'canSlowLog', error instanceof Error ? error : String(error))) {
@@ -166,6 +214,8 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
 
   protected onConnectionRemoved(connectionId: string): void {
     this.lastSeenIds.delete(connectionId);
+    this.externalEntryCounts.delete(connectionId);
+    this.baselineDue.delete(connectionId);
     this.logSources.forget(connectionId);
     this.gaps.forget(connectionId);
     this.cachedEntries.delete(connectionId);
@@ -246,5 +296,31 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
       return this.lastSeenIds.get(defaultId) ?? null;
     }
     return null;
+  }
+
+  /**
+   * Cumulative count of new slowlog entries that anomaly detection counts.
+   * Null until the first completed poll for this connection. It does not
+   * restart when the log source moves.
+   */
+  getExternalEntryCount(connectionId?: string): number | null {
+    const id = connectionId || this.connectionRegistry.getDefaultId();
+    if (!id || !this.externalEntryCounts.has(id)) return null;
+    return this.externalEntryCounts.get(id) ?? null;
+  }
+
+  private isIgnoredSlowlogEntry(entry: SlowLogEntry): boolean {
+    const name = entry.clientName ?? '';
+    if (this.ignoreOwnClients && isBetterDbClientName(name)) return true;
+    if (name && this.ignoreClientPrefixes.some((prefix) => name.startsWith(prefix))) return true;
+    if (this.ignoreCommands.size === 0) return false;
+    // `get` matches GET with any arguments; `cluster|slot-stats` matches only
+    // that subcommand.
+    const [cmd, sub] = (entry.command ?? []).slice(0, 2).map((part) => part.toLowerCase());
+    if (!cmd) return false;
+    return (
+      this.ignoreCommands.has(cmd) ||
+      (sub !== undefined && this.ignoreCommands.has(`${cmd}|${sub}`))
+    );
   }
 }
