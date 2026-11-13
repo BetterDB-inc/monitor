@@ -734,7 +734,7 @@ The cluster is read every 30 seconds, and every 5 seconds while a migration is r
 
 A connection through the BetterDB agent is not watched: the monitor reaches only that one node through the agent and cannot ask the primaries. When the monitor can open its own sockets but no primary answers on the address the cluster reports for it, as behind NAT or an SSH tunnel, it reads the connection's own node instead and tries the primaries again after 10 minutes. From one node it sees only the migrations that node is the source or the target of.
 
-While the nodes of a migration cannot be read, its events stay as they are: a read that fails does not close them. The same holds after the monitor restarts. An entry that was open stays open until the monitor sees the migration again, a node lists the job as finished, both nodes of a move with the older markers answer without them, or a read covers every primary. Where the monitor reads only the connection's own node, an entry for a migration between other nodes therefore stays open; resolve it by hand once the migration has ended.
+While the nodes of a migration cannot be read, its events stay as they are: a read that fails does not close them. The same holds after the monitor restarts. An entry that was open stays open until the monitor sees the migration again, a node lists the job as finished, both nodes of a move with the older markers answer without them, or a read covers every primary. Where the monitor reads only the connection's own node, an entry for the older markers, or for a job between other nodes, therefore stays open when the migration ended while the monitor was down; resolve it by hand.
 
 ### slot_migration_stuck
 **What it measures**: A slot migration that stopped making progress, or an atomic job that ended as `failed`
@@ -754,7 +754,7 @@ WARNING: Slot migration stuck: slots 0-1365 from 10.0.0.1:6379 to 10.0.0.3:6379 
 
 `CLUSTER CANCELSLOTMIGRATIONS` has no job name: it cancels every active migration the node it runs on is the source of. Check what else that node is moving before you run it.
 
-The quiet time is counted on the monitor's clock from the moment it last saw a change, not by comparing the server's timestamps with it, so a clock difference between the two does not matter. It starts again when the monitor restarts. A warning that was open before the restart stays open until the monitor sees the job's state or times change, the slots change, or the migration end.
+The quiet time is counted on the monitor's clock from the moment it last saw a change, not by comparing the server's timestamps with it, so a clock difference between the two does not matter. It starts again when the monitor restarts. A warning that was open before the restart stays open until the monitor sees the job's state or times change, the slots change, or the migration end. That also holds when only the target of the job can be read.
 
 A failed job is reported once. Jobs that were already in a node's list when the monitor first read that node are not reported, so a restart does not repeat old failures; a job that failed while the monitor was down is missed. A job that starts and fails between two reads is still reported while a node the monitor can read still lists it. A node keeps finished jobs in memory only, up to `cluster-slot-migration-log-max-len` of them (1000 by default), and loses the list when it restarts.
 

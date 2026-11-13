@@ -159,8 +159,7 @@ function endedWhileUnwatched(
   if (report.complete) return true;
   if (id.startsWith(JOB_MOVE)) return report.finishedJobs.includes(id.slice(JOB_MOVE.length));
   const ends = id.slice(LEGACY_MOVE.length).split('>');
-  const read = ends.filter((nodeId) => readNow.has(nodeId));
-  return report.ownNodeOnly ? read.length > 0 : read.length === ends.length;
+  return ends.every((nodeId) => readNow.has(nodeId));
 }
 
 export function judgeSlotMigrations(
@@ -184,9 +183,7 @@ export function judgeSlotMigrations(
     const since = known && unchanged ? known.since : now;
     const stuckSignature = `stuck:${move.id}`;
     const stuckBefore =
-      move.timed &&
-      (!known || unchanged) &&
-      (known?.stuckBefore === true || watch.adopted.has(stuckSignature));
+      (!known || unchanged) && (known?.stuckBefore === true || watch.adopted.has(stuckSignature));
     listed.add(move.id);
     moves.set(move.id, {
       stamp: move.stamp,

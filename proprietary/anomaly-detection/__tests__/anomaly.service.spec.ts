@@ -3286,6 +3286,19 @@ describe('AnomalyService', () => {
         expect(resolvedIds()).toEqual(['stuck-1']);
       });
 
+      it('keeps a stuck warning when only the target of the job can be read', async () => {
+        report = {
+          ...report,
+          migrations: [job({ state: 'importing', phase: 'receiving-snapshot' })],
+          readNodeIds: [B.id],
+          complete: false,
+        };
+        await after(0);
+        await after(MINUTE);
+
+        expect(resolvedIds()).toEqual([]);
+      });
+
       it('keeps them open while the nodes cannot be read, then closes the ones that ended', async () => {
         report = { ...report, migrations: [], readNodeIds: ['c0000000'], complete: false };
         await after(0);

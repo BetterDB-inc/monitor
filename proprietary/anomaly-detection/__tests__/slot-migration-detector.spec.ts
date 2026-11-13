@@ -325,10 +325,34 @@ describe('judgeSlotMigrations', () => {
       expect(judged.stuck).toHaveLength(1);
     });
 
-    it('does not keep a stuck warning for a job it would not judge', () => {
+    it('keeps a stuck warning when only the target can be read and the snapshot arrives', () => {
       const importing = job({ state: 'importing', phase: 'receiving-snapshot' });
+      const targetOnly = report({ migrations: [importing], readNodeIds: [B.id], complete: false });
 
-      const judged = run([[T0, report({ migrations: [importing] })]], adopted(STUCK));
+      const judged = run(
+        [
+          [T0, targetOnly],
+          [T0 + 2 * ATOMIC_MIGRATION_STALL_MS, targetOnly],
+        ],
+        adopted(STUCK),
+      );
+
+      expect(judged.stuck).toEqual([]);
+      expect([...judged.held]).toEqual([STUCK]);
+    });
+
+    it('lets go of that warning once the target reports another state', () => {
+      const importing = job({ state: 'importing', phase: 'receiving-snapshot' });
+      const targetOnly = (migration: SlotMigration) =>
+        report({ migrations: [migration], readNodeIds: [B.id], complete: false });
+
+      const judged = run(
+        [
+          [T0, targetOnly(importing)],
+          [T0 + MINUTE, targetOnly({ ...importing, phase: 'waiting-for-paused' })],
+        ],
+        adopted(STUCK),
+      );
 
       expect(judged.held.size).toBe(0);
     });
@@ -388,8 +412,8 @@ describe('judgeSlotMigrations', () => {
         expect([...partial([A.id, C.id]).held]).toEqual([MARKERS]);
       });
 
-      it('closes them on one of the two nodes when that node is all it can read', () => {
-        expect(partial([A.id], true).held.size).toBe(0);
+      it('keeps them when the one node it can read is only one of the two', () => {
+        expect([...partial([A.id], true).held]).toEqual([MARKERS]);
       });
 
       it('keeps them when the one node it can read is neither of the two', () => {
