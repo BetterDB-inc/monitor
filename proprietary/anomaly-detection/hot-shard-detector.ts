@@ -55,6 +55,10 @@ function networkOf(shard: ShardLoad): number {
   return shard.networkBytesInPerSecond + shard.networkBytesOutPerSecond;
 }
 
+export function hotShardRatio(cpuUsecPerSecond: number, cpuMedian: number): number {
+  return cpuUsecPerSecond / Math.max(cpuMedian, NEAR_IDLE_CPU_USEC_PER_SECOND);
+}
+
 export function hotShardSignature(shardId: string): string {
   return `hot_shard:${shardId}`;
 }
@@ -74,7 +78,7 @@ export function judgeHotShards(
     const factor = openShardIds.has(shard.nodeId)
       ? HOT_SHARD_RELEASE_FACTOR
       : HOT_SHARD_RAISE_FACTOR;
-    const ratio = shard.cpuUsecPerSecond / Math.max(cpuMedian, NEAR_IDLE_CPU_USEC_PER_SECOND);
+    const ratio = hotShardRatio(shard.cpuUsecPerSecond, cpuMedian);
     if (ratio < factor) continue;
     findings.push({
       shardId: shard.nodeId,
