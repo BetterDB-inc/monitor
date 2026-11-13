@@ -713,6 +713,31 @@ In the last two cases the event is raised without key names, the detail has `key
 
   Then read `topKeys` from `GET /api/monitor/sessions/<session-id>/cross-reference?baseline=24h`.
 
+**Rebalance suggestion**: every open hot shard carries a suggestion, in the `rebalance` field of [`GET /api/anomaly/hot-shards`](#get-hot-shards) and in the `get_hot_shards` MCP tool. It is advice only. BetterDB moves no slot and sends nothing to the cluster for it beyond reads.
+
+The suggestion is one of two things:
+
+- A **plan**: slot ranges to move off the hot shard, the shard each range goes to, and the projected CPU of every shard before and after. It picks the ranges with the fewest keys that carry enough CPU, at most 8 ranges, and the coldest healthy shards as targets, an empty primary first and a shard in the hot shard's availability zone first on a tie. It uses as few targets as will do, at most 4. `effect` is `resolves` when the hot shard ends at or under 1.25 times the projected median, and `headroom` when the move only frees at least 25% of the shard's CPU.
+- **No plan**, with a `reason`, when moving slots will not help or should wait:
+
+  | `reason` | Meaning |
+  | --- | --- |
+  | `key_level` | One or a few slots carry the load: the slots that each take at least 20% of the shard's CPU add up to 0.8 of a core or more, or the rest of the slots carry under 25% of the shard's CPU. A slot cannot be split, so the fix is at the key: client-side caching, reads from replicas, or splitting the key. `pinnedSlots` lists them. |
+  | `cluster_hot` | The other shards cannot take even 25% of the shard's CPU without going over 0.8 of a core or over 1.25 times the projected median. Add a shard. |
+  | `no_target` | No other healthy primary can take slots. |
+  | `unhealthy_node` | A primary is failed or suspect. |
+  | `migration_running` | A slot migration or reshard is running, or the monitor could not ask every primary. |
+  | `settling` | Slots changed owner and the slot load is still being measured. |
+  | `slots_scattered` | The shard's slots are in too many small ranges to move enough load in 8 ranges. |
+
+  For `key_level` and `cluster_hot` the event message ends with the reason, for example `Rebalancing will not help: slot 9189 alone is 81% of this shard's CPU. Consider client-side caching, reads from replicas, or splitting key "session:global".` For the other reasons it ends with a short `No rebalance is suggested ...` sentence. The message is written once, when the event is raised.
+
+A slot that is at least 20% of the shard's CPU is never part of a plan: it would only move the problem. The projection assumes that a slot's load moves with it one for one.
+
+A plan lists `warnings`, none of which block it: `source_fork` (the hot shard forks for the snapshot while it is the busiest node), `fewer_replicas` (the target has fewer replicas than the hot shard), `target_memory` (the keys moved, at the hot shard's average key size, would take the target past 80% of its `maxmemory`; `memoryShare` is the estimate) and `memory_unknown` (the target has no `maxmemory`, or `INFO` could not be read on it or on the hot shard).
+
+The suggestion is computed right before the event is raised and again every 5 minutes, or sooner when slots change owner. Each computation asks every primary whether a slot is migrating, and for a plan reads `INFO` once on the hot shard and on each target.
+
 Before you start one:
 
 - `MONITOR` makes the node send every command it runs to the capture connection. On a primary that is already hot this adds load, so keep the capture short. The usual limits of a capture apply: its duration, its byte and line caps, and one capture per connection at a time.
@@ -1046,6 +1071,8 @@ The open [`hot_shard`](#hot_shard) events of one cluster connection, with the nu
 
 `cpu` gives the shard's CPU rate per second, its share of the cluster, the cluster median and the ratio the rule used. `network` gives the same for bytes in plus bytes out, without a ratio: it is detail only, and it includes replication, counted once per replica. `topSlots` (up to 5) are ranked by CPU. `topKeys` (up to 10, full names) are ranked by `freq`, the LFU counter of the key (0 to 255). `keySource` is `lfu` when the keys were read and `unavailable` when they were not, with the reason in `keyNote`. `keysSampledAt` is the time of the read the names come from and `keysSampled` the number of keys whose frequency it got. When a later read gave no names, the names of the earlier read stay and `keyNote` says so. `eventId` is the id of the open event. `captureAvailable` is `true` when the key names are missing and a [capture on the hot primary](#hot_shard) can show them.
 
+`rebalance` is the [rebalance suggestion](#hot_shard): `kind` is `plan` or `no_plan`. A plan has `moves` (each with `targetShardId`, `targetAddr`, inclusive slot `ranges`, and the slots, keys and CPU it moves), `projection` (every shard's CPU, share and ratio to the median `before` and `after`, with its `role`), `medianBefore`, `medianAfter`, `pinnedSlots` and `warnings`. A `no_plan` has a `reason` and `pinnedSlots`. The field is missing for a moment after a restart, until the suggestion is computed again.
+
 **Response**:
 ```json
 [
@@ -1074,7 +1101,37 @@ The open [`hot_shard`](#hot_shard) events of one cluster connection, with the nu
     ],
     "keySource": "lfu",
     "keysSampled": 1012,
-    "keysSampledAt": 1704067200000
+    "keysSampledAt": 1704067200000,
+    "rebalance": {
+      "kind": "plan",
+      "action": "spread",
+      "effect": "resolves",
+      "sourceShardId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d",
+      "moves": [
+        {
+          "targetShardId": "9c4e1b7a2d5f8036a1c3e5f7092b4d6f8a0c2e4b",
+          "targetAddr": "10.0.0.3:6379",
+          "ranges": [[2000, 2410]],
+          "slotCount": 411,
+          "keyCount": 48210,
+          "cpuUsecPerSecond": 262000,
+          "shareOfShard": 0.28
+        }
+      ],
+      "pinnedSlots": [{ "slot": 1234, "shareOfShard": 0.62 }],
+      "projection": [
+        {
+          "shardId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d",
+          "nodeAddr": "10.0.0.1:6379",
+          "role": "source",
+          "before": { "cpuUsecPerSecond": 930000, "share": 0.61, "ratio": 3.1 },
+          "after": { "cpuUsecPerSecond": 668000, "share": 0.44, "ratio": 1.19 }
+        }
+      ],
+      "medianBefore": 300000,
+      "medianAfter": 562000,
+      "warnings": [{ "code": "source_fork", "shardId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d" }]
+    }
   }
 ]
 ```

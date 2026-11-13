@@ -12,6 +12,7 @@ describe('McpAnomalyController', () => {
     getRecentAnomalies: jest.fn(),
     getIncidentTimelines: jest.fn(),
     getRetryAmplificationStatus: jest.fn(),
+    getHotShards: jest.fn(),
     getReplicationDivergenceHistory: jest.fn(),
   };
   const registry = { get: jest.fn() };
@@ -166,5 +167,29 @@ describe('McpAnomalyController', () => {
 
     expect((caught as HttpException).getStatus()).toBe(404);
     expect(svc.getRetryAmplificationStatus).not.toHaveBeenCalled();
+  });
+
+  it('hot shards returns the open hot shards of the instance with their suggestion', () => {
+    const shards = [{ shardId: 'a0000000', rebalance: { kind: 'plan', moves: [] } }];
+    svc.getHotShards.mockReturnValue(shards);
+
+    expect(controller.getHotShards('inst1')).toBe(shards);
+    expect(svc.getHotShards).toHaveBeenCalledWith('inst1');
+  });
+
+  it('hot shards returns 404 for an unregistered instance', () => {
+    registry.get.mockImplementationOnce(() => {
+      throw new NotFoundException('nope');
+    });
+
+    let caught: unknown;
+    try {
+      controller.getHotShards('ghost');
+    } catch (error) {
+      caught = error;
+    }
+
+    expect((caught as HttpException).getStatus()).toBe(404);
+    expect(svc.getHotShards).not.toHaveBeenCalled();
   });
 });
