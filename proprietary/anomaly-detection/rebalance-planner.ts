@@ -13,6 +13,7 @@ export interface RebalancePolicy {
   headroomShare: number;
   maxRanges: number;
   maxTargets: number;
+  targetMemoryShare: number;
   excludedShardIds: readonly string[];
   excludedSlots: readonly number[];
 }
@@ -24,6 +25,7 @@ export const DEFAULT_REBALANCE_POLICY: RebalancePolicy = {
   headroomShare: 0.25,
   maxRanges: 8,
   maxTargets: 4,
+  targetMemoryShare: 0.8,
   excludedShardIds: [],
   excludedSlots: [],
 };
@@ -84,8 +86,15 @@ export interface RebalanceProjection {
 }
 
 export interface RebalanceWarning {
-  code: 'source_fork' | 'fewer_replicas';
+  code: 'source_fork' | 'fewer_replicas' | 'target_memory' | 'memory_unknown';
   shardId: string;
+  memoryShare?: number;
+}
+
+export interface ShardMemory {
+  usedBytes: number;
+  maxBytes: number;
+  keyCount: number;
 }
 
 export interface RebalancePlan {
@@ -459,6 +468,38 @@ export function planRebalance(
     medianAfter,
     warnings,
   };
+}
+
+export function shardMemoryFromInfo(
+  info: Record<string, Record<string, string> | undefined>,
+): ShardMemory | undefined {
+  const usedBytes = Number(info.memory?.used_memory);
+  const maxBytes = Number(info.memory?.maxmemory);
+  if (!Number.isFinite(usedBytes) || !Number.isFinite(maxBytes)) return undefined;
+  const keyCount = Object.values(info.keyspace ?? {}).reduce((total, db) => {
+    const keys = Number(/(?:^|,)keys=(\d+)/.exec(db)?.[1]);
+    return total + (Number.isFinite(keys) ? keys : 0);
+  }, 0);
+  return { usedBytes, maxBytes, keyCount };
+}
+
+export function memoryWarnings(
+  plan: RebalancePlan,
+  memoryByShard: ReadonlyMap<string, ShardMemory>,
+  policy: RebalancePolicy = DEFAULT_REBALANCE_POLICY,
+): RebalanceWarning[] {
+  const source = memoryByShard.get(plan.sourceShardId);
+  return plan.moves.flatMap((move): RebalanceWarning[] => {
+    const target = memoryByShard.get(move.targetShardId);
+    if (!source || source.keyCount <= 0 || !target || target.maxBytes <= 0) {
+      return [{ code: 'memory_unknown', shardId: move.targetShardId }];
+    }
+    const bytesPerKey = source.usedBytes / source.keyCount;
+    const memoryShare = (target.usedBytes + move.keyCount * bytesPerKey) / target.maxBytes;
+    return memoryShare > policy.targetMemoryShare
+      ? [{ code: 'target_memory', shardId: move.targetShardId, memoryShare }]
+      : [];
+  });
 }
 
 function listed(values: readonly number[]): string {

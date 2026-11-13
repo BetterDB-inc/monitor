@@ -5,7 +5,9 @@ import {
   type RebalanceShard,
   type RebalanceVerdict,
   describeNoPlan,
+  memoryWarnings,
   planRebalance,
+  shardMemoryFromInfo,
 } from '../rebalance-planner';
 
 const ZONE_BY_ID: Record<string, number> = { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7 };
@@ -476,5 +478,94 @@ describe('describeNoPlan', () => {
     ],
   ])('explains %s', (reason, sentence) => {
     expect(describeNoPlan(noPlan(reason), [])).toBe(sentence);
+  });
+});
+
+describe('memoryWarnings', () => {
+  const GB = 1024 ** 3;
+  const plan = () =>
+    planOf(
+      planRebalance({
+        hotShardId: 'a',
+        shards: [shard('a', 300_000), shard('b', 100_000), shard('c', 100_000)],
+        slots: slots(0, even(100, 3_000), 1_000),
+      }),
+    );
+  const source = { usedBytes: 4 * GB, maxBytes: 8 * GB, keyCount: 100_000 };
+
+  it('moves the plan fixture to one target', () => {
+    expect(plan().moves).toMatchObject([{ targetShardId: 'b', keyCount: 26_000 }]);
+  });
+
+  it('says nothing when the target keeps room after taking the keys', () => {
+    const memory = new Map([
+      ['a', source],
+      ['b', { usedBytes: 2 * GB, maxBytes: 8 * GB, keyCount: 50_000 }],
+    ]);
+
+    expect(memoryWarnings(plan(), memory)).toEqual([]);
+  });
+
+  it('warns when the moved keys would take the target past 80% of its memory limit', () => {
+    const memory = new Map([
+      ['a', source],
+      ['b', { usedBytes: 5.5 * GB, maxBytes: 8 * GB, keyCount: 50_000 }],
+    ]);
+
+    expect(memoryWarnings(plan(), memory)).toEqual([
+      { code: 'target_memory', shardId: 'b', memoryShare: expect.closeTo(0.8175) },
+    ]);
+  });
+
+  it('uses the limit it is given', () => {
+    const memory = new Map([
+      ['a', source],
+      ['b', { usedBytes: 2 * GB, maxBytes: 8 * GB, keyCount: 50_000 }],
+    ]);
+
+    expect(
+      memoryWarnings(plan(), memory, { ...DEFAULT_REBALANCE_POLICY, targetMemoryShare: 0.3 }),
+    ).toEqual([{ code: 'target_memory', shardId: 'b', memoryShare: expect.closeTo(0.38) }]);
+  });
+
+  it.each([
+    [
+      'the target has no memory limit',
+      { a: source, b: { usedBytes: GB, maxBytes: 0, keyCount: 9 } },
+    ],
+    ['the target could not be read', { a: source }],
+    ['the source could not be read', { b: { usedBytes: GB, maxBytes: 8 * GB, keyCount: 9 } }],
+    [
+      'the source reports no keys',
+      { a: { ...source, keyCount: 0 }, b: { usedBytes: GB, maxBytes: 8 * GB, keyCount: 9 } },
+    ],
+  ])('says the memory room is unknown when %s', (_case, readings) => {
+    expect(memoryWarnings(plan(), new Map(Object.entries(readings)))).toEqual([
+      { code: 'memory_unknown', shardId: 'b' },
+    ]);
+  });
+});
+
+describe('shardMemoryFromInfo', () => {
+  it('reads used memory, the limit and the keys of every database', () => {
+    expect(
+      shardMemoryFromInfo({
+        memory: { used_memory: '1048576', maxmemory: '4194304' },
+        keyspace: { db0: 'keys=120,expires=4,avg_ttl=0', db3: 'keys=30,expires=0,avg_ttl=0' },
+      }),
+    ).toEqual({ usedBytes: 1_048_576, maxBytes: 4_194_304, keyCount: 150 });
+  });
+
+  it('reads an empty node with no memory limit', () => {
+    expect(shardMemoryFromInfo({ memory: { used_memory: '900000', maxmemory: '0' } })).toEqual({
+      usedBytes: 900_000,
+      maxBytes: 0,
+      keyCount: 0,
+    });
+  });
+
+  it('gives nothing when the memory section is missing or unreadable', () => {
+    expect(shardMemoryFromInfo({})).toBeUndefined();
+    expect(shardMemoryFromInfo({ memory: { used_memory: 'n/a', maxmemory: '0' } })).toBeUndefined();
   });
 });

@@ -112,9 +112,12 @@ import {
   type RebalanceNoPlanReason,
   type RebalanceShard,
   type RebalanceVerdict,
+  type ShardMemory,
   describeNoPlan,
+  memoryWarnings,
   noRebalancePlan,
   planRebalance,
+  shardMemoryFromInfo,
 } from './rebalance-planner';
 import {
   BACKLOG_COVERAGE_CRITICAL_SEC,
@@ -452,6 +455,7 @@ type FanoutCount = 'checked' | 'unreachable' | 'authFailed' | 'skipped' | 'notDi
 
 /** Coverage as recorded; its age and staleness are worked out when it is read. */
 type StoredFanoutCoverage = Omit<FanoutCoverage, 'ageMs' | 'stale'>;
+type NodeClient = Awaited<ReturnType<ClusterDiscoveryService['getNodeConnection']>>;
 
 const EMPTY_FANOUT: Readonly<Record<FanoutCount, number>> = {
   checked: 0,
@@ -6486,15 +6490,87 @@ export class AnomalyService
     if (due.length > 0) {
       const shards = this.rebalanceShards(sample, nodes, findings);
       const migrating = migrationsChecked ? false : await this.isSlotMigrationRunning(ctx);
-      for (const { signature, shardId, slots } of due) {
-        const verdict = migrating
-          ? noRebalancePlan('migration_running')
-          : planRebalance({ hotShardId: shardId, shards, slots });
-        kept.set(signature, { verdict, computedAt: timestamp, ownership });
+      const verdicts = await Promise.all(
+        due.map(({ shardId, slots }) =>
+          migrating
+            ? noRebalancePlan('migration_running')
+            : this.withMemoryWarnings(
+                connectionId,
+                planRebalance({ hotShardId: shardId, shards, slots }),
+              ),
+        ),
+      );
+      for (const [index, { signature }] of due.entries()) {
+        kept.set(signature, { verdict: verdicts[index], computedAt: timestamp, ownership });
       }
     }
     if (kept.size > 0) this.hotShardRebalance.set(connectionId, kept);
     else this.hotShardRebalance.delete(connectionId);
+  }
+
+  private async withMemoryWarnings(
+    connectionId: string,
+    verdict: RebalanceVerdict,
+  ): Promise<RebalanceVerdict> {
+    if (verdict.kind !== 'plan') return verdict;
+    const shardIds = [verdict.sourceShardId, ...verdict.moves.map((move) => move.targetShardId)];
+    const readings = await Promise.all(
+      shardIds.map((shardId) => this.readShardMemory(connectionId, shardId)),
+    );
+    const memory = new Map<string, ShardMemory>();
+    for (const [index, reading] of readings.entries()) {
+      if (reading) memory.set(shardIds[index], reading);
+    }
+    return { ...verdict, warnings: [...verdict.warnings, ...memoryWarnings(verdict, memory)] };
+  }
+
+  private async readShardMemory(
+    connectionId: string,
+    shardId: string,
+  ): Promise<ShardMemory | undefined> {
+    if (!this.clusterDiscovery || !this.dialsDataNodes(connectionId)) return undefined;
+    try {
+      const raw = await this.readShard(
+        connectionId,
+        shardId,
+        'reading the memory of the shard timed out',
+        (client) => client.info(),
+      );
+      return shardMemoryFromInfo(
+        InfoParser.parse(raw) as Record<string, Record<string, string> | undefined>,
+      );
+    } catch (err) {
+      this.logger.debug(
+        `Memory read failed for shard ${shardId}: ${err instanceof Error ? err.message : err}`,
+      );
+      return undefined;
+    }
+  }
+
+  private async readShard<T>(
+    connectionId: string,
+    shardId: string,
+    timedOut: string,
+    read: (client: NodeClient) => Promise<T>,
+  ): Promise<T> {
+    const discovery = this.clusterDiscovery;
+    if (!discovery) throw new Error('the monitor does not connect to the cluster nodes directly');
+    let client: NodeClient | undefined;
+    let abandoned = false;
+    const reading = (async () => {
+      client = await discovery.getNodeConnection(shardId, connectionId);
+      if (abandoned) throw new Error(timedOut);
+      return read(client);
+    })();
+    try {
+      return await withTimeout(reading, AnomalyService.FANOUT_COMMAND_TIMEOUT_MS, timedOut);
+    } catch (err) {
+      if (err instanceof Error && err.message === timedOut) {
+        abandoned = true;
+        if (client) discovery.evictNodeClient(client);
+      }
+      throw err;
+    }
   }
 
   private async isSlotMigrationRunning(ctx: ConnectionContext): Promise<boolean> {
@@ -6557,29 +6633,20 @@ export class AnomalyService
     shardId: string,
     topSlots: HotShardSlot[],
   ): Promise<HotKeyRead> {
-    const discovery = this.clusterDiscovery;
-    if (!discovery || !this.dialsDataNodes(connectionId)) {
+    if (!this.clusterDiscovery || !this.dialsDataNodes(connectionId)) {
       return hotKeysUnavailable('the monitor does not connect to the cluster nodes directly');
     }
     const slots = topSlots.slice(0, HOT_KEY_SLOTS).map((slot) => slot.slot);
     const timedOut = 'reading the keys from the hot primary timed out';
-    let client: Awaited<ReturnType<ClusterDiscoveryService['getNodeConnection']>> | undefined;
-    let abandoned = false;
-    const reading = (async () => {
-      client = await discovery.getNodeConnection(shardId, connectionId);
-      if (abandoned) throw new Error(timedOut);
-      return sampleHotKeys(client, slots);
-    })();
     try {
-      return await withTimeout(reading, AnomalyService.FANOUT_COMMAND_TIMEOUT_MS, timedOut);
+      return await this.readShard(connectionId, shardId, timedOut, (client) =>
+        sampleHotKeys(client, slots),
+      );
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
-      if (reason !== timedOut) {
-        return hotKeysUnavailable(`reading the keys from the hot primary failed: ${reason}`);
-      }
-      abandoned = true;
-      if (client) discovery.evictNodeClient(client);
-      return hotKeysUnavailable(timedOut);
+      return hotKeysUnavailable(
+        reason === timedOut ? timedOut : `reading the keys from the hot primary failed: ${reason}`,
+      );
     }
   }
 

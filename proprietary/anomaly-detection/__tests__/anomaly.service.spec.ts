@@ -2912,7 +2912,10 @@ describe('AnomalyService', () => {
               cpuUsecPerSecond: 360_000,
             },
           ],
-          warnings: [{ code: 'source_fork', shardId: 'a0000000' }],
+          warnings: [
+            { code: 'source_fork', shardId: 'a0000000' },
+            { code: 'memory_unknown', shardId: 'b0000000' },
+          ],
         });
       });
 
@@ -3044,7 +3047,123 @@ describe('AnomalyService', () => {
             { code: 'source_fork', shardId: 'a0000000' },
             { code: 'fewer_replicas', shardId: 'd0000000' },
             { code: 'fewer_replicas', shardId: 'b0000000' },
+            { code: 'memory_unknown', shardId: 'd0000000' },
+            { code: 'memory_unknown', shardId: 'b0000000' },
           ],
+        });
+      });
+
+      describe('target memory', () => {
+        const GB = 1024 ** 3;
+        const info = (usedBytes: number, maxBytes: number, keys: number) =>
+          `# Memory\r\nused_memory:${usedBytes}\r\nmaxmemory:${maxBytes}\r\n` +
+          `# Keyspace\r\ndb0:keys=${keys},expires=0,avg_ttl=0\r\n`;
+        const warnings = () => (rebalance() as { warnings: unknown[] }).warnings;
+        const fullReads = (client: { info: jest.Mock }) =>
+          client.info.mock.calls.filter((args) => args.length === 0).length;
+
+        function dialMemory(replies: Record<string, string | Error | Promise<string>>) {
+          const clients = Object.fromEntries(
+            Object.entries(replies).map(([nodeId, reply]) => [
+              nodeId,
+              {
+                info: jest.fn(async () => {
+                  if (reply instanceof Error) throw reply;
+                  return reply;
+                }),
+              },
+            ]),
+          );
+          const discovery = {
+            getNodeConnection: jest.fn(async (nodeId: string) => {
+              if (!clients[nodeId]) throw new Error('ECONNREFUSED');
+              return clients[nodeId];
+            }),
+            evictNodeClient: jest.fn(),
+            retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+            releaseConnection: jest.fn().mockResolvedValue(undefined),
+          };
+          (service as any).clusterDiscovery = discovery;
+          return { clients, discovery };
+        }
+
+        it('warns when the moved keys would fill the target past 80% of its limit', async () => {
+          spreadLoad();
+          const { clients } = dialMemory({
+            a0000000: info(4 * GB, 8 * GB, 200),
+            b0000000: info(5 * GB, 8 * GB, 50),
+            c0000000: info(GB, 8 * GB, 50),
+          });
+
+          await step(HOT, 6);
+
+          expect(warnings()).toEqual([
+            { code: 'source_fork', shardId: 'a0000000' },
+            { code: 'target_memory', shardId: 'b0000000', memoryShare: expect.closeTo(0.825) },
+          ]);
+          expect(fullReads(clients.c0000000)).toBe(0);
+        });
+
+        it('adds no warning when the target keeps room', async () => {
+          spreadLoad();
+          dialMemory({ a0000000: info(4 * GB, 8 * GB, 200), b0000000: info(GB, 8 * GB, 50) });
+
+          await step(HOT, 6);
+
+          expect(warnings()).toEqual([{ code: 'source_fork', shardId: 'a0000000' }]);
+        });
+
+        it('reads the memory once per plan, not on every poll', async () => {
+          spreadLoad();
+          const { clients } = dialMemory({
+            a0000000: info(4 * GB, 8 * GB, 200),
+            b0000000: info(GB, 8 * GB, 50),
+          });
+
+          await step(HOT, 20);
+
+          expect(fullReads(clients.b0000000)).toBe(1);
+        });
+
+        it('says the room is unknown when the target cannot be read', async () => {
+          spreadLoad();
+          dialMemory({ a0000000: info(4 * GB, 8 * GB, 200), b0000000: new Error('NOPERM') });
+
+          await step(HOT, 6);
+
+          expect(warnings()).toEqual([
+            { code: 'source_fork', shardId: 'a0000000' },
+            { code: 'memory_unknown', shardId: 'b0000000' },
+          ]);
+        });
+
+        it('says the room is unknown when the target has no memory limit', async () => {
+          spreadLoad();
+          dialMemory({ a0000000: info(4 * GB, 8 * GB, 200), b0000000: info(GB, 0, 50) });
+
+          await step(HOT, 6);
+
+          expect(warnings()).toContainEqual({ code: 'memory_unknown', shardId: 'b0000000' });
+        });
+
+        it('gives up on a target that does not answer and drops its client', async () => {
+          const budget = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+          (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;
+          try {
+            spreadLoad();
+            const { clients, discovery } = dialMemory({
+              a0000000: info(4 * GB, 8 * GB, 200),
+              b0000000: new Promise<string>(() => undefined),
+            });
+
+            await step(HOT, 6);
+
+            expect(hotEvents()).toHaveLength(1);
+            expect(warnings()).toContainEqual({ code: 'memory_unknown', shardId: 'b0000000' });
+            expect(discovery.evictNodeClient).toHaveBeenCalledWith(clients.b0000000);
+          } finally {
+            (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = budget;
+          }
         });
       });
 
