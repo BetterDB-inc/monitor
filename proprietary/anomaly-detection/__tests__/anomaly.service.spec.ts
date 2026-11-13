@@ -3019,6 +3019,50 @@ describe('AnomalyService', () => {
         expect(rebalance()).toMatchObject({ kind: 'plan' });
       });
 
+      it('asks about no slot migration while the kept answer is not a plan', async () => {
+        const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: true });
+        (service as any).clusterMetrics = { checkSlotMigrations };
+        await step(HOT, 6);
+
+        expect(checkSlotMigrations).toHaveBeenCalledTimes(1);
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'key_level' });
+
+        checkSlotMigrations.mockResolvedValue({ migrations: [{ slot: 5 }], complete: true });
+        await step(HOT, 5);
+
+        expect(checkSlotMigrations).toHaveBeenCalledTimes(1);
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'key_level' });
+      });
+
+      it('withdraws only the plans when a slot migration is found', async () => {
+        const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: true });
+        (service as any).clusterMetrics = { checkSlotMigrations };
+        const verdicts = () => service.getHotShards('conn-a').map((shard) => shard.rebalance);
+        IDS.push('d0000000', 'e0000000');
+        ADDRS.push('10.0.0.4:6379', '10.0.0.5:6379');
+        owners = [[...WIDE], [10, 11], [20, 21], [30, 31], [40, 41]];
+        evenSlots = true;
+        try {
+          await step([900_000, 900_000, 100_000, 100_000, 100_000], 6);
+
+          expect(verdicts()).toMatchObject([
+            { kind: 'plan' },
+            { kind: 'no_plan', reason: 'key_level' },
+          ]);
+
+          checkSlotMigrations.mockResolvedValue({ migrations: [{ slot: 5 }], complete: true });
+          await step([900_000, 900_000, 100_000, 100_000, 100_000]);
+
+          expect(verdicts()).toMatchObject([
+            { kind: 'no_plan', reason: 'migration_running' },
+            { kind: 'no_plan', reason: 'key_level' },
+          ]);
+        } finally {
+          IDS.length = 3;
+          ADDRS.length = 3;
+        }
+      });
+
       it('plans from the slot load it took before the key read', async () => {
         spreadLoad();
         const client = {
