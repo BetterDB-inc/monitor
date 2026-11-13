@@ -935,36 +935,11 @@ const NO_PLAN_SENTENCES: Partial<Record<RebalanceNoPlanReason, string>> = {
     " No rebalance is suggested: this shard's slots are too scattered to move enough load in a few ranges.",
 };
 
-function describeConflict(conflictsWith: readonly RebalanceCoveringShard[]): string {
-  const several = conflictsWith.length > 1;
-  return (
-    ' No rebalance is suggested for this shard yet: no move from it fits next to the ' +
-    `suggestion${several ? 's' : ''} for ${listed(conflictsWith.map((shard) => shard.nodeAddr))}. ` +
-    `Apply ${several ? 'those' : 'that one'} first.`
-  );
-}
-
-function describeCovered(coveredBy: readonly RebalanceCoveringShard[]): string {
-  const several = coveredBy.length > 1;
-  return (
-    ` No rebalance is suggested for this shard: the suggestion${several ? 's' : ''} for ` +
-    `${listed(coveredBy.map((shard) => shard.nodeAddr))} already ` +
-    `bring${several ? '' : 's'} its load near the median. ` +
-    `Apply ${several ? 'those' : 'that one'} first.`
-  );
-}
-
 export function describeNoPlan(
   verdict: RebalanceVerdict | undefined,
   topKeys: readonly HotShardKey[],
 ): string {
   if (!verdict || verdict.kind === 'plan') return '';
   if (verdict.reason === 'key_level') return describeKeyLevel(verdict.pinnedSlots, topKeys);
-  if (verdict.reason === 'covered_by_other_plan' && verdict.coveredBy?.length) {
-    return describeCovered(verdict.coveredBy);
-  }
-  if (verdict.reason === 'conflicts_with_other_plan' && verdict.conflictsWith?.length) {
-    return describeConflict(verdict.conflictsWith);
-  }
   return NO_PLAN_SENTENCES[verdict.reason] ?? '';
 }
