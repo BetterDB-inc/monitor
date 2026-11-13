@@ -6507,14 +6507,17 @@ export class AnomalyService
       }
       due.push({ signature, shardId: finding.shardId });
     }
-    if (kept.size > 0 || due.length > 0) {
+    const plans = [...kept]
+      .filter(([, last]) => last.verdict.kind === 'plan')
+      .map(([signature]) => signature);
+    if (plans.length > 0 || due.length > 0) {
       const blocked =
         topologyBlocker ??
         (migrationsChecked || !(await this.isSlotMigrationRunning(ctx))
           ? undefined
           : 'migration_running');
       if (blocked) {
-        for (const signature of [...kept.keys(), ...due.map((plan) => plan.signature)]) {
+        for (const signature of [...plans, ...due.map((plan) => plan.signature)]) {
           kept.set(signature, {
             verdict: noRebalancePlan(blocked),
             computedAt: timestamp,
