@@ -781,58 +781,13 @@ describe('describeNoPlan', () => {
     expect(describeNoPlan(noPlan(reason), [])).toBe(sentence);
   });
 
-  it('names the shard whose suggestion covers this one', () => {
-    const verdict = {
-      ...noPlan('covered_by_other_plan'),
-      coveredBy: [{ shardId: 'a', nodeAddr: '10.0.0.1:6379' }],
-    } as RebalanceVerdict;
+  it.each([
+    ['covered_by_other_plan', { coveredBy: [{ shardId: 'a', nodeAddr: '10.0.0.1:6379' }] }],
+    ['conflicts_with_other_plan', { conflictsWith: [{ shardId: 'a', nodeAddr: '10.0.0.1:6379' }] }],
+  ])('says nothing about %s, which changes with the plans of other shards', (reason, names) => {
+    const verdict = { ...noPlan(reason), ...names } as RebalanceVerdict;
 
-    expect(describeNoPlan(verdict, [])).toBe(
-      ' No rebalance is suggested for this shard: the suggestion for 10.0.0.1:6379 already ' +
-        'brings its load near the median. Apply that one first.',
-    );
-  });
-
-  it('names every shard whose suggestion covers this one', () => {
-    const verdict = {
-      ...noPlan('covered_by_other_plan'),
-      coveredBy: [
-        { shardId: 'a', nodeAddr: '10.0.0.1:6379' },
-        { shardId: 'b', nodeAddr: '10.0.0.2:6379' },
-      ],
-    } as RebalanceVerdict;
-
-    expect(describeNoPlan(verdict, [])).toBe(
-      ' No rebalance is suggested for this shard: the suggestions for 10.0.0.1:6379 and ' +
-        '10.0.0.2:6379 already bring its load near the median. Apply those first.',
-    );
-  });
-
-  it('names the shard whose suggestion leaves no room for one here', () => {
-    const verdict = {
-      ...noPlan('conflicts_with_other_plan'),
-      conflictsWith: [{ shardId: 'a', nodeAddr: '10.0.0.1:6379' }],
-    } as RebalanceVerdict;
-
-    expect(describeNoPlan(verdict, [])).toBe(
-      ' No rebalance is suggested for this shard yet: no move from it fits next to the ' +
-        'suggestion for 10.0.0.1:6379. Apply that one first.',
-    );
-  });
-
-  it('names every shard whose suggestion leaves no room for one here', () => {
-    const verdict = {
-      ...noPlan('conflicts_with_other_plan'),
-      conflictsWith: [
-        { shardId: 'a', nodeAddr: '10.0.0.1:6379' },
-        { shardId: 'b', nodeAddr: '10.0.0.2:6379' },
-      ],
-    } as RebalanceVerdict;
-
-    expect(describeNoPlan(verdict, [])).toBe(
-      ' No rebalance is suggested for this shard yet: no move from it fits next to the ' +
-        'suggestions for 10.0.0.1:6379 and 10.0.0.2:6379. Apply those first.',
-    );
+    expect(describeNoPlan(verdict, [])).toBe('');
   });
 
   it.each(['unhealthy_node', 'migration_running', 'settling'])(

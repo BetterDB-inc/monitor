@@ -3588,17 +3588,28 @@ describe('AnomalyService', () => {
           ADDRS.length = 3;
         });
 
-        it('names the plan that covers it, in the answer and in its event', async () => {
+        it('names the plan that covers it in the answer, not in its event', async () => {
           await step(COVERED, 6);
 
           expect(verdicts()).toEqual({
             a0000000: expect.objectContaining({ kind: 'plan', plannedAfter: [] }),
             b0000000: coveredByA,
           });
-          expect(messageOf('b0000000')).toMatch(
-            / No rebalance is suggested for this shard: the suggestion for 10\.0\.0\.1:6379 already brings its load near the median\. Apply that one first\.$/,
-          );
+          expect(messageOf('b0000000')).not.toContain('ebalanc');
           expect(messageOf('a0000000')).not.toContain('ebalanc');
+        });
+
+        it('plans without a shard whose event is resolved by hand while its keys are read', async () => {
+          await step(COVERED, 6);
+          const eventOfA = hotEvents().find((event) => event.message.includes('a0000000'))!;
+          jest.spyOn(service as any, 'refreshHotShardKeys').mockImplementationOnce(async () => {
+            await service.resolveAnomaly(eventOfA.id);
+          });
+
+          await step(COVERED);
+
+          expect(verdicts().a0000000).toBeUndefined();
+          expect(verdicts().b0000000).toEqual(expect.objectContaining({ kind: 'plan' }));
         });
 
         it('keeps that answer for five minutes, then plans again from the load it has by then', async () => {

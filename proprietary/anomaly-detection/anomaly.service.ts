@@ -6330,8 +6330,8 @@ export class AnomalyService
         return;
       }
       await this.refreshHotShardKeys(ctx, timestamp, sample.timestamp, findings, topSlots);
-      await this.refreshRebalance(ctx, timestamp, sample, findings, nodes ?? [], slots);
       const judged = await this.withoutHotShardsResolvedSince(connectionId, findings, open);
+      await this.refreshRebalance(ctx, timestamp, sample, judged, nodes ?? [], slots);
       await this.applyHotShardGate(ctx, timestamp, sample.timestamp, judged, topSlots, selfId);
       this.rememberHotShards(connectionId, sample.timestamp, judged, topSlots);
     } catch (err) {
