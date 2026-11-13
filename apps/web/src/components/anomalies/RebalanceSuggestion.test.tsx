@@ -365,7 +365,10 @@ describe('RebalanceSuggestion', () => {
       'unhealthy_node',
       'A primary is failed or suspect. A suggestion comes back when every primary is healthy.',
     ],
-    ['migration_running', 'A slot migration is running. A suggestion comes back when it ends.'],
+    [
+      'migration_running',
+      'A slot migration is running, or the monitor could not ask every primary whether one is. A suggestion comes back when no migration is running and every primary answers.',
+    ],
     ['settling', 'Slots changed owner and the load is still being measured.'],
     [
       'slots_scattered',
