@@ -137,6 +137,19 @@ export const COUNTER_RATE_METRICS: ReadonlySet<MetricType> = new Set([
   MetricType.KEYSPACE_MISSES,
 ]);
 
+/**
+ * Per-second floor below which a COUNTER_RATE_METRICS z-score spike is ignored,
+ * as ERROR_REPLIES_MIN_PER_SEC does for error_replies: on a server that only
+ * occasionally evicts or denies, the baseline sits near zero with a tiny spread
+ * and any non-zero rate would otherwise score as a spike. Absolute thresholds
+ * still fire below the floor.
+ */
+export const COUNTER_RATE_MIN_PER_SEC: ReadonlyMap<MetricType, number> = new Map([
+  [MetricType.ACL_DENIED, 1],
+  [MetricType.EVICTED_KEYS, 10],
+  [MetricType.KEYSPACE_MISSES, 50],
+]);
+
 export enum AnomalySeverity {
   INFO = 'info',
   WARNING = 'warning',

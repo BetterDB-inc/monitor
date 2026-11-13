@@ -1030,6 +1030,24 @@ describe('AnomalyService', () => {
       expect(missSpikes()).toEqual([]);
     });
 
+    it('ignores small non-zero rates over a near-zero baseline', async () => {
+      // A quiet server: no misses or evictions, then a trickle below each floor.
+      let misses = 0;
+      let evicted = 0;
+      for (let i = 0; i <= 40; i++) await pollAt(1_000_000 + i * 1000, misses, evicted);
+      for (let i = 41; i <= 45; i++) {
+        misses += 20;
+        evicted += 3;
+        await pollAt(1_000_000 + i * 1000, misses, evicted);
+      }
+      expect(missesBuffer().getLatest()).toBe(20);
+      expect(
+        spikes.filter((a) =>
+          [MetricType.KEYSPACE_MISSES, MetricType.EVICTED_KEYS].includes(a.metricType),
+        ),
+      ).toEqual([]);
+    });
+
     it('treats a run_id change as a reset even when the counter is higher', async () => {
       let misses = 1_000;
       for (let i = 0; i <= 40; i++) {

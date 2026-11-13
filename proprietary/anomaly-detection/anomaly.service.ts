@@ -388,6 +388,7 @@ import {
   MetricType,
   METRICS_HANDLED_OUTSIDE_EXTRACTOR,
   COUNTER_RATE_METRICS,
+  COUNTER_RATE_MIN_PER_SEC,
   AnomalyEvent,
   CorrelatedAnomalyGroup,
   AnomalySeverity,
@@ -1256,7 +1257,9 @@ export class AnomalyService
       connectionBuffers.set(metricType, new MetricBuffer(metricType));
       connectionDetectors.set(
         metricType,
-        new SpikeDetector(metricType, this.resolveSpikeConfig(metricType)),
+        new SpikeDetector(metricType, this.resolveSpikeConfig(metricType), {
+          minValue: COUNTER_RATE_MIN_PER_SEC.get(metricType),
+        }),
       );
     }
 
