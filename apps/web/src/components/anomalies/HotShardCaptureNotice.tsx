@@ -1,15 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Info } from 'lucide-react';
-import { metricsApi } from '../../api/metrics';
-import { usePolling } from '../../hooks/usePolling';
+import { useOpenHotShards } from '../../hooks/useOpenHotShards';
 import { StartSessionModal } from '../../pages/monitor/start-session-modal';
-import type { HotShardDetail } from '../../types/anomaly';
 import { Alert, AlertDescription, AlertTitle } from '../ui/alert';
 import { Button } from '../ui/button';
-
-const OPEN_EVENTS_POLL_MS = 5000;
-const HOT_SHARDS_POLL_MS = 10000;
 
 interface Props {
   connectionId: string | undefined;
@@ -31,28 +26,7 @@ export function HotShardCaptureNotice({ connectionId }: Props) {
     wasOpen.current = open;
   }, [open]);
 
-  const { data: openEvents, error: eventsError } = usePolling({
-    fetcher: () => metricsApi.getAnomalyEvents({ metricType: 'hot_shard', activeOnly: true }),
-    interval: OPEN_EVENTS_POLL_MS,
-    enabled: !!connectionId,
-    refetchKey: connectionId,
-  });
-  const openIds = new Set(
-    (openEvents ?? [])
-      .filter((event) => event.metricType === 'hot_shard' && !event.resolved)
-      .map((event) => event.id),
-  );
-  const hotShardOpen = openIds.size > 0;
-  const { data: hotShards, error: hotShardsError } = usePolling<HotShardDetail[]>({
-    fetcher: () => metricsApi.getHotShards(),
-    interval: HOT_SHARDS_POLL_MS,
-    enabled: hotShardOpen && !!connectionId,
-    refetchKey: connectionId,
-  });
-  const offered =
-    connectionId && !eventsError && !hotShardsError
-      ? (hotShards ?? []).filter((shard) => shard.captureAvailable && openIds.has(shard.eventId))
-      : [];
+  const offered = useOpenHotShards(connectionId).filter((shard) => shard.captureAvailable);
 
   return (
     <>

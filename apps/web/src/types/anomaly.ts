@@ -112,6 +112,87 @@ export interface HotShardKey {
   freq: number;
 }
 
+export type RebalanceNoPlanReason =
+  | 'key_level'
+  | 'cluster_hot'
+  | 'no_target'
+  | 'unhealthy_node'
+  | 'migration_running'
+  | 'settling'
+  | 'slots_scattered'
+  | 'too_many_targets';
+
+export type RebalanceSupport =
+  | 'valkey_atomic'
+  | 'redis_atomic'
+  | 'none'
+  | 'provider_managed'
+  | 'unknown';
+
+export interface RebalancePinnedSlot {
+  slot: number;
+  shareOfShard: number;
+}
+
+export interface RebalanceMove {
+  targetShardId: string;
+  targetAddr: string;
+  ranges: Array<[number, number]>;
+  slotCount: number;
+  keyCount: number;
+  cpuUsecPerSecond: number;
+  shareOfShard: number;
+}
+
+export interface RebalanceShardLoad {
+  cpuUsecPerSecond: number;
+  share: number;
+  ratio: number;
+}
+
+export interface RebalanceProjection {
+  shardId: string;
+  nodeAddr: string;
+  role: 'source' | 'target' | 'other';
+  before: RebalanceShardLoad;
+  after: RebalanceShardLoad;
+}
+
+export interface RebalanceWarning {
+  code: 'source_fork' | 'fewer_replicas' | 'target_memory' | 'memory_unknown';
+  shardId: string;
+  memoryShare?: number;
+}
+
+export interface RebalanceCommand {
+  nodeAddr: string;
+  text: string;
+}
+
+export interface RebalancePlan {
+  kind: 'plan';
+  action: 'spread';
+  effect: 'resolves' | 'headroom';
+  sourceShardId: string;
+  moves: RebalanceMove[];
+  pinnedSlots: RebalancePinnedSlot[];
+  projection: RebalanceProjection[];
+  medianBefore: number;
+  medianAfter: number;
+  warnings: RebalanceWarning[];
+  support?: RebalanceSupport;
+  commands?: RebalanceCommand[];
+}
+
+export interface RebalanceNoPlan {
+  kind: 'no_plan';
+  action: 'spread';
+  reason: RebalanceNoPlanReason;
+  pinnedSlots: RebalancePinnedSlot[];
+}
+
+export type RebalanceVerdict = RebalancePlan | RebalanceNoPlan;
+
 export interface HotShardDetail {
   eventId: string;
   captureAvailable: boolean;
@@ -128,6 +209,7 @@ export interface HotShardDetail {
   keyNote?: string;
   keysSampled: number;
   keysSampledAt?: number;
+  rebalance?: RebalanceVerdict;
 }
 
 export type ReplicationDivergenceLevel = 'none' | 'behind' | 'warning' | 'critical' | 'unobserved';

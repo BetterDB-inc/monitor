@@ -713,7 +713,7 @@ In the last two cases the event is raised without key names, the detail has `key
 
   Then read `topKeys` from `GET /api/monitor/sessions/<session-id>/cross-reference?baseline=24h`.
 
-**Rebalance suggestion**: every open hot shard carries a suggestion, in the `rebalance` field of [`GET /api/anomaly/hot-shards`](#get-hot-shards) and in the `get_hot_shards` MCP tool. It is advice only. BetterDB moves no slot and sends nothing to the cluster for it beyond reads.
+**Rebalance suggestion**: every open hot shard carries a suggestion, shown in a panel at the top of the Anomalies page, in the `rebalance` field of [`GET /api/anomaly/hot-shards`](#get-hot-shards) and in the `get_hot_shards` MCP tool. It is advice only. BetterDB moves no slot and sends nothing to the cluster for it beyond reads.
 
 The suggestion is one of two things:
 
