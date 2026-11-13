@@ -3051,6 +3051,28 @@ describe('AnomalyService', () => {
         expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'unhealthy_node' });
       });
 
+      it('blames the suspect primary, not a migration, without asking the nodes again', async () => {
+        const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: true });
+        (service as any).clusterMetrics = { checkSlotMigrations };
+        spreadLoad();
+        await step(HOT, 6);
+        checkSlotMigrations.mockClear();
+        checkSlotMigrations.mockResolvedValue({ migrations: [], complete: false });
+
+        const nodes = clusterNodes();
+        nodes[1].flags = ['master', 'fail?'];
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(nodes);
+        await step(HOT);
+
+        expect(checkSlotMigrations).not.toHaveBeenCalled();
+        expect(rebalance()).toEqual({
+          kind: 'no_plan',
+          action: 'spread',
+          reason: 'unhealthy_node',
+          pinnedSlots: [],
+        });
+      });
+
       it('counts replicas and takes an empty primary as a target', async () => {
         spreadLoad();
         const nodes = [

@@ -6494,11 +6494,11 @@ export class AnomalyService
     }
     if (due.length > 0) {
       const shards = this.rebalanceShards(sample, nodes, findings);
-      const migrating = migrationsChecked ? false : await this.isSlotMigrationRunning(ctx);
+      const blocked = await this.rebalanceBlocker(ctx, unhealthy.length > 0, migrationsChecked);
       const verdicts = await Promise.all(
         due.map(({ shardId, slots }) =>
-          migrating
-            ? noRebalancePlan('migration_running')
+          blocked
+            ? noRebalancePlan(blocked)
             : this.withMemoryWarnings(
                 connectionId,
                 planRebalance({ hotShardId: shardId, shards, slots }),
@@ -6576,6 +6576,16 @@ export class AnomalyService
       }
       throw err;
     }
+  }
+
+  private async rebalanceBlocker(
+    ctx: ConnectionContext,
+    unhealthy: boolean,
+    migrationsChecked: boolean,
+  ): Promise<RebalanceNoPlanReason | undefined> {
+    if (unhealthy) return 'unhealthy_node';
+    if (migrationsChecked) return undefined;
+    return (await this.isSlotMigrationRunning(ctx)) ? 'migration_running' : undefined;
   }
 
   private async isSlotMigrationRunning(ctx: ConnectionContext): Promise<boolean> {
