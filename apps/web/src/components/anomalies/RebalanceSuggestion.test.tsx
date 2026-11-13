@@ -383,6 +383,33 @@ describe('RebalanceSuggestion', () => {
     expect(region).toHaveTextContent(text);
   });
 
+  it.each([
+    [
+      [{ shardId: OTHER, nodeAddr: '10.0.0.2:6379' }],
+      "The suggestion for 10.0.0.2:6379 already brings this shard's load near the median. Apply that one first.",
+    ],
+    [
+      [
+        { shardId: OTHER, nodeAddr: '10.0.0.2:6379' },
+        { shardId: TARGET, nodeAddr: '10.0.0.3:6379' },
+      ],
+      "The suggestions for 10.0.0.2:6379 and 10.0.0.3:6379 already bring this shard's load near the median. Apply those first.",
+    ],
+    [
+      undefined,
+      "The suggestion for another hot shard already brings this shard's load near the median. Apply that one first.",
+    ],
+  ])(
+    'names the suggestion that covers a hot shard with no plan of its own',
+    async (coveredBy, text) => {
+      await show([hotShard({ ...noPlan('covered_by_other_plan'), coveredBy })]);
+
+      const region = await panel();
+      expect(within(region).getByText('No plan')).toBeInTheDocument();
+      expect(region).toHaveTextContent(text);
+    },
+  );
+
   it('shows one panel per open hot shard', async () => {
     await show(
       [

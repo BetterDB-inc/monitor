@@ -120,7 +120,13 @@ export type RebalanceNoPlanReason =
   | 'migration_running'
   | 'settling'
   | 'slots_scattered'
-  | 'too_many_targets';
+  | 'too_many_targets'
+  | 'covered_by_other_plan';
+
+export interface RebalanceCoveringShard {
+  shardId: string;
+  nodeAddr: string;
+}
 
 export type RebalanceSupport =
   | 'valkey_atomic'
@@ -190,6 +196,7 @@ export interface RebalanceNoPlan {
   action: 'spread';
   reason: RebalanceNoPlanReason;
   pinnedSlots: RebalancePinnedSlot[];
+  coveredBy?: RebalanceCoveringShard[];
 }
 
 export type RebalanceVerdict = RebalancePlan | RebalanceNoPlan;

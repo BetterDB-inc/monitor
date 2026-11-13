@@ -77,7 +77,10 @@ const NO_COMMAND: Record<Exclude<RebalanceSupport, 'valkey_atomic' | 'redis_atom
   unknown: 'The server version could not be read, so no command is shown.',
 };
 
-const NO_PLAN_REASONS: Record<Exclude<RebalanceNoPlanReason, 'key_level'>, string> = {
+const NO_PLAN_REASONS: Record<
+  Exclude<RebalanceNoPlanReason, 'key_level' | 'covered_by_other_plan'>,
+  string
+> = {
   cluster_hot: 'No other shard has room for this load. Consider adding a shard.',
   too_many_targets: 'This load would have to be spread over too many shards for one suggestion.',
   no_target: 'No other primary can take slots.',
@@ -88,6 +91,16 @@ const NO_PLAN_REASONS: Record<Exclude<RebalanceNoPlanReason, 'key_level'>, strin
   settling: 'Slots changed owner and the load is still being measured.',
   slots_scattered: "This shard's slots are too scattered to move enough load in a few ranges.",
 };
+
+function describeCovered(verdict: RebalanceNoPlan): string {
+  const covering = (verdict.coveredBy ?? []).map((shard) => shard.nodeAddr);
+  const several = covering.length > 1;
+  return (
+    `The suggestion${several ? 's' : ''} for ${covering.length > 0 ? listed(covering) : 'another hot shard'} ` +
+    `already bring${several ? '' : 's'} this shard's load near the median. ` +
+    `Apply ${several ? 'those' : 'that one'} first.`
+  );
+}
 
 function describeKeyLevel(verdict: RebalanceNoPlan, shard: HotShardDetail): string {
   const slots = verdict.pinnedSlots;
@@ -252,6 +265,7 @@ function Plan({ plan }: { plan: RebalancePlan }) {
 }
 
 function NoPlan({ verdict, shard }: { verdict: RebalanceNoPlan; shard: HotShardDetail }) {
+  if (verdict.reason === 'covered_by_other_plan') return <p>{describeCovered(verdict)}</p>;
   if (verdict.reason !== 'key_level') return <p>{NO_PLAN_REASONS[verdict.reason]}</p>;
   return (
     <div className="space-y-2">
