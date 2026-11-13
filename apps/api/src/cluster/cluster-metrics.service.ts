@@ -961,11 +961,13 @@ export class ClusterMetricsService {
       }
     };
 
-    // A new primary has no slots until its first import lands, so include every primary.
-    const masters = nodes.filter((node) => node.role === 'master');
+    // A new primary has no slots until its first import lands, so include every healthy primary.
+    const masters = nodes.filter(
+      (node) => node.role === 'master' && (node.state === 'healthy' || node.slots.length > 0),
+    );
     const primaries = masters.filter((node) => node.state !== 'failed');
     if (primaries.length === 0) complete = false;
-    if (masters.some((node) => node.state === 'failed' && node.slots.length > 0)) complete = false;
+    if (masters.some((node) => node.state === 'failed')) complete = false;
     await Promise.all(
       primaries.map((primary) =>
         this.onNode(primary, connectionId, NODE_COMMAND_TIMEOUT_MS, (client) => readNode(primary, client)).catch((error) => {

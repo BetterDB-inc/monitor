@@ -109,6 +109,7 @@ export interface RebalancePlan {
   medianBefore: number;
   medianAfter: number;
   warnings: RebalanceWarning[];
+  plannedAfter: string[];
 }
 
 export interface RebalanceNoPlan {
@@ -532,6 +533,7 @@ function spread(ctx: Spread): RebalanceVerdict | SlotLoadRate[] {
     medianBefore,
     medianAfter,
     warnings,
+    plannedAfter: [],
   };
 }
 
@@ -609,24 +611,28 @@ export function planRebalances(
 ): RebalanceVerdict[] {
   const verdicts: RebalanceVerdict[] = [];
   for (const hotShard of hotShards) {
-    const left = shardsAfter(shards, [...earlier, ...verdicts]);
-    verdicts.push(planRebalance({ ...hotShard, shards: left }, policy));
+    const counted = [...earlier, ...verdicts].filter((verdict) => verdict.kind === 'plan');
+    const verdict = planRebalance({ ...hotShard, shards: shardsAfter(shards, counted) }, policy);
+    verdicts.push(
+      verdict.kind === 'plan'
+        ? { ...verdict, plannedAfter: counted.map((plan) => plan.sourceShardId) }
+        : verdict,
+    );
   }
   return verdicts;
 }
 
 function shardsAfter(
   shards: readonly RebalanceShard[],
-  verdicts: readonly RebalanceVerdict[],
+  plans: readonly RebalancePlan[],
 ): RebalanceShard[] {
   const change = new Map<string, number>();
   const add = (shardId: string, cpu: number) =>
     change.set(shardId, (change.get(shardId) ?? 0) + cpu);
-  for (const verdict of verdicts) {
-    if (verdict.kind !== 'plan') continue;
-    for (const move of verdict.moves) {
+  for (const plan of plans) {
+    for (const move of plan.moves) {
       add(move.targetShardId, move.cpuUsecPerSecond);
-      add(verdict.sourceShardId, -move.cpuUsecPerSecond);
+      add(plan.sourceShardId, -move.cpuUsecPerSecond);
     }
   }
   return shards.map((shard) => ({
