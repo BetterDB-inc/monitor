@@ -3026,6 +3026,31 @@ describe('AnomalyService', () => {
         );
       });
 
+      it('plans as soon as the suspect primary is healthy again', async () => {
+        spreadLoad();
+        const nodes = clusterNodes();
+        nodes[2].flags = ['master', 'fail?'];
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(nodes);
+        await step(HOT, 6);
+
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(clusterNodes());
+        await step(HOT);
+
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+      });
+
+      it('drops a plan as soon as a primary turns suspect', async () => {
+        spreadLoad();
+        await step(HOT, 6);
+
+        const nodes = clusterNodes();
+        nodes[1].flags = ['master', 'fail?'];
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(nodes);
+        await step(HOT);
+
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'unhealthy_node' });
+      });
+
       it('counts replicas and takes an empty primary as a target', async () => {
         spreadLoad();
         const nodes = [

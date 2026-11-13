@@ -736,7 +736,7 @@ A slot that is at least 20% of the shard's CPU is never part of a plan: it would
 
 A plan lists `warnings`, none of which block it: `source_fork` (the hot shard forks for the snapshot while it is the busiest node), `fewer_replicas` (the target has fewer replicas than the hot shard), `target_memory` (the keys moved, at the hot shard's average key size, would take the target past 80% of its `maxmemory`; `memoryShare` is the estimate) and `memory_unknown` (the target has no `maxmemory`, or `INFO` could not be read on it or on the hot shard).
 
-The suggestion is computed right before the event is raised and again every 5 minutes, or sooner when slots change owner. Each computation asks every primary whether a slot is migrating, and for a plan reads `INFO` once on the hot shard and on each target.
+The suggestion is computed right before the event is raised and again every 5 minutes, or sooner when slots change owner or a primary turns suspect, failed or healthy again. Each computation asks every primary whether a slot is migrating, and for a plan reads `INFO` once on the hot shard and on each target.
 
 Before you start one:
 

@@ -6457,8 +6457,13 @@ export class AnomalyService
     const connectionId = ctx.connectionId;
     const eventIds = this.hotShardEventIds.get(connectionId);
     const known = this.hotShardRebalance.get(connectionId);
-    const ownership = sample.shards
-      .map((shard) => `${shard.nodeId}:${shard.slotCount}`)
+    const unhealthy = nodes
+      .filter((node) => node.flags.includes('master') && clusterNodeState(node.flags) !== 'healthy')
+      .map((node) => `${node.id}:${clusterNodeState(node.flags)}`);
+    const ownership = [
+      ...sample.shards.map((shard) => `${shard.nodeId}:${shard.slotCount}`),
+      ...unhealthy,
+    ]
       .sort()
       .join(',');
     const kept = new Map<
