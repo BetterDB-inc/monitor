@@ -6278,7 +6278,10 @@ export class AnomalyService
         sample.timestamp > (this.hotShardSampleAt.get(connectionId) ?? -Infinity) &&
         timestamp - sample.timestamp <= HOT_SHARD_BLIND_MS;
       if (!isNew) {
-        const blocked = nodes && this.rebalanceTopologyBlocker(sample, nodes);
+        const blocked =
+          nodes &&
+          (this.rebalanceTopologyBlocker(sample, nodes) ??
+            (this.isReshardWindowOpen(connectionId, timestamp) ? 'migration_running' : undefined));
         if (blocked) this.holdRebalance(connectionId, blocked);
         const judgedAt = this.hotShardJudgedAt.get(connectionId);
         if (judgedAt === undefined) this.hotShardJudgedAt.set(connectionId, timestamp);

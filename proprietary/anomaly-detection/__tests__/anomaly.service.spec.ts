@@ -2982,6 +2982,17 @@ describe('AnomalyService', () => {
         expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'migration_running' });
       });
 
+      it('withdraws the plan when a reshard starts and no new sample comes', async () => {
+        spreadLoad();
+        await step(HOT, 6);
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+
+        migrating = true;
+        await idle(STEP_MS);
+
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'migration_running' });
+      });
+
       it('suggests nothing when a refresh finds a slot migration, without asking twice at the raise', async () => {
         const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: true });
         (service as any).clusterMetrics = { checkSlotMigrations };
