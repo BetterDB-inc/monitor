@@ -72,6 +72,7 @@ function plan(overrides: Partial<RebalancePlan> = {}): RebalancePlan {
     medianBefore: 300_000,
     medianAfter: 562_000,
     warnings: [{ code: 'source_fork', shardId: SOURCE }],
+    plannedAfter: [],
     support: 'valkey_atomic',
     commands: [{ nodeAddr: '10.0.0.1:6379', text: MIGRATESLOTS }],
     ...overrides,
@@ -396,6 +397,32 @@ describe('RebalanceSuggestion', () => {
     );
 
     expect(await screen.findAllByRole('region')).toHaveLength(2);
+  });
+
+  it('says which earlier suggestions the numbers of a later one count as applied', async () => {
+    const later = plan({ sourceShardId: OTHER, plannedAfter: [SOURCE] });
+    await show(
+      [
+        hotShard(plan()),
+        hotShard(later, { eventId: 'evt-2', shardId: OTHER, nodeAddr: '10.0.0.2:6379' }),
+      ],
+      { events: [EVENT, { ...EVENT, id: 'evt-2' }] },
+    );
+
+    const sentence = 'These numbers count the suggestion for 10.0.0.1:6379 as applied.';
+    const second = await screen.findByRole('region', { name: /hot shard 5d6e7f80/i });
+    expect(within(second).getByText(sentence)).toBeInTheDocument();
+    expect(within(await panel()).queryByText(/as applied/)).not.toBeInTheDocument();
+  });
+
+  it('names every earlier suggestion, by shard ID when it has no address', async () => {
+    await show([hotShard(plan({ plannedAfter: [OTHER, 'a'.repeat(40)] }))]);
+
+    expect(
+      within(await panel()).getByText(
+        'These numbers count the suggestions for 10.0.0.2:6379 and aaaaaaaa as applied.',
+      ),
+    ).toBeInTheDocument();
   });
 
   it('shows nothing for a shard whose suggestion is not computed yet', async () => {

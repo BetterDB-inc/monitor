@@ -167,6 +167,13 @@ function Commands({ plan }: { plan: RebalancePlan }) {
   );
 }
 
+function describePlannedAfter(plan: RebalancePlan): string {
+  const earlier = plan.plannedAfter.map(
+    (shardId) => plan.projection.find((row) => row.shardId === shardId)?.nodeAddr ?? short(shardId),
+  );
+  return `These numbers count the suggestion${earlier.length === 1 ? '' : 's'} for ${listed(earlier)} as applied.`;
+}
+
 function Plan({ plan }: { plan: RebalancePlan }) {
   const source = plan.projection.find((row) => row.role === 'source');
   const moved = plan.moves.reduce((total, move) => total + move.shareOfShard, 0);
@@ -228,6 +235,9 @@ function Plan({ plan }: { plan: RebalancePlan }) {
             `The ${others} other shard${others === 1 ? ' keeps its' : 's keep their'} load. `}
           The median goes from {ofCore(plan.medianBefore)} to {ofCore(plan.medianAfter)} of a core.
         </p>
+        {plan.plannedAfter.length > 0 && (
+          <p className="text-muted-foreground">{describePlannedAfter(plan)}</p>
+        )}
       </div>
       {plan.warnings.length > 0 && (
         <ul aria-label="Warnings" className="list-disc pl-5 text-yellow-600 dark:text-yellow-500">

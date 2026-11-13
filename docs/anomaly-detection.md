@@ -735,7 +735,7 @@ The suggestion is one of two things:
 
 A slot that is at least 20% of the shard's CPU is never part of a plan: it would only move the problem. Neither is a slot that carries more CPU than any target has room for. `pinnedSlots` lists both kinds. The projection assumes that a slot's load moves with it one for one.
 
-When several shards are hot, their plans are made one after another, in the order the hot shards are listed, and each plan starts from the loads the plans before it leave. The `before` numbers of a later plan already count the slots an earlier plan moves, so two plans never fill the same room on a target twice. Such a plan names the earlier hot shards in `plannedAfter`; the list is empty for a plan that starts from the measured loads.
+When several shards are hot, their plans are made one after another, in the order the hot shards are listed, and each plan starts from the loads the plans before it leave. The `before` numbers of a later plan already count the slots an earlier plan moves, so two plans never fill the same room on a target twice. Such a plan names the earlier hot shards in `plannedAfter`; the list is empty for a plan that starts from the measured loads. The panel says so under the table of such a plan.
 
 A plan lists `warnings`, none of which block it: `source_fork` (the hot shard forks for the snapshot while it is the busiest node), `fewer_replicas` (the target has fewer replicas than the hot shard), `target_memory` (the keys moved, at the hot shard's average key size, would take the target past 80% of its `maxmemory`; `memoryShare` is the estimate) and `memory_unknown` (the target has no `maxmemory`, or `INFO` could not be read on it or on the hot shard).
 

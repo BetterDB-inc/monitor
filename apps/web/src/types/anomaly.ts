@@ -180,6 +180,7 @@ export interface RebalancePlan {
   medianBefore: number;
   medianAfter: number;
   warnings: RebalanceWarning[];
+  plannedAfter: string[];
   support?: RebalanceSupport;
   commands?: RebalanceCommand[];
 }
