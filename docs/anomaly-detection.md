@@ -720,6 +720,42 @@ Before you start one:
 - A capture counts the first argument of a command as its key. `MGET a b c` counts `a` only, an `EVAL` counts its script text, and a command without a key, such as `CLUSTER NODES`, counts its first word.
 - The capture is not offered for a connection that reaches the cluster through an agent, because the monitor cannot open `MONITOR` on a node there.
 
+### slot_migration
+**What it measures**: Slot migrations in flight on a cluster: atomic jobs (`CLUSTER MIGRATESLOTS`, Valkey 9.0+) and the `MIGRATING` / `IMPORTING` markers of the older `SETSLOT` and `MIGRATE` steps
+**Why it matters**: It puts the migration on the timeline, so a latency or load event that happens while slots move can be read next to it
+**Source**: `CLUSTER NODES` and `CLUSTER GETSLOTMIGRATIONS` on every primary
+**Detection method**: State-based (not z-score based). An INFO event opens when a migration is first seen and resolves when it is no longer running, however it ended. There is one event per atomic job, and one per pair of source and target node for the older markers, whatever the number of slots.
+
+```
+INFO: Slot migration running: slots 0-1365 from 10.0.0.1:6379 to 10.0.0.3:6379 (state: snapshotting). This entry closes when the migration ends.
+```
+
+The cluster is read every 30 seconds, and every 5 seconds while a migration is running, so a job that starts and ends between two reads gets no entry. A migration is watched whoever started it. A primary without `CLUSTER GETSLOTMIGRATIONS` is asked for it once an hour, not on every read. On a cluster registered through a seed, the seed connection watches and its member connections do not; nodes registered one by one as separate connections each raise their own events.
+
+While the nodes of a migration cannot be read, its events stay as they are: a read that fails does not close them.
+
+### slot_migration_stuck
+**What it measures**: A slot migration that stopped making progress, or an atomic job that ended as `failed`
+**Why it matters**: A migration that hangs keeps slots in a half-moved state and holds memory on both nodes; a failed one means the move you asked for did not happen
+**Source**: The same reads as [`slot_migration`](#slot_migration)
+**Detection method**: State-based (not z-score based). Three cases raise a WARNING:
+
+| Case | Rule | Resolves |
+| --- | --- | --- |
+| Atomic job stuck | The job is still active and its state, `last_update_time` and `last_ack_time` have not changed for 10 minutes | When any of the three changes, or the job ends |
+| Older markers stuck | The same slots carry `MIGRATING` / `IMPORTING` markers between the same two nodes for 30 minutes | When the set of slots changes, or the markers are gone |
+| Atomic job failed | The job is listed with state `failed`. The message carries what the server said, cut to 200 characters | Not by itself: it reports something that happened. Resolve it once you have read it |
+
+```
+WARNING: Slot migration stuck: slots 0-1365 from 10.0.0.1:6379 to 10.0.0.3:6379 has reported no state change and no heartbeat for 10 minutes (state: snapshotting). Check that the two nodes reach each other and that the target has memory for the slots. To stop it, run CLUSTER CANCELSLOTMIGRATIONS on 10.0.0.1:6379.
+```
+
+The quiet time is counted on the monitor's clock from the moment it last saw a change, not by comparing the server's timestamps with it, so a clock difference between the two does not matter. It starts again when the monitor restarts.
+
+A failed job is reported once. Jobs that were already in a node's list when the monitor first read that node are not reported, so a restart does not repeat old failures; a job that failed while the monitor was down is missed. A job that starts and fails between two reads is still reported, because the server keeps finished jobs in its list.
+
+BetterDB never cancels or restarts a migration.
+
 ## Configuration
 
 ### Environment Variables

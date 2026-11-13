@@ -77,6 +77,8 @@ export enum MetricType {
   REPLICATION_DIVERGENCE = 'replication_divergence',
   BACKLOG_COVERAGE_RISK = 'backlog_coverage_risk',
   RESYNC_ESCALATION = 'resync_escalation',
+  SLOT_MIGRATION = 'slot_migration',
+  SLOT_MIGRATION_STUCK = 'slot_migration_stuck',
 }
 
 /**
@@ -125,6 +127,8 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.REPLICATION_DIVERGENCE,
   MetricType.BACKLOG_COVERAGE_RISK,
   MetricType.RESYNC_ESCALATION,
+  MetricType.SLOT_MIGRATION,
+  MetricType.SLOT_MIGRATION_STUCK,
 ]);
 
 export enum AnomalySeverity {
