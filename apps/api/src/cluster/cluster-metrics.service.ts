@@ -209,6 +209,7 @@ export interface FailedSlotMigration {
 
 export interface SlotMigrationReport extends SlotMigrationCheck {
   failed: FailedSlotMigration[];
+  finishedJobs: string[];
   readNodeIds: string[];
   ownNodeOnly: boolean;
 }
@@ -898,7 +899,14 @@ export class ClusterMetricsService {
       this.logger.error(
         `Failed to check slot migrations: ${error instanceof Error ? error.message : error}`,
       );
-      return { migrations: [], failed: [], readNodeIds: [], complete: false, ownNodeOnly: false };
+      return {
+        migrations: [],
+        failed: [],
+        finishedJobs: [],
+        readNodeIds: [],
+        complete: false,
+        ownNodeOnly: false,
+      };
     }
 
     const findNode = (idOrPrefix: string) =>
@@ -914,6 +922,7 @@ export class ClusterMetricsService {
     // preferring the source's EXPORT view so the entry does not flip between polls.
     const atomicJobs = new Map<string, SlotMigration>();
     const failedJobs = new Map<string, FailedSlotMigration>();
+    const finishedJobs = new Set<string>();
     const readNodeIds = new Set<string>();
 
     const addLegacyMarkers = (nodesString: string) => {
@@ -1008,7 +1017,10 @@ export class ClusterMetricsService {
             message: job.message ?? '',
           });
         }
-        if (FINISHED_MIGRATION_STATES.has(job.state)) continue;
+        if (FINISHED_MIGRATION_STATES.has(job.state)) {
+          finishedJobs.add(job.name);
+          continue;
+        }
         if (isImport && atomicJobs.has(job.name)) continue;
         const firstSlot = parseInt((job.slot_ranges ?? '').split(/[-\s]/)[0], 10);
         atomicJobs.set(job.name, {
@@ -1082,6 +1094,7 @@ export class ClusterMetricsService {
     return {
       migrations: [...legacy.values(), ...atomicJobs.values()],
       failed: [...failedJobs.values()],
+      finishedJobs: [...finishedJobs],
       readNodeIds: [...readNodeIds],
       complete,
       ownNodeOnly,

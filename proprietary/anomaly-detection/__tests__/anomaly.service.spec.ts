@@ -2924,6 +2924,7 @@ describe('AnomalyService', () => {
     let report: {
       migrations: unknown[];
       failed: unknown[];
+      finishedJobs: string[];
       readNodeIds: string[];
       complete: boolean;
       ownNodeOnly?: boolean;
@@ -2957,7 +2958,7 @@ describe('AnomalyService', () => {
     });
 
     function see(migrations: unknown[], failed: unknown[] = []): void {
-      report = { migrations, failed, readNodeIds: ALL, complete: true };
+      report = { migrations, failed, finishedJobs: [], readNodeIds: ALL, complete: true };
     }
 
     async function after(ms: number): Promise<void> {
@@ -3129,7 +3130,7 @@ describe('AnomalyService', () => {
     it('keeps the entries open while the nodes of the migration cannot be read', async () => {
       see([job()]);
       await after(0);
-      report = { migrations: [], failed: [], readNodeIds: ['c0000000'], complete: false };
+      report = { ...report, migrations: [], readNodeIds: ['c0000000'], complete: false };
       await after(MINUTE);
 
       expect(running()).toEqual([expect.objectContaining({ resolved: false })]);
@@ -3286,7 +3287,7 @@ describe('AnomalyService', () => {
       });
 
       it('keeps them open while the nodes cannot be read, then closes the ones that ended', async () => {
-        report = { migrations: [], failed: [], readNodeIds: ['c0000000'], complete: false };
+        report = { ...report, migrations: [], readNodeIds: ['c0000000'], complete: false };
         await after(0);
         await after(MINUTE);
 

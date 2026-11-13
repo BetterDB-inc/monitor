@@ -66,6 +66,7 @@ function report(overrides: Partial<SlotMigrationReport> = {}): SlotMigrationRepo
   return {
     migrations: [],
     failed: [],
+    finishedJobs: [],
     readNodeIds: ALL,
     complete: true,
     ownNodeOnly: false,
@@ -356,13 +357,44 @@ describe('judgeSlotMigrations', () => {
       expect(judged.held.size).toBe(0);
     });
 
-    it('takes its own node as the whole view when that is all it can read', () => {
+    it('keeps them when the one node it can read takes no part in the migration', () => {
       const judged = run(
-        [[T0, report({ readNodeIds: [A.id], complete: false, ownNodeOnly: true })]],
+        [[T0, report({ readNodeIds: [C.id], complete: false, ownNodeOnly: true })]],
+        adopted(RUNNING, STUCK),
+      );
+
+      expect([...judged.held].sort()).toEqual([RUNNING, STUCK]);
+    });
+
+    it('closes them when a node it can read lists the job as finished', () => {
+      const judged = run(
+        [[T0, report({ readNodeIds: [A.id], complete: false, finishedJobs: ['job-1'] })]],
         adopted(RUNNING, STUCK),
       );
 
       expect(judged.held.size).toBe(0);
+    });
+
+    describe('for legacy markers', () => {
+      const MARKERS = `running:legacy:${A.id}>${B.id}`;
+      const partial = (readNodeIds: string[], ownNodeOnly = false) =>
+        run([[T0, report({ readNodeIds, complete: false, ownNodeOnly })]], adopted(MARKERS));
+
+      it('closes them when both nodes answer without the markers', () => {
+        expect(partial([A.id, B.id]).held.size).toBe(0);
+      });
+
+      it('keeps them while one of the two nodes cannot be read', () => {
+        expect([...partial([A.id, C.id]).held]).toEqual([MARKERS]);
+      });
+
+      it('closes them on one of the two nodes when that node is all it can read', () => {
+        expect(partial([A.id], true).held.size).toBe(0);
+      });
+
+      it('keeps them when the one node it can read is neither of the two', () => {
+        expect([...partial([C.id], true).held]).toEqual([MARKERS]);
+      });
     });
 
     it('keeps the stuck warning when the job is first seen after an incomplete read', () => {

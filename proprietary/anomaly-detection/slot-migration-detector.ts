@@ -6,6 +6,8 @@ export const LEGACY_MIGRATION_STALL_MS = 30 * 60_000;
 const MAX_REASON_LENGTH = 200;
 const SHORT_NODE_ID_LENGTH = 8;
 const SNAPSHOT_ARRIVING_PHASE = 'receiving-snapshot';
+const JOB_MOVE = 'job:';
+const LEGACY_MOVE = 'legacy:';
 
 export type SlotMigrationFindingKind = 'running' | 'stuck' | 'failed';
 
@@ -107,7 +109,7 @@ function movesOf(migrations: SlotMigration[]): Move[] {
   for (const migration of migrations) {
     if (migration.jobName !== undefined) {
       moves.push({
-        id: `job:${migration.jobName}`,
+        id: `${JOB_MOVE}${migration.jobName}`,
         atomic: true,
         timed: hasHeartbeat(migration),
         slots: migration.slotRange ?? `${migration.slot}`,
@@ -125,7 +127,7 @@ function movesOf(migrations: SlotMigration[]): Move[] {
   for (const [pair, { first, slots }] of legacy) {
     const ranges = asRanges(slots);
     moves.push({
-      id: `legacy:${pair}`,
+      id: `${LEGACY_MOVE}${pair}`,
       atomic: false,
       timed: true,
       slots: ranges,
@@ -147,6 +149,18 @@ function couldNotBeSeen(
   if (watched.length === 0) return true;
   const unread = (nodeId: string) => !readNow.has(nodeId);
   return move.atomic ? watched.every(unread) : watched.some(unread);
+}
+
+function endedWhileUnwatched(
+  id: string,
+  report: SlotMigrationReport,
+  readNow: ReadonlySet<string>,
+): boolean {
+  if (report.complete) return true;
+  if (id.startsWith(JOB_MOVE)) return report.finishedJobs.includes(id.slice(JOB_MOVE.length));
+  const ends = id.slice(LEGACY_MOVE.length).split('>');
+  const read = ends.filter((nodeId) => readNow.has(nodeId));
+  return report.ownNodeOnly ? read.length > 0 : read.length === ends.length;
 }
 
 export function judgeSlotMigrations(
@@ -199,11 +213,10 @@ export function judgeSlotMigrations(
     unseen.add(`stuck:${id}`);
   }
 
-  const wholeView = report.complete || (report.ownNodeOnly && readNow.size > 0);
   const adopted = new Set<string>();
   for (const signature of watch.adopted) {
     const id = signature.slice(signature.indexOf(':') + 1);
-    if (listed.has(id) || wholeView) continue;
+    if (listed.has(id) || endedWhileUnwatched(id, report, readNow)) continue;
     adopted.add(signature);
     held.add(signature);
   }
@@ -212,7 +225,7 @@ export function judgeSlotMigrations(
   for (const job of report.failed) {
     knownFailed.add(job.jobName);
     if (watch.knownFailed.has(job.jobName)) continue;
-    const wasRunning = watch.moves.has(`job:${job.jobName}`);
+    const wasRunning = watch.moves.has(`${JOB_MOVE}${job.jobName}`);
     const wasWatched =
       watch.seenNodes.has(job.sourceNodeId) || watch.seenNodes.has(job.targetNodeId);
     if (!wasRunning && !wasWatched) continue;

@@ -734,7 +734,7 @@ The cluster is read every 30 seconds, and every 5 seconds while a migration is r
 
 A connection through the BetterDB agent is not watched: the monitor reaches only that one node through the agent and cannot ask the primaries. When the monitor can open its own sockets but no primary answers on the address the cluster reports for it, as behind NAT or an SSH tunnel, it reads the connection's own node instead and tries the primaries again after 10 minutes. From one node it sees only the migrations that node is the source or the target of.
 
-While the nodes of a migration cannot be read, its events stay as they are: a read that fails does not close them. The same holds after the monitor restarts: the entries that were open stay open until it has read the nodes.
+While the nodes of a migration cannot be read, its events stay as they are: a read that fails does not close them. The same holds after the monitor restarts. An entry that was open stays open until the monitor sees the migration again, a node lists the job as finished, both nodes of a move with the older markers answer without them, or a read covers every primary. Where the monitor reads only the connection's own node, an entry for a migration between other nodes therefore stays open; resolve it by hand once the migration has ended.
 
 ### slot_migration_stuck
 **What it measures**: A slot migration that stopped making progress, or an atomic job that ended as `failed`

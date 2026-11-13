@@ -655,6 +655,27 @@ used_cpu_user:20.3\r
         expect(report.failed).toEqual([]);
       });
 
+      it.each(['success', 'cancelled', 'failed'])(
+        'names a job that ended as %s among the finished ones',
+        async (state) => {
+          mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+          nodeClients({ abc123node1: { jobs: [job({ ...running, state })] } });
+
+          const report = await service.readSlotMigrations('conn-1');
+
+          expect(report.finishedJobs).toEqual(['job-1']);
+        },
+      );
+
+      it('does not name a running job among the finished ones', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({ abc123node1: { jobs: [job(running)] } });
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect(report.finishedJobs).toEqual([]);
+      });
+
       it('names the primaries that answered', async () => {
         mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
         nodeClients({ def456node2: { nodesError: new Error('timeout'), jobsError: new Error('timeout') } });
