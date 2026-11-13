@@ -3260,6 +3260,66 @@ describe('AnomalyService', () => {
           expect(warnings()).toContainEqual({ code: 'memory_unknown', shardId: 'b0000000' });
         });
 
+        describe('command', () => {
+          const server = (version: string) => `# Server\r\n${version}\r\n`;
+          const VALKEY_9 = server('redis_version:7.2.4\r\nvalkey_version:9.0.1');
+          const plan = () => rebalance() as { support: string; commands: unknown[] };
+
+          it('gives the command to run when every shard of the plan is Valkey 9', async () => {
+            spreadLoad();
+            dialMemory({
+              a0000000: VALKEY_9 + info(4 * GB, 8 * GB, 200),
+              b0000000: VALKEY_9 + info(GB, 8 * GB, 50),
+            });
+
+            await step(HOT, 6);
+
+            expect(plan()).toMatchObject({
+              support: 'valkey_atomic',
+              commands: [
+                {
+                  nodeAddr: '10.0.0.1:6379',
+                  text: 'CLUSTER MIGRATESLOTS SLOTSRANGE 100 107 NODE b0000000',
+                },
+              ],
+            });
+          });
+
+          it('gives no command when the target runs a version without one', async () => {
+            spreadLoad();
+            dialMemory({
+              a0000000: VALKEY_9 + info(4 * GB, 8 * GB, 200),
+              b0000000: server('redis_version:7.2.4\r\nvalkey_version:8.1.4') + info(GB, 8 * GB, 50),
+            });
+
+            await step(HOT, 6);
+
+            expect(plan()).toMatchObject({ support: 'none', commands: [] });
+          });
+
+          it('says the version is unknown when a shard of the plan cannot be read', async () => {
+            spreadLoad();
+            dialMemory({ a0000000: VALKEY_9 + info(4 * GB, 8 * GB, 200) });
+
+            await step(HOT, 6);
+
+            expect(plan()).toMatchObject({ support: 'unknown', commands: [] });
+          });
+
+          it('gives no command on a managed service', async () => {
+            spreadLoad();
+            ctx.host = 'my-cluster.abc123.clustercfg.use1.cache.amazonaws.com';
+            dialMemory({
+              a0000000: VALKEY_9 + info(4 * GB, 8 * GB, 200),
+              b0000000: VALKEY_9 + info(GB, 8 * GB, 50),
+            });
+
+            await step(HOT, 6);
+
+            expect(plan()).toMatchObject({ support: 'provider_managed', commands: [] });
+          });
+        });
+
         it('gives up on a target that does not answer and drops its client', async () => {
           const budget = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
           (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;

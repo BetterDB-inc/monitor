@@ -4,10 +4,13 @@ import {
   type RebalancePlan,
   type RebalanceShard,
   type RebalanceVerdict,
+  type ShardServer,
   describeNoPlan,
   memoryWarnings,
   planRebalance,
   shardMemoryFromInfo,
+  shardServerFromInfo,
+  withCommands,
 } from '../rebalance-planner';
 
 const ZONE_BY_ID: Record<string, number> = { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7 };
@@ -819,5 +822,124 @@ describe('shardMemoryFromInfo', () => {
   it('gives nothing when the memory section is missing or unreadable', () => {
     expect(shardMemoryFromInfo({})).toBeUndefined();
     expect(shardMemoryFromInfo({ memory: { used_memory: 'n/a', maxmemory: '0' } })).toBeUndefined();
+  });
+});
+
+describe('withCommands', () => {
+  const VALKEY_9 = { dbType: 'valkey' as const, version: '9.0.1' };
+  const REDIS_84 = { dbType: 'redis' as const, version: '8.4.0' };
+  const plan = (): RebalancePlan => {
+    const base = planOf(
+      planRebalance({
+        hotShardId: 'a',
+        shards: [shard('a', 300_000), shard('b', 100_000), shard('c', 100_000)],
+        slots: slots(0, even(100, 3_000), 1_000),
+      }),
+    );
+    const move = (targetShardId: string, ranges: Array<[number, number]>) => ({
+      ...base.moves[0],
+      targetShardId,
+      targetAddr: shard(targetShardId, 0).nodeAddr,
+      ranges,
+    });
+    return {
+      ...base,
+      moves: [
+        move('b', [[0, 13]]),
+        move('c', [
+          [28, 39],
+          [50, 51],
+        ]),
+      ],
+    };
+  };
+  const servers = (server: unknown, ids = 'abcdefg') =>
+    new Map(ids.split('').map((id) => [id, server as ShardServer]));
+
+  it('gives one Valkey command for the whole plan, to run on the hot shard', () => {
+    expect(withCommands(plan(), servers(VALKEY_9), false)).toMatchObject({
+      support: 'valkey_atomic',
+      commands: [
+        {
+          nodeAddr: '10.0.0.1:6379',
+          text: 'CLUSTER MIGRATESLOTS SLOTSRANGE 0 13 NODE b SLOTSRANGE 28 39 50 51 NODE c',
+        },
+      ],
+    });
+  });
+
+  it('gives one Redis command per target, to run on that target', () => {
+    expect(withCommands(plan(), servers(REDIS_84), false)).toMatchObject({
+      support: 'redis_atomic',
+      commands: [
+        { nodeAddr: '10.0.0.2:6379', text: 'CLUSTER MIGRATION IMPORT 0 13' },
+        { nodeAddr: '10.0.0.3:6379', text: 'CLUSTER MIGRATION IMPORT 28 39 50 51' },
+      ],
+    });
+  });
+
+  it.each([
+    ['Valkey 10', { dbType: 'valkey', version: '10.0.0' }, 'valkey_atomic', 1],
+    ['Valkey 8.1', { dbType: 'valkey', version: '8.1.4' }, 'none', 0],
+    ['Redis 9', { dbType: 'redis', version: '9.0.0' }, 'redis_atomic', 2],
+    ['Redis 8.2', { dbType: 'redis', version: '8.2.3' }, 'none', 0],
+    ['a version that is not a number', { dbType: 'valkey', version: 'unstable' }, 'unknown', 0],
+  ])('reads %s', (_name, server, support, commands) => {
+    const result = withCommands(plan(), servers(server), false);
+
+    expect(result.support).toBe(support);
+    expect(result.commands).toHaveLength(commands);
+  });
+
+  it('has no command when a shard of the plan runs an older version', () => {
+    const mixed = servers(VALKEY_9);
+    mixed.set('c', { dbType: 'valkey', version: '8.1.4' });
+
+    expect(withCommands(plan(), mixed, false)).toMatchObject({ support: 'none', commands: [] });
+  });
+
+  it('has no command when the shards of the plan run different servers', () => {
+    const mixed = servers(VALKEY_9);
+    mixed.set('c', REDIS_84);
+
+    expect(withCommands(plan(), mixed, false)).toMatchObject({ support: 'none', commands: [] });
+  });
+
+  it('ignores the version of a shard that is not in the plan', () => {
+    const mixed = servers(VALKEY_9);
+    mixed.set('g', { dbType: 'valkey', version: '8.1.4' });
+
+    expect(withCommands(plan(), mixed, false).support).toBe('valkey_atomic');
+  });
+
+  it('says the version is unknown when a shard of the plan could not be read', () => {
+    expect(withCommands(plan(), servers(VALKEY_9, 'ab'), false)).toMatchObject({
+      support: 'unknown',
+      commands: [],
+    });
+  });
+
+  it('gives no command on a managed service, whatever the version', () => {
+    expect(withCommands(plan(), servers(VALKEY_9), true)).toMatchObject({
+      support: 'provider_managed',
+      commands: [],
+    });
+  });
+
+  it('reads Valkey from INFO even though it also reports a Redis version', () => {
+    expect(
+      shardServerFromInfo({ server: { redis_version: '7.2.4', valkey_version: '9.0.1' } }),
+    ).toEqual({ dbType: 'valkey', version: '9.0.1' });
+  });
+
+  it('reads Redis from INFO', () => {
+    expect(shardServerFromInfo({ server: { redis_version: '8.4.0' } })).toEqual({
+      dbType: 'redis',
+      version: '8.4.0',
+    });
+  });
+
+  it('gives nothing when INFO has no version', () => {
+    expect(shardServerFromInfo({ memory: { used_memory: '1' } })).toBeUndefined();
   });
 });

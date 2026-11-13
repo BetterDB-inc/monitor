@@ -737,6 +737,16 @@ A slot that is at least 20% of the shard's CPU is never part of a plan: it would
 
 A plan lists `warnings`, none of which block it: `source_fork` (the hot shard forks for the snapshot while it is the busiest node), `fewer_replicas` (the target has fewer replicas than the hot shard), `target_memory` (the keys moved, at the hot shard's average key size, would take the target past 80% of its `maxmemory`; `memoryShare` is the estimate) and `memory_unknown` (the target has no `maxmemory`, or `INFO` could not be read on it or on the hot shard).
 
+A plan also says whether the cluster has one command that does the move, in `support`, and gives the command text in `commands`. BetterDB never sends it; it is there to copy.
+
+| `support` | Meaning | `commands` |
+| --- | --- | --- |
+| `valkey_atomic` | The hot shard and every target run Valkey 9.0 or later. | One `CLUSTER MIGRATESLOTS` for the whole plan, to run on the hot shard. The server starts all of its moves or none. |
+| `redis_atomic` | The hot shard and every target run Redis 8.4 or later. | One `CLUSTER MIGRATION IMPORT` per target, to run on that target. |
+| `none` | A shard of the plan runs an older version, or they run different servers. There is no atomic command; BetterDB does not script the `SETSLOT` and `MIGRATE` steps. | Empty. |
+| `provider_managed` | The connection is a managed service known by its host name. Use the provider's own resharding. | Empty. |
+| `unknown` | `INFO` could not be read on a shard of the plan, so the version is not known. | Empty. |
+
 The suggestion is computed right before the event is raised and again every 5 minutes, or sooner when slots change owner or a primary turns suspect, failed or healthy again. A plan is withdrawn at once, without waiting for a new measurement, when a primary turns failed or suspect or a measured shard stops being a primary. Each computation asks every primary whether a slot is migrating, unless a primary is failed or suspect (the answer is then `unhealthy_node` without asking), and for a plan reads `INFO` once on the hot shard and on each target.
 
 Before you start one:
@@ -1072,7 +1082,7 @@ The open [`hot_shard`](#hot_shard) events of one cluster connection, with the nu
 
 `cpu` gives the shard's CPU rate per second, its share of the cluster, the cluster median and the ratio the rule used. `network` gives the same for bytes in plus bytes out, without a ratio: it is detail only, and it includes replication, counted once per replica. `topSlots` (up to 5) are ranked by CPU. `topKeys` (up to 10, full names) are ranked by `freq`, the LFU counter of the key (0 to 255). `keySource` is `lfu` when the keys were read and `unavailable` when they were not, with the reason in `keyNote`. `keysSampledAt` is the time of the read the names come from and `keysSampled` the number of keys whose frequency it got. When a later read gave no names, the names of the earlier read stay and `keyNote` says so. `eventId` is the id of the open event. `captureAvailable` is `true` when the key names are missing and a [capture on the hot primary](#hot_shard) can show them.
 
-`rebalance` is the [rebalance suggestion](#hot_shard): `kind` is `plan` or `no_plan`. A plan has `moves` (each with `targetShardId`, `targetAddr`, inclusive slot `ranges`, and the slots, keys and CPU it moves), `projection` (every shard's CPU, share and ratio to the median `before` and `after`, with its `role`), `medianBefore`, `medianAfter`, `pinnedSlots` and `warnings`. A `no_plan` has a `reason` and `pinnedSlots`. The field is missing for a moment after a restart, until the suggestion is computed again.
+`rebalance` is the [rebalance suggestion](#hot_shard): `kind` is `plan` or `no_plan`. A plan has `moves` (each with `targetShardId`, `targetAddr`, inclusive slot `ranges`, and the slots, keys and CPU it moves), `projection` (every shard's CPU, share and ratio to the median `before` and `after`, with its `role`), `medianBefore`, `medianAfter`, `pinnedSlots`, `warnings`, `support` and `commands` (each with the `nodeAddr` to run it on and the command `text`). A `no_plan` has a `reason` and `pinnedSlots`. The field is missing for a moment after a restart, until the suggestion is computed again.
 
 **Response**:
 ```json
@@ -1131,7 +1141,14 @@ The open [`hot_shard`](#hot_shard) events of one cluster connection, with the nu
       ],
       "medianBefore": 300000,
       "medianAfter": 562000,
-      "warnings": [{ "code": "source_fork", "shardId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d" }]
+      "warnings": [{ "code": "source_fork", "shardId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d" }],
+      "support": "valkey_atomic",
+      "commands": [
+        {
+          "nodeAddr": "10.0.0.1:6379",
+          "text": "CLUSTER MIGRATESLOTS SLOTSRANGE 2000 2410 NODE 9c4e1b7a2d5f8036a1c3e5f7092b4d6f8a0c2e4b"
+        }
+      ]
     }
   }
 ]
