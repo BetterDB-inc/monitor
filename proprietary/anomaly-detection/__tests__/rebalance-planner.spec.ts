@@ -38,6 +38,24 @@ function even(count: number, cpu: number): number[] {
   return new Array(count).fill(cpu);
 }
 
+function fleet(count: number, cpu: number): RebalanceShard[] {
+  return Array.from({ length: count }, (_, i) => ({
+    shardId: `s${String(i + 1).padStart(2, '0')}`,
+    nodeAddr: `10.0.1.${i + 1}:6379`,
+    cpuUsecPerSecond: cpu,
+    slotCount: 100,
+    state: 'healthy' as const,
+    hot: false,
+  }));
+}
+
+function expectTargetsToFit(plan: RebalancePlan, policy = DEFAULT_REBALANCE_POLICY): void {
+  for (const row of plan.projection.filter((shard) => shard.role === 'target')) {
+    expect(row.after.ratio).toBeLessThanOrEqual(policy.resolveRatio + 1e-9);
+    expect(row.after.cpuUsecPerSecond).toBeLessThanOrEqual(policy.nodeCpuLimitUsecPerSecond);
+  }
+}
+
 function planOf(verdict: RebalanceVerdict): RebalancePlan {
   if (verdict.kind !== 'plan') throw new Error(`no plan: ${verdict.reason}`);
   return verdict;
@@ -386,6 +404,173 @@ describe('planRebalance', () => {
     expect(verdict).toMatchObject({ kind: 'no_plan', reason: 'slots_scattered' });
   });
 
+  it('keeps a slot that no target can take out of the plan', () => {
+    const cpus = even(200, 2_000);
+    cpus[100] = 95_000;
+    const load = slots(0, cpus, 500);
+    load[100] = { ...load[100], keyCount: 1 };
+
+    const plan = planOf(
+      planRebalance({
+        hotShardId: 'a',
+        shards: [shard('a', 493_000), ...fleet(8, 100_000)],
+        slots: load,
+      }),
+    );
+
+    expect(plan.effect).toBe('resolves');
+    expect(movedSlots(plan)).not.toContain(100);
+    expect(plan.pinnedSlots).toEqual([{ slot: 100, shareOfShard: expect.closeTo(95 / 493) }]);
+    expect(plan.moves).toHaveLength(4);
+    expect(after(plan, 'a').ratio).toBeLessThanOrEqual(DEFAULT_REBALANCE_POLICY.resolveRatio);
+    expectTargetsToFit(plan);
+  });
+
+  it('gives every planned target its share, so a plan that resolves is labelled so', () => {
+    const plan = planOf(
+      planRebalance({
+        hotShardId: 'a',
+        shards: [shard('a', 500_000), ...fleet(8, 100_000)],
+        slots: slots(0, even(800, 625)),
+      }),
+    );
+
+    expect(plan.effect).toBe('resolves');
+    expect(plan.moves).toHaveLength(4);
+    expect(after(plan, 'a').ratio).toBeLessThanOrEqual(DEFAULT_REBALANCE_POLICY.resolveRatio);
+    expectTargetsToFit(plan);
+  });
+
+  it('trims a target that whole slots would take over the line', () => {
+    const cpu: Record<string, number> = { a: 300_000, b: 50_000, c: 50_000 };
+
+    const plan = planOf(
+      planRebalance(
+        {
+          hotShardId: 'a',
+          shards: ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((id) => shard(id, cpu[id] ?? 100_000)),
+          slots: slots(0, even(30, 10_000)),
+        },
+        { ...DEFAULT_REBALANCE_POLICY, maxTargets: 2 },
+      ),
+    );
+
+    expect(plan.effect).toBe('headroom');
+    expect(plan.moves.map((move) => [move.targetShardId, move.slotCount])).toEqual([
+      ['b', 7],
+      ['c', 7],
+    ]);
+    expectTargetsToFit(plan);
+  });
+
+  it('never returns a plan that puts a target over the line, whatever the slot load', () => {
+    let seed = 20261113;
+    const random = () => {
+      seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
+      return seed / 2_147_483_648;
+    };
+    let plans = 0;
+    for (let round = 0; round < 300; round += 1) {
+      const others = fleet(2 + Math.floor(random() * 18), 0).map((other) => ({
+        ...other,
+        cpuUsecPerSecond: Math.floor(20_000 + random() * 200_000),
+      }));
+      const count = 5 + Math.floor(random() * 400);
+      const skew = random();
+      const cpus = Array.from({ length: count }, () =>
+        Math.floor(random() < skew * 0.1 ? random() * 80_000 : random() * 4_000),
+      );
+      const load = slots(0, cpus).map((slot, i) => ({
+        ...slot,
+        slot: i * (random() < 0.05 ? 2 : 1) + (i > count / 2 ? 500 : 0),
+        keyCount: Math.floor(random() * 1_000),
+      }));
+      const input = {
+        hotShardId: 'a',
+        shards: [
+          shard(
+            'a',
+            load.reduce((sum, slot) => sum + slot.cpuUsecPerSecond, 0),
+          ),
+          ...others,
+        ],
+        slots: [...new Map(load.map((slot) => [slot.slot, slot])).values()].sort(
+          (x, y) => x.slot - y.slot,
+        ),
+      };
+      const sourceCpu = input.slots.reduce((sum, slot) => sum + slot.cpuUsecPerSecond, 0);
+
+      const verdict = planRebalance(input);
+
+      if (verdict.kind !== 'plan') continue;
+      plans += 1;
+      expectTargetsToFit(verdict);
+      const moved = movedSlots(verdict);
+      const pinned = new Set(verdict.pinnedSlots.map((slot) => slot.slot));
+      const owned = new Set(input.slots.map((slot) => slot.slot));
+      expect(new Set(moved).size).toBe(moved.length);
+      expect(moved.every((slot) => owned.has(slot) && !pinned.has(slot))).toBe(true);
+      const ranges = verdict.moves.reduce((sum, move) => sum + move.ranges.length, 0);
+      expect(ranges).toBeLessThanOrEqual(DEFAULT_REBALANCE_POLICY.maxRanges);
+      expect(verdict.moves.length).toBeLessThanOrEqual(DEFAULT_REBALANCE_POLICY.maxTargets);
+      const freed = verdict.moves.reduce((sum, move) => sum + move.cpuUsecPerSecond, 0);
+      expect(after(verdict, 'a').cpuUsecPerSecond).toBeCloseTo(sourceCpu - freed, 3);
+      const resolved = after(verdict, 'a').ratio <= DEFAULT_REBALANCE_POLICY.resolveRatio + 1e-9;
+      expect(verdict.effect).toBe(resolved ? 'resolves' : 'headroom');
+      if (!resolved) {
+        expect(freed).toBeGreaterThanOrEqual(
+          DEFAULT_REBALANCE_POLICY.headroomShare * sourceCpu - 1e-6,
+        );
+      }
+    }
+    expect(plans).toBeGreaterThan(50);
+  });
+
+  it.each([2.5, 3, 4])(
+    'offers headroom when four of twenty shards cannot take all of a %sx shard',
+    (factor) => {
+      const plan = planOf(
+        planRebalance({
+          hotShardId: 'a',
+          shards: [shard('a', factor * 100_000), ...fleet(19, 100_000)],
+          slots: slots(0, even(800, (factor * 100_000) / 800)),
+        }),
+      );
+
+      expect(plan.effect).toBe('headroom');
+      expect(plan.moves).toHaveLength(4);
+      expectTargetsToFit(plan);
+    },
+  );
+
+  it.each([5, 8])(
+    'does not call the cluster hot when twenty shards have room for a %sx shard but four do not',
+    (factor) => {
+      const verdict = planRebalance({
+        hotShardId: 'a',
+        shards: [shard('a', factor * 100_000), ...fleet(19, 100_000)],
+        slots: slots(0, even(800, (factor * 100_000) / 800)),
+      });
+
+      expect(verdict).toEqual({
+        kind: 'no_plan',
+        action: 'spread',
+        reason: 'too_many_targets',
+        pinnedSlots: [],
+      });
+    },
+  );
+
+  it('calls the cluster hot when all the other shards together have no room', () => {
+    const verdict = planRebalance({
+      hotShardId: 'a',
+      shards: [shard('a', 1_600_000), ...fleet(19, 790_000)],
+      slots: slots(0, even(800, 2_000)),
+    });
+
+    expect(verdict).toMatchObject({ kind: 'no_plan', reason: 'cluster_hot' });
+  });
+
   it('keeps every number finite on a near-idle cluster', () => {
     const verdict = planRebalance({
       hotShardId: 'a',
@@ -472,6 +657,10 @@ describe('describeNoPlan', () => {
     ['unhealthy_node', ' No rebalance is suggested while a primary is failed or suspect.'],
     ['migration_running', ' No rebalance is suggested while a slot migration is running.'],
     ['settling', ' No rebalance is suggested until the slot load settles.'],
+    [
+      'too_many_targets',
+      ' No rebalance is suggested: this load would have to be spread over too many shards.',
+    ],
     [
       'slots_scattered',
       " No rebalance is suggested: this shard's slots are too scattered to move enough load in a few ranges.",

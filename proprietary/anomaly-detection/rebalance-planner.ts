@@ -54,7 +54,8 @@ export type RebalanceNoPlanReason =
   | 'unhealthy_node'
   | 'migration_running'
   | 'settling'
-  | 'slots_scattered';
+  | 'slots_scattered'
+  | 'too_many_targets';
 
 export interface RebalancePinnedSlot {
   slot: number;
@@ -121,6 +122,9 @@ export type RebalanceVerdict = RebalancePlan | RebalanceNoPlan;
 
 const SOLVE_STEPS = 50;
 const SLACK = 1e-6;
+const AIM_STEPS = 6;
+const HEAVY_ROUNDS = 8;
+const TRIM_STEPS = 256;
 
 interface SlotWindow {
   slots: SlotLoadRate[];
@@ -129,9 +133,24 @@ interface SlotWindow {
 }
 
 interface Outlook {
-  fills: number[];
   sourceRatio: number;
   targetsFit: boolean;
+}
+
+interface Taker {
+  target: RebalanceShard;
+  fill: number;
+  slots: SlotLoadRate[];
+  cpu: number;
+}
+
+interface Realized {
+  takers: Taker[];
+  selected: number;
+  freed: number;
+  medianAfter: number;
+  sourceRatio: number;
+  oversized: SlotLoadRate[];
 }
 
 export function noRebalancePlan(
@@ -252,94 +271,71 @@ function rangesOf(slots: readonly SlotLoadRate[]): Array<[number, number]> {
   return segmentsOf(slots).map((segment) => [segment[0].slot, segment[segment.length - 1].slot]);
 }
 
-function handOut(
+function pour(
   windows: readonly SlotWindow[],
   targets: readonly RebalanceShard[],
   fills: readonly number[],
-  sourceCpu: number,
-): RebalanceMove[] {
+): Taker[] {
   const takers = targets
-    .map((target, index) => ({ target, fill: fills[index], slots: [] as SlotLoadRate[] }))
+    .map((target, index): Taker => ({ target, fill: fills[index], slots: [], cpu: 0 }))
     .filter((taker) => taker.fill > SLACK);
   if (takers.length === 0) return [];
   const ordered = windows.flatMap((window) => window.slots).sort((a, b) => a.slot - b.slot);
   let at = 0;
+  let due = takers[0].fill;
   let poured = 0;
   for (const slot of ordered) {
-    if (at < takers.length - 1 && poured >= takers[at].fill - SLACK) {
+    while (at < takers.length - 1 && poured + slot.cpuUsecPerSecond / 2 > due + SLACK) {
       at += 1;
-      poured = 0;
+      due += takers[at].fill;
     }
     takers[at].slots.push(slot);
+    takers[at].cpu += slot.cpuUsecPerSecond;
     poured += slot.cpuUsecPerSecond;
   }
-  return takers
-    .filter((taker) => taker.slots.length > 0)
-    .map(({ target, slots }) => {
-      const cpu = cpuOf(slots);
-      return {
-        targetShardId: target.shardId,
-        targetAddr: target.nodeAddr,
-        ranges: rangesOf(slots),
-        slotCount: slots.length,
-        keyCount: keysOf(slots),
-        cpuUsecPerSecond: cpu,
-        shareOfShard: cpu / sourceCpu,
-      };
-    });
+  return takers;
 }
 
-export function planRebalance(
-  input: RebalanceInput,
-  policy: RebalancePolicy = DEFAULT_REBALANCE_POLICY,
-): RebalanceVerdict {
-  if (input.shards.some((shard) => shard.state !== 'healthy')) {
-    return noRebalancePlan('unhealthy_node');
+function dropEdge(taker: Taker, all: boolean): void {
+  if (all) {
+    taker.slots = [];
+  } else if (
+    taker.slots[0].cpuUsecPerSecond > taker.slots[taker.slots.length - 1].cpuUsecPerSecond
+  ) {
+    taker.slots.shift();
+  } else {
+    taker.slots.pop();
   }
-  const source = input.shards.find((shard) => shard.shardId === input.hotShardId);
-  const sourceCpu = cpuOf(input.slots);
-  if (!source || sourceCpu <= 0) return noRebalancePlan('settling');
+  taker.cpu = cpuOf(taker.slots);
+}
 
-  const cpuBefore = (shard: RebalanceShard) =>
-    shard === source ? sourceCpu : shard.cpuUsecPerSecond;
-  const owners = input.shards.filter((shard) => shard === source || shard.slotCount > 0);
-  const medianBefore = median(owners.map(cpuBefore));
-  if (hotShardRatio(sourceCpu, medianBefore) <= policy.resolveRatio) {
-    return noRebalancePlan('settling');
-  }
+interface Spread {
+  input: RebalanceInput;
+  policy: RebalancePolicy;
+  source: RebalanceShard;
+  sourceCpu: number;
+  medianBefore: number;
+  candidates: RebalanceShard[];
+  kept: SlotLoadRate[];
+  reportOversized: boolean;
+}
 
-  const pinned = input.slots
-    .filter((slot) => slot.cpuUsecPerSecond >= policy.pinnedSlotShare * sourceCpu)
-    .sort((a, b) => b.cpuUsecPerSecond - a.cpuUsecPerSecond || a.slot - b.slot);
-  const pinnedSlots = pinned.map((slot) => ({
-    slot: slot.slot,
-    shareOfShard: slot.cpuUsecPerSecond / sourceCpu,
-  }));
-  if (cpuOf(pinned) >= policy.nodeCpuLimitUsecPerSecond) {
-    return noRebalancePlan('key_level', pinnedSlots);
-  }
-
-  const kept = new Set([...pinned.map((slot) => slot.slot), ...policy.excludedSlots]);
+function spread(ctx: Spread): RebalanceVerdict | SlotLoadRate[] {
+  const { input, policy, source, sourceCpu, medianBefore, candidates } = ctx;
+  const pinnedSlots = [...ctx.kept]
+    .sort((a, b) => b.cpuUsecPerSecond - a.cpuUsecPerSecond || a.slot - b.slot)
+    .map((slot) => ({ slot: slot.slot, shareOfShard: slot.cpuUsecPerSecond / sourceCpu }));
+  const kept = new Set([...ctx.kept.map((slot) => slot.slot), ...policy.excludedSlots]);
   const movable = input.slots
     .filter((slot) => !kept.has(slot.slot))
     .sort((a, b) => a.slot - b.slot);
   const movableCpu = cpuOf(movable);
-
-  const sameZone = (shard: RebalanceShard) =>
-    source.availabilityZone !== undefined && shard.availabilityZone === source.availabilityZone
-      ? 0
-      : 1;
-  const candidates = input.shards
-    .filter(
-      (shard) => shard !== source && !shard.hot && !policy.excludedShardIds.includes(shard.shardId),
-    )
-    .sort(
-      (a, b) =>
-        a.cpuUsecPerSecond - b.cpuUsecPerSecond ||
-        sameZone(a) - sameZone(b) ||
-        (a.shardId < b.shardId ? -1 : 1),
-    );
-  if (candidates.length === 0) return noRebalancePlan('no_target', pinnedSlots);
+  const owners = input.shards.filter((shard) => shard === source || shard.slotCount > 0);
+  const cpuBefore = (shard: RebalanceShard) =>
+    shard === source ? sourceCpu : shard.cpuUsecPerSecond;
+  const fitsOn = (cpu: number, medianAfter: number, slack = 0) =>
+    cpu <= policy.nodeCpuLimitUsecPerSecond + slack &&
+    hotShardRatio(cpu, medianAfter) <= policy.resolveRatio + slack;
 
   const outlook = (targets: readonly RebalanceShard[], amount: number): Outlook => {
     const fills = waterFill(
@@ -347,82 +343,145 @@ export function planRebalance(
       amount,
     );
     const after = targets.map((target, index) => target.cpuUsecPerSecond + fills[index]);
-    const loads = [
+    const medianAfter = median([
       ...owners
         .filter((shard) => shard !== source && !targets.includes(shard))
         .map((shard) => shard.cpuUsecPerSecond),
       sourceCpu - amount,
       ...after.filter((_, index) => targets[index].slotCount > 0 || fills[index] > 0),
-    ];
-    const medianAfter = median(loads);
+    ]);
     return {
-      fills,
       sourceRatio: hotShardRatio(sourceCpu - amount, medianAfter),
-      targetsFit: after.every(
-        (cpu, index) =>
-          fills[index] <= 0 ||
-          (cpu <= policy.nodeCpuLimitUsecPerSecond &&
-            hotShardRatio(cpu, medianAfter) <= policy.resolveRatio),
-      ),
+      targetsFit: after.every((cpu, index) => fills[index] <= 0 || fitsOn(cpu, medianAfter)),
+    };
+  };
+
+  const loadsAfter = (takers: readonly Taker[]) => {
+    const gained = new Map(
+      takers
+        .filter((taker) => taker.slots.length > 0)
+        .map((taker) => [taker.target.shardId, taker.cpu]),
+    );
+    const freed = [...gained.values()].reduce((total, cpu) => total + cpu, 0);
+    const cpuAfter = (shard: RebalanceShard) =>
+      shard === source
+        ? sourceCpu - freed
+        : shard.cpuUsecPerSecond + (gained.get(shard.shardId) ?? 0);
+    const medianAfter = median(
+      input.shards
+        .filter((shard) => owners.includes(shard) || gained.has(shard.shardId))
+        .map(cpuAfter),
+    );
+    return { gained, freed, cpuAfter, medianAfter };
+  };
+
+  const trim = (takers: readonly Taker[]): void => {
+    for (let step = 0; ; step += 1) {
+      const { medianAfter } = loadsAfter(takers);
+      const after = (taker: Taker) => taker.target.cpuUsecPerSecond + taker.cpu;
+      const worst = takers
+        .filter((taker) => taker.slots.length > 0)
+        .reduce<
+          Taker | undefined
+        >((top, taker) => (top && after(top) >= after(taker) ? top : taker), undefined);
+      if (!worst || fitsOn(after(worst), medianAfter, SLACK)) return;
+      dropEdge(worst, step >= TRIM_STEPS);
+    }
+  };
+
+  const realize = (targets: readonly RebalanceShard[], aim: number): Realized => {
+    const windows = selectWindows(
+      movable,
+      aim,
+      Math.max(1, policy.maxRanges - (targets.length - 1)),
+    );
+    const selected = windows.reduce((total, window) => total + window.cpu, 0);
+    const fills = waterFill(
+      targets.map((target) => target.cpuUsecPerSecond),
+      selected,
+    );
+    const largestFill = Math.max(...fills);
+    const oversized = ctx.reportOversized
+      ? windows
+          .flatMap((window) => window.slots)
+          .filter((slot) => slot.cpuUsecPerSecond > largestFill + SLACK)
+      : [];
+    const takers = pour(windows, targets, fills);
+    trim(takers);
+    const { freed, medianAfter } = loadsAfter(takers);
+    return {
+      takers,
+      selected,
+      freed,
+      medianAfter,
+      sourceRatio: hotShardRatio(sourceCpu - freed, medianAfter),
+      oversized,
     };
   };
 
   const most = Math.min(Math.max(1, policy.maxTargets), candidates.length);
-  let targets: RebalanceShard[] = [];
-  let amount = 0;
-  for (let count = 1; count <= most && targets.length === 0; count += 1) {
+  let chosen: Realized | undefined;
+  for (let count = 1; count <= most && !chosen; count += 1) {
     const tried = candidates.slice(0, count);
     const resolves = (moved: number) => outlook(tried, moved).sourceRatio <= policy.resolveRatio;
     if (!resolves(movableCpu)) continue;
     const needed = smallestThat(resolves, movableCpu);
     if (!outlook(tried, needed).targetsFit) continue;
-    targets = tried;
-    amount = needed;
-  }
-  if (targets.length === 0) {
-    targets = candidates.slice(0, most);
-    const fits = (moved: number) => outlook(targets, moved).targetsFit;
-    const allFits = fits(movableCpu);
-    amount = allFits ? movableCpu : largestThat(fits, movableCpu);
-    if (amount < policy.headroomShare * sourceCpu - SLACK) {
-      return noRebalancePlan(allFits ? 'key_level' : 'cluster_hot', pinnedSlots);
+    let aim = needed;
+    for (let step = 0; step < AIM_STEPS; step += 1) {
+      const real = realize(tried, aim);
+      if (real.oversized.length > 0) return real.oversized;
+      if (real.freed > 0 && real.sourceRatio <= policy.resolveRatio + SLACK) {
+        chosen = real;
+        break;
+      }
+      if (real.selected >= movableCpu - SLACK) break;
+      const short = sourceCpu - real.freed - policy.resolveRatio * real.medianAfter;
+      aim = Math.min(movableCpu, real.selected + Math.max(short, 2 * SLACK));
     }
   }
+  if (!chosen) {
+    const roomOf = (pool: readonly RebalanceShard[]) => {
+      const fits = (moved: number) => outlook(pool, moved).targetsFit;
+      return fits(movableCpu) ? movableCpu : largestThat(fits, movableCpu);
+    };
+    const enough = policy.headroomShare * sourceCpu - SLACK;
+    const pool = candidates.slice(0, most);
+    const amount = roomOf(pool);
+    if (amount < enough) {
+      if (movableCpu < enough) return noRebalancePlan('key_level', pinnedSlots);
+      return noRebalancePlan(
+        roomOf(candidates) < enough ? 'cluster_hot' : 'too_many_targets',
+        pinnedSlots,
+      );
+    }
+    chosen = realize(pool, amount);
+    if (chosen.oversized.length > 0) return chosen.oversized;
+  }
 
-  const windows = selectWindows(
-    movable,
-    amount,
-    Math.max(1, policy.maxRanges - (targets.length - 1)),
-  );
-  const freed = windows.reduce((total, window) => total + window.cpu, 0);
-  const moves = handOut(
-    windows,
-    targets,
-    waterFill(
-      targets.map((target) => target.cpuUsecPerSecond),
-      freed,
-    ),
-    sourceCpu,
-  );
-  if (moves.length === 0) return noRebalancePlan('settling', pinnedSlots);
-
-  const gained = new Map(moves.map((move) => [move.targetShardId, move.cpuUsecPerSecond]));
-  const cpuAfter = (shard: RebalanceShard) =>
-    shard === source
-      ? sourceCpu - freed
-      : shard.cpuUsecPerSecond + (gained.get(shard.shardId) ?? 0);
-  const medianAfter = median(
-    input.shards
-      .filter((shard) => owners.includes(shard) || gained.has(shard.shardId))
-      .map(cpuAfter),
-  );
+  const takers = chosen.takers.filter((taker) => taker.slots.length > 0);
+  const { gained, freed, cpuAfter, medianAfter } = loadsAfter(takers);
   const effect =
     hotShardRatio(sourceCpu - freed, medianAfter) <= policy.resolveRatio + SLACK
       ? 'resolves'
       : 'headroom';
-  if (effect === 'headroom' && freed < policy.headroomShare * sourceCpu - SLACK) {
+  if (
+    takers.length === 0 ||
+    (effect === 'headroom' && freed < policy.headroomShare * sourceCpu - SLACK)
+  ) {
     return noRebalancePlan('slots_scattered', pinnedSlots);
   }
+  const moves = takers.map(
+    ({ target, slots, cpu }): RebalanceMove => ({
+      targetShardId: target.shardId,
+      targetAddr: target.nodeAddr,
+      ranges: rangesOf(slots),
+      slotCount: slots.length,
+      keyCount: keysOf(slots),
+      cpuUsecPerSecond: cpu,
+      shareOfShard: cpu / sourceCpu,
+    }),
+  );
 
   const totalCpu = input.shards.reduce((total, shard) => total + cpuBefore(shard), 0);
   const order = (shard: RebalanceShard) =>
@@ -448,8 +507,7 @@ export function planRebalance(
     );
 
   const warnings: RebalanceWarning[] = [{ code: 'source_fork', shardId: source.shardId }];
-  for (const target of targets) {
-    if (!gained.has(target.shardId)) continue;
+  for (const { target } of takers) {
     if (target.replicaCount === undefined || source.replicaCount === undefined) continue;
     if (target.replicaCount < source.replicaCount) {
       warnings.push({ code: 'fewer_replicas', shardId: target.shardId });
@@ -468,6 +526,79 @@ export function planRebalance(
     medianAfter,
     warnings,
   };
+}
+
+export function planRebalance(
+  input: RebalanceInput,
+  policy: RebalancePolicy = DEFAULT_REBALANCE_POLICY,
+): RebalanceVerdict {
+  if (input.shards.some((shard) => shard.state !== 'healthy')) {
+    return noRebalancePlan('unhealthy_node');
+  }
+  const source = input.shards.find((shard) => shard.shardId === input.hotShardId);
+  const sourceCpu = cpuOf(input.slots);
+  if (!source || sourceCpu <= 0) return noRebalancePlan('settling');
+
+  const medianBefore = median(
+    input.shards
+      .filter((shard) => shard === source || shard.slotCount > 0)
+      .map((shard) => (shard === source ? sourceCpu : shard.cpuUsecPerSecond)),
+  );
+  if (hotShardRatio(sourceCpu, medianBefore) <= policy.resolveRatio) {
+    return noRebalancePlan('settling');
+  }
+
+  const pinned = input.slots.filter(
+    (slot) => slot.cpuUsecPerSecond >= policy.pinnedSlotShare * sourceCpu,
+  );
+  if (cpuOf(pinned) >= policy.nodeCpuLimitUsecPerSecond) {
+    return spreadless('key_level', pinned, sourceCpu);
+  }
+
+  const sameZone = (shard: RebalanceShard) =>
+    source.availabilityZone !== undefined && shard.availabilityZone === source.availabilityZone
+      ? 0
+      : 1;
+  const candidates = input.shards
+    .filter(
+      (shard) => shard !== source && !shard.hot && !policy.excludedShardIds.includes(shard.shardId),
+    )
+    .sort(
+      (a, b) =>
+        a.cpuUsecPerSecond - b.cpuUsecPerSecond ||
+        sameZone(a) - sameZone(b) ||
+        (a.shardId < b.shardId ? -1 : 1),
+    );
+  if (candidates.length === 0) return spreadless('no_target', pinned, sourceCpu);
+
+  const kept = [...pinned];
+  for (let round = 0; ; round += 1) {
+    const outcome = spread({
+      input,
+      policy,
+      source,
+      sourceCpu,
+      medianBefore,
+      candidates,
+      kept,
+      reportOversized: round < HEAVY_ROUNDS,
+    });
+    if (!Array.isArray(outcome)) return outcome;
+    kept.push(...outcome);
+  }
+}
+
+function spreadless(
+  reason: RebalanceNoPlanReason,
+  kept: readonly SlotLoadRate[],
+  sourceCpu: number,
+): RebalanceNoPlan {
+  return noRebalancePlan(
+    reason,
+    [...kept]
+      .sort((a, b) => b.cpuUsecPerSecond - a.cpuUsecPerSecond || a.slot - b.slot)
+      .map((slot) => ({ slot: slot.slot, shareOfShard: slot.cpuUsecPerSecond / sourceCpu })),
+  );
 }
 
 export function shardMemoryFromInfo(
@@ -538,6 +669,8 @@ const NO_PLAN_SENTENCES: Record<Exclude<RebalanceNoPlanReason, 'key_level'>, str
   unhealthy_node: ' No rebalance is suggested while a primary is failed or suspect.',
   migration_running: ' No rebalance is suggested while a slot migration is running.',
   settling: ' No rebalance is suggested until the slot load settles.',
+  too_many_targets:
+    ' No rebalance is suggested: this load would have to be spread over too many shards.',
   slots_scattered:
     " No rebalance is suggested: this shard's slots are too scattered to move enough load in a few ranges.",
 };

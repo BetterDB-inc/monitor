@@ -3065,8 +3065,8 @@ describe('AnomalyService', () => {
         expect(rebalance()).toMatchObject({
           kind: 'plan',
           moves: [
-            { targetShardId: 'd0000000', targetAddr: '10.0.0.4:6379', ranges: [[100, 107]] },
-            { targetShardId: 'b0000000', ranges: [[108, 111]] },
+            { targetShardId: 'd0000000', targetAddr: '10.0.0.4:6379', ranges: [[100, 106]] },
+            { targetShardId: 'b0000000', ranges: [[107, 111]] },
           ],
           warnings: [
             { code: 'source_fork', shardId: 'a0000000' },

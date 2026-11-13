@@ -717,13 +717,14 @@ In the last two cases the event is raised without key names, the detail has `key
 
 The suggestion is one of two things:
 
-- A **plan**: slot ranges to move off the hot shard, the shard each range goes to, and the projected CPU of every shard before and after. It picks the ranges with the fewest keys that carry enough CPU, at most 8 ranges, and the coldest healthy shards as targets, an empty primary first and a shard in the hot shard's availability zone first on a tie. It uses as few targets as will do, at most 4. `effect` is `resolves` when the hot shard ends at or under 1.25 times the projected median, and `headroom` when the move only frees at least 25% of the shard's CPU.
+- A **plan**: slot ranges to move off the hot shard, the shard each range goes to, and the projected CPU of every shard before and after. It picks the ranges with the fewest keys that carry enough CPU, at most 8 ranges, and the coldest healthy shards as targets, an empty primary first and a shard in the hot shard's availability zone first on a tie. It uses as few targets as will do, at most 4. No target ends above 0.8 of a core or above 1.25 times the projected median: slots move whole, so the planner checks the load of the real ranges and takes slots back off a target that would end over the line. `effect` is `resolves` when the hot shard ends at or under 1.25 times the projected median, and `headroom` when the move only frees at least 25% of the shard's CPU.
 - **No plan**, with a `reason`, when moving slots will not help or should wait:
 
   | `reason` | Meaning |
   | --- | --- |
   | `key_level` | One or a few slots carry the load: the slots that each take at least 20% of the shard's CPU add up to 0.8 of a core or more, or the rest of the slots carry under 25% of the shard's CPU. A slot cannot be split, so the fix is at the key: client-side caching, reads from replicas, or splitting the key. `pinnedSlots` lists them. |
-  | `cluster_hot` | The other shards cannot take even 25% of the shard's CPU without going over 0.8 of a core or over 1.25 times the projected median. Add a shard. |
+  | `cluster_hot` | All the other shards together cannot take even 25% of the shard's CPU without going over 0.8 of a core or over 1.25 times the projected median. Add a shard. |
+  | `too_many_targets` | The other shards have room, but not within 4 targets: the load would have to be spread over more shards than one suggestion covers. |
   | `no_target` | No other healthy primary can take slots. |
   | `unhealthy_node` | A primary is failed or suspect. |
   | `migration_running` | A slot migration or reshard is running, or the monitor could not ask every primary. |
@@ -732,7 +733,7 @@ The suggestion is one of two things:
 
   For `key_level` and `cluster_hot` the event message ends with the reason, for example `Rebalancing will not help: slot 9189 alone is 81% of this shard's CPU. Consider client-side caching, reads from replicas, or splitting key "session:global".` For the other reasons it ends with a short `No rebalance is suggested ...` sentence. The message is written once, when the event is raised.
 
-A slot that is at least 20% of the shard's CPU is never part of a plan: it would only move the problem. The projection assumes that a slot's load moves with it one for one.
+A slot that is at least 20% of the shard's CPU is never part of a plan: it would only move the problem. Neither is a slot that carries more CPU than any target has room for. `pinnedSlots` lists both kinds. The projection assumes that a slot's load moves with it one for one.
 
 A plan lists `warnings`, none of which block it: `source_fork` (the hot shard forks for the snapshot while it is the busiest node), `fewer_replicas` (the target has fewer replicas than the hot shard), `target_memory` (the keys moved, at the hot shard's average key size, would take the target past 80% of its `maxmemory`; `memoryShare` is the estimate) and `memory_unknown` (the target has no `maxmemory`, or `INFO` could not be read on it or on the hot shard).
 
