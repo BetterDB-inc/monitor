@@ -591,9 +591,11 @@ used_cpu_user:20.3\r
         last_ack_time: 1_700_000_090,
         state: 'snapshotting',
         message: '',
+        cow_size: 0,
+        remaining_repl_size: 4096,
       };
 
-      it('gives a running job its name and its times in milliseconds', async () => {
+      it('gives a running job its name, its times in milliseconds and its backlog', async () => {
         mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
         nodeClients({ abc123node1: { jobs: [job(running)] } });
 
@@ -604,6 +606,7 @@ used_cpu_user:20.3\r
             jobName: 'job-1',
             lastUpdateAt: 1_700_000_060_000,
             lastAckAt: 1_700_000_090_000,
+            remainingReplBytes: 4096,
             phase: 'snapshotting',
           }),
         ]);
@@ -612,13 +615,14 @@ used_cpu_user:20.3\r
 
       it('leaves out a time the server did not send', async () => {
         mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
-        const { last_ack_time: _ack, ...withoutAck } = running;
+        const { last_ack_time: _ack, remaining_repl_size: _backlog, ...withoutAck } = running;
         nodeClients({ abc123node1: { jobs: [job({ ...withoutAck, last_update_time: 'soon' })] } });
 
         const [migration] = (await service.readSlotMigrations('conn-1')).migrations;
 
         expect(migration.lastUpdateAt).toBeUndefined();
         expect(migration.lastAckAt).toBeUndefined();
+        expect(migration.remainingReplBytes).toBeUndefined();
       });
 
       it('lists a failed job once, with what the server said about it', async () => {

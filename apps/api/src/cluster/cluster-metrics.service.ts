@@ -190,6 +190,7 @@ export interface SlotMigration {
   jobName?: string;
   lastUpdateAt?: number;
   lastAckAt?: number;
+  remainingReplBytes?: number;
 }
 
 export interface SlotMigrationCheck {
@@ -220,6 +221,14 @@ export interface SlotMigrationReport extends SlotMigrationCheck {
 const FINISHED_MIGRATION_STATES = new Set(['success', 'failed', 'cancelled']);
 const MIGRATION_JOBS_ASK_AGAIN_MS = 5 * 60_000;
 const MAX_REMEMBERED_NODES_WITHOUT_MIGRATION_JOBS = 1000;
+const FULL_NODE_ID_LENGTH = 40;
+
+function byteCount(value: string | undefined): number | undefined {
+  const bytes = Number(value);
+  return value !== undefined && value !== '' && Number.isSafeInteger(bytes) && bytes >= 0
+    ? bytes
+    : undefined;
+}
 
 function epochSecondsToMs(value: string | undefined): number | undefined {
   const seconds = Number(value);
@@ -915,8 +924,14 @@ export class ClusterMetricsService {
       };
     }
 
+    const nodesById = new Map(nodes.map((node) => [node.id, node]));
     const findNode = (idOrPrefix: string) =>
-      idOrPrefix ? nodes.find((n) => n.id.startsWith(idOrPrefix)) : undefined;
+      idOrPrefix
+        ? (nodesById.get(idOrPrefix) ??
+          (idOrPrefix.length < FULL_NODE_ID_LENGTH
+            ? nodes.find((n) => n.id.startsWith(idOrPrefix))
+            : undefined))
+        : undefined;
     // The source's MIGRATING marker and the target's IMPORTING marker describe
     // the same move; keep one entry and let MIGRATING win so the label is stable.
     const legacy = new Map<string, SlotMigration>();
@@ -1019,9 +1034,13 @@ export class ClusterMetricsService {
       for (const job of jobs) {
         if (!job.name) continue;
         const isImport = job.operation?.toUpperCase() === 'IMPORT';
+        if (FINISHED_MIGRATION_STATES.has(job.state)) {
+          finishedJobs.add(job.name);
+          if (job.state !== 'failed' || (isImport && failedJobs.has(job.name))) continue;
+        }
         const source = findNode(job.source_node ?? '');
         const target = findNode(job.target_node ?? '');
-        if (job.state === 'failed' && !(isImport && failedJobs.has(job.name))) {
+        if (job.state === 'failed') {
           failedJobs.set(job.name, {
             jobName: job.name,
             slotRange: job.slot_ranges ?? '',
@@ -1031,9 +1050,6 @@ export class ClusterMetricsService {
             targetAddress: target?.address ?? '',
             message: job.message ?? '',
           });
-        }
-        if (FINISHED_MIGRATION_STATES.has(job.state)) {
-          finishedJobs.add(job.name);
           continue;
         }
         const firstSlot = parseInt((job.slot_ranges ?? '').split(/[-\s]/)[0], 10);
@@ -1049,6 +1065,7 @@ export class ClusterMetricsService {
           jobName: job.name,
           lastUpdateAt: epochSecondsToMs(job.last_update_time),
           lastAckAt: epochSecondsToMs(job.last_ack_time),
+          remainingReplBytes: byteCount(job.remaining_repl_size),
         };
         jobViews.push(view);
         if (!(isImport && atomicJobs.has(job.name))) atomicJobs.set(job.name, view);

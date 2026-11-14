@@ -29,7 +29,7 @@ function job(overrides: Partial<SlotMigration> = {}): SlotMigration {
     targetNodeId: B.id,
     targetAddress: B.address,
     state: 'migrating',
-    phase: 'snapshotting',
+    phase: 'waiting-to-snapshot',
     jobName: 'job-1',
     lastUpdateAt: T0,
     lastAckAt: T0,
@@ -115,13 +115,13 @@ describe('judgeSlotMigrations', () => {
           sourceAddress: A.address,
           targetNodeId: B.id,
           targetAddress: B.address,
-          phase: 'snapshotting',
+          phase: 'waiting-to-snapshot',
         },
       ]);
       expect(judged.stuck).toEqual([]);
     });
 
-    it('is stuck after 10 minutes with the same state, update time and heartbeat', () => {
+    it('is stuck after 10 minutes with the same state and update time', () => {
       const seen = report({ migrations: [job()] });
 
       const before = run([
@@ -139,14 +139,28 @@ describe('judgeSlotMigrations', () => {
           kind: 'stuck',
           signature: 'stuck:job:job-1',
           quietMs: ATOMIC_MIGRATION_STALL_MS,
-          phase: 'snapshotting',
+          phase: 'waiting-to-snapshot',
         }),
       ]);
       expect(after.running).toHaveLength(1);
     });
 
+    it('is stuck although its heartbeat keeps arriving', () => {
+      const judged = run([
+        [T0, report({ migrations: [job()] })],
+        [T0 + 5 * MINUTE, report({ migrations: [job({ lastAckAt: T0 + 5 * MINUTE })] })],
+        [
+          T0 + ATOMIC_MIGRATION_STALL_MS,
+          report({ migrations: [job({ lastAckAt: T0 + 10 * MINUTE })] }),
+        ],
+      ]);
+
+      expect(judged.stuck).toEqual([
+        expect.objectContaining({ quietMs: ATOMIC_MIGRATION_STALL_MS }),
+      ]);
+    });
+
     it.each([
-      ['a heartbeat', { lastAckAt: T0 + 9 * MINUTE }],
       ['a status update', { lastUpdateAt: T0 + 9 * MINUTE }],
       ['a new state', { phase: 'replicating' }],
     ])('is not stuck when %s arrived in the meantime', (_, progress) => {
@@ -159,8 +173,8 @@ describe('judgeSlotMigrations', () => {
       expect(judged.stuck).toEqual([]);
     });
 
-    it('is never judged stuck when the server sends neither time', () => {
-      const untimed = job({ lastUpdateAt: undefined, lastAckAt: undefined });
+    it('is never judged stuck when the server sends no update time', () => {
+      const untimed = job({ lastUpdateAt: undefined });
 
       const judged = run([
         [T0, report({ migrations: [untimed] })],
@@ -171,12 +185,12 @@ describe('judgeSlotMigrations', () => {
       expect(judged.stuck).toEqual([]);
     });
 
-    it('is still judged when the server sends only one of the two times', () => {
-      const heartbeatOnly = job({ lastUpdateAt: undefined });
+    it('is still judged when the server sends no heartbeat time', () => {
+      const updateOnly = job({ lastAckAt: undefined });
 
       const judged = run([
-        [T0, report({ migrations: [heartbeatOnly] })],
-        [T0 + ATOMIC_MIGRATION_STALL_MS, report({ migrations: [heartbeatOnly] })],
+        [T0, report({ migrations: [updateOnly] })],
+        [T0 + ATOMIC_MIGRATION_STALL_MS, report({ migrations: [updateOnly] })],
       ]);
 
       expect(judged.stuck).toHaveLength(1);
@@ -197,7 +211,7 @@ describe('judgeSlotMigrations', () => {
       const judged = run([
         [T0, report({ migrations: [job()] })],
         [T0 + 10 * MINUTE, report({ migrations: [job()] })],
-        [T0 + 11 * MINUTE, report({ migrations: [job({ lastAckAt: T0 + 11 * MINUTE })] })],
+        [T0 + 11 * MINUTE, report({ migrations: [job({ lastUpdateAt: T0 + 11 * MINUTE })] })],
       ]);
 
       expect(judged.stuck).toEqual([]);
@@ -267,6 +281,98 @@ describe('judgeSlotMigrations', () => {
       expect(judged.stuck).toEqual([]);
     });
 
+    it('is not judged stuck while its source takes the snapshot', () => {
+      const snapshotting = job({ phase: 'snapshotting' });
+
+      const judged = run([
+        [T0, report({ migrations: [snapshotting] })],
+        [T0 + 2 * ATOMIC_MIGRATION_STALL_MS, report({ migrations: [snapshotting] })],
+      ]);
+
+      expect(judged.running).toHaveLength(1);
+      expect(judged.stuck).toEqual([]);
+    });
+
+    it('is not judged stuck from its source while its target last reported the snapshot', () => {
+      const exported = job({ phase: 'replicating' });
+      const imported = job({ state: 'importing', phase: 'receiving-snapshot' });
+      const sourceOnly = report({
+        migrations: [exported],
+        jobViews: [exported],
+        jobsReadNodeIds: [A.id, C.id],
+        complete: false,
+      });
+
+      const judged = run([
+        [T0, report({ migrations: [exported], jobViews: [exported, imported] })],
+        [T0 + ATOMIC_MIGRATION_STALL_MS, sourceOnly],
+      ]);
+
+      expect(judged.stuck).toEqual([]);
+    });
+
+    it('is not stuck while its replication backlog keeps shrinking', () => {
+      const streaming = (remainingReplBytes: number) =>
+        report({ migrations: [job({ phase: 'waiting-to-pause', remainingReplBytes })] });
+
+      const judged = run([
+        [T0, streaming(9_000)],
+        [T0 + 4 * MINUTE, streaming(6_000)],
+        [T0 + 8 * MINUTE, streaming(3_000)],
+        [T0 + 12 * MINUTE, streaming(3_000)],
+      ]);
+
+      expect(judged.stuck).toEqual([]);
+    });
+
+    it('is stuck when its backlog only rises and falls above its lowest point', () => {
+      const streaming = (remainingReplBytes: number) =>
+        report({ migrations: [job({ phase: 'waiting-to-pause', remainingReplBytes })] });
+
+      const judged = run([
+        [T0, streaming(5_000)],
+        [T0 + 3 * MINUTE, streaming(8_000)],
+        [T0 + 6 * MINUTE, streaming(6_000)],
+        [T0 + ATOMIC_MIGRATION_STALL_MS, streaming(5_000)],
+      ]);
+
+      expect(judged.stuck).toEqual([
+        expect.objectContaining({ quietMs: ATOMIC_MIGRATION_STALL_MS }),
+      ]);
+    });
+
+    it('measures the backlog afresh after a change of state', () => {
+      const at = (phase: string, remainingReplBytes: number) =>
+        report({ migrations: [job({ phase, remainingReplBytes })] });
+
+      const judged = run([
+        [T0, at('replicating', 1_000)],
+        [T0 + MINUTE, at('waiting-to-pause', 9_000)],
+        [T0 + 6 * MINUTE, at('waiting-to-pause', 8_000)],
+        [T0 + 11 * MINUTE, at('waiting-to-pause', 8_000)],
+      ]);
+
+      expect(judged.stuck).toEqual([]);
+    });
+
+    it('lets a job without node names go once its node lists it as finished', () => {
+      const tracked = job({
+        sourceNodeId: '',
+        sourceAddress: '',
+        targetNodeId: '',
+        targetAddress: '',
+      });
+      const ownNode = { readNodeIds: [C.id], complete: false, ownNodeOnly: true };
+
+      const judged = run([
+        [T0, report({ migrations: [tracked], ...ownNode })],
+        [T0 + MINUTE, report({ finishedJobs: ['job-1'], ...ownNode })],
+      ]);
+
+      expect(judged.unseen.size).toBe(0);
+      expect(judged.watch.moves.size).toBe(0);
+    });
+
     it('is judged from its target again in the states that carry a heartbeat', () => {
       const importing = job({ state: 'importing', phase: 'waiting-for-paused' });
 
@@ -280,7 +386,7 @@ describe('judgeSlotMigrations', () => {
   });
 
   describe('a job read from either end', () => {
-    const exported = job();
+    const exported = job({ phase: 'waiting-to-pause' });
     const imported = job({
       state: 'importing',
       phase: 'waiting-for-paused',
@@ -320,7 +426,7 @@ describe('judgeSlotMigrations', () => {
     });
 
     it('moves on when one end reports a change while the other cannot be read', () => {
-      const moved = job({ lastAckAt: T0 + 6 * MINUTE });
+      const moved = job({ phase: 'waiting-to-pause', lastUpdateAt: T0 + 6 * MINUTE });
       const judged = run([
         [T0, both],
         [T0 + 5 * MINUTE, targetOnly],
@@ -329,6 +435,16 @@ describe('judgeSlotMigrations', () => {
       ]);
 
       expect(judged.stuck).toEqual([]);
+    });
+
+    it('keeps its stuck warning across a read that hears only from its target', () => {
+      const judged = run([
+        [T0, both],
+        [T0 + ATOMIC_MIGRATION_STALL_MS, both],
+        [T0 + ATOMIC_MIGRATION_STALL_MS + 5_000, targetOnly],
+      ]);
+
+      expect(judged.stuck).toEqual([expect.objectContaining({ signature: 'stuck:job:job-1' })]);
     });
   });
 
@@ -394,8 +510,8 @@ describe('judgeSlotMigrations', () => {
       const judged = run(
         [
           [T0, report({ migrations: [job()] })],
-          [T0 + MINUTE, report({ migrations: [job({ lastAckAt: T0 + MINUTE })] })],
-          [T0 + 2 * MINUTE, report({ migrations: [job({ lastAckAt: T0 + MINUTE })] })],
+          [T0 + MINUTE, report({ migrations: [job({ lastUpdateAt: T0 + MINUTE })] })],
+          [T0 + 2 * MINUTE, report({ migrations: [job({ lastUpdateAt: T0 + MINUTE })] })],
         ],
         adopted(STUCK),
       );
@@ -737,19 +853,26 @@ describe('describeSlotMigration', () => {
     );
   });
 
-  it('says how long an atomic job has been quiet and how to cancel it', () => {
+  it('says how long an atomic job has been quiet, what holds it back and how to cancel it', () => {
     const text = describeSlotMigration({
       ...base,
       kind: 'stuck',
       signature: 's',
-      phase: 'snapshotting',
+      phase: 'waiting-to-pause',
       quietMs: 12 * MINUTE,
     });
 
     expect(text).toContain(
       'WARNING: Slot migration stuck: slots 0-100 from 10.0.0.1:6379 to 10.0.0.2:6379',
     );
-    expect(text).toContain('no state change and no heartbeat for 12 minutes (state: snapshotting)');
+    expect(text).toContain(
+      'has not changed state or cut its replication backlog for 12 minutes (state: waiting-to-pause)',
+    );
+    expect(text).toContain(
+      'Check for a save or AOF rewrite running on 10.0.0.1:6379, which holds back the snapshot, ' +
+        'and for writes to these slots arriving faster than the target takes them, ' +
+        'which keep the backlog from draining.',
+    );
     expect(text).toContain(
       'To stop it, run CLUSTER CANCELSLOTMIGRATIONS on 10.0.0.1:6379. ' +
         'That cancels every migration that node is the source of, not only this one.',

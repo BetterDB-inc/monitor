@@ -5,7 +5,7 @@ export const LEGACY_MIGRATION_STALL_MS = 30 * 60_000;
 
 const MAX_REASON_LENGTH = 200;
 const SHORT_NODE_ID_LENGTH = 8;
-const SNAPSHOT_ARRIVING_PHASE = 'receiving-snapshot';
+const SNAPSHOT_PHASES = new Set(['snapshotting', 'receiving-snapshot']);
 const JOB_MOVE = 'job:';
 const LEGACY_MOVE = 'legacy:';
 
@@ -25,8 +25,16 @@ export interface SlotMigrationFinding {
   reason?: string;
 }
 
+interface ViewMark {
+  stamp: string;
+  timed: boolean;
+  backlog?: number;
+}
+
+type Views = Readonly<Record<string, ViewMark>>;
+
 interface WatchedMove {
-  stamps: Readonly<Record<string, string>>;
+  views: Views;
   since: number;
   atomic: boolean;
   nodeIds: string[];
@@ -53,9 +61,8 @@ export interface SlotMigrationJudgement {
 interface Move {
   id: string;
   atomic: boolean;
-  timed: boolean;
   slots: string;
-  stamps: Record<string, string>;
+  views: Views;
   phase?: string;
   sourceNodeId: string;
   sourceAddress: string;
@@ -106,20 +113,19 @@ function endpoints(migration: SlotMigration) {
   };
 }
 
-function hasHeartbeat(migration: SlotMigration): boolean {
-  if (migration.lastUpdateAt === undefined && migration.lastAckAt === undefined) return false;
-  return !(migration.state === 'importing' && migration.phase === SNAPSHOT_ARRIVING_PHASE);
-}
-
-function stampOf(migration: SlotMigration): string {
-  return `${migration.phase ?? ''}|${migration.lastUpdateAt ?? ''}|${migration.lastAckAt ?? ''}`;
+function markOf(migration: SlotMigration): ViewMark {
+  return {
+    stamp: `${migration.phase ?? ''}|${migration.lastUpdateAt ?? ''}`,
+    timed: migration.lastUpdateAt !== undefined && !SNAPSHOT_PHASES.has(migration.phase ?? ''),
+    backlog: migration.remainingReplBytes,
+  };
 }
 
 function movesOf(report: SlotMigrationReport): Move[] {
-  const views = new Map<string, Record<string, string>>();
+  const views = new Map<string, Record<string, ViewMark>>();
   for (const view of report.jobViews) {
     if (view.jobName === undefined) continue;
-    views.set(view.jobName, { ...views.get(view.jobName), [view.state]: stampOf(view) });
+    views.set(view.jobName, { ...views.get(view.jobName), [view.state]: markOf(view) });
   }
   const moves: Move[] = [];
   const legacy = new Map<string, { first: SlotMigration; slots: number[] }>();
@@ -128,9 +134,8 @@ function movesOf(report: SlotMigrationReport): Move[] {
       moves.push({
         id: `${JOB_MOVE}${migration.jobName}`,
         atomic: true,
-        timed: hasHeartbeat(migration),
         slots: migration.slotRange ?? `${migration.slot}`,
-        stamps: views.get(migration.jobName) ?? { [migration.state]: stampOf(migration) },
+        views: views.get(migration.jobName) ?? { [migration.state]: markOf(migration) },
         phase: migration.phase,
         ...endpoints(migration),
       });
@@ -146,22 +151,36 @@ function movesOf(report: SlotMigrationReport): Move[] {
     moves.push({
       id: `${LEGACY_MOVE}${pair}`,
       atomic: false,
-      timed: true,
       slots: ranges,
-      stamps: { [LEGACY_MOVE]: ranges },
+      views: { [LEGACY_MOVE]: { stamp: ranges, timed: true } },
       ...endpoints(first),
     });
   }
   return moves;
 }
 
-function changed(
-  before: Readonly<Record<string, string>>,
-  now: Readonly<Record<string, string>>,
-): boolean {
-  return Object.entries(now).some(
-    ([view, stamp]) => before[view] !== undefined && before[view] !== stamp,
-  );
+function progressed(before: Views, now: Views): boolean {
+  return Object.entries(now).some(([view, mark]) => {
+    const known = before[view];
+    if (known === undefined) return false;
+    if (known.stamp !== mark.stamp) return true;
+    return (
+      known.backlog !== undefined && mark.backlog !== undefined && mark.backlog < known.backlog
+    );
+  });
+}
+
+function merged(before: Views, now: Views): Views {
+  const views = { ...before };
+  for (const [view, mark] of Object.entries(now)) {
+    const known = before[view];
+    const lowest =
+      known?.stamp === mark.stamp && known.backlog !== undefined && mark.backlog !== undefined
+        ? Math.min(known.backlog, mark.backlog)
+        : mark.backlog;
+    views[view] = { ...mark, backlog: lowest };
+  }
+  return views;
 }
 
 function couldNotBeSeen(move: WatchedMove, sight: Sight): boolean {
@@ -172,10 +191,13 @@ function couldNotBeSeen(move: WatchedMove, sight: Sight): boolean {
   return move.atomic ? watched.every(unread) : watched.some(unread);
 }
 
-function endedWhileUnwatched(id: string, report: SlotMigrationReport, markers: Sight): boolean {
-  if (id.startsWith(JOB_MOVE)) {
-    return report.complete || report.finishedJobs.includes(id.slice(JOB_MOVE.length));
-  }
+function endedWhileUnwatched(
+  id: string,
+  report: SlotMigrationReport,
+  markers: Sight,
+  finished: ReadonlySet<string>,
+): boolean {
+  if (id.startsWith(JOB_MOVE)) return report.complete || finished.has(id);
   if (markers.complete) return true;
   const ends = id.slice(LEGACY_MOVE.length).split('>');
   return ends.every((nodeId) => markers.readNow.has(nodeId));
@@ -204,27 +226,31 @@ export function judgeSlotMigrations(
   const unseen = new Set<string>();
   const held = new Set<string>();
   const listed = new Set<string>();
+  const finished = new Set(report.finishedJobs.map((name) => `${JOB_MOVE}${name}`));
 
   for (const move of movesOf(report)) {
     const known = watch.moves.get(move.id);
-    const unchanged = known !== undefined && !changed(known.stamps, move.stamps);
+    const unchanged = known !== undefined && !progressed(known.views, move.views);
     const since = known && unchanged ? known.since : now;
+    const views = merged(known?.views ?? {}, move.views);
+    const quietMs = now - since;
+    const stallMs = move.atomic ? ATOMIC_MIGRATION_STALL_MS : LEGACY_MIGRATION_STALL_MS;
+    const isStuck = quietMs >= stallMs && Object.values(views).every((view) => view.timed);
     const stuckSignature = `stuck:${move.id}`;
     const stuckBefore =
-      (!known || unchanged) && (known?.stuckBefore === true || watch.adopted.has(stuckSignature));
+      isStuck ||
+      ((!known || unchanged) && (known?.stuckBefore === true || watch.adopted.has(stuckSignature)));
     listed.add(move.id);
     moves.set(move.id, {
-      stamps: { ...known?.stamps, ...move.stamps },
+      views,
       since,
       atomic: move.atomic,
       nodeIds: [move.sourceNodeId, move.targetNodeId].filter((nodeId) => nodeId !== ''),
       stuckBefore,
     });
-    const { id, stamps: _stamps, timed, ...shown } = move;
+    const { id, views: _views, ...shown } = move;
     running.push({ kind: 'running', signature: `running:${id}`, ...shown });
-    const quietMs = now - since;
-    const stallMs = move.atomic ? ATOMIC_MIGRATION_STALL_MS : LEGACY_MIGRATION_STALL_MS;
-    if (timed && quietMs >= stallMs) {
+    if (isStuck) {
       stuck.push({ kind: 'stuck', signature: stuckSignature, ...shown, quietMs });
     } else if (stuckBefore) {
       held.add(stuckSignature);
@@ -232,7 +258,8 @@ export function judgeSlotMigrations(
   }
 
   for (const [id, move] of watch.moves) {
-    if (moves.has(id) || !couldNotBeSeen(move, move.atomic ? jobs : markers)) continue;
+    if (moves.has(id) || finished.has(id)) continue;
+    if (!couldNotBeSeen(move, move.atomic ? jobs : markers)) continue;
     moves.set(id, move);
     unseen.add(`running:${id}`);
     unseen.add(`stuck:${id}`);
@@ -241,7 +268,7 @@ export function judgeSlotMigrations(
   const adopted = new Set<string>();
   for (const signature of watch.adopted) {
     const id = signature.slice(signature.indexOf(':') + 1);
-    if (listed.has(id) || endedWhileUnwatched(id, report, markers)) continue;
+    if (listed.has(id) || endedWhileUnwatched(id, report, markers, finished)) continue;
     adopted.add(signature);
     held.add(signature);
   }
@@ -315,9 +342,11 @@ export function describeSlotMigration(finding: SlotMigrationFinding): string {
   const quiet = minutes(finding.quietMs ?? 0);
   if (finding.atomic) {
     return (
-      `WARNING: Slot migration stuck: ${move} has reported no state change and no heartbeat ` +
-      `for ${quiet}${state}. Check that the two nodes reach each other and that the target has ` +
-      `memory for the slots. To stop it, run CLUSTER CANCELSLOTMIGRATIONS on ${source}. ` +
+      `WARNING: Slot migration stuck: ${move} has not changed state or cut its replication ` +
+      `backlog for ${quiet}${state}. Check for a save or AOF rewrite running on ${source}, ` +
+      `which holds back the snapshot, and for writes to these slots arriving faster than the ` +
+      `target takes them, which keep the backlog from draining. ` +
+      `To stop it, run CLUSTER CANCELSLOTMIGRATIONS on ${source}. ` +
       `That cancels every migration that node is the source of, not only this one.`
     );
   }

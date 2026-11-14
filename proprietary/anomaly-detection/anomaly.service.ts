@@ -581,6 +581,7 @@ const ADOPTED_METRICS: MetricType[] = [
 const SLOT_MIGRATION_IDLE_CHECK_MS = 30_000;
 const SLOT_MIGRATION_BUSY_CHECK_MS = 5_000;
 const SLOT_MIGRATION_DIAL_RETRY_MS = 10 * 60_000;
+const SLOT_MIGRATION_DIAL_MISS_MS = 60_000;
 const STUCK_SLOT_MIGRATION_KEY = 'stuck:';
 
 /** A shard no connection has observed for this long has its open events closed. */
@@ -914,6 +915,8 @@ export class AnomalyService
   private slotMigrationWatch = new Map<string, SlotMigrationWatch>();
   private slotMigrationCheckedAt = new Map<string, number>();
   private slotMigrationOwnNodeUntil = new Map<string, number>();
+  private slotMigrationDialMissSince = new Map<string, number>();
+  private slotMigrationsListed = new Set<string>();
   private slotMigrationFirstSeen = new Map<string, Map<string, number>>();
   private activeSlotMigrations = new Map<string, Set<string>>();
   private slotMigrationEventIds = new Map<string, Map<string, string>>();
@@ -1533,6 +1536,8 @@ export class AnomalyService
     this.slotMigrationWatch.delete(connectionId);
     this.slotMigrationCheckedAt.delete(connectionId);
     this.slotMigrationOwnNodeUntil.delete(connectionId);
+    this.slotMigrationDialMissSince.delete(connectionId);
+    this.slotMigrationsListed.delete(connectionId);
     this.slotMigrationFirstSeen.delete(connectionId);
     this.activeSlotMigrations.delete(connectionId);
     this.slotMigrationEventIds.delete(connectionId);
@@ -8395,9 +8400,9 @@ export class AnomalyService
       if (!this.clusterMetrics || !this.dialsDataNodes(connectionId)) return;
       if (this.clusterMetrics.coveredBySeed(connectionId)) return;
       const checkedAt = this.slotMigrationCheckedAt.get(connectionId);
-      const watched = this.slotMigrationWatch.get(connectionId);
-      const every =
-        (watched?.moves.size ?? 0) > 0 ? SLOT_MIGRATION_BUSY_CHECK_MS : SLOT_MIGRATION_IDLE_CHECK_MS;
+      const every = this.slotMigrationsListed.has(connectionId)
+        ? SLOT_MIGRATION_BUSY_CHECK_MS
+        : SLOT_MIGRATION_IDLE_CHECK_MS;
       if (checkedAt !== undefined && timestamp - checkedAt < every) return;
       this.slotMigrationCheckedAt.set(connectionId, timestamp);
 
@@ -8407,15 +8412,15 @@ export class AnomalyService
         rememberNodesWithoutJobs: true,
       });
       if (this.slotMigrationCheckedAt.get(connectionId) !== timestamp) return;
-      if (report.ownNodeOnly && !ownNodeOnly) {
-        this.slotMigrationOwnNodeUntil.set(connectionId, timestamp + SLOT_MIGRATION_DIAL_RETRY_MS);
-      }
+      if (!ownNodeOnly) this.noteSlotMigrationDial(connectionId, timestamp, report.ownNodeOnly);
       const judged = judgeSlotMigrations(
         this.slotMigrationWatch.get(connectionId),
         report,
         timestamp,
       );
       this.slotMigrationWatch.set(connectionId, judged.watch);
+      if (judged.running.length > 0) this.slotMigrationsListed.add(connectionId);
+      else this.slotMigrationsListed.delete(connectionId);
 
       const gate = {
         ctx,
@@ -8453,6 +8458,20 @@ export class AnomalyService
         `Slot migration check failed for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
       );
     }
+  }
+
+  private noteSlotMigrationDial(connectionId: string, timestamp: number, missed: boolean): void {
+    if (!missed) {
+      this.slotMigrationDialMissSince.delete(connectionId);
+      return;
+    }
+    const since = this.slotMigrationDialMissSince.get(connectionId) ?? timestamp;
+    if (timestamp - since < SLOT_MIGRATION_DIAL_MISS_MS) {
+      this.slotMigrationDialMissSince.set(connectionId, since);
+      return;
+    }
+    this.slotMigrationDialMissSince.delete(connectionId);
+    this.slotMigrationOwnNodeUntil.set(connectionId, timestamp + SLOT_MIGRATION_DIAL_RETRY_MS);
   }
 
   private buildSlotMigrationEvent(

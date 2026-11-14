@@ -3129,7 +3129,7 @@ describe('AnomalyService', () => {
       targetNodeId: B.id,
       targetAddress: B.address,
       state: 'migrating',
-      phase: 'snapshotting',
+      phase: 'waiting-to-snapshot',
       jobName: 'job-1',
       lastUpdateAt: BASE,
       lastAckAt: BASE,
@@ -3275,7 +3275,7 @@ describe('AnomalyService', () => {
       ]);
       expect(running()).toEqual([expect.objectContaining({ resolved: false })]);
 
-      see([job({ lastAckAt: clock })]);
+      see([job({ lastUpdateAt: clock })]);
       await after(MINUTE);
 
       expect(stuck()).toEqual([expect.objectContaining({ resolved: true })]);
@@ -3397,6 +3397,23 @@ describe('AnomalyService', () => {
       expect(readSlotMigrations).toHaveBeenCalledTimes(2);
     });
 
+    it('goes back to every 30 seconds while the move it keeps cannot be seen', async () => {
+      see([job()]);
+      await after(0);
+      report = { ...report, migrations: [], ...partial(['c0000000']) };
+      await after(5_000);
+
+      expect(readSlotMigrations).toHaveBeenCalledTimes(2);
+
+      for (let i = 0; i < 5; i += 1) await after(5_000);
+
+      expect(readSlotMigrations).toHaveBeenCalledTimes(2);
+
+      await after(5_000);
+
+      expect(readSlotMigrations).toHaveBeenCalledTimes(3);
+    });
+
     it('leaves the watch to the seed when the connection is a member of one', async () => {
       coveredBySeed.mockReturnValue(true);
       see([job()]);
@@ -3415,21 +3432,38 @@ describe('AnomalyService', () => {
       expect(running()).toEqual([]);
     });
 
-    it('reads only its own node for 10 minutes after no primary could be dialed', async () => {
+    it('reads only its own node for 10 minutes once no primary could be dialed for a minute', async () => {
       report = { ...report, ...partial([A.id]), ownNodeOnly: true };
       await after(0);
+      await after(30_000);
+      await after(30_000);
 
+      expect(readSlotMigrations).toHaveBeenCalledTimes(3);
       expect(readSlotMigrations).toHaveBeenLastCalledWith('conn-a', WATCH_READ);
 
       await after(30_000);
       await after(9 * MINUTE);
 
-      expect(readSlotMigrations).toHaveBeenCalledTimes(3);
-      expect(readSlotMigrations).toHaveBeenNthCalledWith(2, 'conn-a', OWN_NODE_READ);
-      expect(readSlotMigrations).toHaveBeenNthCalledWith(3, 'conn-a', OWN_NODE_READ);
+      expect(readSlotMigrations).toHaveBeenCalledTimes(5);
+      expect(readSlotMigrations).toHaveBeenNthCalledWith(4, 'conn-a', OWN_NODE_READ);
+      expect(readSlotMigrations).toHaveBeenNthCalledWith(5, 'conn-a', OWN_NODE_READ);
 
       await after(MINUTE);
 
+      expect(readSlotMigrations).toHaveBeenLastCalledWith('conn-a', WATCH_READ);
+    });
+
+    it('keeps dialing the primaries when a read between misses reaches one', async () => {
+      const missed = { ...report, ...partial([A.id]), ownNodeOnly: true };
+      const reached = { ...report };
+      readSlotMigrations
+        .mockResolvedValueOnce(missed)
+        .mockResolvedValueOnce(reached)
+        .mockResolvedValueOnce(missed)
+        .mockResolvedValueOnce(missed);
+      for (let i = 0; i < 5; i += 1) await after(30_000);
+
+      expect(readSlotMigrations).toHaveBeenCalledTimes(5);
       expect(readSlotMigrations).toHaveBeenLastCalledWith('conn-a', WATCH_READ);
     });
 
@@ -3511,7 +3545,7 @@ describe('AnomalyService', () => {
 
         expect(resolvedIds()).toEqual([]);
 
-        see([job({ lastAckAt: clock })]);
+        see([job({ lastUpdateAt: clock })]);
         await after(MINUTE);
 
         expect(resolvedIds()).toEqual(['stuck-1']);
@@ -3580,6 +3614,9 @@ describe('AnomalyService', () => {
       for (const state of [
         'slotMigrationWatch',
         'slotMigrationCheckedAt',
+        'slotMigrationOwnNodeUntil',
+        'slotMigrationDialMissSince',
+        'slotMigrationsListed',
         'slotMigrationFirstSeen',
         'activeSlotMigrations',
         'slotMigrationEventIds',
@@ -14913,6 +14950,20 @@ describe('AnomalyService', () => {
       );
     });
 
+    it.each([MetricType.SLOT_MIGRATION, MetricType.SLOT_MIGRATION_STUCK])(
+      'keeps an unresolved %s event open',
+      async (metricType) => {
+        const now = Date.now();
+        (service as any).recentAnomalies.push(anomaly({ timestamp: now - 40 * MIN, metricType }));
+
+        await (service as any).tickIncidentTimelines(now);
+
+        expect((service as any).liveIncidents[0].recovery).toEqual(
+          expect.objectContaining({ status: 'degraded', openSignals: [metricType] }),
+        );
+      },
+    );
+
     it('does not call a P99 regression recovered inside its re-fire cooldown', async () => {
       const now = Date.now();
       (service as any).recentAnomalies.push(
@@ -15833,6 +15884,8 @@ describe('AnomalyService', () => {
             MetricType.BACKLOG_COVERAGE_RISK,
             MetricType.CLIENT_SATURATION,
             MetricType.RESYNC_ESCALATION,
+            MetricType.SLOT_MIGRATION,
+            MetricType.SLOT_MIGRATION_STUCK,
           ].sort(),
         );
         for (const metricType of stateMetrics.filter((m) => !open.includes(m))) {
