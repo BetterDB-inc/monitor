@@ -281,7 +281,7 @@ describe('judgeSlotMigrations', () => {
         expect(judged.held.size).toBe(0);
       });
 
-      it('holds its warning while only its source is read', () => {
+      it('keeps its warning while only its source is read', () => {
         const source = job({ phase: 'send-bulk-and-stream', lastUpdateAt: undefined, retries: 0 });
 
         const judged = run([
@@ -297,17 +297,113 @@ describe('judgeSlotMigrations', () => {
           ],
         ]);
 
-        expect(judged.stuck).toEqual([]);
-        expect(judged.held).toEqual(new Set(['stuck:job:job-1']));
+        expect(judged.stuck).toEqual([expect.objectContaining({ signature: 'stuck:job:job-1' })]);
         expect(isStuckFailingImport(judged.watch, 'job-1')).toBe(true);
       });
 
-      it('lets its warning go once the import stops failing', () => {
-        const judged = run([...retried(10), [T0 + 11 * MINUTE, attempt('streaming-buffer', 600)]]);
+      type Sighting = { at: number; stuck: boolean; released: boolean };
+      const watchReads = (
+        readMs: number,
+        untilMs: number,
+        read: (elapsed: number) => SlotMigrationReport,
+      ): Sighting[] => {
+        const sightings: Sighting[] = [];
+        let watch: SlotMigrationWatch | undefined;
+        for (let elapsed = 0; elapsed <= untilMs; elapsed += readMs) {
+          const judged = judgeSlotMigrations(watch, read(elapsed), T0 + elapsed);
+          watch = judged.watch;
+          sightings.push({
+            at: elapsed,
+            stuck: judged.stuck.length > 0,
+            released: isStuckFailingImport(watch, 'job-1'),
+          });
+        }
+        return sightings;
+      };
+      const slowAttempts = (attemptMs: number) => (elapsed: number) =>
+        attempt('connecting', Math.floor(elapsed / attemptMs));
+      const firstStuck = (sightings: Sighting[]) => sightings.find((s) => s.stuck)?.at;
+      const steadyFrom = (sightings: Sighting[], at: number) =>
+        sightings.filter((s) => s.at >= at).every((s) => s.stuck && s.released);
+
+      it.each([5_000, 30_000])(
+        'is stuck after about 10 minutes when each attempt takes a minute, read every %i ms',
+        (readMs) => {
+          const sightings = watchReads(readMs, 40 * MINUTE, slowAttempts(MINUTE));
+          const at = firstStuck(sightings) ?? Infinity;
+
+          expect(at).toBeGreaterThanOrEqual(10 * MINUTE);
+          expect(at).toBeLessThanOrEqual(11 * MINUTE);
+          expect(steadyFrom(sightings, at)).toBe(true);
+        },
+      );
+
+      it('is stuck within 15 minutes when each attempt takes 4 minutes', () => {
+        const sightings = watchReads(5_000, 40 * MINUTE, slowAttempts(4 * MINUTE));
+        const at = firstStuck(sightings) ?? Infinity;
+
+        expect(at).toBeLessThanOrEqual(15 * MINUTE);
+        expect(steadyFrom(sightings, at)).toBe(true);
+      });
+
+      it('is never stuck when one retry works and the import then streams for 30 minutes', () => {
+        const sightings = watchReads(5_000, 30 * MINUTE, (elapsed) =>
+          elapsed < 10_000 ? attempt('connecting', 0) : attempt('streaming-buffer', 1),
+        );
+
+        expect(sightings.some((s) => s.stuck || s.released)).toBe(false);
+      });
+
+      it('is not stuck from two failures alone', () => {
+        const sightings = watchReads(30_000, 15 * MINUTE, (elapsed) =>
+          attempt('connecting', Math.min(2, Math.floor(elapsed / MINUTE))),
+        );
+
+        expect(sightings.some((s) => s.stuck)).toBe(false);
+      });
+
+      it('ends its warning once no failure has been seen for 10 minutes', () => {
+        const quiet = (minutes: number): Array<[number, SlotMigrationReport]> =>
+          Array.from({ length: minutes }, (_, i) => [
+            T0 + (11 + i) * MINUTE,
+            attempt('streaming-buffer', 600),
+          ]);
+
+        const kept = run([...retried(10), ...quiet(10)]);
+        const ended = run([...retried(10), ...quiet(11)]);
+
+        expect(kept.stuck).toHaveLength(1);
+        expect(ended.stuck).toEqual([]);
+        expect(ended.held.size).toBe(0);
+        expect(isStuckFailingImport(ended.watch, 'job-1')).toBe(false);
+      });
+
+      it('ends its warning when the task completes', () => {
+        const judged = run([
+          ...retried(10),
+          [T0 + 11 * MINUTE, report({ finishedJobs: ['job-1'] })],
+        ]);
 
         expect(judged.stuck).toEqual([]);
-        expect(judged.held.size).toBe(0);
+        expect(judged.running).toEqual([]);
         expect(isStuckFailingImport(judged.watch, 'job-1')).toBe(false);
+      });
+
+      it('keeps a warning from before a restart until 10 minutes pass without a failure', () => {
+        const adopted = withAdoptedSlotMigrations(undefined, ['stuck:job:job-1']);
+        const quiet = (minutes: number): Array<[number, SlotMigrationReport]> =>
+          Array.from({ length: minutes + 1 }, (_, i) => [
+            T0 + i * MINUTE,
+            attempt('connecting', 5),
+          ]);
+
+        const first = run(quiet(0), adopted);
+        const later = run(quiet(11), adopted);
+
+        expect(first.held).toEqual(new Set(['stuck:job:job-1']));
+        expect(isStuckFailingImport(first.watch, 'job-1')).toBe(true);
+        expect(later.held.size).toBe(0);
+        expect(isStuckFailingImport(later.watch, 'job-1')).toBe(false);
       });
 
       it('no longer counts for the hot_shard hold once it is stuck', () => {

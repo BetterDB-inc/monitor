@@ -2,6 +2,8 @@ import type { SlotMigration, SlotMigrationReport } from '@app/cluster/cluster-me
 
 export const ATOMIC_MIGRATION_STALL_MS = 10 * 60_000;
 export const LEGACY_MIGRATION_STALL_MS = 30 * 60_000;
+const FAILING_IMPORT_QUIET_MS = 10 * 60_000;
+const FAILING_IMPORT_MIN_FAILURES = 3;
 
 const MAX_REASON_LENGTH = 200;
 const SHORT_NODE_ID_LENGTH = 8;
@@ -44,11 +46,17 @@ interface ViewMark {
 
 type Views = Readonly<Record<string, ViewMark>>;
 
+interface Failing {
+  since: number;
+  lastAt: number;
+  count: number;
+}
+
 interface WatchedMove {
   views: Views;
   since: number;
   sourceSince?: number;
-  failingSince?: number;
+  failing?: Failing;
   atomic: boolean;
   nodeIds: string[];
   stuckBefore: boolean;
@@ -149,11 +157,26 @@ function markOf(migration: SlotMigration): ViewMark {
   };
 }
 
-function importFailing(before: Views | undefined, now: Views): boolean | undefined {
+function newFailures(before: Views | undefined, now: Views): number {
   const mark = now[IMPORT_VIEW];
-  if (mark?.retries === undefined) return undefined;
+  if (mark?.retries === undefined) return 0;
   const known = before?.[IMPORT_VIEW]?.retries;
-  return mark.failed === true || (known !== undefined && mark.retries > known);
+  const retried = known === undefined ? 0 : mark.retries - known;
+  if (retried > 0) return retried;
+  return mark.failed ? 1 : 0;
+}
+
+function failingOf(
+  known: Failing | undefined,
+  failures: number,
+  adopted: boolean,
+  now: number,
+): Failing | undefined {
+  if (failures > 0) {
+    return { since: known?.since ?? now, lastAt: now, count: (known?.count ?? 0) + failures };
+  }
+  if (known && now - known.lastAt > FAILING_IMPORT_QUIET_MS) return undefined;
+  return known ?? (adopted ? { since: now, lastAt: now, count: 0 } : undefined);
 }
 
 export function isStuckFailingImport(
@@ -161,7 +184,7 @@ export function isStuckFailingImport(
   jobName: string,
 ): boolean {
   const move = watch?.moves.get(`${JOB_MOVE}${jobName}`);
-  return move?.failingSince !== undefined && move.stuckBefore;
+  return move?.failing !== undefined && move.stuckBefore;
 }
 
 function movesOf(report: SlotMigrationReport): Move[] {
@@ -283,29 +306,31 @@ export function judgeSlotMigrations(
     const sourceRead = move.views[SOURCE_VIEW] !== undefined;
     const sourceSince =
       (unchanged ? known?.sourceSince : undefined) ?? (sourceRead ? now : undefined);
-    const failing = importFailing(known?.views, move.views);
-    let failingSince = known?.failingSince;
-    if (failing === false) failingSince = undefined;
-    else if (failing) failingSince ??= now;
     const views = merged(known?.views ?? {}, move.views);
-    const failingMs = failingSince === undefined ? undefined : now - failingSince;
-    const failedTooLong = failing === true && (failingMs ?? 0) >= ATOMIC_MIGRATION_STALL_MS;
-    const quietMs = failedTooLong ? (failingMs ?? 0) : now - since;
+    const stuckSignature = `stuck:${move.id}`;
+    const adopted = watch.adopted.has(stuckSignature);
+    const retrying = Object.values(views).some((mark) => mark.retries !== undefined);
+    const failing = retrying
+      ? failingOf(known?.failing, newFailures(known?.views, move.views), adopted, now)
+      : undefined;
+    const failedTooLong =
+      failing !== undefined &&
+      failing.count >= FAILING_IMPORT_MIN_FAILURES &&
+      now - failing.since >= ATOMIC_MIGRATION_STALL_MS;
+    const quietMs = failedTooLong ? now - failing.since : now - since;
     const watchedMs = move.atomic ? now - (sourceSince ?? now) : quietMs;
     const stallMs = move.atomic ? ATOMIC_MIGRATION_STALL_MS : LEGACY_MIGRATION_STALL_MS;
     const isStuck =
       failedTooLong || (watchedMs >= stallMs && isTimed(move.atomic, views, move.views));
-    const stuckSignature = `stuck:${move.id}`;
+    const heldBefore = known?.stuckBefore === true || adopted;
     const stuckBefore =
-      isStuck ||
-      ((!known || unchanged || failingSince !== undefined) &&
-        (known?.stuckBefore === true || watch.adopted.has(stuckSignature)));
+      isStuck || ((retrying ? failing !== undefined : !known || unchanged) && heldBefore);
     listed.add(move.id);
     moves.set(move.id, {
       views,
       since,
       sourceSince,
-      failingSince,
+      failing,
       atomic: move.atomic,
       nodeIds: [move.sourceNodeId, move.targetNodeId].filter((nodeId) => nodeId !== ''),
       stuckBefore,
