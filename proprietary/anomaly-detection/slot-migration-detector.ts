@@ -157,12 +157,16 @@ function markOf(migration: SlotMigration): ViewMark {
   };
 }
 
+function failuresSeen(mark: ViewMark): number {
+  return (mark.retries ?? 0) + (mark.failed ? 1 : 0);
+}
+
 function newFailures(before: Views | undefined, now: Views): number {
   const mark = now[IMPORT_VIEW];
   if (mark?.retries === undefined) return 0;
-  const known = before?.[IMPORT_VIEW]?.retries;
-  const retried = known === undefined ? 0 : mark.retries - known;
-  if (retried > 0) return retried;
+  const known = before?.[IMPORT_VIEW];
+  const added = known?.retries === undefined ? 0 : failuresSeen(mark) - failuresSeen(known);
+  if (added > 0) return added;
   return mark.failed ? 1 : 0;
 }
 
@@ -316,7 +320,7 @@ export function judgeSlotMigrations(
     const failedTooLong =
       failing !== undefined &&
       failing.count >= FAILING_IMPORT_MIN_FAILURES &&
-      now - failing.since >= ATOMIC_MIGRATION_STALL_MS;
+      failing.lastAt - failing.since >= ATOMIC_MIGRATION_STALL_MS;
     const quietMs = failedTooLong ? now - failing.since : now - since;
     const watchedMs = move.atomic ? now - (sourceSince ?? now) : quietMs;
     const stallMs = move.atomic ? ATOMIC_MIGRATION_STALL_MS : LEGACY_MIGRATION_STALL_MS;

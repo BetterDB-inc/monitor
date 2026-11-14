@@ -338,11 +338,11 @@ describe('judgeSlotMigrations', () => {
         },
       );
 
-      it('is stuck within 15 minutes when each attempt takes 4 minutes', () => {
+      it('is stuck once failures 4 minutes apart span 10 minutes', () => {
         const sightings = watchReads(5_000, 40 * MINUTE, slowAttempts(4 * MINUTE));
         const at = firstStuck(sightings) ?? Infinity;
 
-        expect(at).toBeLessThanOrEqual(15 * MINUTE);
+        expect(at).toBe(16 * MINUTE);
         expect(steadyFrom(sightings, at)).toBe(true);
       });
 
@@ -350,6 +350,36 @@ describe('judgeSlotMigrations', () => {
         const sightings = watchReads(5_000, 30 * MINUTE, (elapsed) =>
           elapsed < 10_000 ? attempt('connecting', 0) : attempt('streaming-buffer', 1),
         );
+
+        expect(sightings.some((s) => s.stuck || s.released)).toBe(false);
+      });
+
+      it('is never stuck when three failures in its first 8 minutes are followed by streaming', () => {
+        const failedAt = [30_000, 4 * MINUTE, 8 * MINUTE];
+        const sightings = watchReads(5_000, 38 * MINUTE, (elapsed) => {
+          const retries = failedAt.filter((at) => elapsed >= at).length;
+          return attempt(elapsed < 8 * MINUTE ? 'connecting' : 'streaming-buffer', retries);
+        });
+
+        expect(sightings.some((s) => s.stuck || s.released)).toBe(false);
+      });
+
+      it('is never stuck when three failures in its first 15 seconds are followed by streaming', () => {
+        const sightings = watchReads(5_000, 30 * MINUTE, (elapsed) => {
+          const retries = Math.min(3, Math.floor(elapsed / 5_000));
+          return attempt(retries < 3 ? 'connecting' : 'streaming-buffer', retries);
+        });
+
+        expect(sightings.some((s) => s.stuck || s.released)).toBe(false);
+      });
+
+      it('counts a failure once when a read sees it failed and the next one sees its retry', () => {
+        const sightings = watchReads(5_000, 30 * MINUTE, (elapsed) => {
+          if (elapsed === MINUTE) return attempt('failed', 0);
+          if (elapsed === 2 * MINUTE) return attempt('failed', 1);
+          const retries = elapsed > 2 * MINUTE ? 2 : elapsed > MINUTE ? 1 : 0;
+          return attempt(elapsed > 2 * MINUTE ? 'streaming-buffer' : 'connecting', retries);
+        });
 
         expect(sightings.some((s) => s.stuck || s.released)).toBe(false);
       });
