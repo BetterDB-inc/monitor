@@ -40,6 +40,20 @@ export interface NodeHealth {
   error?: string;
 }
 
+interface OwnNodeClient {
+  shared: Valkey;
+  host: string | undefined;
+  port: number | undefined;
+  username: string | undefined;
+  password: string | undefined;
+  tls: Valkey['options']['tls'];
+  client: Valkey;
+  ready: Promise<void>;
+  connected: boolean;
+  running: number;
+  idleTimer?: ReturnType<typeof setTimeout>;
+}
+
 // Per-connection discovery cache
 interface DiscoveryCache {
   nodes: DiscoveredNode[];
@@ -53,6 +67,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   // Per-connection discovery cache to prevent cross-connection cache contamination
   private discoveryCacheByConnection: Map<string, DiscoveryCache> = new Map();
   private discoveryInFlight: Map<string, Promise<DiscoveredNode[]>> = new Map();
+  private ownNodeClients: Map<string, OwnNodeClient> = new Map();
   private loggedConnectionErrors: Set<string> = new Set();
   private loggedGetConnectionErrors: Set<string> = new Set();
   private readonly MAX_LOGGED_ERRORS = 1000; // Prevent unbounded growth
@@ -60,6 +75,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   private readonly CONNECTION_TIMEOUT = 5000; // 5 seconds
   private readonly HEALTH_CHECK_INTERVAL = 30000; // 30 seconds
   private readonly MAX_CONNECTIONS = 512; // Maximum number of concurrent connections
+  private readonly OWN_NODE_IDLE_MS = 5 * 60_000;
 
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
@@ -148,6 +164,100 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     } finally {
       client.disconnect();
     }
+  }
+
+  async onOwnNodeClient<T>(
+    connectionId: string | undefined,
+    timeoutMs: number,
+    run: (client: Valkey) => Promise<T>,
+  ): Promise<T> {
+    const key = this.ownNodeKey(connectionId);
+    const shared = this.connectionRegistry.get(connectionId).getClient();
+    const { host, port, username, password, tls } = shared.options;
+    const kept = this.ownNodeClients.get(key);
+    const reusable =
+      kept !== undefined &&
+      kept.shared === shared &&
+      kept.host === host &&
+      kept.port === port &&
+      kept.username === username &&
+      kept.password === password &&
+      kept.tls === tls &&
+      (!kept.connected || kept.client.status === 'ready');
+    if (kept && !reusable) this.dropOwnNodeClient(key, kept);
+    const own = reusable ? kept : this.openOwnNodeClient(key, shared, timeoutMs);
+    clearTimeout(own.idleTimer);
+    own.running += 1;
+    try {
+      await own.ready;
+      return await run(own.client);
+    } catch (error) {
+      this.dropOwnNodeClient(key, own);
+      throw error;
+    } finally {
+      own.running -= 1;
+      if (own.running === 0 && this.ownNodeClients.get(key) === own) this.closeWhenIdle(key, own);
+    }
+  }
+
+  private closeWhenIdle(key: string, own: OwnNodeClient): void {
+    own.idleTimer = setTimeout(() => {
+      if (own.running === 0) this.dropOwnNodeClient(key, own);
+    }, this.OWN_NODE_IDLE_MS);
+    own.idleTimer.unref?.();
+  }
+
+  releaseOwnNodeClient(connectionId: string | undefined): void {
+    const key = this.ownNodeKey(connectionId);
+    const kept = this.ownNodeClients.get(key);
+    if (kept) this.dropOwnNodeClient(key, kept);
+  }
+
+  private ownNodeKey(connectionId: string | undefined): string {
+    return connectionId || this.connectionRegistry.getDefaultId() || 'default';
+  }
+
+  private openOwnNodeClient(key: string, shared: Valkey, timeoutMs: number): OwnNodeClient {
+    const { host, port, username, password, tls } = shared.options;
+    const client = new Valkey({
+      host,
+      port,
+      username,
+      password,
+      tls,
+      lazyConnect: true,
+      enableOfflineQueue: false,
+      maxRetriesPerRequest: 0,
+      retryStrategy: () => null,
+      enableReadyCheck: false,
+      connectTimeout: timeoutMs,
+      commandTimeout: timeoutMs,
+      connectionName: 'BetterDB-Monitor-Own-Node',
+    });
+    client.on('error', () => undefined);
+    const own: OwnNodeClient = {
+      shared,
+      host,
+      port,
+      username,
+      password,
+      tls,
+      client,
+      ready: Promise.resolve(),
+      connected: false,
+      running: 0,
+    };
+    own.ready = client.connect().then(() => {
+      own.connected = true;
+    });
+    this.ownNodeClients.set(key, own);
+    return own;
+  }
+
+  private dropOwnNodeClient(key: string, own: OwnNodeClient): void {
+    clearTimeout(own.idleTimer);
+    if (this.ownNodeClients.get(key) === own) this.ownNodeClients.delete(key);
+    own.client.disconnect();
   }
 
   forgetTopology(connectionId?: string): void {
@@ -599,6 +709,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     for (const [key] of owned) this.discoveredNodes.delete(key);
     this.discoveryCacheByConnection.delete(connectionId);
     this.discoveryInFlight.delete(connectionId);
+    this.releaseOwnNodeClient(connectionId);
     await Promise.allSettled(owned.map(([, connection]) => this.closeNodeClient(connection.client)));
   }
 
@@ -632,6 +743,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     );
     this.discoveredNodes.clear();
     this.discoveryCacheByConnection.clear();
+    for (const [key, own] of [...this.ownNodeClients]) this.dropOwnNodeClient(key, own);
     this.logger.log('All node connections closed');
   }
 

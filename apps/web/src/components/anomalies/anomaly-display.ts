@@ -129,6 +129,8 @@ export const METRIC_LABELS: Record<string, string> = {
   connection_churn: 'Connection Churn',
   reshard_shard_skew: 'Reshard Shard Skew',
   hot_shard: 'Hot Shard',
+  slot_migration: 'Slot Migration',
+  slot_migration_stuck: 'Slot Migration Stuck or Failed',
   topology_divergence: 'Topology Divergence',
   backlog_coverage_risk: 'Backlog Coverage Risk',
   resync_escalation: 'Resync Escalation',

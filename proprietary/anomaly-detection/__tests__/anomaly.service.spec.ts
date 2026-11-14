@@ -4,6 +4,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { RESHARD_MARKER_STALL_MS } from '../reshard-pressure-detector';
 import { RESYNC_ESCALATION_WINDOW_MS } from '../recovery-amplification-detector';
+import { judgeSlotMigrations, type SlotMigrationWatch } from '../slot-migration-detector';
 import { AnomalyService } from '../anomaly.service';
 import { IncidentTimelineBuilder, incidentIdFor, incidentStartOf, signalKey } from '../incident-timeline';
 import { ReplicaSlotAnomaly, replicaSlotSignature } from '../replica-slot-state-detector';
@@ -2284,6 +2285,46 @@ describe('AnomalyService', () => {
       expect(checkSlotMigrations).toHaveBeenCalledTimes(2);
     });
 
+    it('does not wait for a Redis import that has kept failing for 10 minutes', async () => {
+      let watch: SlotMigrationWatch | undefined;
+      for (let i = 0; i <= 10; i += 1) {
+        const target = {
+          slot: 0,
+          slotRange: '0-100',
+          sourceNodeId: 'a0000000',
+          sourceAddress: '10.0.0.1:6379',
+          targetNodeId: 'b0000000',
+          targetAddress: '10.0.0.2:6379',
+          state: 'importing' as const,
+          phase: 'failed',
+          jobName: 'job-1',
+          retries: 60 * i,
+        };
+        const read = {
+          migrations: [target],
+          failed: [],
+          finishedJobs: [],
+          jobViews: [target],
+          readNodeIds: ['a0000000', 'b0000000'],
+          jobsReadNodeIds: ['a0000000', 'b0000000'],
+          complete: true,
+          markersComplete: true,
+          ownNodeOnly: false,
+        };
+        watch = judgeSlotMigrations(watch, read, 1_700_000_000_000 + i * 60_000).watch;
+      }
+      const checkSlotMigrations = jest
+        .fn()
+        .mockResolvedValue({ migrations: [{ slot: 0, jobName: 'job-1' }], complete: true });
+      (service as any).clusterMetrics = { checkSlotMigrations };
+      (service as any).slotMigrationWatch.set('conn-a', watch);
+
+      await step(HOT, 6);
+
+      expect(checkSlotMigrations).toHaveBeenCalledTimes(1);
+      expect(hotEvents()).toHaveLength(1);
+    });
+
     it('holds a new event back while it cannot tell whether a slot is migrating', async () => {
       const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: false });
       (service as any).clusterMetrics = { checkSlotMigrations };
@@ -4351,6 +4392,549 @@ describe('AnomalyService', () => {
         'hotShardSince',
         'hotShardKeys',
         'hotKeyNoteLogged',
+      ]) {
+        expect((service as any)[state].has('conn-a')).toBe(false);
+      }
+    });
+  });
+
+  describe('slot migration', () => {
+    const BASE = 1_700_000_000_000;
+    const MINUTE = 60_000;
+    const A = { id: 'a0000000', address: '10.0.0.1:6379' };
+    const B = { id: 'b0000000', address: '10.0.0.2:6379' };
+    const ALL = [A.id, B.id, 'c0000000'];
+    let clock: number;
+    let ctx: ConnectionContext;
+    let report: {
+      migrations: unknown[];
+      failed: unknown[];
+      finishedJobs: string[];
+      jobViews: unknown[];
+      readNodeIds: string[];
+      jobsReadNodeIds: string[];
+      complete: boolean;
+      markersComplete: boolean;
+      ownNodeOnly?: boolean;
+    };
+    let readSlotMigrations: jest.Mock;
+    let coveredBySeed: jest.Mock;
+
+    const job = (overrides: Record<string, unknown> = {}) => ({
+      slot: 0,
+      slotRange: '0-100',
+      sourceNodeId: A.id,
+      sourceAddress: A.address,
+      targetNodeId: B.id,
+      targetAddress: B.address,
+      state: 'migrating',
+      phase: 'waiting-to-snapshot',
+      jobName: 'job-1',
+      lastUpdateAt: BASE,
+      ...overrides,
+    });
+
+    const failedJob = () => ({
+      jobName: 'job-1',
+      slotRange: '0-100',
+      sourceNodeId: A.id,
+      sourceAddress: A.address,
+      targetNodeId: B.id,
+      targetAddress: B.address,
+      message: 'Connection lost to target',
+      listedByNodeIds: [A.id],
+    });
+
+    const WATCH_READ = { ownNodeOnly: false, rememberNodesWithoutJobs: true };
+    const OWN_NODE_READ = { ownNodeOnly: true, rememberNodesWithoutJobs: true };
+
+    function see(migrations: unknown[], failed: unknown[] = []): void {
+      report = {
+        migrations,
+        failed,
+        finishedJobs: [],
+        jobViews: [],
+        readNodeIds: ALL,
+        jobsReadNodeIds: ALL,
+        complete: true,
+        markersComplete: true,
+      };
+    }
+
+    const partial = (readNodeIds: string[]) => ({
+      readNodeIds,
+      jobsReadNodeIds: readNodeIds,
+      complete: false,
+      markersComplete: false,
+    });
+
+    async function after(ms: number): Promise<void> {
+      clock += ms;
+      await poll(ctx);
+    }
+
+    const events = (metricType: MetricType) =>
+      service.getRecentEvents().filter((e) => e.metricType === metricType);
+    const running = () => events(MetricType.SLOT_MIGRATION);
+    const stuck = () => events(MetricType.SLOT_MIGRATION_STUCK);
+
+    beforeEach(() => {
+      clock = BASE;
+      jest.spyOn(Date, 'now').mockImplementation(() => clock);
+      storage.getLatencyStatsHistory = jest.fn().mockResolvedValue([]);
+      see([]);
+      readSlotMigrations = jest.fn().mockImplementation(async () => report);
+      coveredBySeed = jest.fn().mockReturnValue(false);
+      (service as any).clusterMetrics = { readSlotMigrations, coveredBySeed };
+      const info = {
+        server: { redis_version: '9.0.0' },
+        replication: { role: 'master' },
+        clients: { connected_clients: '10', blocked_clients: '0' },
+        memory: { used_memory: '1000000' },
+        stats: { instantaneous_ops_per_sec: '6000', cluster_enabled: '1' },
+      };
+      const nodes = ALL.map((id, i) => ({
+        id,
+        address: `10.0.0.${i + 1}:6379@16379`,
+        flags: i === 0 ? ['myself', 'master'] : ['master'],
+        master: '-',
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 1,
+        linkState: 'connected',
+        slots: [],
+      }));
+      ctx = {
+        ...mockCtx,
+        connectionId: 'conn-a',
+        connectionName: 'cluster',
+        client: {
+          ...dbClient,
+          getInfoParsed: jest.fn().mockResolvedValue(info),
+          getClusterInfo: jest.fn().mockResolvedValue({ cluster_state: 'ok' }),
+          getClusterNodes: jest.fn().mockResolvedValue(nodes),
+        },
+      } as unknown as ConnectionContext;
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it('raises nothing on a cluster with no migration', async () => {
+      await after(0);
+      await after(MINUTE);
+
+      expect(running()).toEqual([]);
+      expect(stuck()).toEqual([]);
+    });
+
+    it('opens an info entry for a running migration and closes it when the job ends', async () => {
+      see([job()]);
+      await after(0);
+
+      expect(running()).toEqual([
+        expect.objectContaining({
+          severity: AnomalySeverity.INFO,
+          resolved: false,
+          dedupeKey: 'running:job:job-1',
+          connectionId: 'conn-a',
+          message: expect.stringContaining(
+            'Slot migration running: slots 0-100 from 10.0.0.1:6379 to 10.0.0.2:6379',
+          ),
+        }),
+      ]);
+
+      see([]);
+      await after(MINUTE);
+
+      expect(running()).toEqual([expect.objectContaining({ resolved: true })]);
+      expect(stuck()).toEqual([]);
+    });
+
+    it('raises one warning when a job makes no progress for 10 minutes, and resolves it when it moves', async () => {
+      see([job()]);
+      await after(0);
+      await after(9 * MINUTE);
+
+      expect(stuck()).toEqual([]);
+
+      await after(MINUTE);
+      await after(MINUTE);
+
+      expect(stuck()).toEqual([
+        expect.objectContaining({
+          severity: AnomalySeverity.WARNING,
+          resolved: false,
+          dedupeKey: 'stuck:job:job-1',
+          value: 10,
+          threshold: 10,
+          message: expect.stringContaining('Slot migration stuck: slots 0-100'),
+        }),
+      ]);
+      expect(running()).toEqual([expect.objectContaining({ resolved: false })]);
+
+      see([job({ lastUpdateAt: clock })]);
+      await after(MINUTE);
+
+      expect(stuck()).toEqual([expect.objectContaining({ resolved: true })]);
+      expect(running()).toEqual([expect.objectContaining({ resolved: false })]);
+    });
+
+    it('raises one warning with the server message when a job fails, and leaves it open', async () => {
+      see([job()]);
+      await after(0);
+      see([], [failedJob()]);
+      await after(MINUTE);
+      await after(MINUTE);
+
+      expect(stuck()).toEqual([
+        expect.objectContaining({
+          severity: AnomalySeverity.WARNING,
+          resolved: false,
+          dedupeKey: 'failed:job-1',
+          message: expect.stringContaining('The server said: "Connection lost to target".'),
+        }),
+      ]);
+      expect(running()).toEqual([expect.objectContaining({ resolved: true })]);
+    });
+
+    it('does not report a job that had already failed when the monitor started', async () => {
+      see([], [failedJob()]);
+      await after(0);
+      await after(MINUTE);
+
+      expect(stuck()).toEqual([]);
+    });
+
+    it('warns about legacy markers that stay on the same slots for 30 minutes', async () => {
+      const marker = {
+        slot: 10,
+        sourceNodeId: A.id,
+        sourceAddress: A.address,
+        targetNodeId: B.id,
+        targetAddress: B.address,
+        state: 'migrating',
+      };
+      see([marker]);
+      await after(0);
+      await after(29 * MINUTE);
+
+      expect(stuck()).toEqual([]);
+
+      await after(MINUTE);
+
+      expect(stuck()).toEqual([
+        expect.objectContaining({
+          dedupeKey: `stuck:legacy:${A.id}>${B.id}`,
+          value: 30,
+          threshold: 30,
+          message: expect.stringContaining('same MIGRATING or IMPORTING markers for 30 minutes'),
+        }),
+      ]);
+    });
+
+    it('closes the entry of older markers that end while atomic jobs cannot be listed', async () => {
+      const marker = {
+        slot: 10,
+        sourceNodeId: A.id,
+        sourceAddress: A.address,
+        targetNodeId: B.id,
+        targetAddress: B.address,
+        state: 'migrating',
+      };
+      const withoutJobs = { jobsReadNodeIds: [], complete: false };
+      see([marker]);
+      report = { ...report, ...withoutJobs };
+      await after(0);
+
+      expect(running()).toEqual([expect.objectContaining({ resolved: false })]);
+
+      see([]);
+      report = { ...report, ...withoutJobs };
+      await after(MINUTE);
+
+      expect(running()).toEqual([expect.objectContaining({ resolved: true })]);
+    });
+
+    it('keeps the entries open while the nodes of the migration cannot be read', async () => {
+      see([job()]);
+      await after(0);
+      report = { ...report, migrations: [], ...partial(['c0000000']) };
+      await after(MINUTE);
+
+      expect(running()).toEqual([expect.objectContaining({ resolved: false })]);
+
+      see([]);
+      await after(MINUTE);
+
+      expect(running()).toEqual([expect.objectContaining({ resolved: true })]);
+    });
+
+    it('reads the cluster every 30 seconds while nothing is moving', async () => {
+      await after(0);
+      for (let i = 0; i < 5; i += 1) await after(5_000);
+
+      expect(readSlotMigrations).toHaveBeenCalledTimes(1);
+
+      await after(5_000);
+
+      expect(readSlotMigrations).toHaveBeenCalledTimes(2);
+      expect(readSlotMigrations).toHaveBeenCalledWith('conn-a', WATCH_READ);
+    });
+
+    it('reads every 5 seconds while a migration is running', async () => {
+      see([job()]);
+      await after(0);
+      await after(1_000);
+      await after(3_000);
+
+      expect(readSlotMigrations).toHaveBeenCalledTimes(1);
+
+      await after(1_000);
+
+      expect(readSlotMigrations).toHaveBeenCalledTimes(2);
+    });
+
+    it('goes back to every 30 seconds while the move it keeps cannot be seen', async () => {
+      see([job()]);
+      await after(0);
+      report = { ...report, migrations: [], ...partial(['c0000000']) };
+      await after(5_000);
+
+      expect(readSlotMigrations).toHaveBeenCalledTimes(2);
+
+      for (let i = 0; i < 5; i += 1) await after(5_000);
+
+      expect(readSlotMigrations).toHaveBeenCalledTimes(2);
+
+      await after(5_000);
+
+      expect(readSlotMigrations).toHaveBeenCalledTimes(3);
+    });
+
+    it('leaves the watch to the seed when the connection is a member of one', async () => {
+      coveredBySeed.mockReturnValue(true);
+      see([job()]);
+      await after(0);
+
+      expect(readSlotMigrations).not.toHaveBeenCalled();
+      expect(running()).toEqual([]);
+    });
+
+    it('does not watch a connection that cannot open its own sockets to the nodes', async () => {
+      (service as any).connectionRegistry.getConfig.mockReturnValue({ host: 'agent' });
+      see([job()]);
+      await after(0);
+
+      expect(readSlotMigrations).not.toHaveBeenCalled();
+      expect(running()).toEqual([]);
+    });
+
+    it('reads only its own node for 10 minutes once no primary could be dialed for a minute', async () => {
+      report = { ...report, ...partial([A.id]), ownNodeOnly: true };
+      await after(0);
+      await after(30_000);
+      await after(30_000);
+
+      expect(readSlotMigrations).toHaveBeenCalledTimes(3);
+      expect(readSlotMigrations).toHaveBeenLastCalledWith('conn-a', WATCH_READ);
+
+      await after(30_000);
+      await after(9 * MINUTE);
+
+      expect(readSlotMigrations).toHaveBeenCalledTimes(5);
+      expect(readSlotMigrations).toHaveBeenNthCalledWith(4, 'conn-a', OWN_NODE_READ);
+      expect(readSlotMigrations).toHaveBeenNthCalledWith(5, 'conn-a', OWN_NODE_READ);
+
+      await after(MINUTE);
+
+      expect(readSlotMigrations).toHaveBeenLastCalledWith('conn-a', WATCH_READ);
+    });
+
+    it('keeps dialing the primaries when a read between misses reaches one', async () => {
+      const missed = { ...report, ...partial([A.id]), ownNodeOnly: true };
+      const reached = { ...report };
+      readSlotMigrations
+        .mockResolvedValueOnce(missed)
+        .mockResolvedValueOnce(reached)
+        .mockResolvedValueOnce(missed)
+        .mockResolvedValueOnce(missed);
+      for (let i = 0; i < 5; i += 1) await after(30_000);
+
+      expect(readSlotMigrations).toHaveBeenCalledTimes(5);
+      expect(readSlotMigrations).toHaveBeenLastCalledWith('conn-a', WATCH_READ);
+    });
+
+    it('keeps counting the dial misses across a read whose cluster discovery failed', async () => {
+      const missed = { ...report, ...partial([A.id]), ownNodeOnly: true };
+      const undiscovered = { ...report, ...partial([]), ownNodeOnly: false };
+      readSlotMigrations
+        .mockResolvedValueOnce(missed)
+        .mockResolvedValueOnce(undiscovered)
+        .mockResolvedValueOnce(missed);
+      for (let i = 0; i < 4; i += 1) await after(30_000);
+
+      expect(readSlotMigrations).toHaveBeenCalledTimes(4);
+      expect(readSlotMigrations).toHaveBeenLastCalledWith('conn-a', OWN_NODE_READ);
+    });
+
+    it('survives a read that throws and tries again later', async () => {
+      readSlotMigrations.mockRejectedValueOnce(new Error('boom'));
+      see([job()]);
+      await after(0);
+
+      expect(running()).toEqual([]);
+
+      await after(30_000);
+
+      expect(running()).toHaveLength(1);
+    });
+
+    it('adopts its open entries after a restart and closes the ones that ended', async () => {
+      const stored = (id: string, metricType: MetricType, dedupeKey: string) => ({
+        id,
+        metricType,
+        dedupeKey,
+        timestamp: BASE - 5 * MINUTE,
+        resolved: false,
+      });
+      storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) => {
+        if (offset) return [];
+        if (metricType === MetricType.SLOT_MIGRATION) {
+          return [
+            stored('run-1', MetricType.SLOT_MIGRATION, 'running:job:job-1'),
+            stored('run-2', MetricType.SLOT_MIGRATION, 'running:job:job-2'),
+          ];
+        }
+        if (metricType === MetricType.SLOT_MIGRATION_STUCK) {
+          return [
+            stored('stuck-2', MetricType.SLOT_MIGRATION_STUCK, 'stuck:job:job-2'),
+            stored('failed-0', MetricType.SLOT_MIGRATION_STUCK, 'failed:job-0'),
+          ];
+        }
+        return [];
+      });
+      (service as any).connectionRegistry.getConfig.mockImplementation((id: string) => ({ id }));
+      see([job()]);
+
+      await after(0);
+
+      expect(running()).toEqual([]);
+      const resolved = storage.resolveAnomaly.mock.calls.map(([id]: [string]) => id).sort();
+      expect(resolved).toEqual(['run-2', 'stuck-2']);
+    });
+
+    describe('with entries open from before a restart', () => {
+      const resolvedIds = () =>
+        [...new Set(storage.resolveAnomaly.mock.calls.map(([id]: [string]) => id))].sort();
+
+      beforeEach(() => {
+        const stored = (id: string, metricType: MetricType, dedupeKey: string) => ({
+          id,
+          metricType,
+          dedupeKey,
+          timestamp: BASE - 15 * MINUTE,
+          resolved: false,
+        });
+        storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) => {
+          if (offset) return [];
+          if (metricType === MetricType.SLOT_MIGRATION) {
+            return [stored('run-1', MetricType.SLOT_MIGRATION, 'running:job:job-1')];
+          }
+          if (metricType === MetricType.SLOT_MIGRATION_STUCK) {
+            return [stored('stuck-1', MetricType.SLOT_MIGRATION_STUCK, 'stuck:job:job-1')];
+          }
+          return [];
+        });
+        (service as any).connectionRegistry.getConfig.mockImplementation((id: string) => ({ id }));
+      });
+
+      it('keeps a stuck warning open until the job moves', async () => {
+        see([job()]);
+        await after(0);
+        await after(MINUTE);
+
+        expect(resolvedIds()).toEqual([]);
+
+        see([job({ lastUpdateAt: clock })]);
+        await after(MINUTE);
+
+        expect(resolvedIds()).toEqual(['stuck-1']);
+      });
+
+      it('keeps a stuck warning when only the target of the job can be read', async () => {
+        report = {
+          ...report,
+          migrations: [job({ state: 'importing', phase: 'receiving-snapshot' })],
+          ...partial([B.id]),
+        };
+        await after(0);
+        await after(MINUTE);
+
+        expect(resolvedIds()).toEqual([]);
+      });
+
+      it('keeps them open while the nodes cannot be read, then closes the ones that ended', async () => {
+        report = { ...report, migrations: [], ...partial(['c0000000']) };
+        await after(0);
+        await after(MINUTE);
+
+        expect(resolvedIds()).toEqual([]);
+
+        see([]);
+        await after(MINUTE);
+
+        expect(resolvedIds()).toEqual(['run-1', 'stuck-1']);
+      });
+
+      it('closes them when the connection is removed', async () => {
+        see([job()]);
+        await after(0);
+
+        await (service as any).onConnectionRemoved('conn-a');
+        await new Promise((resolve) => setImmediate(resolve));
+
+        expect(resolvedIds()).toEqual(['run-1', 'stuck-1']);
+      });
+
+      it('closes a failed-job warning when the connection is removed', async () => {
+        see([job()]);
+        await after(0);
+        see([], [failedJob()]);
+        await after(MINUTE);
+        const failed = stuck().find((event) => event.dedupeKey === 'failed:job-1')!;
+        storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
+          !offset && metricType === MetricType.SLOT_MIGRATION_STUCK
+            ? [{ id: failed.id, metricType, dedupeKey: failed.dedupeKey, timestamp: failed.timestamp, resolved: false }]
+            : [],
+        );
+
+        await (service as any).onConnectionRemoved('conn-a');
+        for (let i = 0; i < 10; i += 1) await new Promise((resolve) => setImmediate(resolve));
+
+        expect(resolvedIds()).toContain(failed.id);
+      });
+    });
+
+    it('forgets everything about a removed connection', async () => {
+      see([job()]);
+      await after(0);
+
+      await (service as any).onConnectionRemoved('conn-a');
+
+      for (const state of [
+        'slotMigrationWatch',
+        'slotMigrationCheckedAt',
+        'slotMigrationOwnNodeUntil',
+        'slotMigrationDialMissSince',
+        'slotMigrationsListed',
+        'slotMigrationFirstSeen',
+        'activeSlotMigrations',
+        'slotMigrationEventIds',
+        'stuckSlotMigrationFirstSeen',
+        'activeStuckSlotMigrations',
+        'stuckSlotMigrationEventIds',
       ]) {
         expect((service as any)[state].has('conn-a')).toBe(false);
       }
@@ -15678,6 +16262,20 @@ describe('AnomalyService', () => {
       );
     });
 
+    it.each([MetricType.SLOT_MIGRATION, MetricType.SLOT_MIGRATION_STUCK])(
+      'keeps an unresolved %s event open',
+      async (metricType) => {
+        const now = Date.now();
+        (service as any).recentAnomalies.push(anomaly({ timestamp: now - 40 * MIN, metricType }));
+
+        await (service as any).tickIncidentTimelines(now);
+
+        expect((service as any).liveIncidents[0].recovery).toEqual(
+          expect.objectContaining({ status: 'degraded', openSignals: [metricType] }),
+        );
+      },
+    );
+
     it('does not call a P99 regression recovered inside its re-fire cooldown', async () => {
       const now = Date.now();
       (service as any).recentAnomalies.push(
@@ -16598,6 +17196,8 @@ describe('AnomalyService', () => {
             MetricType.BACKLOG_COVERAGE_RISK,
             MetricType.CLIENT_SATURATION,
             MetricType.RESYNC_ESCALATION,
+            MetricType.SLOT_MIGRATION,
+            MetricType.SLOT_MIGRATION_STUCK,
           ].sort(),
         );
         for (const metricType of stateMetrics.filter((m) => !open.includes(m))) {
@@ -23114,7 +23714,8 @@ describe('AnomalyService', () => {
                 ([opts]) =>
                   opts.connectionId === 'conn-9' &&
                   opts.metricType !== MetricType.REPLICATION_DIVERGENCE &&
-                  opts.metricType !== MetricType.RAFT_HEALTH,
+                  opts.metricType !== MetricType.RAFT_HEALTH &&
+                  opts.metricType !== MetricType.SLOT_MIGRATION_STUCK,
               ).length;
             const reads = adoptionReads();
 

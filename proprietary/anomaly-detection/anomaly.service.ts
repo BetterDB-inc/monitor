@@ -165,6 +165,16 @@ import {
   detectOrphanedSlotKeys,
   orphanedSlotKeysSignature,
 } from './orphaned-slot-keys-detector';
+import {
+  ATOMIC_MIGRATION_STALL_MS,
+  LEGACY_MIGRATION_STALL_MS,
+  SlotMigrationFinding,
+  SlotMigrationWatch,
+  describeSlotMigration,
+  judgeSlotMigrations,
+  isStuckFailingImport,
+  withAdoptedSlotMigrations,
+} from './slot-migration-detector';
 import { GhostMember, detectGhostMembers, ghostMemberSignature } from './ghost-membership-detector';
 import { ForgetRejoin, GhostMembershipHistory } from './ghost-membership-history';
 import {
@@ -230,7 +240,11 @@ import {
   isReplicaRole,
 } from '@app/database/parsers/replication-info.parser';
 import { ClusterDiscoveryService } from '@app/cluster/cluster-discovery.service';
-import { ClusterMetricsService, parseSlotMigrationJobs } from '@app/cluster/cluster-metrics.service';
+import {
+  ClusterMetricsService,
+  type SlotMigrationReport,
+  parseSlotMigrationJobs,
+} from '@app/cluster/cluster-metrics.service';
 import { withConfiguredZones, withShardMetadata } from '@app/cluster/shard-metadata';
 import {
   type DivergenceGroup,
@@ -586,8 +600,16 @@ const ADOPTED_METRICS: MetricType[] = [
   MetricType.TOPOLOGY_DIVERGENCE,
   MetricType.REPLICA_SLOT_STATE,
   MetricType.RAFT_HEALTH,
+  MetricType.SLOT_MIGRATION,
+  MetricType.SLOT_MIGRATION_STUCK,
   MetricType.PRIMARY_WITHOUT_REPLICAS,
 ];
+
+const SLOT_MIGRATION_IDLE_CHECK_MS = 30_000;
+const SLOT_MIGRATION_BUSY_CHECK_MS = 5_000;
+const SLOT_MIGRATION_DIAL_RETRY_MS = 10 * 60_000;
+const SLOT_MIGRATION_DIAL_MISS_MS = 60_000;
+const STUCK_SLOT_MIGRATION_KEY = 'stuck:';
 
 /** A shard no connection has observed for this long has its open events closed. */
 const PRIMARY_REPLICA_UNOBSERVED_MS = 5 * 60_000;
@@ -921,6 +943,17 @@ export class AnomalyService
   // `firstSeen` gates on persistence so a reshard window whose in-flight
   // markers fell between polls doesn't alert, `active` dedupes once fired.
   private orphanedSlotFirstSeen = new Map<string, Map<string, number>>();
+  private slotMigrationWatch = new Map<string, SlotMigrationWatch>();
+  private slotMigrationCheckedAt = new Map<string, number>();
+  private slotMigrationOwnNodeUntil = new Map<string, number>();
+  private slotMigrationDialMissSince = new Map<string, number>();
+  private slotMigrationsListed = new Set<string>();
+  private slotMigrationFirstSeen = new Map<string, Map<string, number>>();
+  private activeSlotMigrations = new Map<string, Set<string>>();
+  private slotMigrationEventIds = new Map<string, Map<string, string>>();
+  private stuckSlotMigrationFirstSeen = new Map<string, Map<string, number>>();
+  private activeStuckSlotMigrations = new Map<string, Set<string>>();
+  private stuckSlotMigrationEventIds = new Map<string, Map<string, string>>();
   private activeOrphanedSlots = new Map<string, Set<string>>();
   // Per-connection per-shard failover-churn windows (valkey#3996, gossip mode).
   private failoverChurnState = new Map<string, FailoverChurnStateMap>();
@@ -1532,6 +1565,17 @@ export class AnomalyService
     this.activeReplicaSlotAnomalies.delete(connectionId);
     this.replicaSlotEventIds.delete(connectionId);
     this.orphanedSlotLastProbe.delete(connectionId);
+    this.slotMigrationWatch.delete(connectionId);
+    this.slotMigrationCheckedAt.delete(connectionId);
+    this.slotMigrationOwnNodeUntil.delete(connectionId);
+    this.slotMigrationDialMissSince.delete(connectionId);
+    this.slotMigrationsListed.delete(connectionId);
+    this.slotMigrationFirstSeen.delete(connectionId);
+    this.activeSlotMigrations.delete(connectionId);
+    this.slotMigrationEventIds.delete(connectionId);
+    this.stuckSlotMigrationFirstSeen.delete(connectionId);
+    this.activeStuckSlotMigrations.delete(connectionId);
+    this.stuckSlotMigrationEventIds.delete(connectionId);
     this.orphanedSlotFirstSeen.delete(connectionId);
     this.activeOrphanedSlots.delete(connectionId);
     this.failoverChurnState.delete(connectionId);
@@ -2280,6 +2324,7 @@ export class AnomalyService
           // it runs in BOTH topology modes.
           await this.detectOrphanedSlotKeys(ctx, timestamp, nodes);
           await this.detectReshardPressure(info, ctx, timestamp, nodes, cpuUtilizationSample);
+          await this.detectSlotMigrations(ctx, timestamp);
           // A slot-owning primary with no synced replica (#714). Runs in both
           // topology modes, and is not held back during a rolling update: that
           // is when the shard is most often left with a single copy.
@@ -2655,6 +2700,18 @@ export class AnomalyService
       this.adoptHotShardEvents(connectionId, rows(MetricType.HOT_SHARD));
       this.adoptTopologyDivergenceEvents(connectionId, rows(MetricType.TOPOLOGY_DIVERGENCE));
       this.adoptReplicaSlotEvents(connectionId, rows(MetricType.REPLICA_SLOT_STATE));
+      this.adoptSlotMigrationEvents(
+        connectionId,
+        rows(MetricType.SLOT_MIGRATION),
+        this.slotMigrationEventIds,
+      );
+      this.adoptSlotMigrationEvents(
+        connectionId,
+        rows(MetricType.SLOT_MIGRATION_STUCK).filter((event) =>
+          event.dedupeKey?.startsWith(STUCK_SLOT_MIGRATION_KEY),
+        ),
+        this.stuckSlotMigrationEventIds,
+      );
       if (rows(MetricType.RAFT_HEALTH).some((e) => e.severity === AnomalySeverity.CRITICAL)) {
         this.raftLeaderlessActive.set(connectionId, true);
       }
@@ -6600,7 +6657,12 @@ export class AnomalyService
   private async readSlotMigrationState(connectionId: string): Promise<SlotMigrationState> {
     if (!this.clusterMetrics) return 'none';
     const check = await this.clusterMetrics.checkSlotMigrations(connectionId);
-    if (check.migrations.length > 0) return 'running';
+    const watch = this.slotMigrationWatch.get(connectionId);
+    const running = check.migrations.filter(
+      (migration) =>
+        migration.jobName === undefined || !isStuckFailingImport(watch, migration.jobName),
+    );
+    if (running.length > 0) return 'running';
     return check.complete ? 'none' : 'unknown';
   }
 
@@ -8676,6 +8738,141 @@ export class AnomalyService
     for (const sig of active) {
       if (!currentSignatures.has(sig) && !isPreserved(sig)) active.delete(sig);
     }
+  }
+
+  private adoptSlotMigrationEvents(
+    connectionId: string,
+    open: StoredAnomalyEvent[],
+    eventIdsByConn: Map<string, Map<string, string>>,
+  ): void {
+    const eventIds = eventIdsByConn.get(connectionId) ?? new Map<string, string>();
+    const tracked = new Set(eventIds.values());
+    const adopted: string[] = [];
+    for (const event of [...open].sort((a, b) => b.timestamp - a.timestamp)) {
+      if (tracked.has(event.id)) continue;
+      const signature = event.dedupeKey;
+      if (signature === undefined || eventIds.has(signature)) {
+        this.closeLater(event.id);
+        continue;
+      }
+      eventIds.set(signature, event.id);
+      adopted.push(signature);
+    }
+    if (eventIds.size > 0) eventIdsByConn.set(connectionId, eventIds);
+    if (adopted.length === 0) return;
+    this.slotMigrationWatch.set(
+      connectionId,
+      withAdoptedSlotMigrations(this.slotMigrationWatch.get(connectionId), adopted),
+    );
+  }
+
+  private async detectSlotMigrations(ctx: ConnectionContext, timestamp: number): Promise<void> {
+    const connectionId = ctx.connectionId;
+    try {
+      if (!this.clusterMetrics || !this.dialsDataNodes(connectionId)) return;
+      if (this.clusterMetrics.coveredBySeed(connectionId)) return;
+      const checkedAt = this.slotMigrationCheckedAt.get(connectionId);
+      const every = this.slotMigrationsListed.has(connectionId)
+        ? SLOT_MIGRATION_BUSY_CHECK_MS
+        : SLOT_MIGRATION_IDLE_CHECK_MS;
+      if (checkedAt !== undefined && timestamp - checkedAt < every) return;
+      this.slotMigrationCheckedAt.set(connectionId, timestamp);
+
+      const ownNodeOnly = (this.slotMigrationOwnNodeUntil.get(connectionId) ?? 0) > timestamp;
+      const report = await this.clusterMetrics.readSlotMigrations(connectionId, {
+        ownNodeOnly,
+        rememberNodesWithoutJobs: true,
+      });
+      if (this.slotMigrationCheckedAt.get(connectionId) !== timestamp) return;
+      if (!ownNodeOnly) this.noteSlotMigrationDial(connectionId, timestamp, report);
+      const judged = judgeSlotMigrations(
+        this.slotMigrationWatch.get(connectionId),
+        report,
+        timestamp,
+      );
+      this.slotMigrationWatch.set(connectionId, judged.watch);
+      if (judged.running.length > 0) this.slotMigrationsListed.add(connectionId);
+      else this.slotMigrationsListed.delete(connectionId);
+
+      const gate = {
+        ctx,
+        timestamp,
+        signatureOf: (finding: SlotMigrationFinding) => finding.signature,
+        minPersistMs: 0,
+        preserveSignature: (signature: string) =>
+          judged.unseen.has(signature) || judged.held.has(signature),
+        buildEvent: (finding: SlotMigrationFinding) =>
+          this.buildSlotMigrationEvent(connectionId, timestamp, finding),
+      };
+      await this.applyTopologyPersistenceGate<SlotMigrationFinding>({
+        ...gate,
+        findings: judged.running,
+        firstSeenByConn: this.slotMigrationFirstSeen,
+        activeByConn: this.activeSlotMigrations,
+        eventIdsByConn: this.slotMigrationEventIds,
+        metricType: MetricType.SLOT_MIGRATION,
+      });
+      await this.applyTopologyPersistenceGate<SlotMigrationFinding>({
+        ...gate,
+        findings: judged.stuck,
+        firstSeenByConn: this.stuckSlotMigrationFirstSeen,
+        activeByConn: this.activeStuckSlotMigrations,
+        eventIdsByConn: this.stuckSlotMigrationEventIds,
+        metricType: MetricType.SLOT_MIGRATION_STUCK,
+      });
+      for (const finding of judged.failed) {
+        const event = this.buildSlotMigrationEvent(connectionId, timestamp, finding);
+        this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+        await this.addAnomaly(event, ctx);
+      }
+    } catch (err) {
+      this.logger.debug(
+        `Slot migration check failed for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+
+  private noteSlotMigrationDial(
+    connectionId: string,
+    timestamp: number,
+    report: SlotMigrationReport,
+  ): void {
+    if (!report.ownNodeOnly) {
+      if (report.readNodeIds.length > 0) this.slotMigrationDialMissSince.delete(connectionId);
+      return;
+    }
+    const since = this.slotMigrationDialMissSince.get(connectionId) ?? timestamp;
+    if (timestamp - since < SLOT_MIGRATION_DIAL_MISS_MS) {
+      this.slotMigrationDialMissSince.set(connectionId, since);
+      return;
+    }
+    this.slotMigrationDialMissSince.delete(connectionId);
+    this.slotMigrationOwnNodeUntil.set(connectionId, timestamp + SLOT_MIGRATION_DIAL_RETRY_MS);
+  }
+
+  private buildSlotMigrationEvent(
+    connectionId: string,
+    timestamp: number,
+    finding: SlotMigrationFinding,
+  ): AnomalyEvent {
+    const running = finding.kind === 'running';
+    const stallMs = finding.atomic ? ATOMIC_MIGRATION_STALL_MS : LEGACY_MIGRATION_STALL_MS;
+    return {
+      id: randomUUID(),
+      timestamp,
+      metricType: running ? MetricType.SLOT_MIGRATION : MetricType.SLOT_MIGRATION_STUCK,
+      anomalyType: AnomalyType.SPIKE,
+      severity: running ? AnomalySeverity.INFO : AnomalySeverity.WARNING,
+      value: finding.kind === 'stuck' ? Math.floor((finding.quietMs ?? 0) / 60_000) : 1,
+      baseline: 0,
+      zScore: 0,
+      stdDev: 0,
+      threshold: finding.kind === 'stuck' ? stallMs / 60_000 : 0,
+      message: describeSlotMigration(finding),
+      dedupeKey: finding.signature,
+      resolved: false,
+      connectionId,
+    };
   }
 
   private isTrackedEventOpen(
@@ -12174,6 +12371,8 @@ export class AnomalyService
       ...(this.hotShardEventIds.get(connectionId)?.values() ?? []),
       ...(this.topologyDivergenceEventIds.get(connectionId)?.values() ?? []),
       ...(this.replicaSlotEventIds.get(connectionId)?.values() ?? []),
+      ...(this.slotMigrationEventIds.get(connectionId)?.values() ?? []),
+      ...(this.stuckSlotMigrationEventIds.get(connectionId)?.values() ?? []),
       ...(this.legacyReplicaSlotEvents.get(connectionId) ?? []).map((e) => e.id),
       this.adoptedReshardEventIds.get(connectionId),
       ...(this.adoptedNodeReshardEventIds.get(connectionId)?.values() ?? []),
@@ -12193,7 +12392,7 @@ export class AnomalyService
     this.removedConnectionSweeps.set(connectionId, [
       ...(divergenceSwept ? [] : [MetricType.REPLICATION_DIVERGENCE]),
       ...(this.openEventsAdopted.has(connectionId)
-        ? [MetricType.RAFT_HEALTH]
+        ? [MetricType.RAFT_HEALTH, MetricType.SLOT_MIGRATION_STUCK]
         : [...ADOPTED_METRICS, ...NODE_ADOPTED_METRICS]),
     ]);
     this.closeRemovedEvents(connectionId, ids).catch((err) => {
