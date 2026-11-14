@@ -3111,8 +3111,11 @@ describe('AnomalyService', () => {
       migrations: unknown[];
       failed: unknown[];
       finishedJobs: string[];
+      jobViews: unknown[];
       readNodeIds: string[];
+      jobsReadNodeIds: string[];
       complete: boolean;
+      markersComplete: boolean;
       ownNodeOnly?: boolean;
     };
     let readSlotMigrations: jest.Mock;
@@ -3143,9 +3146,28 @@ describe('AnomalyService', () => {
       message: 'Connection lost to target',
     });
 
+    const WATCH_READ = { ownNodeOnly: false, rememberNodesWithoutJobs: true };
+    const OWN_NODE_READ = { ownNodeOnly: true, rememberNodesWithoutJobs: true };
+
     function see(migrations: unknown[], failed: unknown[] = []): void {
-      report = { migrations, failed, finishedJobs: [], readNodeIds: ALL, complete: true };
+      report = {
+        migrations,
+        failed,
+        finishedJobs: [],
+        jobViews: [],
+        readNodeIds: ALL,
+        jobsReadNodeIds: ALL,
+        complete: true,
+        markersComplete: true,
+      };
     }
+
+    const partial = (readNodeIds: string[]) => ({
+      readNodeIds,
+      jobsReadNodeIds: readNodeIds,
+      complete: false,
+      markersComplete: false,
+    });
 
     async function after(ms: number): Promise<void> {
       clock += ms;
@@ -3313,10 +3335,33 @@ describe('AnomalyService', () => {
       ]);
     });
 
+    it('closes the entry of older markers that end while atomic jobs cannot be listed', async () => {
+      const marker = {
+        slot: 10,
+        sourceNodeId: A.id,
+        sourceAddress: A.address,
+        targetNodeId: B.id,
+        targetAddress: B.address,
+        state: 'migrating',
+      };
+      const withoutJobs = { jobsReadNodeIds: [], complete: false };
+      see([marker]);
+      report = { ...report, ...withoutJobs };
+      await after(0);
+
+      expect(running()).toEqual([expect.objectContaining({ resolved: false })]);
+
+      see([]);
+      report = { ...report, ...withoutJobs };
+      await after(MINUTE);
+
+      expect(running()).toEqual([expect.objectContaining({ resolved: true })]);
+    });
+
     it('keeps the entries open while the nodes of the migration cannot be read', async () => {
       see([job()]);
       await after(0);
-      report = { ...report, migrations: [], readNodeIds: ['c0000000'], complete: false };
+      report = { ...report, migrations: [], ...partial(['c0000000']) };
       await after(MINUTE);
 
       expect(running()).toEqual([expect.objectContaining({ resolved: false })]);
@@ -3336,7 +3381,7 @@ describe('AnomalyService', () => {
       await after(5_000);
 
       expect(readSlotMigrations).toHaveBeenCalledTimes(2);
-      expect(readSlotMigrations).toHaveBeenCalledWith('conn-a');
+      expect(readSlotMigrations).toHaveBeenCalledWith('conn-a', WATCH_READ);
     });
 
     it('reads every 5 seconds while a migration is running', async () => {
@@ -3371,21 +3416,21 @@ describe('AnomalyService', () => {
     });
 
     it('reads only its own node for 10 minutes after no primary could be dialed', async () => {
-      report = { ...report, readNodeIds: [A.id], complete: false, ownNodeOnly: true };
+      report = { ...report, ...partial([A.id]), ownNodeOnly: true };
       await after(0);
 
-      expect(readSlotMigrations).toHaveBeenLastCalledWith('conn-a');
+      expect(readSlotMigrations).toHaveBeenLastCalledWith('conn-a', WATCH_READ);
 
       await after(30_000);
       await after(9 * MINUTE);
 
       expect(readSlotMigrations).toHaveBeenCalledTimes(3);
-      expect(readSlotMigrations).toHaveBeenNthCalledWith(2, 'conn-a', { ownNodeOnly: true });
-      expect(readSlotMigrations).toHaveBeenNthCalledWith(3, 'conn-a', { ownNodeOnly: true });
+      expect(readSlotMigrations).toHaveBeenNthCalledWith(2, 'conn-a', OWN_NODE_READ);
+      expect(readSlotMigrations).toHaveBeenNthCalledWith(3, 'conn-a', OWN_NODE_READ);
 
       await after(MINUTE);
 
-      expect(readSlotMigrations).toHaveBeenLastCalledWith('conn-a');
+      expect(readSlotMigrations).toHaveBeenLastCalledWith('conn-a', WATCH_READ);
     });
 
     it('survives a read that throws and tries again later', async () => {
@@ -3436,7 +3481,7 @@ describe('AnomalyService', () => {
 
     describe('with entries open from before a restart', () => {
       const resolvedIds = () =>
-        storage.resolveAnomaly.mock.calls.map(([id]: [string]) => id).sort();
+        [...new Set(storage.resolveAnomaly.mock.calls.map(([id]: [string]) => id))].sort();
 
       beforeEach(() => {
         const stored = (id: string, metricType: MetricType, dedupeKey: string) => ({
@@ -3476,8 +3521,7 @@ describe('AnomalyService', () => {
         report = {
           ...report,
           migrations: [job({ state: 'importing', phase: 'receiving-snapshot' })],
-          readNodeIds: [B.id],
-          complete: false,
+          ...partial([B.id]),
         };
         await after(0);
         await after(MINUTE);
@@ -3486,7 +3530,7 @@ describe('AnomalyService', () => {
       });
 
       it('keeps them open while the nodes cannot be read, then closes the ones that ended', async () => {
-        report = { ...report, migrations: [], readNodeIds: ['c0000000'], complete: false };
+        report = { ...report, migrations: [], ...partial(['c0000000']) };
         await after(0);
         await after(MINUTE);
 
@@ -3506,6 +3550,24 @@ describe('AnomalyService', () => {
         await new Promise((resolve) => setImmediate(resolve));
 
         expect(resolvedIds()).toEqual(['run-1', 'stuck-1']);
+      });
+
+      it('closes a failed-job warning when the connection is removed', async () => {
+        see([job()]);
+        await after(0);
+        see([], [failedJob()]);
+        await after(MINUTE);
+        const failed = stuck().find((event) => event.dedupeKey === 'failed:job-1')!;
+        storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
+          !offset && metricType === MetricType.SLOT_MIGRATION_STUCK
+            ? [{ id: failed.id, metricType, dedupeKey: failed.dedupeKey, timestamp: failed.timestamp, resolved: false }]
+            : [],
+        );
+
+        await (service as any).onConnectionRemoved('conn-a');
+        for (let i = 0; i < 10; i += 1) await new Promise((resolve) => setImmediate(resolve));
+
+        expect(resolvedIds()).toContain(failed.id);
       });
     });
 
@@ -22287,7 +22349,8 @@ describe('AnomalyService', () => {
                 ([opts]) =>
                   opts.connectionId === 'conn-9' &&
                   opts.metricType !== MetricType.REPLICATION_DIVERGENCE &&
-                  opts.metricType !== MetricType.RAFT_HEALTH,
+                  opts.metricType !== MetricType.RAFT_HEALTH &&
+                  opts.metricType !== MetricType.SLOT_MIGRATION_STUCK,
               ).length;
             const reads = adoptionReads();
 

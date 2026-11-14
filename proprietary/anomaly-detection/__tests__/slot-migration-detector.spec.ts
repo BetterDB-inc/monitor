@@ -63,14 +63,19 @@ function failedJob(overrides: Partial<FailedSlotMigration> = {}): FailedSlotMigr
 }
 
 function report(overrides: Partial<SlotMigrationReport> = {}): SlotMigrationReport {
+  const readNodeIds = overrides.readNodeIds ?? ALL;
+  const complete = overrides.complete ?? true;
   return {
     migrations: [],
     failed: [],
     finishedJobs: [],
-    readNodeIds: ALL,
-    complete: true,
+    jobViews: [],
     ownNodeOnly: false,
     ...overrides,
+    readNodeIds,
+    jobsReadNodeIds: overrides.jobsReadNodeIds ?? readNodeIds,
+    complete,
+    markersComplete: overrides.markersComplete ?? complete,
   };
 }
 
@@ -271,6 +276,98 @@ describe('judgeSlotMigrations', () => {
       ]);
 
       expect(judged.stuck).toHaveLength(1);
+    });
+  });
+
+  describe('a job read from either end', () => {
+    const exported = job();
+    const imported = job({
+      state: 'importing',
+      phase: 'waiting-for-paused',
+      lastUpdateAt: T0 - MINUTE,
+      lastAckAt: T0 - MINUTE,
+    });
+    const both = report({ migrations: [exported], jobViews: [exported, imported] });
+    const sourceOnly = report({ migrations: [exported], jobViews: [exported] });
+    const targetOnly = report({
+      migrations: [imported],
+      jobViews: [imported],
+      readNodeIds: [B.id, C.id],
+      complete: false,
+    });
+
+    it('is stuck when the reads keep switching between its two ends', () => {
+      const judged = run([
+        [T0, both],
+        [T0 + 3 * MINUTE, targetOnly],
+        [T0 + 6 * MINUTE, sourceOnly],
+        [T0 + 9 * MINUTE, targetOnly],
+        [T0 + ATOMIC_MIGRATION_STALL_MS, sourceOnly],
+      ]);
+
+      expect(judged.stuck).toEqual([
+        expect.objectContaining({ quietMs: ATOMIC_MIGRATION_STALL_MS }),
+      ]);
+    });
+
+    it('is stuck when an end it reads for the first time reports nothing new', () => {
+      const judged = run([
+        [T0, targetOnly],
+        [T0 + ATOMIC_MIGRATION_STALL_MS, both],
+      ]);
+
+      expect(judged.stuck).toHaveLength(1);
+    });
+
+    it('moves on when one end reports a change while the other cannot be read', () => {
+      const moved = job({ lastAckAt: T0 + 6 * MINUTE });
+      const judged = run([
+        [T0, both],
+        [T0 + 5 * MINUTE, targetOnly],
+        [T0 + 6 * MINUTE, report({ migrations: [moved], jobViews: [moved] })],
+        [T0 + 12 * MINUTE, report({ migrations: [moved], jobViews: [moved] })],
+      ]);
+
+      expect(judged.stuck).toEqual([]);
+    });
+  });
+
+  describe('a server that refuses to list atomic jobs', () => {
+    const markersOnly = (overrides: Partial<SlotMigrationReport> = {}) =>
+      report({ jobsReadNodeIds: [], complete: false, markersComplete: true, ...overrides });
+
+    it('keeps an atomic job it can no longer list', () => {
+      const judged = run([
+        [T0, report({ migrations: [job()] })],
+        [T0 + MINUTE, markersOnly()],
+      ]);
+
+      expect([...judged.unseen].sort()).toEqual(['running:job:job-1', 'stuck:job:job-1']);
+    });
+
+    it('still lets older markers that end go', () => {
+      const judged = run([
+        [T0, markersOnly({ migrations: [marker(10)] })],
+        [T0 + MINUTE, markersOnly()],
+      ]);
+
+      expect(judged.running).toEqual([]);
+      expect(judged.unseen.size).toBe(0);
+    });
+
+    it('still closes adopted entries of older markers that ended', () => {
+      const adopted = withAdoptedSlotMigrations(undefined, [`running:legacy:${A.id}>${B.id}`]);
+
+      expect(run([[T0, markersOnly()]], adopted).held.size).toBe(0);
+    });
+
+    it('does not report a failed job whose nodes it had read only for markers', () => {
+      const judged = run([
+        [T0, markersOnly()],
+        [T0 + MINUTE, report({ failed: [failedJob()] })],
+      ]);
+
+      expect(judged.failed).toEqual([]);
     });
   });
 

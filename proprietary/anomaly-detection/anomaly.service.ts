@@ -8402,9 +8402,10 @@ export class AnomalyService
       this.slotMigrationCheckedAt.set(connectionId, timestamp);
 
       const ownNodeOnly = (this.slotMigrationOwnNodeUntil.get(connectionId) ?? 0) > timestamp;
-      const report = ownNodeOnly
-        ? await this.clusterMetrics.readSlotMigrations(connectionId, { ownNodeOnly })
-        : await this.clusterMetrics.readSlotMigrations(connectionId);
+      const report = await this.clusterMetrics.readSlotMigrations(connectionId, {
+        ownNodeOnly,
+        rememberNodesWithoutJobs: true,
+      });
       if (this.slotMigrationCheckedAt.get(connectionId) !== timestamp) return;
       if (report.ownNodeOnly && !ownNodeOnly) {
         this.slotMigrationOwnNodeUntil.set(connectionId, timestamp + SLOT_MIGRATION_DIAL_RETRY_MS);
@@ -11996,7 +11997,7 @@ export class AnomalyService
     this.removedConnectionSweeps.set(connectionId, [
       ...(divergenceSwept ? [] : [MetricType.REPLICATION_DIVERGENCE]),
       ...(this.openEventsAdopted.has(connectionId)
-        ? [MetricType.RAFT_HEALTH]
+        ? [MetricType.RAFT_HEALTH, MetricType.SLOT_MIGRATION_STUCK]
         : [...ADOPTED_METRICS, ...NODE_ADOPTED_METRICS]),
     ]);
     this.closeRemovedEvents(connectionId, ids).catch((err) => {

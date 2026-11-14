@@ -26,7 +26,7 @@ export interface SlotMigrationFinding {
 }
 
 interface WatchedMove {
-  stamp: string;
+  stamps: Readonly<Record<string, string>>;
   since: number;
   atomic: boolean;
   nodeIds: string[];
@@ -37,6 +37,7 @@ export interface SlotMigrationWatch {
   moves: ReadonlyMap<string, WatchedMove>;
   knownFailed: ReadonlySet<string>;
   seenNodes: ReadonlySet<string>;
+  seenJobNodes: ReadonlySet<string>;
   adopted: ReadonlySet<string>;
 }
 
@@ -54,7 +55,7 @@ interface Move {
   atomic: boolean;
   timed: boolean;
   slots: string;
-  stamp: string;
+  stamps: Record<string, string>;
   phase?: string;
   sourceNodeId: string;
   sourceAddress: string;
@@ -66,8 +67,15 @@ const EMPTY_WATCH: SlotMigrationWatch = {
   moves: new Map(),
   knownFailed: new Set(),
   seenNodes: new Set(),
+  seenJobNodes: new Set(),
   adopted: new Set(),
 };
+
+interface Sight {
+  seenBefore: ReadonlySet<string>;
+  readNow: ReadonlySet<string>;
+  complete: boolean;
+}
 
 export function withAdoptedSlotMigrations(
   watch: SlotMigrationWatch | undefined,
@@ -103,17 +111,26 @@ function hasHeartbeat(migration: SlotMigration): boolean {
   return !(migration.state === 'importing' && migration.phase === SNAPSHOT_ARRIVING_PHASE);
 }
 
-function movesOf(migrations: SlotMigration[]): Move[] {
+function stampOf(migration: SlotMigration): string {
+  return `${migration.phase ?? ''}|${migration.lastUpdateAt ?? ''}|${migration.lastAckAt ?? ''}`;
+}
+
+function movesOf(report: SlotMigrationReport): Move[] {
+  const views = new Map<string, Record<string, string>>();
+  for (const view of report.jobViews) {
+    if (view.jobName === undefined) continue;
+    views.set(view.jobName, { ...views.get(view.jobName), [view.state]: stampOf(view) });
+  }
   const moves: Move[] = [];
   const legacy = new Map<string, { first: SlotMigration; slots: number[] }>();
-  for (const migration of migrations) {
+  for (const migration of report.migrations) {
     if (migration.jobName !== undefined) {
       moves.push({
         id: `${JOB_MOVE}${migration.jobName}`,
         atomic: true,
         timed: hasHeartbeat(migration),
         slots: migration.slotRange ?? `${migration.slot}`,
-        stamp: `${migration.phase ?? ''}|${migration.lastUpdateAt ?? ''}|${migration.lastAckAt ?? ''}`,
+        stamps: views.get(migration.jobName) ?? { [migration.state]: stampOf(migration) },
         phase: migration.phase,
         ...endpoints(migration),
       });
@@ -131,35 +148,37 @@ function movesOf(migrations: SlotMigration[]): Move[] {
       atomic: false,
       timed: true,
       slots: ranges,
-      stamp: ranges,
+      stamps: { [LEGACY_MOVE]: ranges },
       ...endpoints(first),
     });
   }
   return moves;
 }
 
-function couldNotBeSeen(
-  move: WatchedMove,
-  seenBefore: ReadonlySet<string>,
-  readNow: ReadonlySet<string>,
-  complete: boolean,
+function changed(
+  before: Readonly<Record<string, string>>,
+  now: Readonly<Record<string, string>>,
 ): boolean {
-  if (complete) return false;
-  const watched = move.nodeIds.filter((nodeId) => seenBefore.has(nodeId));
+  return Object.entries(now).some(
+    ([view, stamp]) => before[view] !== undefined && before[view] !== stamp,
+  );
+}
+
+function couldNotBeSeen(move: WatchedMove, sight: Sight): boolean {
+  if (sight.complete) return false;
+  const watched = move.nodeIds.filter((nodeId) => sight.seenBefore.has(nodeId));
   if (watched.length === 0) return true;
-  const unread = (nodeId: string) => !readNow.has(nodeId);
+  const unread = (nodeId: string) => !sight.readNow.has(nodeId);
   return move.atomic ? watched.every(unread) : watched.some(unread);
 }
 
-function endedWhileUnwatched(
-  id: string,
-  report: SlotMigrationReport,
-  readNow: ReadonlySet<string>,
-): boolean {
-  if (report.complete) return true;
-  if (id.startsWith(JOB_MOVE)) return report.finishedJobs.includes(id.slice(JOB_MOVE.length));
+function endedWhileUnwatched(id: string, report: SlotMigrationReport, markers: Sight): boolean {
+  if (id.startsWith(JOB_MOVE)) {
+    return report.complete || report.finishedJobs.includes(id.slice(JOB_MOVE.length));
+  }
+  if (markers.complete) return true;
   const ends = id.slice(LEGACY_MOVE.length).split('>');
-  return ends.every((nodeId) => readNow.has(nodeId));
+  return ends.every((nodeId) => markers.readNow.has(nodeId));
 }
 
 export function judgeSlotMigrations(
@@ -168,7 +187,16 @@ export function judgeSlotMigrations(
   now: number,
 ): SlotMigrationJudgement {
   const watch = previous ?? EMPTY_WATCH;
-  const readNow = new Set(report.readNodeIds);
+  const markers: Sight = {
+    seenBefore: watch.seenNodes,
+    readNow: new Set(report.readNodeIds),
+    complete: report.markersComplete,
+  };
+  const jobs: Sight = {
+    seenBefore: watch.seenJobNodes,
+    readNow: new Set(report.jobsReadNodeIds),
+    complete: report.complete,
+  };
   const moves = new Map<string, WatchedMove>();
   const running: SlotMigrationFinding[] = [];
   const stuck: SlotMigrationFinding[] = [];
@@ -177,22 +205,22 @@ export function judgeSlotMigrations(
   const held = new Set<string>();
   const listed = new Set<string>();
 
-  for (const move of movesOf(report.migrations)) {
+  for (const move of movesOf(report)) {
     const known = watch.moves.get(move.id);
-    const unchanged = known?.stamp === move.stamp;
+    const unchanged = known !== undefined && !changed(known.stamps, move.stamps);
     const since = known && unchanged ? known.since : now;
     const stuckSignature = `stuck:${move.id}`;
     const stuckBefore =
       (!known || unchanged) && (known?.stuckBefore === true || watch.adopted.has(stuckSignature));
     listed.add(move.id);
     moves.set(move.id, {
-      stamp: move.stamp,
+      stamps: { ...known?.stamps, ...move.stamps },
       since,
       atomic: move.atomic,
       nodeIds: [move.sourceNodeId, move.targetNodeId].filter((nodeId) => nodeId !== ''),
       stuckBefore,
     });
-    const { id, stamp: _stamp, timed, ...shown } = move;
+    const { id, stamps: _stamps, timed, ...shown } = move;
     running.push({ kind: 'running', signature: `running:${id}`, ...shown });
     const quietMs = now - since;
     const stallMs = move.atomic ? ATOMIC_MIGRATION_STALL_MS : LEGACY_MIGRATION_STALL_MS;
@@ -204,7 +232,7 @@ export function judgeSlotMigrations(
   }
 
   for (const [id, move] of watch.moves) {
-    if (moves.has(id) || !couldNotBeSeen(move, watch.seenNodes, readNow, report.complete)) continue;
+    if (moves.has(id) || !couldNotBeSeen(move, move.atomic ? jobs : markers)) continue;
     moves.set(id, move);
     unseen.add(`running:${id}`);
     unseen.add(`stuck:${id}`);
@@ -213,7 +241,7 @@ export function judgeSlotMigrations(
   const adopted = new Set<string>();
   for (const signature of watch.adopted) {
     const id = signature.slice(signature.indexOf(':') + 1);
-    if (listed.has(id) || endedWhileUnwatched(id, report, readNow)) continue;
+    if (listed.has(id) || endedWhileUnwatched(id, report, markers)) continue;
     adopted.add(signature);
     held.add(signature);
   }
@@ -224,7 +252,7 @@ export function judgeSlotMigrations(
     if (watch.knownFailed.has(job.jobName)) continue;
     const wasRunning = watch.moves.has(`${JOB_MOVE}${job.jobName}`);
     const wasWatched =
-      watch.seenNodes.has(job.sourceNodeId) || watch.seenNodes.has(job.targetNodeId);
+      jobs.seenBefore.has(job.sourceNodeId) || jobs.seenBefore.has(job.targetNodeId);
     if (!wasRunning && !wasWatched) continue;
     failed.push({
       kind: 'failed',
@@ -239,9 +267,10 @@ export function judgeSlotMigrations(
     });
   }
 
-  const seenNodes = new Set(report.complete ? readNow : [...watch.seenNodes, ...readNow]);
+  const seen = (sight: Sight) =>
+    new Set(sight.complete ? sight.readNow : [...sight.seenBefore, ...sight.readNow]);
   return {
-    watch: { moves, knownFailed, seenNodes, adopted },
+    watch: { moves, knownFailed, seenNodes: seen(markers), seenJobNodes: seen(jobs), adopted },
     running,
     stuck,
     failed,

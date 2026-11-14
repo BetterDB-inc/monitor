@@ -683,7 +683,38 @@ used_cpu_user:20.3\r
         const report = await service.readSlotMigrations('conn-1');
 
         expect(report.complete).toBe(false);
+        expect(report.markersComplete).toBe(false);
         expect([...report.readNodeIds].sort()).toEqual(['abc123node1', 'fff789node3']);
+      });
+
+      it('counts the markers of primaries that may not list their migration jobs', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        const noperm = {
+          jobsError: new Error("NOPERM User betterdb has no permissions to run the 'cluster|getslotmigrations' command"),
+        };
+        nodeClients({ abc123node1: noperm, def456node2: noperm, fff789node3: noperm });
+        const warn = jest.spyOn((service as unknown as { logger: Logger }).logger, 'warn').mockImplementation(() => undefined);
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect([...report.readNodeIds].sort()).toEqual(['abc123node1', 'def456node2', 'fff789node3']);
+        expect(report.jobsReadNodeIds).toEqual([]);
+        expect(report.markersComplete).toBe(true);
+        expect(report.complete).toBe(false);
+        expect(warn).toHaveBeenCalledTimes(1);
+      });
+
+      it('keeps both ends of an atomic job for the watch', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({
+          abc123node1: { jobs: [job(running)] },
+          fff789node3: { jobs: [job({ ...running, operation: 'IMPORT', state: 'receiving-snapshot' })] },
+        });
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect(report.migrations).toEqual([expect.objectContaining({ state: 'migrating' })]);
+        expect(report.jobViews.map((view) => view.state).sort()).toEqual(['importing', 'migrating']);
       });
 
       it('says that it read the primaries when it did', async () => {
@@ -729,10 +760,13 @@ used_cpu_user:20.3\r
 
         expect(report.complete).toBe(true);
         expect(report.readNodeIds).toHaveLength(3);
+        expect(report.jobsReadNodeIds).toHaveLength(3);
       });
 
       describe('a primary without the command', () => {
-        const HOUR_MS = 60 * 60_000;
+        const FIVE_MINUTES_MS = 5 * 60_000;
+        const watchRead = (connectionId: string) =>
+          service.readSlotMigrations(connectionId, { rememberNodesWithoutJobs: true });
         let asked: string[];
         let now: number;
 
@@ -756,33 +790,47 @@ used_cpu_user:20.3\r
           jest.restoreAllMocks();
         });
 
-        it('is not asked again on the next read', async () => {
-          await service.readSlotMigrations('conn-1');
+        it('is not asked again on the next read of the watch', async () => {
+          await watchRead('conn-1');
           asked = [];
           now += 30_000;
 
-          const report = await service.readSlotMigrations('conn-1');
+          const report = await watchRead('conn-1');
 
           expect(asked.sort()).toEqual(['abc123node1', 'fff789node3']);
           expect(report.complete).toBe(true);
-          expect(report.readNodeIds).toHaveLength(3);
+          expect(report.jobsReadNodeIds).toHaveLength(3);
         });
 
-        it('is asked again after an hour, in case it was upgraded', async () => {
-          await service.readSlotMigrations('conn-1');
+        it('is asked again by the watch after five minutes, in case it was upgraded', async () => {
+          await watchRead('conn-1');
           asked = [];
-          now += HOUR_MS;
+          now += FIVE_MINUTES_MS;
 
-          await service.readSlotMigrations('conn-1');
+          await watchRead('conn-1');
 
           expect(asked.sort()).toEqual(['abc123node1', 'def456node2', 'fff789node3']);
         });
 
         it('is remembered per connection', async () => {
-          await service.readSlotMigrations('conn-1');
+          await watchRead('conn-1');
           asked = [];
 
-          await service.readSlotMigrations('conn-2');
+          await watchRead('conn-2');
+
+          expect(asked).toContain('def456node2');
+        });
+
+        it('is asked again at once by the migration check and the dashboard', async () => {
+          await watchRead('conn-1');
+          asked = [];
+
+          await service.checkSlotMigrations('conn-1');
+
+          expect(asked).toContain('def456node2');
+
+          asked = [];
+          await service.getSlotMigrations('conn-1');
 
           expect(asked).toContain('def456node2');
         });
