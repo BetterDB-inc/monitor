@@ -50,6 +50,8 @@ interface OwnNodeClient {
   client: Valkey;
   ready: Promise<void>;
   connected: boolean;
+  running: number;
+  idleTimer?: ReturnType<typeof setTimeout>;
 }
 
 // Per-connection discovery cache
@@ -73,6 +75,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   private readonly CONNECTION_TIMEOUT = 5000; // 5 seconds
   private readonly HEALTH_CHECK_INTERVAL = 30000; // 30 seconds
   private readonly MAX_CONNECTIONS = 512; // Maximum number of concurrent connections
+  private readonly OWN_NODE_IDLE_MS = 5 * 60_000;
 
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
@@ -183,13 +186,25 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       (!kept.connected || kept.client.status === 'ready');
     if (kept && !reusable) this.dropOwnNodeClient(key, kept);
     const own = reusable ? kept : this.openOwnNodeClient(key, shared, timeoutMs);
+    clearTimeout(own.idleTimer);
+    own.running += 1;
     try {
       await own.ready;
       return await run(own.client);
     } catch (error) {
       this.dropOwnNodeClient(key, own);
       throw error;
+    } finally {
+      own.running -= 1;
+      if (own.running === 0 && this.ownNodeClients.get(key) === own) this.closeWhenIdle(key, own);
     }
+  }
+
+  private closeWhenIdle(key: string, own: OwnNodeClient): void {
+    own.idleTimer = setTimeout(() => {
+      if (own.running === 0) this.dropOwnNodeClient(key, own);
+    }, this.OWN_NODE_IDLE_MS);
+    own.idleTimer.unref?.();
   }
 
   releaseOwnNodeClient(connectionId: string | undefined): void {
@@ -230,6 +245,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       client,
       ready: Promise.resolve(),
       connected: false,
+      running: 0,
     };
     own.ready = client.connect().then(() => {
       own.connected = true;
@@ -239,6 +255,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   }
 
   private dropOwnNodeClient(key: string, own: OwnNodeClient): void {
+    clearTimeout(own.idleTimer);
     if (this.ownNodeClients.get(key) === own) this.ownNodeClients.delete(key);
     own.client.disconnect();
   }

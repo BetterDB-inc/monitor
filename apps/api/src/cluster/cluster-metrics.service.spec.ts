@@ -743,13 +743,13 @@ used_cpu_user:20.3\r
         ]);
       });
 
-      it("closes the connection's kept own-node socket once a read reaches a primary", async () => {
+      it("leaves the connection's kept own-node socket alone when a read reaches a primary", async () => {
         mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
         nodeClients({});
 
         await service.readSlotMigrations('conn-1');
 
-        expect(mockDiscoveryService.releaseOwnNodeClient).toHaveBeenCalledWith('conn-1');
+        expect(mockDiscoveryService.releaseOwnNodeClient).not.toHaveBeenCalled();
         expect(mockDiscoveryService.onOwnNodeClient).not.toHaveBeenCalled();
       });
 

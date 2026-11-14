@@ -1133,7 +1133,6 @@ export class ClusterMetricsService {
       }
     } else {
       this.loggedErrors.delete(`slotmigrations-${connectionId ?? ''}`);
-      this.discoveryService.releaseOwnNodeClient(connectionId);
     }
 
     return {

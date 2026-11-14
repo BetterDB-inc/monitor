@@ -1226,6 +1226,75 @@ describe('ClusterDiscoveryService', () => {
       expect(second.call).toHaveBeenCalledTimes(1);
     });
 
+    describe('when it is not used', () => {
+      const IDLE_MS = 5 * 60_000;
+
+      beforeEach(() => jest.useFakeTimers());
+      afterEach(() => jest.useRealTimers());
+
+      it('keeps one socket for reads every 30 seconds', async () => {
+        const client = keptClient();
+
+        for (let i = 0; i < 12; i++) {
+          await read();
+          await jest.advanceTimersByTimeAsync(30_000);
+        }
+
+        expect(jest.mocked(Valkey)).toHaveBeenCalledTimes(1);
+        expect(client.disconnect).not.toHaveBeenCalled();
+      });
+
+      it('closes the socket once it has not been used for 5 minutes', async () => {
+        const first = keptClient();
+        await read();
+        await jest.advanceTimersByTimeAsync(IDLE_MS - 1);
+        expect(first.disconnect).not.toHaveBeenCalled();
+
+        await jest.advanceTimersByTimeAsync(1);
+        const second = keptClient();
+        await read();
+
+        expect(first.disconnect).toHaveBeenCalledTimes(1);
+        expect(second.call).toHaveBeenCalledTimes(1);
+      });
+
+      it('does not close the socket while a read on it is still running', async () => {
+        const client = keptClient();
+        let answer: (value: string) => void = () => undefined;
+        const running = service.onOwnNodeClient(
+          'test-connection',
+          5_000,
+          () => new Promise<string>((resolve) => (answer = resolve)),
+        );
+        await jest.advanceTimersByTimeAsync(IDLE_MS * 2);
+        expect(client.disconnect).not.toHaveBeenCalled();
+
+        answer('OK');
+        await expect(running).resolves.toBe('OK');
+        await jest.advanceTimersByTimeAsync(IDLE_MS);
+
+        expect(client.disconnect).toHaveBeenCalledTimes(1);
+      });
+
+      it('lets a second read share the socket a first read is using', async () => {
+        const client = keptClient();
+        let answer: (value: string) => void = () => undefined;
+        const first = service.onOwnNodeClient(
+          'test-connection',
+          5_000,
+          () => new Promise<string>((resolve) => (answer = resolve)),
+        );
+
+        await expect(read()).resolves.toBe('OK');
+        await jest.advanceTimersByTimeAsync(IDLE_MS);
+        answer('OK');
+        await first;
+
+        expect(jest.mocked(Valkey)).toHaveBeenCalledTimes(1);
+        expect(client.disconnect).not.toHaveBeenCalled();
+      });
+    });
+
     it('closes the kept socket when released, when the connection goes and on shutdown', async () => {
       const released = keptClient();
       await read();
