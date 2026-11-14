@@ -27,6 +27,7 @@ import {
 } from '@app/common/services/multi-connection-poller';
 import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import { withTimeout } from '@app/common/utils/with-timeout';
+import { isNegativeEnvValue } from '@app/common/utils/env-bool';
 import { isAuthErrorReply } from '@app/common/utils/auth-error';
 import { dialsDataNodes } from '@app/connections/data-node-reach';
 import {
@@ -229,7 +230,34 @@ import {
   isReplicaRole,
 } from '@app/database/parsers/replication-info.parser';
 import { ClusterDiscoveryService } from '@app/cluster/cluster-discovery.service';
-import { ClusterMetricsService } from '@app/cluster/cluster-metrics.service';
+import { ClusterMetricsService, parseSlotMigrationJobs } from '@app/cluster/cluster-metrics.service';
+import { withConfiguredZones, withShardMetadata } from '@app/cluster/shard-metadata';
+import {
+  type DivergenceGroup,
+  type OpenDivergence,
+  type TrackedDisagreement,
+  confirmedDisagreements,
+  groupDivergences,
+  migrationTouchesSlots,
+  settleOpenDivergences,
+} from './topology-divergence';
+import {
+  type DivergenceRoundResult,
+  TOPOLOGY_DIVERGENCE_DEFAULTS,
+  TOPOLOGY_DIVERGENCE_MAX_MIGRATION_CHECKS,
+  TOPOLOGY_DIVERGENCE_MEMBERSHIP_MIN_AGE_MS,
+  TOPOLOGY_DIVERGENCE_NODE_TIMEOUT_FALLBACK_MS,
+  TOPOLOGY_DIVERGENCE_NODE_TIMEOUT_REFRESH_MS,
+  TopologyDivergenceMonitor,
+} from './topology-divergence-monitor';
+import {
+  type TopologyDivergenceReport,
+  buildDivergenceDetail,
+  divergenceMessage,
+  divergenceSeverity,
+  outranksSeverity,
+  toDivergenceNode,
+} from './topology-divergence-report';
 import { ShardLoadService } from '@app/cluster/shard-load.service';
 import type { ShardLoadSample, SlotLoadRate } from '@app/cluster/shard-load';
 import { parseNodeAddress } from '@app/topology/membership-diff';
@@ -253,8 +281,18 @@ import {
   FAILOVER_CHURN_MIN_CHANGES,
   FailoverChurnStateMap,
   acknowledgeChurnFinding,
+  canonicalSlotKey,
   evaluateFailoverChurn,
 } from './failover-churn-detector';
+import {
+  DEFAULT_PRIMARY_WITHOUT_REPLICAS_CONFIG,
+  PrimaryWithoutReplicasConfig,
+  ShardReplicaState,
+  createShardReplicaState,
+  endPrimaryReplicaEpisode,
+  evaluatePrimaryWithoutReplicas,
+  syncedReplicaCount,
+} from './primary-without-replicas-detector';
 import {
   COB_WARN_RATIO,
   CobConnectionState,
@@ -432,6 +470,8 @@ import {
 import {
   MetricType,
   METRICS_HANDLED_OUTSIDE_EXTRACTOR,
+  COUNTER_RATE_METRICS,
+  COUNTER_RATE_MIN_PER_SEC,
   AnomalyEvent,
   CorrelatedAnomalyGroup,
   AnomalySeverity,
@@ -543,9 +583,21 @@ const ADOPTED_METRICS: MetricType[] = [
   MetricType.RESYNC_ESCALATION,
   MetricType.RESHARD_SHARD_SKEW,
   MetricType.HOT_SHARD,
+  MetricType.TOPOLOGY_DIVERGENCE,
   MetricType.REPLICA_SLOT_STATE,
   MetricType.RAFT_HEALTH,
+  MetricType.PRIMARY_WITHOUT_REPLICAS,
 ];
+
+/** A shard no connection has observed for this long has its open events closed. */
+const PRIMARY_REPLICA_UNOBSERVED_MS = 5 * 60_000;
+
+/** An open primary_without_replicas event and the connection it is stored under. */
+interface PrimaryReplicaEvent {
+  id: string;
+  connectionId: string;
+  level: 'warning' | 'critical';
+}
 
 const NODE_ADOPTED_METRICS: MetricType[] = [MetricType.FORK_MEMORY_RISK, MetricType.REPL_BUFFER_PRESSURE];
 
@@ -713,6 +765,12 @@ export class AnomalyService
   private lastEvictedClients = new Map<string, number>();
   private lastErrorReplies = new Map<string, { value: number; timestamp: number }>();
   private lastErrorstatCounts = new Map<string, { counts: Map<string, number>; timestamp: number }>();
+  // Last reading of each lifetime INFO counter in COUNTER_RATE_METRICS, per
+  // connection, so the extractor loop can feed a per-second rate instead.
+  private lastCounterReadings = new Map<
+    string,
+    Map<MetricType, { value: number; timestamp: number; runId?: string }>
+  >();
   private clientEvictionLimit = new Map<string, string>();
   // Last-logged count of unreachable replicas in the slot-state fan-out, per
   // connection — so the degraded-detection warning is emitted only on a change,
@@ -742,6 +800,23 @@ export class AnomalyService
   private reshardWatchedSince = new Map<string, number>();
   private reshardMissedReads = new Set<string>();
   private reshardNodeSelves = new Map<string, { self: ClusterNode; readAt: number }>();
+  private readonly topologyDivergence = new TopologyDivergenceMonitor();
+  private readonly topologyDivergenceSettings: {
+    enabled: boolean;
+    nodesPerZone: number;
+    randomNodes: number;
+    minRounds: number;
+    intervalMs: number;
+  };
+  private topologyDivergenceFirstSeen = new Map<string, Map<string, number>>();
+  private activeTopologyDivergences = new Map<string, Set<string>>();
+  private topologyDivergenceEventIds = new Map<string, Map<string, string>>();
+  private topologyDivergenceEventOwners = new Map<string, string>();
+  private topologyDivergenceEventSeverity = new Map<string, AnomalySeverity>();
+  private topologyDivergenceOpen = new Map<string, Map<string, OpenDivergence>>();
+  private topologyDivergenceAnchors = new Map<string, string>();
+  private topologyDivergenceNodeTimeouts = new Map<string, { ms: number; readAt: number }>();
+  private topologyDivergenceSettledSlots = new Map<string, Set<string>>();
   private hotShardFirstSeen = new Map<string, Map<string, number>>();
   private activeHotShards = new Map<string, Set<string>>();
   private hotShardEventIds = new Map<string, Map<string, string>>();
@@ -849,6 +924,16 @@ export class AnomalyService
   private activeOrphanedSlots = new Map<string, Set<string>>();
   // Per-connection per-shard failover-churn windows (valkey#3996, gossip mode).
   private failoverChurnState = new Map<string, FailoverChurnStateMap>();
+  // Primary without replicas (#714). Keyed by shard, NOT by connection: every
+  // connection that observes a shard shares one state, so it raises one event
+  // and a failover or a hand-over to another connection continues the same
+  // episode. A cluster shard is keyed by cluster key + slot ranges, a primary
+  // outside a cluster by its replication ID. `primaryReplicaPaths` holds the
+  // state key each connection or fan-out address last used.
+  private primaryReplicaState = new Map<string, ShardReplicaState>();
+  private primaryReplicaEvents = new Map<string, PrimaryReplicaEvent[]>();
+  private primaryReplicaPaths = new Map<string, string>();
+  private readonly primaryReplicaConfig: PrimaryWithoutReplicasConfig;
   // Replication output-buffer pressure (valkey#3963): per-connection replica
   // hysteresis state, cached slave limit triplet with slow recheck, and the
   // last-seen sync_full counter for delta computation.
@@ -1112,6 +1197,26 @@ export class AnomalyService
       ),
     };
     this.infoTimeoutMs = this.numberEnv('ANOMALY_INFO_TIMEOUT_MS', 5000);
+
+    const replicas = DEFAULT_PRIMARY_WITHOUT_REPLICAS_CONFIG;
+    this.primaryReplicaConfig = {
+      warnMs: this.numberEnv('ANOMALY_PRIMARY_NO_REPLICA_WARN_MS', replicas.warnMs),
+      critMs: this.numberEnv('ANOMALY_PRIMARY_NO_REPLICA_CRIT_MS', replicas.critMs),
+      expectationTtlMs: this.numberEnv(
+        'ANOMALY_PRIMARY_REPLICAS_EXPECTATION_TTL_MS',
+        replicas.expectationTtlMs,
+      ),
+    };
+
+    const divergence = TOPOLOGY_DIVERGENCE_DEFAULTS;
+    const divergenceEnabled = this.configService.get<string | boolean>('ANOMALY_TOPOLOGY_DIVERGENCE_ENABLED');
+    this.topologyDivergenceSettings = {
+      enabled: !isNegativeEnvValue(String(divergenceEnabled ?? true)),
+      nodesPerZone: Math.max(1, this.numberEnv('ANOMALY_TOPOLOGY_DIVERGENCE_NODES_PER_ZONE', divergence.nodesPerZone)),
+      randomNodes: Math.max(2, this.numberEnv('ANOMALY_TOPOLOGY_DIVERGENCE_RANDOM_NODES', divergence.randomNodes)),
+      minRounds: Math.max(1, this.numberEnv('ANOMALY_TOPOLOGY_DIVERGENCE_MIN_POLLS', divergence.minRounds)),
+      intervalMs: Math.max(1, this.numberEnv('ANOMALY_TOPOLOGY_DIVERGENCE_INTERVAL_MS', divergence.intervalMs)),
+    };
   }
 
   /**
@@ -1151,6 +1256,7 @@ export class AnomalyService
 
   async onModuleInit() {
     this.detectorOverrides = await this.settingsService.getDetectorConfig();
+    this.warnOnCounterRateOverrides(this.detectorOverrides);
     this.unsubscribeDetectorConfig = this.settingsService.onDetectorConfigChange((c) =>
       this.reloadDetectorConfig(c),
     );
@@ -1212,6 +1318,8 @@ export class AnomalyService
       // maxclients-exhaustion signal) is tracked separately, as a per-poll delta,
       // so a connection-limit event is not misread as an auth attack. See the
       // REJECTED_CONNECTIONS rate-of-change block in pollConnection.
+      // ACL_DENIED, EVICTED_KEYS and KEYSPACE_MISSES read lifetime counters; the
+      // poll loop turns them into per-second rates (see counterRate).
       [MetricType.ACL_DENIED, (info) => this.parseNumber(info.acl_access_denied_auth)],
       [MetricType.EVICTED_KEYS, (info) => this.parseNumber(info.evicted_keys)],
       [MetricType.BLOCKED_CLIENTS, (info) => this.parseNumber(info.blocked_clients)],
@@ -1226,6 +1334,52 @@ export class AnomalyService
         },
       ],
     ]);
+  }
+
+  /**
+   * Per-second rate of a lifetime counter since this connection's previous poll,
+   * or null when there is no previous reading, the counter went backwards
+   * (server restart, CONFIG RESETSTAT), or the server's run_id changed (the
+   * connection now reaches a different process, e.g. after a failover behind a
+   * Service, whose counter may be higher); in each case the reading becomes the
+   * new baseline. The elapsed time is floored at the poll interval, as for
+   * error_replies, so a poll that runs early cannot inflate the rate.
+   */
+  private counterRate(
+    connectionId: string,
+    metricType: MetricType,
+    value: number,
+    timestamp: number,
+    runId: string | undefined,
+  ): number | null {
+    let readings = this.lastCounterReadings.get(connectionId);
+    if (readings === undefined) {
+      readings = new Map();
+      this.lastCounterReadings.set(connectionId, readings);
+    }
+    const last = readings.get(metricType);
+    readings.set(metricType, { value, timestamp, runId });
+    if (last === undefined || value < last.value) return null;
+    if (last.runId !== undefined && runId !== undefined && last.runId !== runId) return null;
+    const elapsedMs = Math.max(timestamp - last.timestamp, this.getIntervalMs());
+    return ((value - last.value) * 1000) / elapsedMs;
+  }
+
+  /**
+   * Absolute thresholds on COUNTER_RATE_METRICS used to be compared with the
+   * lifetime total and are now compared with the per-second rate. Stored
+   * overrides keep their numbers, so say once at startup that their meaning changed.
+   */
+  private warnOnCounterRateOverrides(overrides: DetectorConfigMap): void {
+    const affected = [...COUNTER_RATE_METRICS].filter((metric) => {
+      const override = overrides[metric as unknown as ApiMetricType];
+      return override?.warningAbsolute !== undefined || override?.criticalAbsolute !== undefined;
+    });
+    if (affected.length === 0) return;
+    this.logger.warn(
+      `Absolute threshold overrides for ${affected.join(', ')} are now compared with a per-second rate, ` +
+        'not the lifetime total since restart. Review them in Settings > Anomaly detectors.',
+    );
   }
 
   reloadDetectorConfig(overrides: DetectorConfigMap): void {
@@ -1268,7 +1422,10 @@ export class AnomalyService
       connectionBuffers.set(metricType, new MetricBuffer(metricType));
       connectionDetectors.set(
         metricType,
-        new SpikeDetector(metricType, this.resolveSpikeConfig(metricType)),
+        new SpikeDetector(metricType, this.resolveSpikeConfig(metricType), {
+          minValue: COUNTER_RATE_MIN_PER_SEC.get(metricType),
+          absoluteBelowMean: COUNTER_RATE_METRICS.has(metricType),
+        }),
       );
     }
 
@@ -1288,6 +1445,7 @@ export class AnomalyService
     this.lastEvictedClients.delete(connectionId);
     this.lastErrorReplies.delete(connectionId);
     this.lastErrorstatCounts.delete(connectionId);
+    this.lastCounterReadings.delete(connectionId);
     this.replicaFanoutUnreachable.delete(connectionId);
     this.clientEvictionLimit.delete(connectionId);
     this.lastReplicationRole.delete(connectionId);
@@ -1324,6 +1482,7 @@ export class AnomalyService
       this.reshardNodeSelves.delete(key);
     }
     this.forgetClusterKey(connectionId);
+    this.forgetTopologyDivergence(connectionId);
     this.reshardSkewFirstSeen.delete(connectionId);
     this.activeReshardSkews.delete(connectionId);
     this.reshardSkewEventIds.delete(connectionId);
@@ -1376,6 +1535,18 @@ export class AnomalyService
     this.orphanedSlotFirstSeen.delete(connectionId);
     this.activeOrphanedSlots.delete(connectionId);
     this.failoverChurnState.delete(connectionId);
+    // A shard this connection was the last to observe has no one left to
+    // resolve its events, so they are closed. Its expected replica count is
+    // kept until the sweep drops it: a connection added in its place must
+    // still alert when the replicas are already gone.
+    this.primaryReplicaPaths.delete(`connection:${connectionId}`);
+    for (const [key, state] of this.primaryReplicaState) {
+      state.healthyPolls.delete(connectionId);
+      if (state.observers.delete(connectionId) && state.observers.size === 0) {
+        this.closePrimaryReplicaEvents(key);
+        endPrimaryReplicaEpisode(state);
+      }
+    }
     this.forkMemoryState.delete(connectionId);
     this.forkMemLastChanges.delete(connectionId);
     const hadCobState = this.cobState.delete(connectionId);
@@ -1554,13 +1725,21 @@ export class AnomalyService
 
       // Process each metric from INFO
       for (const [metricType, extractor] of this.metricExtractors.entries()) {
-        const value = extractor(info);
-        if (value === null) continue;
+        const reading = extractor(info);
+        if (reading === null) continue;
 
         const buffer = buffers.get(metricType);
         const detector = detectors.get(metricType);
 
         if (!buffer || !detector) continue;
+
+        const value = COUNTER_RATE_METRICS.has(metricType)
+          ? this.counterRate(ctx.connectionId, metricType, reading, timestamp, info.run_id || undefined)
+          : reading;
+        if (value === null) {
+          detector.resetRun();
+          continue;
+        }
 
         buffer.addSample(value, timestamp);
 
@@ -1609,12 +1788,14 @@ export class AnomalyService
         });
       }
 
-      // Slowlog rate-of-change detection (sourced from SlowLogAnalyticsService, not INFO)
-      const currentSlowlogId = this.slowLogAnalytics.getLastSeenId(ctx.connectionId);
-      if (currentSlowlogId !== null) {
-        const lastId = this.lastSlowlogId.get(ctx.connectionId);
-        const delta = Math.max(0, currentSlowlogId - (lastId ?? currentSlowlogId));
-        this.lastSlowlogId.set(ctx.connectionId, currentSlowlogId);
+      // Slowlog rate-of-change detection. Counts new entries that are not
+      // BetterDB's own (or otherwise ignored). getLastSeenId stays the raw id
+      // for the Prometheus exporter.
+      const currentExternal = this.slowLogAnalytics.getExternalEntryCount(ctx.connectionId);
+      if (currentExternal !== null) {
+        const lastCount = this.lastSlowlogId.get(ctx.connectionId);
+        const delta = Math.max(0, currentExternal - (lastCount ?? currentExternal));
+        this.lastSlowlogId.set(ctx.connectionId, currentExternal);
 
         // Lazily create buffer/detector on first available data
         if (!buffers.has(MetricType.SLOWLOG_LAST_ID)) {
@@ -2091,6 +2272,7 @@ export class AnomalyService
 
         if (nodes) {
           this.rememberClusterKey(ctx.connectionId, nodes);
+          if (!isRaft) await this.detectTopologyDivergence(ctx, timestamp, nodes, shards);
           // Orphaned keys in unowned slots after a persistence load
           // (valkey#539): unreachable data silently holding memory. NOT a
           // gossip race — the engine loads persistence files the same way
@@ -2098,6 +2280,11 @@ export class AnomalyService
           // it runs in BOTH topology modes.
           await this.detectOrphanedSlotKeys(ctx, timestamp, nodes);
           await this.detectReshardPressure(info, ctx, timestamp, nodes, cpuUtilizationSample);
+          // A slot-owning primary with no synced replica (#714). Runs in both
+          // topology modes, and is not held back during a rolling update: that
+          // is when the shard is most often left with a single copy.
+          const self = nodes.find((n) => n.flags.includes('myself'));
+          if (self) await this.detectPrimaryWithoutReplicas(info, ctx, timestamp, self);
         }
         await this.detectHotShards(ctx, timestamp, nodes);
         aclClusterNodes = nodes;
@@ -2122,6 +2309,7 @@ export class AnomalyService
       } else if (live && sentinelMode === false) {
         divergenceTargets = { targets: [], members: new Set() };
         fanoutGap = { reason: 'not_applicable', notDialed: 0 };
+        await this.detectPrimaryWithoutReplicas(info, ctx, timestamp, null);
       }
 
       // Persistence-child stall detection (stuck BGSAVE / AOF rewrite) — state-based, not z-score
@@ -2465,11 +2653,17 @@ export class AnomalyService
       });
       this.adoptReshardEvents(connectionId, rows(MetricType.RESHARD_SHARD_SKEW));
       this.adoptHotShardEvents(connectionId, rows(MetricType.HOT_SHARD));
+      this.adoptTopologyDivergenceEvents(connectionId, rows(MetricType.TOPOLOGY_DIVERGENCE));
       this.adoptReplicaSlotEvents(connectionId, rows(MetricType.REPLICA_SLOT_STATE));
       if (rows(MetricType.RAFT_HEALTH).some((e) => e.severity === AnomalySeverity.CRITICAL)) {
         this.raftLeaderlessActive.set(connectionId, true);
       }
       this.adoptRaftFlappingEvents(connectionId, rows(MetricType.RAFT_HEALTH), timestamp);
+      this.adoptPrimaryReplicaEvents(
+        connectionId,
+        rows(MetricType.PRIMARY_WITHOUT_REPLICAS),
+        timestamp,
+      );
       this.openEventsAdopted.add(connectionId);
       this.openEventsRetry.delete(connectionId);
     } catch (err) {
@@ -7073,6 +7267,369 @@ export class AnomalyService
     this.reshardSnapshot.set(key, this.reshardShardSnapshot(key, clusterKey, self, info, null, timestamp));
   }
 
+  private async detectTopologyDivergence(
+    ctx: ConnectionContext,
+    timestamp: number,
+    nodes: ClusterNode[],
+    shards: ClusterShard[] | undefined,
+  ): Promise<void> {
+    const settings = this.topologyDivergenceSettings;
+    const clusterKey = this.connectionClusterKeys.get(ctx.connectionId);
+    if (!settings.enabled || !clusterKey) return;
+    const canDial = !!this.clusterDiscovery && this.dialsDataNodes(ctx.connectionId);
+    const round = await this.topologyDivergence.poll({
+      clusterKey,
+      connectionId: ctx.connectionId,
+      nodes: withConfiguredZones(
+        withShardMetadata(nodes, shards),
+        this.connectionRegistry.getNodeAvailabilityZones(ctx.connectionId),
+      ),
+      at: timestamp,
+      intervalMs: Math.max(settings.intervalMs, this.getIntervalMs()),
+      nodesPerZone: settings.nodesPerZone,
+      randomNodes: settings.randomNodes,
+      canRead: canDial,
+      readView: (node) => this.readTopologyView(ctx, node),
+    });
+    if (round) await this.judgeTopologyDivergence(ctx, timestamp, round, canDial);
+  }
+
+  private async readTopologyView(ctx: ConnectionContext, node: ClusterNode): Promise<ClusterNode[]> {
+    const addr = node.address.split('@')[0];
+    const client = await withTimeout(
+      this.clusterDiscovery!.getNodeConnection(node.id, ctx.connectionId),
+      AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
+      `Connecting to ${addr} timed out`,
+    );
+    const socket: FanoutSocket = { stalled: false };
+    try {
+      const raw = await this.fanoutRead(
+        socket,
+        `${topologyStateKey(ctx.connectionId, addr)}#views`,
+        AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
+        `CLUSTER NODES to ${addr} timed out`,
+        () => client.call('CLUSTER', 'NODES'),
+      );
+      return MetricsParser.parseClusterNodes(raw as string);
+    } finally {
+      if (socket.stalled) client.disconnect();
+    }
+  }
+
+  private async judgeTopologyDivergence(
+    ctx: ConnectionContext,
+    timestamp: number,
+    round: DivergenceRoundResult,
+    canDial: boolean,
+  ): Promise<void> {
+    const { clusterKey } = round;
+    const { minRounds } = this.topologyDivergenceSettings;
+    this.claimTopologyDivergenceEvents(clusterKey, ctx.connectionId);
+
+    const comparable = round.status === 'ok';
+    const countsFailures = round.disagreements.some((d) => d.kind === 'failure_flags');
+    const rule = {
+      minRounds,
+      minAgeMs: {
+        failure_flags: countsFailures ? await this.clusterNodeTimeoutMs(ctx, clusterKey, timestamp) : 0,
+        membership: TOPOLOGY_DIVERGENCE_MEMBERSHIP_MIN_AGE_MS,
+      },
+    };
+    const confirmed = comparable
+      ? await this.withoutMigratingSlots(
+          ctx,
+          round,
+          confirmedDisagreements(round.disagreements, round.at, rule),
+          canDial,
+        )
+      : [];
+    const groups = groupDivergences(confirmed);
+    const open = this.connectionClaims(
+      this.topologyDivergenceOpen,
+      clusterKey,
+      () => new Map<string, OpenDivergence>(),
+    );
+    const eventIds = this.connectionClaims(
+      this.topologyDivergenceEventIds,
+      ctx.connectionId,
+      () => new Map<string, string>(),
+    );
+    const kept = settleOpenDivergences({
+      open,
+      openSignatures: [...eventIds.keys()],
+      confirmed: groups,
+      pendingSignatures: new Set(groupDivergences(round.disagreements).map((group) => group.signature)),
+      comparable,
+      at: round.at,
+      minRounds,
+    });
+
+    await this.closeOutrankedTopologyDivergences(ctx.connectionId, groups, eventIds);
+
+    await this.applyTopologyPersistenceGate({
+      ctx,
+      timestamp,
+      findings: groups,
+      signatureOf: (group) => group.signature,
+      firstSeenByConn: this.topologyDivergenceFirstSeen,
+      activeByConn: this.activeTopologyDivergences,
+      minPersistMs: 0,
+      buildEvent: (group) => this.buildTopologyDivergenceEvent(ctx, timestamp, round, group),
+      eventIdsByConn: this.topologyDivergenceEventIds,
+      metricType: MetricType.TOPOLOGY_DIVERGENCE,
+      preserveSignature: (signature) => kept.has(signature),
+      contextOf: (group) => this.nodeContext(ctx, this.topologyDivergenceNodeAddr(round, group)),
+      ownerOf: (eventId) => this.topologyDivergenceEventOwners.get(eventId),
+    });
+
+    for (const group of groups) {
+      if (eventIds.has(group.signature) && !open.get(group.signature)?.group) {
+        open.set(group.signature, { group, lastCountedAt: round.at, clean: 0 });
+      }
+    }
+    const tracked = new Set([...this.topologyDivergenceEventIds.values()].flatMap((ids) => [...ids.values()]));
+    for (const eventId of [...this.topologyDivergenceEventOwners.keys()]) {
+      if (tracked.has(eventId)) continue;
+      this.topologyDivergenceEventOwners.delete(eventId);
+      this.topologyDivergenceEventSeverity.delete(eventId);
+    }
+  }
+
+  private async closeOutrankedTopologyDivergences(
+    connectionId: string,
+    groups: DivergenceGroup[],
+    eventIds: Map<string, string>,
+  ): Promise<void> {
+    for (const group of groups) {
+      const eventId = eventIds.get(group.signature);
+      const raised = eventId ? this.topologyDivergenceEventSeverity.get(eventId) : undefined;
+      if (!eventId || !raised || !outranksSeverity(divergenceSeverity(group), raised)) continue;
+      eventIds.delete(group.signature);
+      this.activeTopologyDivergences.get(connectionId)?.delete(group.signature);
+      try {
+        await this.resolveAnomalyOutcome(eventId);
+      } catch {
+        this.closeLater(eventId);
+      }
+    }
+  }
+
+  private claimTopologyDivergenceEvents(clusterKey: string, connectionId: string): void {
+    const previous = this.topologyDivergenceAnchors.get(clusterKey);
+    this.topologyDivergenceAnchors.set(clusterKey, connectionId);
+    const holders = new Set<string>(previous ? [previous] : []);
+    for (const [peer, peerKey] of this.connectionClusterKeys) {
+      if (peerKey === clusterKey && this.topologyDivergenceEventIds.has(peer)) holders.add(peer);
+    }
+    holders.delete(connectionId);
+
+    for (const holder of holders) {
+      const firstSeen = this.topologyDivergenceFirstSeen.get(holder);
+      const active = this.activeTopologyDivergences.get(holder);
+      const eventIds = this.topologyDivergenceEventIds.get(holder);
+      this.topologyDivergenceFirstSeen.delete(holder);
+      this.activeTopologyDivergences.delete(holder);
+      this.topologyDivergenceEventIds.delete(holder);
+      if (firstSeen) {
+        const mine = this.connectionClaims(this.topologyDivergenceFirstSeen, connectionId, () => new Map<string, number>());
+        for (const [signature, at] of firstSeen) {
+          if (!mine.has(signature)) mine.set(signature, at);
+        }
+      }
+      if (active) {
+        const mine = this.connectionClaims(this.activeTopologyDivergences, connectionId, () => new Set<string>());
+        for (const signature of active) mine.add(signature);
+      }
+      if (eventIds) {
+        const mine = this.connectionClaims(this.topologyDivergenceEventIds, connectionId, () => new Map<string, string>());
+        for (const [signature, eventId] of eventIds) {
+          if (mine.has(signature)) this.closeLater(eventId);
+          else mine.set(signature, eventId);
+        }
+      }
+    }
+  }
+
+  private async clusterNodeTimeoutMs(
+    ctx: ConnectionContext,
+    clusterKey: string,
+    timestamp: number,
+  ): Promise<number> {
+    const cached = this.topologyDivergenceNodeTimeouts.get(clusterKey);
+    if (cached && timestamp - cached.readAt < TOPOLOGY_DIVERGENCE_NODE_TIMEOUT_REFRESH_MS) return cached.ms;
+    const ms = await withTimeout(
+      ctx.client.getConfigValues('cluster-node-timeout'),
+      this.infoTimeoutMs,
+      'CONFIG GET cluster-node-timeout timed out',
+    )
+      .then((config) => Number(config?.['cluster-node-timeout']))
+      .then((value) => (Number.isFinite(value) && value > 0 ? value : undefined))
+      .catch(() => undefined);
+    const known = ms ?? cached?.ms ?? TOPOLOGY_DIVERGENCE_NODE_TIMEOUT_FALLBACK_MS;
+    this.topologyDivergenceNodeTimeouts.set(clusterKey, { ms: known, readAt: timestamp });
+    return known;
+  }
+
+  private async withoutMigratingSlots(
+    ctx: ConnectionContext,
+    round: DivergenceRoundResult,
+    confirmed: TrackedDisagreement[],
+    canDial: boolean,
+  ): Promise<TrackedDisagreement[]> {
+    const settled = this.connectionClaims(
+      this.topologyDivergenceSettledSlots,
+      round.clusterKey,
+      () => new Set<string>(),
+    );
+    const counted = new Set(round.disagreements.map((d) => d.key));
+    for (const key of [...settled]) {
+      if (!counted.has(key)) settled.delete(key);
+    }
+    const unchecked = confirmed.filter((d) => d.kind === 'slot_owner' && !settled.has(d.key));
+    if (unchecked.length === 0) return confirmed;
+
+    const due = unchecked.slice(0, TOPOLOGY_DIVERGENCE_MAX_MIGRATION_CHECKS);
+    const waiting = new Set(unchecked.slice(TOPOLOGY_DIVERGENCE_MAX_MIGRATION_CHECKS).map((d) => d.key));
+    const ownerIds = [...new Set(due.flatMap((d) => d.subjectIds.slice(0, 2)))];
+    const owners = new Map(
+      await Promise.all(
+        ownerIds.map(async (id) => [id, await this.readSlotOwnerMigrations(ctx, round, id, canDial)] as const),
+      ),
+    );
+    for (const dispute of due) {
+      const migrating = dispute.subjectIds.slice(0, 2).some((id) => {
+        const owner = owners.get(id);
+        return owner ? migrationTouchesSlots(dispute.slots ?? [], owner.self, owner.jobs) : false;
+      });
+      if (!migrating) {
+        settled.add(dispute.key);
+        continue;
+      }
+      waiting.add(dispute.key);
+      this.topologyDivergence.restart(round.clusterKey, dispute.key);
+    }
+    return confirmed.filter((d) => !waiting.has(d.key));
+  }
+
+  private async readSlotOwnerMigrations(
+    ctx: ConnectionContext,
+    round: DivergenceRoundResult,
+    ownerId: string,
+    canDial: boolean,
+  ): Promise<{ self: ClusterNode | null; jobs: Record<string, string>[] }> {
+    const seen = round.selves.get(ownerId) ?? null;
+    const node = round.nodes.get(ownerId);
+    if (!canDial || !node) return { self: seen, jobs: [] };
+    const addr = node.address.split('@')[0];
+    const stateKey = topologyStateKey(ctx.connectionId, addr);
+    const timeoutMs = AnomalyService.FANOUT_COMMAND_TIMEOUT_MS;
+    try {
+      const client = await withTimeout(
+        this.clusterDiscovery!.getNodeConnection(ownerId, ctx.connectionId),
+        timeoutMs,
+        `Connecting to ${addr} timed out`,
+      );
+      const socket: FanoutSocket = { stalled: false };
+      try {
+        const [self, jobs] = await Promise.all([
+          seen ??
+            this.fanoutRead(socket, `${stateKey}#owner`, timeoutMs, `CLUSTER NODES to ${addr} timed out`, () =>
+              client.call('CLUSTER', 'NODES'),
+            ).then(
+              (raw) =>
+                MetricsParser.parseClusterNodes(raw as string).find((n) => n.flags.includes('myself')) ?? null,
+            ),
+          this.fanoutRead(
+            socket,
+            `${stateKey}#migrations`,
+            timeoutMs,
+            `CLUSTER GETSLOTMIGRATIONS to ${addr} timed out`,
+            () => client.call('CLUSTER', 'GETSLOTMIGRATIONS'),
+          ).then(parseSlotMigrationJobs, () => []),
+        ]);
+        return { self, jobs };
+      } finally {
+        if (socket.stalled) client.disconnect();
+      }
+    } catch {
+      return { self: seen, jobs: [] };
+    }
+  }
+
+  private topologyDivergenceNodeAddr(round: DivergenceRoundResult, group: DivergenceGroup): string | undefined {
+    if (group.dissent.length !== 1) return undefined;
+    return toDivergenceNode(group.dissent[0], round.nodes).address || undefined;
+  }
+
+  private buildTopologyDivergenceEvent(
+    ctx: ConnectionContext,
+    timestamp: number,
+    round: DivergenceRoundResult,
+    group: DivergenceGroup,
+  ): AnomalyEvent {
+    const nodeAddr = this.topologyDivergenceNodeAddr(round, group);
+    const id = randomUUID();
+    const severity = divergenceSeverity(group);
+    this.topologyDivergenceEventOwners.set(id, ctx.connectionId);
+    this.topologyDivergenceEventSeverity.set(id, severity);
+    return {
+      id,
+      timestamp,
+      metricType: MetricType.TOPOLOGY_DIVERGENCE,
+      anomalyType: AnomalyType.SPIKE,
+      severity,
+      value: group.disagreements.length,
+      baseline: 0,
+      zScore: 0,
+      stdDev: 0,
+      threshold: this.topologyDivergenceSettings.minRounds,
+      message: divergenceMessage(group, round.nodes, round.at),
+      resolved: false,
+      connectionId: ctx.connectionId,
+      ...(nodeAddr ? { nodeAddr } : {}),
+      dedupeKey: group.signature,
+    };
+  }
+
+  private adoptTopologyDivergenceEvents(connectionId: string, open: StoredAnomalyEvent[]): void {
+    const eventIds = this.topologyDivergenceEventIds.get(connectionId) ?? new Map<string, string>();
+    const tracked = new Set(eventIds.values());
+    for (const event of [...open].sort((a, b) => b.timestamp - a.timestamp)) {
+      if (tracked.has(event.id)) continue;
+      const signature = event.dedupeKey;
+      if (signature === undefined || eventIds.has(signature)) {
+        this.closeLater(event.id);
+        continue;
+      }
+      eventIds.set(signature, event.id);
+      this.topologyDivergenceEventOwners.set(event.id, connectionId);
+      this.topologyDivergenceEventSeverity.set(event.id, event.severity as AnomalySeverity);
+    }
+    if (eventIds.size > 0) this.topologyDivergenceEventIds.set(connectionId, eventIds);
+  }
+
+  private forgetTopologyDivergence(connectionId: string): void {
+    this.topologyDivergence.forgetConnection(connectionId);
+    this.topologyDivergenceFirstSeen.delete(connectionId);
+    this.activeTopologyDivergences.delete(connectionId);
+    this.topologyDivergenceEventIds.delete(connectionId);
+    for (const [eventId, owner] of [...this.topologyDivergenceEventOwners]) {
+      if (owner !== connectionId) continue;
+      this.topologyDivergenceEventOwners.delete(eventId);
+      this.topologyDivergenceEventSeverity.delete(eventId);
+    }
+    const watched = new Set(this.connectionClusterKeys.values());
+    for (const [clusterKey, anchor] of [...this.topologyDivergenceAnchors]) {
+      if (anchor === connectionId) this.topologyDivergenceAnchors.delete(clusterKey);
+      if (watched.has(clusterKey)) continue;
+      this.topologyDivergenceAnchors.delete(clusterKey);
+      this.topologyDivergenceOpen.delete(clusterKey);
+      this.topologyDivergenceNodeTimeouts.delete(clusterKey);
+      this.topologyDivergenceSettledSlots.delete(clusterKey);
+      this.topologyDivergence.forgetCluster(clusterKey);
+    }
+  }
+
   private nodeContext(ctx: ConnectionContext, nodeAddr: string | undefined): ConnectionContext {
     const target = nodeAddr ? splitHostPort(nodeAddr) : null;
     return target
@@ -8002,6 +8559,7 @@ export class AnomalyService
     // rather than read as recovery.
     preserveSignature?: (signature: string) => boolean;
     contextOf?: (finding: T) => ConnectionContext;
+    ownerOf?: (eventId: string) => string | undefined;
   }): Promise<void> {
     const {
       ctx,
@@ -8016,6 +8574,7 @@ export class AnomalyService
       metricType,
       preserveSignature,
       contextOf,
+      ownerOf,
     } = params;
     const connId = ctx.connectionId;
     const isPreserved = (sig: string): boolean => preserveSignature?.(sig) ?? false;
@@ -8058,7 +8617,11 @@ export class AnomalyService
           // backed feed (the source of truth for activeOnly reads): only re-emit
           // when the tracked event is genuinely gone/resolved there — otherwise a
           // still-unresolved stored row would get a duplicate WARNING alongside it.
-          const stillOpen = await this.isTrackedEventOpen(existingId, connId, metricType);
+          const stillOpen = await this.isTrackedEventOpen(
+            existingId,
+            ownerOf?.(existingId) ?? connId,
+            metricType,
+          );
           if (stillOpen) {
             active.add(signature);
             continue;
@@ -8248,6 +8811,260 @@ export class AnomalyService
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
       await this.addAnomaly(event, ctx);
       acknowledgeChurnFinding(state, finding.shardKey, timestamp);
+    }
+  }
+
+  /**
+   * Primary without replicas (#714): a primary whose shard normally has
+   * replicas has had no synced replica past the grace period. `self` is the
+   * node's own CLUSTER NODES line, or null on a standalone node. `nodeAddr` is
+   * set when the node is read through another connection's fan-out.
+   */
+  private async detectPrimaryWithoutReplicas(
+    info: Record<string, string>,
+    ctx: ConnectionContext,
+    timestamp: number,
+    self: ClusterNode | null,
+    nodeAddr?: string,
+  ): Promise<void> {
+    this.sweepPrimaryReplicaShards(timestamp);
+    if (info.role !== 'master') return;
+
+    let key: string;
+    let slots: string | null = null;
+    if (self) {
+      const clusterKey = this.connectionClusterKeys.get(ctx.connectionId);
+      if (!clusterKey || self.slots.length === 0) return;
+      slots = canonicalSlotKey(self.slots);
+      key = this.clusterShardReplicaKey(clusterKey, self);
+    } else {
+      const path = nodeAddr ? `node:${nodeAddr}` : `connection:${ctx.connectionId}`;
+      key = this.primaryReplicaKeyOf(path, info, timestamp);
+    }
+    await this.reconcilePrimaryReplicaAlert(key);
+    const state = this.primaryReplicaState.get(key) ?? createShardReplicaState(timestamp);
+    this.primaryReplicaState.set(key, state);
+    const primaryId = self ? self.id : info.master_replid;
+    if (primaryId) state.primaryId = primaryId;
+
+    // A node that has not learnt its own address yet announces `:port`.
+    const announced = self ? this.clientAddress(self.address) : '';
+    const address =
+      announced && !announced.startsWith(':') ? announced : (nodeAddr ?? `${ctx.host}:${ctx.port}`);
+    const finding = evaluatePrimaryWithoutReplicas(
+      state,
+      {
+        role: info.role,
+        ownsSlots: self ? true : null,
+        primary: self ? `${address} (${self.id.substring(0, 8)})` : address,
+        slots,
+        attached: this.parseNumber(info.connected_slaves) ?? 0,
+        synced: syncedReplicaCount(info),
+        persistenceOff: nodeAddr ? null : this.persistenceKnownOff(ctx.connectionId, info),
+        observer: ctx.connectionId,
+        timestamp,
+      },
+      this.primaryReplicaConfig,
+    );
+
+    if (finding) {
+      const critical = finding.severity === 'critical';
+      const event: AnomalyEvent = {
+        id: randomUUID(),
+        timestamp,
+        metricType: MetricType.PRIMARY_WITHOUT_REPLICAS,
+        anomalyType: AnomalyType.DROP,
+        severity: critical ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING,
+        value: finding.synced,
+        baseline: finding.expected,
+        zScore: 0,
+        stdDev: 0,
+        threshold: finding.expected,
+        message: `${critical ? 'CRITICAL' : 'WARNING'}: ${finding.message}`,
+        resolved: false,
+        connectionId: ctx.connectionId,
+        // A cluster event also names its primary: see adoptPrimaryReplicaEvents.
+        dedupeKey: self ? `${key}@${self.id}` : key,
+        ...(nodeAddr ? { nodeAddr } : {}),
+      };
+      this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+      this.primaryReplicaEvents.set(key, [
+        ...(this.primaryReplicaEvents.get(key) ?? []),
+        { id: event.id, connectionId: ctx.connectionId, level: finding.severity },
+      ]);
+      await this.addAnomaly(event, ctx);
+    }
+
+    if (state.alerted === 'none') {
+      const events = this.primaryReplicaEvents.get(key) ?? [];
+      this.primaryReplicaEvents.delete(key);
+      for (const { id } of events) await this.resolveAnomalyOutcome(id);
+    }
+  }
+
+  /**
+   * State key of a cluster shard: its cluster and slot ranges. A reshard
+   * changes the ranges, so a shard without a state of its own continues the
+   * state last seen with the same primary. It keeps the expected replica
+   * count and the open episode with its events, and a shard that took slots
+   * from it starts on its own. An event is stored with the node ID of its
+   * primary, so a state rebuilt from an open event after a restart is found
+   * in the same way.
+   */
+  private clusterShardReplicaKey(clusterKey: string, self: ClusterNode): string {
+    const prefix = `${clusterKey}:`;
+    const key = prefix + canonicalSlotKey(self.slots);
+    if (this.primaryReplicaState.has(key)) return key;
+    const former = [...this.primaryReplicaState].find(
+      ([candidate, state]) => candidate.startsWith(prefix) && state.primaryId === self.id,
+    )?.[0];
+    if (former === undefined) return key;
+    this.primaryReplicaState.set(key, this.primaryReplicaState.get(former)!);
+    this.primaryReplicaState.delete(former);
+    const events = this.primaryReplicaEvents.get(former);
+    if (events) {
+      this.primaryReplicaEvents.set(key, events);
+      this.primaryReplicaEvents.delete(former);
+    }
+    return key;
+  }
+
+  /**
+   * State key of a primary outside a cluster: the replication ID it was first
+   * seen with. Fan-out and the primary's own connection both read that ID, so
+   * every path to one primary shares one state, and an event picked up after a
+   * restart is under the key the next poll looks for. `path` is the connection
+   * or fan-out address the primary is read through. A path keeps its state
+   * when the ID changes: a restarted primary is still the same primary.
+   */
+  private primaryReplicaKeyOf(
+    path: string,
+    info: Record<string, string>,
+    timestamp: number,
+  ): string {
+    const replid = info.master_replid;
+    const used = this.primaryReplicaPaths.get(path);
+    let key = used !== undefined && this.primaryReplicaState.has(used) ? used : undefined;
+    if (key === undefined && replid) {
+      const withReplid = (id: string) =>
+        [...this.primaryReplicaState].find(([, state]) => state.primaryId === id);
+      key = withReplid(replid)?.[0] ?? `replid:${replid}`;
+      // A promoted replica reports the ID it replicated from as
+      // `master_replid2`. It starts with the replica count that primary was
+      // expected to have, so it alerts when the failover leaves it alone. The
+      // count is copied, not shared: the former primary may still be observed.
+      const former = withReplid(info.master_replid2 ?? '')?.[1];
+      if (former && !this.primaryReplicaState.has(key)) {
+        this.primaryReplicaState.set(key, {
+          ...createShardReplicaState(timestamp),
+          expectedReplicas: former.expectedReplicas,
+          expectedSeenAt: former.expectedSeenAt,
+        });
+      }
+    }
+    key ??= path;
+    this.primaryReplicaPaths.set(path, key);
+    return key;
+  }
+
+  /**
+   * An operator can resolve an event while the shard still has no synced
+   * replica. The alert level then follows the events that are still open, so
+   * the resolved level is raised again instead of staying silent for the rest
+   * of the episode, as the other tracked detectors do.
+   */
+  private async reconcilePrimaryReplicaAlert(key: string): Promise<void> {
+    const state = this.primaryReplicaState.get(key);
+    const tracked = this.primaryReplicaEvents.get(key);
+    if (!state || !tracked || state.alerted === 'none') return;
+    const open: PrimaryReplicaEvent[] = [];
+    for (const event of tracked) {
+      const isOpen = await this.isTrackedEventOpen(
+        event.id,
+        event.connectionId,
+        MetricType.PRIMARY_WITHOUT_REPLICAS,
+      );
+      if (isOpen) open.push(event);
+    }
+    // Another connection may have raised or closed an event in the meantime.
+    if (open.length === tracked.length || this.primaryReplicaEvents.get(key) !== tracked) return;
+    if (open.length > 0) this.primaryReplicaEvents.set(key, open);
+    else this.primaryReplicaEvents.delete(key);
+    state.alerted = open.some((event) => event.level === 'critical')
+      ? 'critical'
+      : open.length > 0
+        ? 'warning'
+        : 'none';
+  }
+
+  /**
+   * True only when this node is known to persist nothing: AOF is off and
+   * `save` is empty. `save` comes from the config-drift snapshot, so no extra
+   * CONFIG GET is sent. Null when either value cannot be read.
+   */
+  private persistenceKnownOff(connectionId: string, info: Record<string, string>): boolean | null {
+    const save = this.configSnapshot.get(connectionId)?.config.save;
+    if (info.aof_enabled === undefined || save === undefined) return null;
+    return info.aof_enabled === '0' && save === '';
+  }
+
+  /**
+   * A shard no connection observes any more cannot keep its events current, so
+   * they are closed. Its expected replica count is kept for the expectation
+   * TTL: a primary that comes back alone after an outage must still alert.
+   */
+  private sweepPrimaryReplicaShards(timestamp: number): void {
+    const unobservedMs = Math.max(PRIMARY_REPLICA_UNOBSERVED_MS, 3 * this.getIntervalMs());
+    for (const [key, state] of [...this.primaryReplicaState]) {
+      const idleMs = timestamp - state.lastSeenAt;
+      if (idleMs <= unobservedMs) continue;
+      this.closePrimaryReplicaEvents(key);
+      if (idleMs <= this.primaryReplicaConfig.expectationTtlMs) {
+        endPrimaryReplicaEpisode(state);
+        continue;
+      }
+      this.primaryReplicaState.delete(key);
+      for (const [path, used] of this.primaryReplicaPaths) {
+        if (used === key) this.primaryReplicaPaths.delete(path);
+      }
+    }
+  }
+
+  private closePrimaryReplicaEvents(key: string): void {
+    for (const { id } of this.primaryReplicaEvents.get(key) ?? []) this.closeLater(id);
+    this.primaryReplicaEvents.delete(key);
+  }
+
+  /** After a restart, continue the episode of each open event instead of leaving it open for good. */
+  private adoptPrimaryReplicaEvents(
+    connectionId: string,
+    open: StoredAnomalyEvent[],
+    timestamp: number,
+  ): void {
+    for (const event of open) {
+      // A cluster event is stored as `<state key>@<node ID of its primary>`.
+      const [, shardKey, nodeId] = /^(cluster:.*)@(.*)$/.exec(event.dedupeKey ?? '') ?? [];
+      const key = shardKey ?? event.dedupeKey;
+      const tracked = key ? (this.primaryReplicaEvents.get(key) ?? []) : [];
+      if (tracked.some((t) => t.id === event.id)) continue;
+      if (!key) {
+        this.closeLater(event.id);
+        continue;
+      }
+      const level = event.severity === AnomalySeverity.CRITICAL ? 'critical' : 'warning';
+      this.primaryReplicaEvents.set(key, [...tracked, { id: event.id, connectionId, level }]);
+      const state = this.primaryReplicaState.get(key) ?? createShardReplicaState(timestamp);
+      state.expectedReplicas = Math.max(state.expectedReplicas, event.baseline);
+      state.zeroSince ??= event.timestamp;
+      if (level === 'critical' || state.alerted === 'none') state.alerted = level;
+      // Restore the primary, so the next poll finds this state: a cluster
+      // shard whose slots changed since, or a primary outside a cluster read
+      // through another connection. The key of the latter is its replication ID.
+      if (nodeId) state.primaryId ??= nodeId;
+      if (key.startsWith('replid:')) state.primaryId ??= key.slice('replid:'.length);
+      // Until the shard is observed again, the adopting connection answers for it.
+      state.observers.add(connectionId);
+      this.primaryReplicaState.set(key, state);
     }
   }
 
@@ -9540,6 +10357,32 @@ export class AnomalyService
       .filter(([signature]) => !resolvedByHand(signature))
       .map(([, detail]) => detail)
       .sort((a, b) => b.cpu.ratio - a.cpu.ratio);
+  }
+
+  getTopologyDivergence(connectionId: string): TopologyDivergenceReport {
+    const clusterKey = this.connectionClusterKeys.get(connectionId);
+    const round = clusterKey ? this.topologyDivergence.lastRound(clusterKey) : undefined;
+    if (!clusterKey || !round) {
+      return { status: 'not_sampled', sampledAt: null, observers: [], unanswered: [], divergences: [] };
+    }
+    const eventIds = this.topologyDivergenceEventIds.get(round.anchorConnectionId);
+    const open = this.topologyDivergenceOpen.get(clusterKey);
+    const raised = [...(open ?? [])].flatMap(([signature, entry]) => {
+      const eventId = eventIds?.get(signature);
+      if (!entry.group || eventId === undefined) return [];
+      if (this.eventInMemory(eventId)?.resolved === true) return [];
+      return [buildDivergenceDetail(entry.group, round.nodes, { eventId, confirmed: true })];
+    });
+    const counting = groupDivergences(round.disagreements)
+      .filter((group) => !open?.has(group.signature))
+      .map((group) => buildDivergenceDetail(group, round.nodes, { eventId: null, confirmed: false }));
+    return {
+      status: round.status,
+      sampledAt: round.at,
+      observers: round.observers.map((id) => toDivergenceNode(id, round.nodes)),
+      unanswered: round.unanswered.map((id) => toDivergenceNode(id, round.nodes)),
+      divergences: [...raised, ...counting],
+    };
   }
 
   getRecentEvents(limit = 100, metricType?: MetricType): AnomalyEvent[] {
@@ -10847,6 +11690,11 @@ export class AnomalyService
       this.adoptNodeOpenEvents(ctx.connectionId, key, target.addr);
       await this.detectForkMemoryRisk(info, nodeCtx, timestamp, target.addr);
       await this.detectCobPressure(info, nodeCtx, timestamp, target.addr, cob);
+      // A cluster primary whose own CLUSTER NODES line could not be read is
+      // skipped: without it the shard is unknown.
+      if (!target.nodeId || self) {
+        await this.detectPrimaryWithoutReplicas(info, nodeCtx, timestamp, self, target.addr);
+      }
       const sample = this.replicationStream.observe(key, info, timestamp);
       if (sample) {
         await this.detectRecoveryAmplification(sample, info, nodeCtx, target.addr);
@@ -11324,6 +12172,7 @@ export class AnomalyService
       ...(this.staleBacklogEventIds.get(connectionId) ?? []),
       ...(this.reshardSkewEventIds.get(connectionId)?.values() ?? []),
       ...(this.hotShardEventIds.get(connectionId)?.values() ?? []),
+      ...(this.topologyDivergenceEventIds.get(connectionId)?.values() ?? []),
       ...(this.replicaSlotEventIds.get(connectionId)?.values() ?? []),
       ...(this.legacyReplicaSlotEvents.get(connectionId) ?? []).map((e) => e.id),
       this.adoptedReshardEventIds.get(connectionId),

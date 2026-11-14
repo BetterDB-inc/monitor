@@ -491,6 +491,7 @@ When a cluster or Sentinel group is registered through one connection (the seed)
 - fork memory risk
 - replica output-buffer pressure, without the per-replica Prometheus gauge
 - reshard pressure, including write P99 read from `INFO latencystats` at most every 30 seconds
+- primary without replicas, without the early CRITICAL for persistence being off
 
 Events from these primaries carry `nodeAddr`. Same-connection sequence rules (`backlog_exhaustion`, `recovery_amplification`) and the correlated signals on a divergence alert group them per node, so a non-seed shard's fork or output-buffer pressure shows on that shard's divergence, not the seed's. `divergence_under_pressure` cannot match on a non-seed shard, because its first step is a z-score write-rate spike, which only runs on registered connections.
 
@@ -549,12 +550,14 @@ Some metrics have custom thresholds beyond Z-score:
 
 | Metric | Warning Threshold | Critical Threshold | Consecutive Required | Cooldown |
 |--------|-------------------|-------------------|---------------------|----------|
-| `acl_denied` | 10 events | 50 events | 2 | 30s |
+| `acl_denied` | 10/s | 50/s | 2 | 30s |
 | `slowlog_last_id` | - | - | 1 | 30s |
 | `memory_used` | - | - | 3 | 60s |
 | `evicted_keys` | - | - | 2 | 30s |
 | `fragmentation_ratio` | 1.5 | 2.0 | 5 | 120s |
 | `error_replies` | 200/s | 2000/s | 2 | 60s |
+
+`acl_denied`, `evicted_keys` and `keyspace_misses` read lifetime counters from `INFO stats`, so the detectors see the per-second rate since the previous poll, and absolute thresholds apply to that rate. A z-score spike below a per-second floor (`acl_denied` 1/s, `evicted_keys` 10/s, `keyspace_misses` 50/s) is ignored, so an occasional eviction or denial on an otherwise quiet server does not alert; absolute thresholds still apply below the floor. The first poll of a connection only records the counter. A counter that goes backwards (server restart, `CONFIG RESETSTAT`), or a change in the server's `run_id` (the connection now reaches a different server process, for example after a failover behind a Service), is treated as a reset: that poll adds no sample and the next poll measures from the new value. Absolute threshold overrides saved before this change keep their numbers but now mean events per second; BetterDB logs a warning at startup when any exist for these metrics.
 
 `error_replies` needs at least 20/s to alert. On a quiet instance almost any burst scores a high Z-score, so a Z-score alone only reaches warning here, and critical needs the absolute threshold.
 
@@ -600,17 +603,17 @@ Some metrics have custom thresholds beyond Z-score:
 **Note**: Previous versions used `SLOWLOG LEN` (`slowlog_count`), which saturates at `slowlog-max-len` (default 128). Using `slowlog_last_id` delta avoids this blind spot.
 
 ### acl_denied
-**What it measures**: Sum of rejected connections and ACL auth denials
+**What it measures**: ACL authentication denials per second
 **Why anomalies matter**: Security concern - possible brute force or misconfig
-**Typical baseline**: 0-5 (should be very low normally)
-**Source**: `INFO stats.rejected_connections + stats.acl_access_denied_auth`
-**Config**: Custom thresholds (WARNING: 10, CRITICAL: 50, 2 consecutive, 30s cooldown)
+**Typical baseline**: 0 (should be very low normally)
+**Source**: `INFO stats.acl_access_denied_auth` (per-second rate between polls). Refused connections (`rejected_connections`, maxclients) have their own detector.
+**Config**: Custom thresholds (WARNING: 10/s, CRITICAL: 50/s, 2 consecutive, 30s cooldown)
 
 ### evicted_keys
-**What it measures**: Total number of keys evicted due to maxmemory
+**What it measures**: Keys evicted due to maxmemory, per second
 **Why anomalies matter**: Indicates memory pressure and cache thrashing
 **Typical baseline**: 0 (ideally), or consistent low rate
-**Source**: `INFO stats.evicted_keys`
+**Source**: `INFO stats.evicted_keys` (per-second rate between polls)
 **Config**: Custom thresholds (2 consecutive, 30s cooldown)
 
 ### blocked_clients
@@ -620,10 +623,10 @@ Some metrics have custom thresholds beyond Z-score:
 **Source**: `INFO clients.blocked_clients`
 
 ### keyspace_misses
-**What it measures**: Total number of failed key lookups
+**What it measures**: Failed key lookups per second
 **Why anomalies matter**: Poor cache hit rate impacts application performance
-**Typical baseline**: Varies widely (track hit ratio instead)
-**Source**: `INFO stats.keyspace_misses`
+**Typical baseline**: Varies widely with read load
+**Source**: `INFO stats.keyspace_misses` (per-second rate between polls)
 
 ### fragmentation_ratio
 **What it measures**: Allocator fragmentation ratio, preferring `allocator_frag_ratio` with fallback to `mem_fragmentation_ratio`
@@ -667,6 +670,29 @@ Some metrics have custom thresholds beyond Z-score:
 **Typical baseline**: No elections
 **Source**: `CLUSTER INFO` (`cluster_raft_*` fields)
 **Detection method**: State-based detector (not z-score based). Three elections inside 60 seconds raise a flapping warning, which resolves after 60 seconds with no new election. A node that can't reach a leader raises a critical event, which resolves when quorum returns. A connection that leaves Raft resolves both.
+
+### primary_without_replicas
+**What it measures**: Whether a primary that normally has replicas still has one in sync
+**Why anomalies matter**: While no replica is in sync, the primary holds the only copy of the shard. With persistence off, losing it loses the shard's data. A Kubernetes operator roll that restarts both replicas of a shard before either is back in sync produces this window on every shard
+**Typical baseline**: At least one replica in `state=online`
+**Source**: `INFO replication` (`role`, `connected_slaves`, `slaveN` or `replicaN` state) of the primary, and the node's own line in `CLUSTER NODES` for its slots
+**Detection method**: State-based detector (not z-score based). A WARNING is raised once the primary has had no replica in `state=online` for 5 seconds, and a CRITICAL once that has lasted 30 seconds. A replica that is attached but still syncing (for example `state=wait_bgsave`) does not count. Both events resolve after one connection sees a synced replica on 2 polls in a row. A replica that is in sync for a single poll does not restart the 30 seconds. An event resolved by hand while the primary still has no synced replica is raised again on the next poll. The message names the primary, its slots, how long the window has lasted and the attached, synced and expected replica counts:
+
+```
+CRITICAL: Primary 10.244.4.28:6379 (90735665) for slots 4096-5460 has had no synced replica for 31 s (0 attached, 0 synced, 2 expected). Persistence is off, so losing this node now loses its data. If a rolling update is in progress, pause it until a replica reports master_link_status:up.
+```
+
+It only fires for a shard that is expected to have replicas. The expected count is the highest `connected_slaves` the monitor has seen on that shard. It rises at once and is lowered only after 24 hours without seeing it, at which point an open event resolves. A standalone instance or a shard that never had a replica is never reported. Neither is a shard whose replicas were already missing when the monitor first saw it, because nothing is expected yet.
+
+In a cluster, only a primary that owns slots is checked. A restarted node that reports `role:master` with no slots is not a primary at risk. One event per level is open per shard, whichever connections observe it: the connection that reads the cluster, a connection registered for the node itself, or both. The shard is identified by its slot ranges, so a failover or a primary that returns under a new address continues the same episode. A reshard changes the slot ranges of a shard, not its primary, so the shard keeps its expected replica count and its open events. A primary that only took slots from another shard is tracked as a new shard.
+
+Outside a cluster, a primary is identified by its replication ID. Its own connection and [per-node coverage](#per-node-coverage) read the same ID, so they share one episode, and a connection that takes the primary over from another one continues it, also after the monitor restarts. A connection keeps the episode when the primary restarts and gets a new replication ID. A replica that is promoted starts with the replica count its former primary was expected to have, so it is reported when a failover leaves it without a replica.
+
+The CRITICAL is raised at 5 seconds instead of 30 when no replica is attached at all and persistence is known to be off: `aof_enabled:0` and an empty `save`. `save` is read with `CONFIG GET` by the config drift check. When it cannot be read, or when the primary is read through another connection's [per-node coverage](#per-node-coverage), persistence counts as unknown and the CRITICAL waits for 30 seconds.
+
+The detector is not held back during a planned rolling update, because that is when the window appears. If no connection observes the shard for 5 minutes, its open events are closed. They are also closed when the last connection that observed the shard is removed. The expected replica count is kept, so a connection added in its place still alerts when the replicas are already gone.
+
+The thresholds are set with `ANOMALY_PRIMARY_NO_REPLICA_WARN_MS` and `ANOMALY_PRIMARY_NO_REPLICA_CRIT_MS`. Set one to `0` to turn that level off, or both to turn the detector off. The early CRITICAL for persistence being off is raised at the WARNING threshold, so with that threshold at `0` it is off too and the CRITICAL waits for its own threshold.
 
 ### hot_shard
 **What it measures**: CPU time per second on the slots of each shard, compared with the other shards of the cluster
@@ -764,6 +790,50 @@ Before you start one:
 - A capture counts the first argument of a command as its key. `MGET a b c` counts `a` only, an `EVAL` counts its script text, and a command without a key, such as `CLUSTER NODES`, counts its first word.
 - The capture is not offered for a connection that reaches the cluster through an agent, because the monitor cannot open `MONITOR` on a node there.
 
+### topology_divergence
+**What it measures**: Whether the nodes of a cluster describe the same cluster. Several nodes are asked for their own `CLUSTER NODES` and the answers are compared
+**Why anomalies matter**: Every other cluster check reads one node's view. When a zone or a single node is cut off, the nodes on each side still answer, and each view looks consistent on its own. Only the comparison shows that they disagree
+**Typical baseline**: Every sampled node reports the same failure flags, config epochs, slot owners and members
+**Source**: `CLUSTER NODES` on a sample of nodes, each on that node's own connection
+**Detection method**: State-based detector (not z-score based). It runs on gossip clusters only, not under Raft.
+
+**Which nodes are asked.** One round runs every 5 seconds for each cluster, however many connections watch it. The node the connection points at always takes part. On top of that:
+
+- When the nodes report availability zones (Valkey 9.1+ `availability-zone`, or zones configured on the connection), one node is asked per zone, so a zone that is cut off is always on one side of the comparison.
+- Nodes without a zone share a quota of 3. When the zones give fewer than 3 nodes in total, more are added until there are 3.
+- A node that is registered as its own connection is preferred. When that connection has polled since the round before, its view is taken from that poll at no extra cost; each such view is used in one round only. Primaries are preferred over replicas.
+- The same nodes are asked again in the next round. A node that does not answer is replaced, unless it is part of a disagreement that is still being counted.
+- A node that another node flags `fail?` or `fail` is asked for its own view as well, at most 2 such nodes per round. That is how a node that is cut off in one direction only shows up.
+- No round asks more than 12 nodes. In a cluster with more zones than that, some zones are not sampled.
+
+**What is compared.** For every node that two or more views describe:
+
+- failure flags: one view marks it `fail?` or `fail`, another does not. A node's opinion of itself is not counted.
+- config epoch
+- slot owner: two views name different owners for the same slots. Slots that the same nodes disagree about in the same way are one disagreement. A slot that joins such a disagreement later is added to the event's slot list in the report once it has disagreed for 3 rounds itself; the message of the event keeps the slots it was raised with. When two nodes claim a slot at the same config epoch, every view is read as giving it to the node with the smaller id, so the order of `CLUSTER NODES` alone never makes a disagreement
+- membership: one view knows the node, another does not or still has it in handshake
+
+**When an event is raised.** A disagreement has to be seen in 3 rounds in a row, about 10 seconds. A disagreement about failure flags also has to last one `cluster-node-timeout` (read from the cluster, 15 seconds when it cannot be read), because nodes legitimately disagree for that long while a failure is being detected. A membership disagreement has to last 60 seconds, so a node that is joining or was just forgotten is not reported. A slot owner disagreement is held back while one of the two owners is still migrating those slots (`MIGRATING`/`IMPORTING` markers, or an unfinished job in `CLUSTER GETSLOTMIGRATIONS` on Valkey 9.0+); when the owners cannot be asked, it is reported.
+
+All disagreements that put the same nodes against the rest are one event. The event names the smaller side first:
+
+```
+Cluster views diverge for 15s: 10.0.1.5:6379 (eu-west-1a) disagrees with 10.0.2.7:6379 (eu-west-1b), 10.0.3.2:6379 (eu-west-1c) about the failure state of 12 nodes and the owner of slots 0-5460.
+```
+
+It is CRITICAL when slot owners are in dispute, because clients can then be sent to different nodes for the same key, and a WARNING otherwise. When the nodes of an open WARNING start to dispute slot owners as well, the WARNING is closed and a CRITICAL event is raised in its place. An open event is not lowered when the slot dispute ends. When exactly one node stands against the rest, the event carries that node's address as `nodeAddr`. The text is written when the event is raised; [`GET /api/anomaly/topology-divergence`](#get-topology-divergence) returns the current state.
+
+**When it closes.** The event closes after the views agree for 3 rounds in a row. A round in which the disagreement shows again starts that count over. A round in which the nodes of one side do not answer, or fewer than two views could be read, is neither agreement nor disagreement: the count is kept as it is and the event stays open. When that lasts 5 minutes the event is closed. An event that is resolved by hand is raised again while the views still differ. The event of a connection that is removed is closed. After a restart the open event is picked up instead of raised a second time.
+
+**What it costs.** Each round sends one `CLUSTER NODES` to at most 11 other nodes, in parallel, with 2 seconds each. The reply has one line per node of the cluster, so it grows with the cluster. A node that does not answer is asked less often, down to once every 8 rounds. A node that is registered as its own connection is not asked in a round for which that connection has polled since the round before; when it has not, the node is asked like any other. The round runs inside the poll of the connection that samples the cluster, so a node that hangs can hold that poll for about 4 seconds (2 to connect, 2 to answer) until it is backed off. A round that counts a failure flag disagreement also reads `cluster-node-timeout` at most once in 5 minutes, and one that confirms a slot owner dispute asks up to 3 owners for their migrations. A connection that reaches the cluster through an agent never runs the rounds, because the monitor cannot dial the other nodes there. When another connection that can dial them watches the same cluster, that one samples it, and the view of the agent connection is used like that of any registered connection. When only agent connections watch a cluster it is not sampled, and the report says `insufficient_views`.
+
+**What it cannot see.**
+
+- A disagreement among nodes that were not sampled. With the default of one node per zone, a single cut-off node is only caught when it is the sampled one or when a sampled node flags it. Raise `ANOMALY_TOPOLOGY_DIVERGENCE_NODES_PER_ZONE` to widen the sample.
+- A partition that heals in less than 3 rounds, and a node that flaps in and out of `fail?` faster than that. The count starts over each time the views agree.
+- A partition the monitor is on one side of. The nodes it cannot reach give no view, so there is nothing to compare them with, and no event is raised. They are listed as `unanswered` in the report, whose `status` stays `ok` as long as two views could be compared; when no other node answers at all it says `insufficient_views`. The views it does get then agree that the other nodes are failing. `cluster_state` and the fan-out coverage report that case.
+- The two sides are in the `message` as text only. The webhook payload has no separate field for them; the full lists are in the report.
+
 ## Configuration
 
 ### Environment Variables
@@ -783,6 +853,19 @@ ANOMALY_CACHE_TTL_MS=3600000
 # Prometheus metrics update interval (default: 30000 = 30 seconds)
 ANOMALY_PROMETHEUS_INTERVAL_MS=30000
 
+# Cluster view divergence (topology_divergence), gossip clusters only
+# Compare the cluster views of several nodes (default: true)
+ANOMALY_TOPOLOGY_DIVERGENCE_ENABLED=true
+# Nodes asked per availability zone (default: 1)
+ANOMALY_TOPOLOGY_DIVERGENCE_NODES_PER_ZONE=1
+# Nodes asked among those without a zone, and the smallest sample (default: 3)
+ANOMALY_TOPOLOGY_DIVERGENCE_RANDOM_NODES=3
+# Rounds in a row a disagreement must hold before it is raised, and
+# rounds of agreement before it is closed (default: 3)
+ANOMALY_TOPOLOGY_DIVERGENCE_MIN_POLLS=3
+# Time between rounds in milliseconds, never shorter than the poll interval (default: 5000)
+ANOMALY_TOPOLOGY_DIVERGENCE_INTERVAL_MS=5000
+
 # Persistence-child stall detection thresholds (seconds)
 # Frozen key progress for this long fires CRITICAL (default: 60)
 MONITOR_PERSISTENCE_STALL_SEC=60
@@ -790,6 +873,14 @@ MONITOR_PERSISTENCE_STALL_SEC=60
 MONITOR_PERSISTENCE_WARN_SEC=120
 # Elapsed time ceiling before a child fires CRITICAL (default: 600)
 MONITOR_PERSISTENCE_CRIT_SEC=600
+
+# Primary without replicas thresholds (milliseconds); 0 turns a level off
+# No synced replica for this long fires WARNING (default: 5000)
+ANOMALY_PRIMARY_NO_REPLICA_WARN_MS=5000
+# No synced replica for this long fires CRITICAL (default: 30000)
+ANOMALY_PRIMARY_NO_REPLICA_CRIT_MS=30000
+# How long a replica count stays expected after it was last seen (default: 86400000 = 24 hours)
+ANOMALY_PRIMARY_REPLICAS_EXPECTATION_TTL_MS=86400000
 ```
 
 ### Runtime Settings
@@ -1163,6 +1254,57 @@ The open [`hot_shard`](#hot_shard) events of one cluster connection, with the nu
     }
   }
 ]
+```
+
+### Get Topology Divergence
+
+```http
+GET /api/anomaly/topology-divergence
+X-Connection-ID: <connection-id>
+```
+
+What the last [`topology_divergence`](#topology_divergence) round of the connection's cluster saw. The connection header is required. Any connection that watches the cluster returns the same report. It is kept in memory and rebuilt by the first round after a restart.
+
+`status` is `ok` when at least two views were compared. It means the views that answered were compared, not that the whole cluster agrees: a node listed in `unanswered` gave no view, and a node that was not asked is not in the report at all. `status` is `insufficient_views` when only the connection's own view could be read, and `not_sampled` when no round has run: the connection is not a gossip cluster, the check is off, or the first round is still to come. `observers` are the nodes asked in the round and `unanswered` those that gave no view. Each entry of `divergences` is one group of nodes against the rest: `sides[0]` is the smaller side. `confirmed` is `false` while the disagreement is still being counted and no event is open; `eventId` is then `null`. `positions` lists, for each disagreement, what was claimed and which nodes claimed it. For `failure_flags` the value is `ok` or `failing` (the view flags the node `fail?` or `fail`), for `config_epoch` the epoch, for `slot_owner` the node id of the owner or `unassigned`, and for `membership` one of `known`, `handshake`, `noaddr` or `missing`. `rounds` is the number of rounds in a row the disagreement was seen and `since` when it was first seen.
+
+**Response**:
+```json
+{
+  "status": "ok",
+  "sampledAt": 1704067200000,
+  "observers": [
+    { "nodeId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d", "address": "10.0.1.5:6379", "role": "primary", "availabilityZone": "eu-west-1a" },
+    { "nodeId": "7c1d0e2f55bb6a1d8c2f5a7b9d3e1f2a4b6c8d0e", "address": "10.0.2.7:6379", "role": "primary", "availabilityZone": "eu-west-1b" },
+    { "nodeId": "9e3f1a2b44cc7b2e9d3a6b8c0e4f2a3b5c7d9e1f", "address": "10.0.3.2:6379", "role": "primary", "availabilityZone": "eu-west-1c" }
+  ],
+  "unanswered": [],
+  "divergences": [
+    {
+      "eventId": "0b9d2c1e-6f3a-4c57-9a41-2d8e7b5f1c30",
+      "confirmed": true,
+      "since": 1704067185000,
+      "sides": [
+        { "nodes": [{ "nodeId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d", "address": "10.0.1.5:6379", "role": "primary", "availabilityZone": "eu-west-1a" }] },
+        { "nodes": [
+          { "nodeId": "7c1d0e2f55bb6a1d8c2f5a7b9d3e1f2a4b6c8d0e", "address": "10.0.2.7:6379", "role": "primary", "availabilityZone": "eu-west-1b" },
+          { "nodeId": "9e3f1a2b44cc7b2e9d3a6b8c0e4f2a3b5c7d9e1f", "address": "10.0.3.2:6379", "role": "primary", "availabilityZone": "eu-west-1c" }
+        ] }
+      ],
+      "disagreements": [
+        {
+          "kind": "failure_flags",
+          "subject": [{ "nodeId": "7c1d0e2f55bb6a1d8c2f5a7b9d3e1f2a4b6c8d0e", "address": "10.0.2.7:6379", "role": "primary", "availabilityZone": "eu-west-1b" }],
+          "positions": [
+            { "value": "failing", "observers": [{ "nodeId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d", "address": "10.0.1.5:6379", "role": "primary", "availabilityZone": "eu-west-1a" }] },
+            { "value": "ok", "observers": [{ "nodeId": "9e3f1a2b44cc7b2e9d3a6b8c0e4f2a3b5c7d9e1f", "address": "10.0.3.2:6379", "role": "primary", "availabilityZone": "eu-west-1c" }] }
+          ],
+          "rounds": 4,
+          "since": 1704067185000
+        }
+      ]
+    }
+  ]
+}
 ```
 
 ### Resolve Anomaly or Group

@@ -202,10 +202,22 @@ describe('SpikeDetector', () => {
       expect(result!.anomalyType).toBe(AnomalyType.SPIKE);
       expect(result!.severity).toBe(AnomalySeverity.CRITICAL);
       expect(result!.message).toBe(
-        'CRITICAL: acl_denied above threshold. Value: 60, Threshold: 50 ' +
-          `(Baseline: 1.05K, Z-score: ${result!.zScore.toFixed(2)})`,
+        'CRITICAL: acl_denied above threshold. Value: 60/s, Threshold: 50/s ' +
+          `(Baseline: 1.05K/s, Z-score: ${result!.zScore.toFixed(2)})`,
       );
       expect(result!.message).not.toContain('below normal');
+    });
+
+    it('prints a counter-derived rate with a /s unit and keeps a fractional baseline', () => {
+      const buffer = new MetricBuffer(MetricType.KEYSPACE_MISSES, 100, MIN_SAMPLES);
+      const detector = new SpikeDetector(MetricType.KEYSPACE_MISSES, {
+        consecutiveRequired: 1,
+        cooldownMs: 0,
+      });
+      for (let i = 0; i < 30; i++) buffer.addSample(i % 2 === 0 ? 0.2 : 0.4, i * 1000);
+      const result = detector.detect(buffer, 50, 50000);
+
+      expect(result!.message).toContain('Value: 50/s, Baseline: 0.3/s ');
     });
 
     it('shows a fractional threshold and value without rounding them together', () => {
