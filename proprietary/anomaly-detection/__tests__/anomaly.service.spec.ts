@@ -1965,7 +1965,11 @@ describe('AnomalyService', () => {
     let bytesOut: Map<number, number>;
     let owners: number[][];
     let migrating: boolean;
+    let evenSlots: boolean;
     let ctx: ConnectionContext;
+    const NO_PLAN_SENTENCE =
+      " Rebalancing will not help: slots 0 and 1 are 100% of this shard's CPU. " +
+      'Consider client-side caching, reads from replicas, or splitting the hot keys.';
 
     function clusterNodes() {
       return IDS.map((id, i) => ({
@@ -2006,7 +2010,8 @@ describe('AnomalyService', () => {
         cpuPerSecond.forEach((rate, shard) => {
           const slots = owners[shard];
           slots.forEach((slot, i) => {
-            const part = slots.length === 1 ? 1 : i === 0 ? 0.75 : 0.25 / (slots.length - 1);
+            const skewed = slots.length === 1 ? 1 : i === 0 ? 0.75 : 0.25 / (slots.length - 1);
+            const part = evenSlots ? 1 / slots.length : skewed;
             counters.set(slot, (counters.get(slot) ?? 0) + (rate * part * STEP_MS) / 1000);
           });
         });
@@ -2037,6 +2042,7 @@ describe('AnomalyService', () => {
         [20, 21],
       ];
       migrating = false;
+      evenSlots = false;
       const info = {
         server: { redis_version: '8.0.0' },
         replication: { role: 'master' },
@@ -2081,7 +2087,7 @@ describe('AnomalyService', () => {
         resolved: false,
         message:
           "Hot shard a0000000 at 10.0.0.1:6379: CPU 9.0x the cluster median (82% of the cluster's slot CPU) for 60s. " +
-          'Top slots by CPU: 0 (75% of the shard), 1 (25%).',
+          `Top slots by CPU: 0 (75% of the shard), 1 (25%).${NO_PLAN_SENTENCE}`,
       });
       expect(hotEvents()[0].nodeAddr).toBeUndefined();
     });
@@ -2170,6 +2176,15 @@ describe('AnomalyService', () => {
           keysSampledAt: BASE + 6 * STEP_MS,
           eventId: hotEvents()[0].id,
           captureAvailable: false,
+          rebalance: {
+            kind: 'no_plan',
+            action: 'spread',
+            reason: 'key_level',
+            pinnedSlots: [
+              { slot: 0, shareOfShard: 0.75 },
+              { slot: 1, shareOfShard: 0.25 },
+            ],
+          },
         },
       ]);
       expect(service.getHotShards('conn-other')).toEqual([]);
@@ -2537,7 +2552,7 @@ describe('AnomalyService', () => {
         "Hot shard a0000000 at 10.0.0.1:6379: CPU 9.0x the cluster median (82% of the cluster's slot CPU) for 60s. " +
         'Top slots by CPU: 0 (75% of the shard), 1 (25%).';
       const capture = (reason: string) =>
-        `${RAISED} Key names are not available (${reason}); a capture on this primary can show them.`;
+        `${RAISED} Key names are not available (${reason}); a capture on this primary can show them.${NO_PLAN_SENTENCE}`;
       let keys: KeysBySlot;
 
       function hotNode() {
@@ -2597,7 +2612,7 @@ describe('AnomalyService', () => {
 
         expect(hotEvents()).toHaveLength(1);
         expect(hotEvents()[0].message).toBe(
-          `${RAISED} Hot keys: "user:42" (freq 255), "cart:{9}" (freq 201), "user:1" (freq 40).`,
+          `${RAISED} Hot keys: "user:42" (freq 255), "cart:{9}" (freq 201), "user:1" (freq 40).${NO_PLAN_SENTENCE}`,
         );
         expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledWith(
           expect.objectContaining({
@@ -2635,7 +2650,7 @@ describe('AnomalyService', () => {
         await step(HOT, 6);
 
         expect(hotEvents()[0].message).toBe(
-          `${RAISED} Hot keys: "<!channel>\\x0a\\"x\\"" (freq 255).`,
+          `${RAISED} Hot keys: "<!channel>\\x0a\\"x\\"" (freq 255).${NO_PLAN_SENTENCE}`,
         );
         expect(service.getHotShards('conn-a')[0].topKeys[0].key).toBe('<!channel>\n"x"');
       });
@@ -3020,7 +3035,7 @@ describe('AnomalyService', () => {
 
         await step(HOT, 6);
 
-        expect(hotEvents()[0].message).toBe(RAISED);
+        expect(hotEvents()[0].message).toBe(`${RAISED}${NO_PLAN_SENTENCE}`);
         expect(discovery.getNodeConnection).not.toHaveBeenCalled();
         expect(service.getHotShards('conn-a')[0]).toMatchObject({
           captureAvailable: false,
@@ -3074,6 +3089,1130 @@ describe('AnomalyService', () => {
           'Hot keys: "second" (freq 7).',
         );
         expect(client.callBuffer).toHaveBeenCalledTimes(4);
+      });
+    });
+
+    describe('rebalance suggestion', () => {
+      const WIDE = Array.from({ length: 20 }, (_, i) => 100 + i);
+      const rebalance = () => service.getHotShards('conn-a')[0]?.rebalance;
+      const targets = () => {
+        const verdict = rebalance();
+        return verdict?.kind === 'plan' ? verdict.moves.map((move) => move.targetShardId) : [];
+      };
+
+      function spreadLoad() {
+        owners[0] = [...WIDE];
+        evenSlots = true;
+      }
+
+      it('suggests which slots of a broadly hot shard to move, and where', async () => {
+        spreadLoad();
+
+        await step(HOT, 6);
+
+        expect(hotEvents()).toHaveLength(1);
+        expect(hotEvents()[0].message).not.toContain('ebalanc');
+        expect(rebalance()).toMatchObject({
+          kind: 'plan',
+          action: 'spread',
+          effect: 'resolves',
+          sourceShardId: 'a0000000',
+          moves: [
+            {
+              targetShardId: 'b0000000',
+              targetAddr: ADDRS[1],
+              ranges: [[100, 107]],
+              slotCount: 8,
+              keyCount: 80,
+              cpuUsecPerSecond: 360_000,
+            },
+          ],
+          warnings: [
+            { code: 'source_fork', shardId: 'a0000000' },
+            { code: 'memory_unknown', shardId: 'b0000000' },
+          ],
+        });
+      });
+
+      it('says in the event why moving slots will not help', async () => {
+        await step(HOT, 6);
+
+        expect(hotEvents()[0].message).toBe(
+          "Hot shard a0000000 at 10.0.0.1:6379: CPU 9.0x the cluster median (82% of the cluster's slot CPU) for 60s. " +
+            'Top slots by CPU: 0 (75% of the shard), 1 (25%).' +
+            NO_PLAN_SENTENCE,
+        );
+        expect(rebalance()).toEqual({
+          kind: 'no_plan',
+          action: 'spread',
+          reason: 'key_level',
+          pinnedSlots: [
+            { slot: 0, shareOfShard: 0.75 },
+            { slot: 1, shareOfShard: 0.25 },
+          ],
+        });
+      });
+
+      it('keeps a plan for five minutes, then plans again from the load it has by then', async () => {
+        spreadLoad();
+        await step(HOT, 6);
+
+        await step([1_300_000, 100_000, 100_000], 19);
+
+        expect(rebalance()).toMatchObject({ moves: [{ ranges: [[100, 107]] }] });
+
+        await step([1_300_000, 100_000, 100_000], 2);
+
+        expect(rebalance()).toMatchObject({ moves: [{ ranges: [[100, 108]] }] });
+      });
+
+      it('plans again as soon as the load has settled after a slot changed owner', async () => {
+        spreadLoad();
+        await step(HOT, 6);
+
+        owners[0] = WIDE.slice(0, 19);
+        owners[1] = [10, 11, 119];
+        await step(HOT);
+
+        expect(rebalance()).toEqual({
+          kind: 'no_plan',
+          action: 'spread',
+          reason: 'settling',
+          pinnedSlots: [],
+        });
+
+        await step(HOT, 3);
+
+        expect(hotEvents()).toHaveLength(1);
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+      });
+
+      it('suggests nothing during a reshard', async () => {
+        spreadLoad();
+        await step(HOT, 6);
+
+        migrating = true;
+        await step(HOT);
+
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'migration_running' });
+      });
+
+      it('withdraws the plan when a reshard starts and no new sample comes', async () => {
+        spreadLoad();
+        await step(HOT, 6);
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+
+        migrating = true;
+        await idle(STEP_MS);
+
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'migration_running' });
+      });
+
+      it('withdraws a kept plan at the next sample that finds a slot migration, asking once per sample', async () => {
+        const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: true });
+        (service as any).clusterMetrics = { checkSlotMigrations };
+        spreadLoad();
+        await step(HOT, 6);
+
+        expect(checkSlotMigrations).toHaveBeenCalledTimes(1);
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+
+        checkSlotMigrations.mockResolvedValue({ migrations: [{ slot: 5 }], complete: true });
+        await step(HOT);
+
+        expect(checkSlotMigrations).toHaveBeenCalledTimes(2);
+        expect(hotEvents()[0].resolved).toBe(false);
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'migration_running' });
+
+        checkSlotMigrations.mockResolvedValue({ migrations: [], complete: true });
+        await step(HOT);
+
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+      });
+
+      it('asks about no slot migration while the kept answer is not a plan', async () => {
+        const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: true });
+        (service as any).clusterMetrics = { checkSlotMigrations };
+        await step(HOT, 6);
+
+        expect(checkSlotMigrations).toHaveBeenCalledTimes(1);
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'key_level' });
+
+        checkSlotMigrations.mockResolvedValue({ migrations: [{ slot: 5 }], complete: true });
+        await step(HOT, 5);
+
+        expect(checkSlotMigrations).toHaveBeenCalledTimes(1);
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'key_level' });
+      });
+
+      it('withdraws only the plans when a slot migration is found', async () => {
+        const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: true });
+        (service as any).clusterMetrics = { checkSlotMigrations };
+        const verdicts = () => service.getHotShards('conn-a').map((shard) => shard.rebalance);
+        IDS.push('d0000000', 'e0000000');
+        ADDRS.push('10.0.0.4:6379', '10.0.0.5:6379');
+        owners = [[...WIDE], [10, 11], [20, 21], [30, 31], [40, 41]];
+        evenSlots = true;
+        try {
+          await step([900_000, 900_000, 100_000, 100_000, 100_000], 6);
+
+          expect(verdicts()).toMatchObject([
+            { kind: 'plan' },
+            { kind: 'no_plan', reason: 'key_level' },
+          ]);
+
+          checkSlotMigrations.mockResolvedValue({ migrations: [{ slot: 5 }], complete: true });
+          await step([900_000, 900_000, 100_000, 100_000, 100_000]);
+
+          expect(verdicts()).toMatchObject([
+            { kind: 'no_plan', reason: 'migration_running' },
+            { kind: 'no_plan', reason: 'key_level' },
+          ]);
+        } finally {
+          IDS.length = 3;
+          ADDRS.length = 3;
+        }
+      });
+
+      it('plans from the slot load it took before the key read', async () => {
+        spreadLoad();
+        const client = {
+          callBuffer: jest.fn(async () => {
+            if (client.callBuffer.mock.calls.length === 1) {
+              counters.set(119, (counters.get(119) ?? 0) + 90_000_000);
+              shardLoad.record('conn-a', reading(), clock + 5_000);
+            }
+            return [];
+          }),
+        };
+        (service as any).clusterDiscovery = {
+          getNodeConnection: jest.fn().mockResolvedValue(client),
+          evictNodeClient: jest.fn(),
+          retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+          releaseConnection: jest.fn().mockResolvedValue(undefined),
+        };
+
+        await step(HOT, 6);
+
+        expect(client.callBuffer).toHaveBeenCalled();
+        expect(shardLoad.getTopSlots('conn-a', IDS[0], 1)[0].slot).toBe(119);
+        expect(rebalance()).toMatchObject({
+          kind: 'plan',
+          moves: [{ ranges: [[100, 107]] }],
+          pinnedSlots: [],
+        });
+      });
+
+      it('plans from the slot load of the sample it judged', async () => {
+        (service as any).clusterMetrics = {
+          checkSlotMigrations: jest.fn().mockImplementation(async () => {
+            counters.set(119, (counters.get(119) ?? 0) + 90_000_000);
+            shardLoad.record('conn-a', reading(), clock + 5_000);
+            return { migrations: [], complete: true };
+          }),
+        };
+        spreadLoad();
+
+        await step(HOT, 6);
+
+        expect(shardLoad.getTopSlots('conn-a', IDS[0], 1)[0].slot).toBe(119);
+        expect(rebalance()).toMatchObject({
+          kind: 'plan',
+          moves: [{ ranges: [[100, 107]] }],
+          pinnedSlots: [],
+        });
+      });
+
+      it('asks again at the next sample while a slot migration blocks the plan', async () => {
+        const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: true });
+        (service as any).clusterMetrics = { checkSlotMigrations };
+        spreadLoad();
+        await step(HOT, 6);
+        checkSlotMigrations.mockResolvedValue({ migrations: [{ slot: 5 }], complete: true });
+        await step(HOT, 20);
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'migration_running' });
+
+        checkSlotMigrations.mockResolvedValue({ migrations: [], complete: true });
+        await step(HOT);
+
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+      });
+
+      describe('a migration check that does not hear from every primary', () => {
+        const HEAVIER = [1_300_000, 100_000, 100_000];
+        const unheard = [
+          ['fails', () => Promise.reject(new Error('connection lost'))],
+          ['misses a primary', () => Promise.resolve({ migrations: [], complete: false })],
+        ] as const;
+
+        it.each(unheard)(
+          'keeps the plan as it is while the check %s, and plans again once it passes',
+          async (_case, reply) => {
+            const checkSlotMigrations = jest
+              .fn()
+              .mockResolvedValue({ migrations: [], complete: true });
+            (service as any).clusterMetrics = { checkSlotMigrations };
+            spreadLoad();
+            await step(HOT, 6);
+
+            checkSlotMigrations.mockImplementation(reply);
+            for (let round = 0; round < 24; round += 1) {
+              await step(HEAVIER);
+
+              expect(rebalance()).toMatchObject({ moves: [{ ranges: [[100, 107]] }] });
+            }
+
+            checkSlotMigrations.mockResolvedValue({ migrations: [], complete: true });
+            await step(HEAVIER);
+
+            expect(rebalance()).toMatchObject({ moves: [{ ranges: [[100, 108]] }] });
+          },
+        );
+
+        it('withdraws the plan when the check misses a primary and still finds a migration', async () => {
+          const checkSlotMigrations = jest
+            .fn()
+            .mockResolvedValue({ migrations: [], complete: true });
+          (service as any).clusterMetrics = { checkSlotMigrations };
+          spreadLoad();
+          await step(HOT, 6);
+
+          checkSlotMigrations.mockResolvedValue({ migrations: [{ slot: 5 }], complete: false });
+          await step(HOT);
+
+          expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'migration_running' });
+        });
+
+        it.each(unheard)(
+          'holds back a new suggestion while the check %s',
+          async (_case, reply) => {
+            const checkSlotMigrations = jest
+              .fn()
+              .mockResolvedValue({ migrations: [], complete: true });
+            (service as any).clusterMetrics = { checkSlotMigrations };
+            spreadLoad();
+            await step(HOT, 6);
+
+            checkSlotMigrations.mockImplementation(reply);
+            (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue([
+              ...clusterNodes(),
+              { ...clusterNodes()[1], id: 'd0000000', address: '10.0.0.4:6379@16379' },
+            ]);
+            await step(HOT, 3);
+
+            expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'migration_running' });
+
+            checkSlotMigrations.mockResolvedValue({ migrations: [], complete: true });
+            await step(HOT);
+
+            expect(targets()[0]).toBe('d0000000');
+          },
+        );
+
+        it('keeps the plan of a shard while the event of another waits on the check', async () => {
+          const checkSlotMigrations = jest
+            .fn()
+            .mockResolvedValue({ migrations: [], complete: true });
+          (service as any).clusterMetrics = { checkSlotMigrations };
+          IDS.push('d0000000', 'e0000000');
+          ADDRS.push('10.0.0.4:6379', '10.0.0.5:6379');
+          owners = [[...WIDE], [10, 11], [20, 21], [30, 31], [40, 41]];
+          evenSlots = true;
+          try {
+            await step([900_000, 150_000, 100_000, 100_000, 100_000], 6);
+            const plan = rebalance();
+            expect(targets()).not.toContain('b0000000');
+
+            checkSlotMigrations.mockClear();
+            checkSlotMigrations.mockResolvedValue({ migrations: [], complete: false });
+            for (let round = 0; round < 12; round += 1) {
+              await step([900_000, 900_000, 100_000, 100_000, 100_000]);
+
+              expect(rebalance()).toEqual(plan);
+            }
+            expect(checkSlotMigrations).toHaveBeenCalled();
+            expect(hotEvents()).toHaveLength(1);
+          } finally {
+            IDS.length = 3;
+            ADDRS.length = 3;
+          }
+        });
+      });
+
+      it('plans from the next sample once the slot load of the shard is measured', async () => {
+        spreadLoad();
+        const slotsOf = shardLoad.getSlots.bind(shardLoad);
+        let measured = false;
+        jest
+          .spyOn(shardLoad, 'getSlots')
+          .mockImplementation((...args) => (measured ? slotsOf(...args) : []));
+        await step(HOT, 6);
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'settling' });
+
+        measured = true;
+        await step(HOT);
+
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+      });
+
+      it('plans again as soon as an empty primary joins', async () => {
+        spreadLoad();
+        await step(HOT, 6);
+        expect(targets()).toEqual(['b0000000']);
+
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue([
+          ...clusterNodes(),
+          { ...clusterNodes()[1], id: 'd0000000', address: '10.0.0.4:6379@16379' },
+        ]);
+        await step(HOT);
+
+        expect(targets()[0]).toBe('d0000000');
+      });
+
+      it('plans again as soon as a target of the plan turns hot', async () => {
+        IDS.push('d0000000', 'e0000000');
+        ADDRS.push('10.0.0.4:6379', '10.0.0.5:6379');
+        owners = [[...WIDE], [10, 11], [20, 21], [30, 31], [40, 41]];
+        evenSlots = true;
+        try {
+          await step([900_000, 100_000, 100_000, 100_000, 100_000], 6);
+          expect(targets()).toContain('b0000000');
+
+          await step([900_000, 900_000, 100_000, 100_000, 100_000]);
+
+          expect(targets()).not.toContain('b0000000');
+        } finally {
+          IDS.length = 3;
+          ADDRS.length = 3;
+        }
+      });
+
+      it('keeps a plan when a shard it moves nothing to goes over and under the hot line', async () => {
+        IDS.push('d0000000', 'e0000000');
+        ADDRS.push('10.0.0.4:6379', '10.0.0.5:6379');
+        owners = [[...WIDE], [10, 11], [20, 21], [30, 31], [40, 41]];
+        evenSlots = true;
+        try {
+          await step([900_000, 150_000, 100_000, 100_000, 100_000], 6);
+          const plan = rebalance();
+          expect(plan).toMatchObject({ kind: 'plan' });
+          expect(targets()).not.toContain('b0000000');
+
+          for (let round = 0; round < 6; round += 1) {
+            await step([1_300_000, 250_000, 100_000, 100_000, 100_000]);
+            expect(rebalance()).toEqual(plan);
+
+            await step([1_300_000, 150_000, 100_000, 100_000, 100_000]);
+            expect(rebalance()).toEqual(plan);
+          }
+        } finally {
+          IDS.length = 3;
+          ADDRS.length = 3;
+        }
+      });
+
+      it('still judges the shard when the migration check of a refresh fails', async () => {
+        const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: true });
+        (service as any).clusterMetrics = { checkSlotMigrations };
+        spreadLoad();
+        await step(HOT, 6);
+
+        checkSlotMigrations.mockRejectedValue(new Error('connection lost'));
+        await step(HOT, 21);
+
+        expect(service.getHotShards('conn-a')).toHaveLength(1);
+        expect(hotEvents()[0].resolved).toBe(false);
+      });
+
+      it('plans nothing while a primary is suspect', async () => {
+        spreadLoad();
+        const nodes = clusterNodes();
+        nodes[2].flags = ['master', 'fail?'];
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(nodes);
+
+        await step(HOT, 6);
+
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'unhealthy_node' });
+      });
+
+      it('keeps a reason that may pass out of the event message', async () => {
+        spreadLoad();
+        const nodes = clusterNodes();
+        nodes[2].flags = ['master', 'fail?'];
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(nodes);
+        await step(HOT, 6);
+
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'unhealthy_node' });
+        expect(hotEvents()[0].message).not.toContain('ebalanc');
+
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(clusterNodes());
+        await step(HOT);
+
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+        expect(hotEvents()).toHaveLength(1);
+      });
+
+      it.each([[['master', 'fail']], [['master', 'fail', 'noaddr']], [['master', 'noaddr']]])(
+        'plans around a primary flagged %j that owns no slots',
+        async (flags) => {
+          spreadLoad();
+          const nodes = [
+            ...clusterNodes(),
+            { ...clusterNodes()[1], id: 'f0000000', address: '10.0.0.9:6379@16379', flags },
+          ];
+          (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(nodes);
+
+          await step(HOT, 6);
+
+          const verdict = rebalance();
+          expect(verdict).toMatchObject({ kind: 'plan' });
+          expect(targets()).toEqual(['b0000000']);
+          expect(
+            verdict?.kind === 'plan' ? verdict.projection.map((row) => row.shardId) : [],
+          ).not.toContain('f0000000');
+        },
+      );
+
+      it('keeps a plan when a primary that owns no slots fails and no new sample comes', async () => {
+        spreadLoad();
+        await step(HOT, 6);
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+
+        const nodes = [
+          ...clusterNodes(),
+          {
+            ...clusterNodes()[1],
+            id: 'f0000000',
+            address: '10.0.0.9:6379@16379',
+            flags: ['master', 'fail'],
+          },
+        ];
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(nodes);
+        await idle(STEP_MS);
+        await step(HOT);
+
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+      });
+
+      it('plans the second hot shard on top of the plan for the first', async () => {
+        const plans = () =>
+          service.getHotShards('conn-a').flatMap(({ rebalance: verdict }) =>
+            verdict?.kind === 'plan' ? [verdict] : [],
+          );
+        IDS.push('d0000000', 'e0000000');
+        ADDRS.push('10.0.0.4:6379', '10.0.0.5:6379');
+        owners = [[...WIDE], WIDE.map((slot) => slot + 100), [20, 21], [30, 31], [40, 41]];
+        evenSlots = true;
+        try {
+          await step([200_000, 200_000, 20_000, 100_000, 100_000], 6);
+
+          const [first, second] = plans();
+          expect(first.plannedAfter).toEqual([]);
+          expect(second.plannedAfter).toEqual(['a0000000']);
+          const moved = first.moves.find((move) => move.targetShardId === 'c0000000');
+          expect(moved).toBeDefined();
+          expect(
+            second.projection.find((row) => row.shardId === 'c0000000')?.before.cpuUsecPerSecond,
+          ).toBeCloseTo(20_000 + (moved?.cpuUsecPerSecond ?? 0), 0);
+        } finally {
+          IDS.length = 3;
+          ADDRS.length = 3;
+        }
+      });
+
+      it('plans as soon as the suspect primary is healthy again', async () => {
+        spreadLoad();
+        const nodes = clusterNodes();
+        nodes[2].flags = ['master', 'fail?'];
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(nodes);
+        await step(HOT, 6);
+
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(clusterNodes());
+        await step(HOT);
+
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+      });
+
+      it('drops a plan as soon as a primary turns suspect', async () => {
+        spreadLoad();
+        await step(HOT, 6);
+
+        const nodes = clusterNodes();
+        nodes[1].flags = ['master', 'fail?'];
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(nodes);
+        await step(HOT);
+
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'unhealthy_node' });
+      });
+
+      it('blames the suspect primary, not a migration, without asking the nodes again', async () => {
+        const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: true });
+        (service as any).clusterMetrics = { checkSlotMigrations };
+        spreadLoad();
+        await step(HOT, 6);
+        checkSlotMigrations.mockClear();
+        checkSlotMigrations.mockResolvedValue({ migrations: [], complete: false });
+
+        const nodes = clusterNodes();
+        nodes[1].flags = ['master', 'fail?'];
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(nodes);
+        await step(HOT);
+
+        expect(checkSlotMigrations).not.toHaveBeenCalled();
+        expect(rebalance()).toEqual({
+          kind: 'no_plan',
+          action: 'spread',
+          reason: 'unhealthy_node',
+          pinnedSlots: [],
+        });
+      });
+
+      it('withdraws the plan when a primary turns suspect and no new sample comes', async () => {
+        spreadLoad();
+        await step(HOT, 6);
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+
+        const nodes = clusterNodes();
+        nodes[1].flags = ['master', 'fail?'];
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(nodes);
+        await idle(STEP_MS);
+
+        expect(rebalance()).toEqual({
+          kind: 'no_plan',
+          action: 'spread',
+          reason: 'unhealthy_node',
+          pinnedSlots: [],
+        });
+      });
+
+      it('plans again from the next sample once the suspect primary is healthy', async () => {
+        spreadLoad();
+        await step(HOT, 6);
+        const nodes = clusterNodes();
+        nodes[1].flags = ['master', 'fail?'];
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(nodes);
+        await idle(STEP_MS);
+
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(clusterNodes());
+        await step(HOT);
+
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+      });
+
+      it.each([
+        ['is now a replica', (node: { flags: string[]; master: string }) => {
+          node.flags = ['slave'];
+          node.master = 'c0000000';
+        }],
+        ['left the cluster', (node: { id: string }) => {
+          node.id = 'f0000000';
+        }],
+      ])('waits for a new sample when a measured shard %s', async (_case, change) => {
+        spreadLoad();
+        await step(HOT, 6);
+
+        const nodes = clusterNodes();
+        change(nodes[1]);
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(nodes);
+        await idle(STEP_MS);
+
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'settling' });
+
+        await step(HOT);
+
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'settling' });
+      });
+
+      it.each([
+        ['is now a replica', (node: { flags: string[]; master: string }) => {
+          node.flags = ['slave'];
+          node.master = 'c0000000';
+        }],
+        ['left the cluster', (node: { id: string }) => {
+          node.id = 'f0000000';
+        }],
+      ])('drops a kept plan when a measured shard %s by the next sample', async (_case, change) => {
+        spreadLoad();
+        await step(HOT, 6);
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+
+        const nodes = clusterNodes();
+        change(nodes[1]);
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(nodes);
+        await step(HOT);
+
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'settling' });
+      });
+
+      it('counts replicas and takes an empty primary as a target', async () => {
+        spreadLoad();
+        const nodes = [
+          ...clusterNodes(),
+          { ...clusterNodes()[1], id: 'd0000000', address: '10.0.0.4:6379@16379,node-4' },
+          { ...clusterNodes()[1], id: 'e0000000', address: '10.0.0.5:6379@16379', master: 'a0000000', flags: ['slave'] },
+        ];
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(nodes);
+
+        await step(HOT, 6);
+
+        expect(rebalance()).toMatchObject({
+          kind: 'plan',
+          moves: [
+            { targetShardId: 'd0000000', targetAddr: '10.0.0.4:6379', ranges: [[100, 106]] },
+            { targetShardId: 'b0000000', ranges: [[107, 111]] },
+          ],
+          warnings: [
+            { code: 'source_fork', shardId: 'a0000000' },
+            { code: 'fewer_replicas', shardId: 'd0000000' },
+            { code: 'fewer_replicas', shardId: 'b0000000' },
+            { code: 'memory_unknown', shardId: 'd0000000' },
+            { code: 'memory_unknown', shardId: 'b0000000' },
+          ],
+        });
+      });
+
+      describe('a hot shard that the plan of another covers', () => {
+        const COVERED = [700_000, 300_000, 100_000, 120_000, 120_000];
+        const verdicts = () =>
+          Object.fromEntries(
+            service.getHotShards('conn-a').map((shard) => [shard.shardId, shard.rebalance]),
+          );
+        const messageOf = (shardId: string) =>
+          hotEvents().find((event) => event.message.includes(shardId))?.message;
+        const coveredByA = {
+          kind: 'no_plan',
+          action: 'spread',
+          reason: 'covered_by_other_plan',
+          pinnedSlots: [],
+          coveredBy: [{ shardId: 'a0000000', nodeAddr: '10.0.0.1:6379' }],
+        };
+
+        beforeEach(() => {
+          IDS.push('d0000000', 'e0000000');
+          ADDRS.push('10.0.0.4:6379', '10.0.0.5:6379');
+          owners = [[...WIDE], WIDE.map((slot) => slot + 100), [20, 21], [30, 31], [40, 41]];
+          evenSlots = true;
+        });
+
+        afterEach(() => {
+          IDS.length = 3;
+          ADDRS.length = 3;
+        });
+
+        it('names the plan that covers it in the answer, not in its event', async () => {
+          await step(COVERED, 6);
+
+          expect(verdicts()).toEqual({
+            a0000000: expect.objectContaining({ kind: 'plan', plannedAfter: [] }),
+            b0000000: coveredByA,
+          });
+          expect(messageOf('b0000000')).not.toContain('ebalanc');
+          expect(messageOf('a0000000')).not.toContain('ebalanc');
+        });
+
+        it('plans without a shard whose event is resolved by hand while its keys are read', async () => {
+          await step(COVERED, 6);
+          const eventOfA = hotEvents().find((event) => event.message.includes('a0000000'))!;
+          jest.spyOn(service as any, 'refreshHotShardKeys').mockImplementationOnce(async () => {
+            await service.resolveAnomaly(eventOfA.id);
+          });
+
+          await step(COVERED);
+
+          expect(verdicts().a0000000).toBeUndefined();
+          expect(verdicts().b0000000).toEqual(expect.objectContaining({ kind: 'plan' }));
+        });
+
+        it('keeps that answer for five minutes, then plans again from the load it has by then', async () => {
+          const heavier = [700_000, 900_000, 100_000, 120_000, 120_000];
+          await step(COVERED, 6);
+
+          await step(heavier, 19);
+
+          expect(verdicts().b0000000).toEqual(coveredByA);
+
+          await step(heavier, 2);
+
+          expect(verdicts().b0000000).toMatchObject({ kind: 'plan', plannedAfter: ['a0000000'] });
+        });
+
+        it('plans it again as soon as the plan that covers it is planned again', async () => {
+          const lighter = [250_000, 300_000, 100_000, 120_000, 120_000];
+          await step([700_000, 100_000, 100_000, 120_000, 120_000], 6);
+          await step(COVERED, 16);
+
+          await step(lighter, 6);
+
+          expect(verdicts().b0000000).toEqual(coveredByA);
+
+          await step(lighter);
+
+          expect(verdicts()).toMatchObject({
+            a0000000: { kind: 'plan', plannedAfter: [] },
+            b0000000: { kind: 'plan', plannedAfter: ['a0000000'] },
+          });
+        });
+
+        it('withdraws it with the plan that covers it when a slot migration is found', async () => {
+          const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: true });
+          (service as any).clusterMetrics = { checkSlotMigrations };
+          await step(COVERED, 6);
+
+          checkSlotMigrations.mockResolvedValue({ migrations: [{ slot: 5 }], complete: true });
+          await step(COVERED);
+
+          expect(verdicts()).toMatchObject({
+            a0000000: { kind: 'no_plan', reason: 'migration_running' },
+            b0000000: { kind: 'no_plan', reason: 'migration_running' },
+          });
+
+          checkSlotMigrations.mockResolvedValue({ migrations: [], complete: true });
+          await step(COVERED);
+
+          expect(verdicts()).toEqual({
+            a0000000: expect.objectContaining({ kind: 'plan' }),
+            b0000000: coveredByA,
+          });
+        });
+      });
+
+      describe('two plans that are not due at the same time', () => {
+        const ONE = [250_000, 100_000, 20_000, 100_000, 100_000];
+        const BOTH = [250_000, 250_000, 20_000, 100_000, 100_000];
+        const order = () =>
+          Object.fromEntries(
+            service
+              .getHotShards('conn-a')
+              .map((shard) => [
+                shard.shardId,
+                shard.rebalance?.kind === 'plan'
+                  ? shard.rebalance.plannedAfter
+                  : shard.rebalance?.reason,
+              ]),
+          );
+
+        beforeEach(() => {
+          IDS.push('d0000000', 'e0000000');
+          ADDRS.push('10.0.0.4:6379', '10.0.0.5:6379');
+          owners = [[...WIDE], WIDE.map((slot) => slot + 100), [20, 21], [30, 31], [40, 41]];
+          evenSlots = true;
+        });
+
+        afterEach(() => {
+          IDS.length = 3;
+          ADDRS.length = 3;
+        });
+
+        it('plans both again, in the same order, when the earlier plan is due', async () => {
+          await step(ONE, 6);
+          await step(BOTH, 22);
+
+          expect(order()).toEqual({ a0000000: [], b0000000: ['a0000000'] });
+
+          for (let round = 0; round < 30; round += 1) {
+            await step(BOTH);
+
+            expect(order()).toEqual({ a0000000: [], b0000000: ['a0000000'] });
+          }
+        });
+
+        it('plans a shard again when the plan that left it no room is planned again', async () => {
+          await step(ONE, 6);
+          await step(BOTH, 10);
+          const kept: Map<string, { verdict: unknown }> = (service as any).hotShardRebalance.get(
+            'conn-a',
+          );
+          const [signature, last] = [...kept].find(([key]) => key.includes('b0000000'))!;
+          kept.set(signature, {
+            ...last,
+            verdict: {
+              kind: 'no_plan',
+              action: 'spread',
+              reason: 'conflicts_with_other_plan',
+              pinnedSlots: [],
+              conflictsWith: [{ shardId: 'a0000000', nodeAddr: '10.0.0.1:6379' }],
+            },
+          });
+
+          await step(BOTH, 12);
+
+          expect(order()).toEqual({ a0000000: [], b0000000: 'conflicts_with_other_plan' });
+
+          await step(BOTH);
+
+          expect(order()).toEqual({ a0000000: [], b0000000: ['a0000000'] });
+        });
+      });
+
+      describe('target memory', () => {
+        const GB = 1024 ** 3;
+        const info = (usedBytes: number, maxBytes: number, keys: number) =>
+          `# Memory\r\nused_memory:${usedBytes}\r\nmaxmemory:${maxBytes}\r\n` +
+          `# Keyspace\r\ndb0:keys=${keys},expires=0,avg_ttl=0\r\n`;
+        const warnings = () => (rebalance() as { warnings: unknown[] }).warnings;
+        const memoryReads = (client: { info: jest.Mock }) =>
+          client.info.mock.calls.filter((args) => args.join() === 'memory,keyspace').length;
+
+        function dialMemory(replies: Record<string, string | Error | Promise<string>>) {
+          const clients = Object.fromEntries(
+            Object.entries(replies).map(([nodeId, reply]) => [
+              nodeId,
+              {
+                info: jest.fn(async () => {
+                  if (reply instanceof Error) throw reply;
+                  return reply;
+                }),
+              },
+            ]),
+          );
+          const discovery = {
+            getNodeConnection: jest.fn(async (nodeId: string) => {
+              if (!clients[nodeId]) throw new Error('ECONNREFUSED');
+              return clients[nodeId];
+            }),
+            evictNodeClient: jest.fn(),
+            retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+            releaseConnection: jest.fn().mockResolvedValue(undefined),
+          };
+          (service as any).clusterDiscovery = discovery;
+          return { clients, discovery };
+        }
+
+        it('warns when the moved keys would fill the target past 80% of its limit', async () => {
+          spreadLoad();
+          const { clients } = dialMemory({
+            a0000000: info(4 * GB, 8 * GB, 200),
+            b0000000: info(5 * GB, 8 * GB, 50),
+            c0000000: info(GB, 8 * GB, 50),
+          });
+
+          await step(HOT, 6);
+
+          expect(warnings()).toEqual([
+            { code: 'source_fork', shardId: 'a0000000' },
+            { code: 'target_memory', shardId: 'b0000000', memoryShare: expect.closeTo(0.825) },
+          ]);
+          expect(memoryReads(clients.c0000000)).toBe(0);
+        });
+
+        it('adds no warning when the target keeps room', async () => {
+          spreadLoad();
+          dialMemory({ a0000000: info(4 * GB, 8 * GB, 200), b0000000: info(GB, 8 * GB, 50) });
+
+          await step(HOT, 6);
+
+          expect(warnings()).toEqual([{ code: 'source_fork', shardId: 'a0000000' }]);
+        });
+
+        it('reads the memory once per plan, not on every poll', async () => {
+          spreadLoad();
+          const { clients } = dialMemory({
+            a0000000: info(4 * GB, 8 * GB, 200),
+            b0000000: info(GB, 8 * GB, 50),
+          });
+
+          await step(HOT, 20);
+
+          expect(memoryReads(clients.b0000000)).toBe(1);
+        });
+
+        it('reads no memory for a kept plan when the migration check finds nothing', async () => {
+          const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: true });
+          (service as any).clusterMetrics = { checkSlotMigrations };
+          spreadLoad();
+          const { clients } = dialMemory({
+            a0000000: info(4 * GB, 8 * GB, 200),
+            b0000000: info(GB, 8 * GB, 50),
+          });
+          await step(HOT, 6);
+          const asked = checkSlotMigrations.mock.calls.length;
+
+          await step(HOT, 5);
+
+          expect(checkSlotMigrations).toHaveBeenCalledTimes(asked + 5);
+          expect(memoryReads(clients.a0000000)).toBe(1);
+          expect(memoryReads(clients.b0000000)).toBe(1);
+        });
+
+        it('reads a shard once when several plans name it', async () => {
+          IDS.push('d0000000', 'e0000000');
+          ADDRS.push('10.0.0.4:6379', '10.0.0.5:6379');
+          owners = [[...WIDE], WIDE.map((slot) => slot + 100), [20, 21], [30, 31], [40, 41]];
+          evenSlots = true;
+          try {
+            const { clients } = dialMemory(
+              Object.fromEntries(IDS.map((id) => [id, info(GB, 8 * GB, 200)])),
+            );
+
+            await step([200_000, 200_000, 20_000, 100_000, 100_000], 6);
+
+            const plans = service.getHotShards('conn-a').map((shard) => shard.rebalance);
+            expect(plans).toMatchObject([
+              { kind: 'plan', moves: [{ targetShardId: 'c0000000' }] },
+              { kind: 'plan', moves: [{ targetShardId: 'c0000000' }] },
+            ]);
+            expect(IDS.map((id) => memoryReads(clients[id]))).toEqual([1, 1, 1, 0, 0]);
+          } finally {
+            IDS.length = 3;
+            ADDRS.length = 3;
+          }
+        });
+
+        describe('with a second hot shard', () => {
+          const warningsOf = (verdict: unknown) => (verdict as { warnings: unknown[] }).warnings;
+          const planWarnings = () =>
+            Object.fromEntries(
+              service
+                .getHotShards('conn-a')
+                .map((shard) => [shard.shardId, warningsOf(shard.rebalance)]),
+            );
+          const full = (memoryShare: number) => ({
+            code: 'target_memory',
+            shardId: 'c0000000',
+            memoryShare: expect.closeTo(memoryShare, 4),
+          });
+          const memoryOf = (targetUsed: number) =>
+            dialMemory({
+              ...Object.fromEntries(IDS.map((id) => [id, info(GB, 8 * GB, 200)])),
+              c0000000: info(targetUsed, 8 * GB, 200),
+            });
+
+          beforeEach(() => {
+            IDS.push('d0000000', 'e0000000');
+            ADDRS.push('10.0.0.4:6379', '10.0.0.5:6379');
+            owners = [[...WIDE], WIDE.map((slot) => slot + 100), [20, 21], [30, 31], [40, 41]];
+            evenSlots = true;
+          });
+
+          afterEach(() => {
+            IDS.length = 3;
+            ADDRS.length = 3;
+          });
+
+          it('counts the keys the earlier plan brings to the same target', async () => {
+            memoryOf(5.8 * GB);
+
+            await step([200_000, 200_000, 20_000, 100_000, 100_000], 6);
+
+            expect(planWarnings()).toEqual({
+              a0000000: [{ code: 'source_fork', shardId: 'a0000000' }],
+              b0000000: [{ code: 'source_fork', shardId: 'b0000000' }, full(0.80625)],
+            });
+          });
+
+          it('counts the keys of a kept plan, reading its source once more', async () => {
+            const { clients } = memoryOf(5.9 * GB);
+            await step([200_000, 100_000, 20_000, 100_000, 100_000], 6);
+            await step([200_000, 300_000, 20_000, 100_000, 100_000], 2);
+            const before = memoryReads(clients.a0000000);
+
+            await step([200_000, 300_000, 20_000, 100_000, 100_000], 4);
+
+            expect(planWarnings()).toEqual({
+              a0000000: [{ code: 'source_fork', shardId: 'a0000000' }],
+              b0000000: [{ code: 'source_fork', shardId: 'b0000000' }, full(0.8125)],
+            });
+            expect(memoryReads(clients.a0000000)).toBe(before + 1);
+          });
+        });
+
+        it('reads the memory of the hot shard after its key read gave up', async () => {
+          const budget = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+          (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;
+          try {
+            spreadLoad();
+            const { clients, discovery } = dialMemory({
+              a0000000: info(4 * GB, 8 * GB, 200),
+              b0000000: info(GB, 8 * GB, 50),
+            });
+            let closed!: (err: Error) => void;
+            const busy = new Promise<never>((_, reject) => {
+              closed = reject;
+            });
+            busy.catch(() => undefined);
+            let reading = false;
+            const stuck = {
+              callBuffer: jest.fn(() => {
+                reading = true;
+                return busy;
+              }),
+              info: jest.fn(async () => {
+                if (reading) await busy;
+                return info(4 * GB, 8 * GB, 200);
+              }),
+            };
+            let hot: (typeof clients)[string] = stuck;
+            discovery.getNodeConnection.mockImplementation(async (nodeId: string) =>
+              nodeId === 'a0000000' ? hot : clients[nodeId],
+            );
+            discovery.evictNodeClient.mockImplementation((client: unknown) => {
+              if (client !== stuck) return;
+              hot = clients.a0000000;
+              closed(new Error('Connection is closed.'));
+            });
+
+            await step(HOT, 6);
+
+            expect(service.getHotShards('conn-a')[0]).toMatchObject({
+              keySource: 'unavailable',
+              keyNote: 'reading the keys from the hot primary timed out',
+            });
+            expect(warnings()).toEqual([{ code: 'source_fork', shardId: 'a0000000' }]);
+          } finally {
+            (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = budget;
+          }
+        });
+
+        it('says the room is unknown when the target cannot be read', async () => {
+          spreadLoad();
+          dialMemory({ a0000000: info(4 * GB, 8 * GB, 200), b0000000: new Error('NOPERM') });
+
+          await step(HOT, 6);
+
+          expect(warnings()).toEqual([
+            { code: 'source_fork', shardId: 'a0000000' },
+            { code: 'memory_unknown', shardId: 'b0000000' },
+          ]);
+        });
+
+        it('says the room is unknown when the target has no memory limit', async () => {
+          spreadLoad();
+          dialMemory({ a0000000: info(4 * GB, 8 * GB, 200), b0000000: info(GB, 0, 50) });
+
+          await step(HOT, 6);
+
+          expect(warnings()).toContainEqual({ code: 'memory_unknown', shardId: 'b0000000' });
+        });
+
+        it('gives up on a target that does not answer and drops its client', async () => {
+          const budget = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+          (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;
+          try {
+            spreadLoad();
+            const { clients, discovery } = dialMemory({
+              a0000000: info(4 * GB, 8 * GB, 200),
+              b0000000: new Promise<string>(() => undefined),
+            });
+
+            await step(HOT, 6);
+
+            expect(hotEvents()).toHaveLength(1);
+            expect(warnings()).toContainEqual({ code: 'memory_unknown', shardId: 'b0000000' });
+            expect(discovery.evictNodeClient).toHaveBeenCalledWith(clients.b0000000);
+          } finally {
+            (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = budget;
+          }
+        });
+      });
+
+      it('drops the suggestion with the event', async () => {
+        spreadLoad();
+        await step(HOT, 6);
+
+        await step(FLAT, 25);
+
+        expect(service.getHotShards('conn-a')).toEqual([]);
+        expect((service as any).hotShardRebalance.get('conn-a')).toBeUndefined();
       });
     });
 

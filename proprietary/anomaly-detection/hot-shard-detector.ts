@@ -1,6 +1,7 @@
 import type { ShardLoad, ShardLoadSample, SlotLoadRate } from '@app/cluster/shard-load';
 import { median } from '../latency-regression/regression-detector';
 import { type HotShardKey, type HotShardKeyDetail, describeHotKeys } from './hot-shard-keys';
+import type { RebalanceVerdict } from './rebalance-planner';
 
 export const HOT_SHARD_MIN_PRIMARIES = 3;
 export const HOT_SHARD_RAISE_FACTOR = 2;
@@ -49,10 +50,15 @@ export interface HotShardDetail extends HotShardKeyDetail {
   cpu: HotShardLoad;
   network: HotShardNetwork;
   topSlots: HotShardSlot[];
+  rebalance?: RebalanceVerdict;
 }
 
 function networkOf(shard: ShardLoad): number {
   return shard.networkBytesInPerSecond + shard.networkBytesOutPerSecond;
+}
+
+export function hotShardRatio(cpuUsecPerSecond: number, cpuMedian: number): number {
+  return cpuUsecPerSecond / Math.max(cpuMedian, NEAR_IDLE_CPU_USEC_PER_SECOND);
 }
 
 export function hotShardSignature(shardId: string): string {
@@ -74,7 +80,7 @@ export function judgeHotShards(
     const factor = openShardIds.has(shard.nodeId)
       ? HOT_SHARD_RELEASE_FACTOR
       : HOT_SHARD_RAISE_FACTOR;
-    const ratio = shard.cpuUsecPerSecond / Math.max(cpuMedian, NEAR_IDLE_CPU_USEC_PER_SECOND);
+    const ratio = hotShardRatio(shard.cpuUsecPerSecond, cpuMedian);
     if (ratio < factor) continue;
     findings.push({
       shardId: shard.nodeId,

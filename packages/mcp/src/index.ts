@@ -758,6 +758,33 @@ server.tool(
 );
 
 server.tool(
+  'get_hot_shards',
+  'Get the hot shards open on a cluster right now: each shard that has carried at least twice the median CPU for a minute, with its load, top slots, hot keys when they can be read, and a rebalance suggestion. `rebalance.kind` is `plan` (slot ranges to move to named target shards, the projected load of every shard before and after, and warnings such as a target short on memory or replicas) or `no_plan` with a `reason`: `key_level` (one or a few slots carry the load, so moving slots will not help), `cluster_hot` (the other shards together have no room), `too_many_targets` (there is room, but not within the 4 shards one suggestion may use), `covered_by_other_plan` (the plan for another hot shard, listed in `coveredBy`, already brings this one near the median: apply that plan first), `conflicts_with_other_plan` (no plan for this shard fits next to the plans for the hot shards listed in `conflictsWith`: apply those first), `no_target`, `unhealthy_node`, `migration_running`, `settling` or `slots_scattered`. The suggestion is read-only: nothing is moved. An empty list means no hot shard event is open; it does not prove the cluster is balanced: a shard must stay hot for a minute first, and the per-slot load must be measured (`cluster-slot-stats-enabled yes` on every primary, on a connection that reaches each node). Use when a cluster looks unbalanced or a hot_shard anomaly is open.',
+  {
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ instanceId }) =>
+    withTelemetry('get_hot_shards', async () => {
+      const id = resolveInstanceId(instanceId);
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/anomalies/hot-shards`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return unavailableOrNotFoundResult(id, 'Anomaly detection');
+        }
+        throw err;
+      }
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
+);
+
+server.tool(
   'get_client_activity',
   'Get time-bucketed client activity from persisted snapshots. Shows connection counts, command distribution, and buffer usage over time. Use startTime/endTime to focus on a specific incident window.',
   {
