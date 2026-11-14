@@ -293,22 +293,47 @@ describe('judgeSlotMigrations', () => {
       expect(judged.stuck).toEqual([]);
     });
 
-    it('is not judged stuck from its source while its target last reported the snapshot', () => {
-      const exported = job({ phase: 'replicating' });
+    describe('while its target expects the snapshot', () => {
+      const exported = job({ phase: 'waiting-to-snapshot' });
       const imported = job({ state: 'importing', phase: 'receiving-snapshot' });
-      const sourceOnly = report({
-        migrations: [exported],
-        jobViews: [exported],
-        jobsReadNodeIds: [A.id, C.id],
+      const both = report({ migrations: [exported], jobViews: [exported, imported] });
+      const targetOnly = report({
+        migrations: [imported],
+        jobViews: [imported],
+        jobsReadNodeIds: [B.id, C.id],
         complete: false,
       });
 
-      const judged = run([
-        [T0, report({ migrations: [exported], jobViews: [exported, imported] })],
-        [T0 + ATOMIC_MIGRATION_STALL_MS, sourceOnly],
-      ]);
+      it('is stuck when its source has waited 10 minutes to start the snapshot', () => {
+        const judged = run([
+          [T0, both],
+          [T0 + ATOMIC_MIGRATION_STALL_MS, both],
+        ]);
 
-      expect(judged.stuck).toEqual([]);
+        expect(judged.stuck).toEqual([
+          expect.objectContaining({ quietMs: ATOMIC_MIGRATION_STALL_MS }),
+        ]);
+      });
+
+      it('is not judged stuck on what its source said before, when only the target is read', () => {
+        const judged = run([
+          [T0, both],
+          [T0 + ATOMIC_MIGRATION_STALL_MS, targetOnly],
+        ]);
+
+        expect(judged.stuck).toEqual([]);
+      });
+
+      it('holds its stuck warning while only the target is read', () => {
+        const judged = run([
+          [T0, both],
+          [T0 + ATOMIC_MIGRATION_STALL_MS, both],
+          [T0 + ATOMIC_MIGRATION_STALL_MS + 5_000, targetOnly],
+        ]);
+
+        expect(judged.stuck).toEqual([]);
+        expect([...judged.held]).toEqual(['stuck:job:job-1']);
+      });
     });
 
     it('is not stuck while its replication backlog keeps shrinking', () => {

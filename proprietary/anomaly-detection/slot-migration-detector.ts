@@ -5,7 +5,9 @@ export const LEGACY_MIGRATION_STALL_MS = 30 * 60_000;
 
 const MAX_REASON_LENGTH = 200;
 const SHORT_NODE_ID_LENGTH = 8;
-const SNAPSHOT_PHASES = new Set(['snapshotting', 'receiving-snapshot']);
+const SNAPSHOT_TAKING_PHASE = 'snapshotting';
+const SNAPSHOT_AWAITING_PHASE = 'receiving-snapshot';
+const SOURCE_VIEW = 'migrating';
 const JOB_MOVE = 'job:';
 const LEGACY_MOVE = 'legacy:';
 
@@ -28,6 +30,7 @@ export interface SlotMigrationFinding {
 interface ViewMark {
   stamp: string;
   timed: boolean;
+  awaitsSource?: boolean;
   backlog?: number;
 }
 
@@ -114,9 +117,14 @@ function endpoints(migration: SlotMigration) {
 }
 
 function markOf(migration: SlotMigration): ViewMark {
+  const awaitsSource = migration.phase === SNAPSHOT_AWAITING_PHASE;
   return {
     stamp: `${migration.phase ?? ''}|${migration.lastUpdateAt ?? ''}`,
-    timed: migration.lastUpdateAt !== undefined && !SNAPSHOT_PHASES.has(migration.phase ?? ''),
+    timed:
+      migration.lastUpdateAt !== undefined &&
+      migration.phase !== SNAPSHOT_TAKING_PHASE &&
+      !awaitsSource,
+    awaitsSource,
     backlog: migration.remainingReplBytes,
   };
 }
@@ -168,6 +176,11 @@ function progressed(before: Views, now: Views): boolean {
       known.backlog !== undefined && mark.backlog !== undefined && mark.backlog < known.backlog
     );
   });
+}
+
+function isTimed(views: Views, now: Views): boolean {
+  const sourceRead = now[SOURCE_VIEW] !== undefined;
+  return Object.values(views).every((view) => view.timed || (sourceRead && view.awaitsSource));
 }
 
 function merged(before: Views, now: Views): Views {
@@ -235,7 +248,7 @@ export function judgeSlotMigrations(
     const views = merged(known?.views ?? {}, move.views);
     const quietMs = now - since;
     const stallMs = move.atomic ? ATOMIC_MIGRATION_STALL_MS : LEGACY_MIGRATION_STALL_MS;
-    const isStuck = quietMs >= stallMs && Object.values(views).every((view) => view.timed);
+    const isStuck = quietMs >= stallMs && isTimed(views, move.views);
     const stuckSignature = `stuck:${move.id}`;
     const stuckBefore =
       isStuck ||
