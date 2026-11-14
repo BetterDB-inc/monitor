@@ -4,6 +4,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { RESHARD_MARKER_STALL_MS } from '../reshard-pressure-detector';
 import { RESYNC_ESCALATION_WINDOW_MS } from '../recovery-amplification-detector';
+import { judgeSlotMigrations, type SlotMigrationWatch } from '../slot-migration-detector';
 import { AnomalyService } from '../anomaly.service';
 import { IncidentTimelineBuilder, incidentIdFor, incidentStartOf, signalKey } from '../incident-timeline';
 import { ReplicaSlotAnomaly, replicaSlotSignature } from '../replica-slot-state-detector';
@@ -2284,6 +2285,46 @@ describe('AnomalyService', () => {
       expect(checkSlotMigrations).toHaveBeenCalledTimes(2);
     });
 
+    it('does not wait for a Redis import that has kept failing for 10 minutes', async () => {
+      let watch: SlotMigrationWatch | undefined;
+      for (let i = 0; i <= 10; i += 1) {
+        const target = {
+          slot: 0,
+          slotRange: '0-100',
+          sourceNodeId: 'a0000000',
+          sourceAddress: '10.0.0.1:6379',
+          targetNodeId: 'b0000000',
+          targetAddress: '10.0.0.2:6379',
+          state: 'importing' as const,
+          phase: 'failed',
+          jobName: 'job-1',
+          retries: 60 * i,
+        };
+        const read = {
+          migrations: [target],
+          failed: [],
+          finishedJobs: [],
+          jobViews: [target],
+          readNodeIds: ['a0000000', 'b0000000'],
+          jobsReadNodeIds: ['a0000000', 'b0000000'],
+          complete: true,
+          markersComplete: true,
+          ownNodeOnly: false,
+        };
+        watch = judgeSlotMigrations(watch, read, 1_700_000_000_000 + i * 60_000).watch;
+      }
+      const checkSlotMigrations = jest
+        .fn()
+        .mockResolvedValue({ migrations: [{ slot: 0, jobName: 'job-1' }], complete: true });
+      (service as any).clusterMetrics = { checkSlotMigrations };
+      (service as any).slotMigrationWatch.set('conn-a', watch);
+
+      await step(HOT, 6);
+
+      expect(checkSlotMigrations).toHaveBeenCalledTimes(1);
+      expect(hotEvents()).toHaveLength(1);
+    });
+
     it('holds a new event back while it cannot tell whether a slot is migrating', async () => {
       const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: false });
       (service as any).clusterMetrics = { checkSlotMigrations };
@@ -4282,6 +4323,7 @@ describe('AnomalyService', () => {
       targetNodeId: B.id,
       targetAddress: B.address,
       message: 'Connection lost to target',
+      listedByNodeIds: [A.id],
     });
 
     const WATCH_READ = { ownNodeOnly: false, rememberNodesWithoutJobs: true };
@@ -4603,6 +4645,19 @@ describe('AnomalyService', () => {
 
       expect(readSlotMigrations).toHaveBeenCalledTimes(5);
       expect(readSlotMigrations).toHaveBeenLastCalledWith('conn-a', WATCH_READ);
+    });
+
+    it('keeps counting the dial misses across a read whose cluster discovery failed', async () => {
+      const missed = { ...report, ...partial([A.id]), ownNodeOnly: true };
+      const undiscovered = { ...report, ...partial([]), ownNodeOnly: false };
+      readSlotMigrations
+        .mockResolvedValueOnce(missed)
+        .mockResolvedValueOnce(undiscovered)
+        .mockResolvedValueOnce(missed);
+      for (let i = 0; i < 4; i += 1) await after(30_000);
+
+      expect(readSlotMigrations).toHaveBeenCalledTimes(4);
+      expect(readSlotMigrations).toHaveBeenLastCalledWith('conn-a', OWN_NODE_READ);
     });
 
     it('survives a read that throws and tries again later', async () => {

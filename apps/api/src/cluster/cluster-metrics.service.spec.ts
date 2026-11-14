@@ -669,7 +669,21 @@ used_cpu_user:20.3\r
             targetNodeId: 'fff789node3',
             targetAddress: '192.168.1.12:6379',
             message: 'Connection lost to target',
+            listedByNodeIds: expect.arrayContaining(['abc123node1', 'fff789node3']),
           },
+        ]);
+        expect(report.failed[0].listedByNodeIds).toHaveLength(2);
+      });
+
+      it('names only the node that lists a failed job', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        const failed = { ...running, state: 'failed', operation: 'IMPORT' };
+        nodeClients({ fff789node3: { jobs: [job(failed)] } });
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect(report.failed).toEqual([
+          expect.objectContaining({ jobName: 'job-1', listedByNodeIds: ['fff789node3'] }),
         ]);
       });
 
@@ -934,6 +948,7 @@ used_cpu_user:20.3\r
               targetAddress: '192.168.1.12:6379',
               state: 'migrating',
               phase: 'send-bulk-and-stream',
+              retries: 0,
               jobName: TASK_ID,
             },
           ]);
@@ -998,6 +1013,8 @@ used_cpu_user:20.3\r
               phase: 'failed',
               sourceNodeId: 'abc123node1',
               targetNodeId: 'fff789node3',
+              retries: 3,
+              lastError: failed.last_error,
             }),
           ]);
           expect(report.jobViews).toHaveLength(1);

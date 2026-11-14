@@ -168,6 +168,7 @@ import {
   SlotMigrationWatch,
   describeSlotMigration,
   judgeSlotMigrations,
+  isStuckFailingImport,
   withAdoptedSlotMigrations,
 } from './slot-migration-detector';
 import { GhostMember, detectGhostMembers, ghostMemberSignature } from './ghost-membership-detector';
@@ -235,7 +236,11 @@ import {
   isReplicaRole,
 } from '@app/database/parsers/replication-info.parser';
 import { ClusterDiscoveryService } from '@app/cluster/cluster-discovery.service';
-import { ClusterMetricsService, parseSlotMigrationJobs } from '@app/cluster/cluster-metrics.service';
+import {
+  ClusterMetricsService,
+  type SlotMigrationReport,
+  parseSlotMigrationJobs,
+} from '@app/cluster/cluster-metrics.service';
 import { withConfiguredZones, withShardMetadata } from '@app/cluster/shard-metadata';
 import {
   type DivergenceGroup,
@@ -6648,7 +6653,12 @@ export class AnomalyService
   private async readSlotMigrationState(connectionId: string): Promise<SlotMigrationState> {
     if (!this.clusterMetrics) return 'none';
     const check = await this.clusterMetrics.checkSlotMigrations(connectionId);
-    if (check.migrations.length > 0) return 'running';
+    const watch = this.slotMigrationWatch.get(connectionId);
+    const running = check.migrations.filter(
+      (migration) =>
+        migration.jobName === undefined || !isStuckFailingImport(watch, migration.jobName),
+    );
+    if (running.length > 0) return 'running';
     return check.complete ? 'none' : 'unknown';
   }
 
@@ -8761,7 +8771,7 @@ export class AnomalyService
         rememberNodesWithoutJobs: true,
       });
       if (this.slotMigrationCheckedAt.get(connectionId) !== timestamp) return;
-      if (!ownNodeOnly) this.noteSlotMigrationDial(connectionId, timestamp, report.ownNodeOnly);
+      if (!ownNodeOnly) this.noteSlotMigrationDial(connectionId, timestamp, report);
       const judged = judgeSlotMigrations(
         this.slotMigrationWatch.get(connectionId),
         report,
@@ -8809,9 +8819,13 @@ export class AnomalyService
     }
   }
 
-  private noteSlotMigrationDial(connectionId: string, timestamp: number, missed: boolean): void {
-    if (!missed) {
-      this.slotMigrationDialMissSince.delete(connectionId);
+  private noteSlotMigrationDial(
+    connectionId: string,
+    timestamp: number,
+    report: SlotMigrationReport,
+  ): void {
+    if (!report.ownNodeOnly) {
+      if (report.readNodeIds.length > 0) this.slotMigrationDialMissSince.delete(connectionId);
       return;
     }
     const since = this.slotMigrationDialMissSince.get(connectionId) ?? timestamp;

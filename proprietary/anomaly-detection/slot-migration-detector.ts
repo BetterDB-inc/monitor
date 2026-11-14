@@ -7,7 +7,9 @@ const MAX_REASON_LENGTH = 200;
 const SHORT_NODE_ID_LENGTH = 8;
 const SNAPSHOT_TAKING_PHASE = 'snapshotting';
 const TRACKING_PHASE = 'occurring-on-primary';
+const FAILED_PHASE = 'failed';
 const SOURCE_VIEW = 'migrating';
+const IMPORT_VIEW = 'importing';
 const TRACKING_VIEW = 'tracking';
 const JOB_MOVE = 'job:';
 const LEGACY_MOVE = 'legacy:';
@@ -26,12 +28,18 @@ export interface SlotMigrationFinding {
   phase?: string;
   quietMs?: number;
   reason?: string;
+  importFailing?: boolean;
+  jobName?: string;
+  retries?: number;
 }
 
 interface ViewMark {
   stamp: string;
   timed: boolean;
   backlog?: number;
+  retries?: number;
+  failed?: boolean;
+  lastError?: string;
 }
 
 type Views = Readonly<Record<string, ViewMark>>;
@@ -40,6 +48,7 @@ interface WatchedMove {
   views: Views;
   since: number;
   sourceSince?: number;
+  failingSince?: number;
   atomic: boolean;
   nodeIds: string[];
   stuckBefore: boolean;
@@ -126,11 +135,33 @@ function viewOf(migration: SlotMigration): string {
 }
 
 function markOf(migration: SlotMigration): ViewMark {
-  return {
+  const mark: ViewMark = {
     stamp: `${migration.phase ?? ''}|${migration.lastUpdateAt ?? ''}`,
     timed: migration.lastUpdateAt !== undefined && migration.phase !== SNAPSHOT_TAKING_PHASE,
     backlog: migration.remainingReplBytes,
   };
+  if (migration.retries === undefined) return mark;
+  return {
+    ...mark,
+    retries: migration.retries,
+    failed: migration.phase === FAILED_PHASE,
+    lastError: migration.lastError,
+  };
+}
+
+function importFailing(before: Views | undefined, now: Views): boolean | undefined {
+  const mark = now[IMPORT_VIEW];
+  if (mark?.retries === undefined) return undefined;
+  const known = before?.[IMPORT_VIEW]?.retries;
+  return mark.failed === true || (known !== undefined && mark.retries > known);
+}
+
+export function isStuckFailingImport(
+  watch: SlotMigrationWatch | undefined,
+  jobName: string,
+): boolean {
+  const move = watch?.moves.get(`${JOB_MOVE}${jobName}`);
+  return move?.failingSince !== undefined && move.stuckBefore;
 }
 
 function movesOf(report: SlotMigrationReport): Move[] {
@@ -252,27 +283,48 @@ export function judgeSlotMigrations(
     const sourceRead = move.views[SOURCE_VIEW] !== undefined;
     const sourceSince =
       (unchanged ? known?.sourceSince : undefined) ?? (sourceRead ? now : undefined);
+    const failing = importFailing(known?.views, move.views);
+    let failingSince = known?.failingSince;
+    if (failing === false) failingSince = undefined;
+    else if (failing) failingSince ??= now;
     const views = merged(known?.views ?? {}, move.views);
-    const quietMs = now - since;
+    const failingMs = failingSince === undefined ? undefined : now - failingSince;
+    const failedTooLong = failing === true && (failingMs ?? 0) >= ATOMIC_MIGRATION_STALL_MS;
+    const quietMs = failedTooLong ? (failingMs ?? 0) : now - since;
     const watchedMs = move.atomic ? now - (sourceSince ?? now) : quietMs;
     const stallMs = move.atomic ? ATOMIC_MIGRATION_STALL_MS : LEGACY_MIGRATION_STALL_MS;
-    const isStuck = watchedMs >= stallMs && isTimed(move.atomic, views, move.views);
+    const isStuck =
+      failedTooLong || (watchedMs >= stallMs && isTimed(move.atomic, views, move.views));
     const stuckSignature = `stuck:${move.id}`;
     const stuckBefore =
       isStuck ||
-      ((!known || unchanged) && (known?.stuckBefore === true || watch.adopted.has(stuckSignature)));
+      ((!known || unchanged || failingSince !== undefined) &&
+        (known?.stuckBefore === true || watch.adopted.has(stuckSignature)));
     listed.add(move.id);
     moves.set(move.id, {
       views,
       since,
       sourceSince,
+      failingSince,
       atomic: move.atomic,
       nodeIds: [move.sourceNodeId, move.targetNodeId].filter((nodeId) => nodeId !== ''),
       stuckBefore,
     });
     const { id, views: _views, ...shown } = move;
     running.push({ kind: 'running', signature: `running:${id}`, ...shown });
-    if (isStuck) {
+    if (failedTooLong) {
+      const mark = views[IMPORT_VIEW];
+      stuck.push({
+        kind: 'stuck',
+        signature: stuckSignature,
+        ...shown,
+        quietMs,
+        importFailing: true,
+        jobName: id.slice(JOB_MOVE.length),
+        retries: mark?.retries,
+        reason: mark?.lastError,
+      });
+    } else if (isStuck) {
       stuck.push({ kind: 'stuck', signature: stuckSignature, ...shown, quietMs });
     } else if (stuckBefore) {
       held.add(stuckSignature);
@@ -300,8 +352,7 @@ export function judgeSlotMigrations(
     knownFailed.add(job.jobName);
     if (watch.knownFailed.has(job.jobName)) continue;
     const wasRunning = watch.moves.has(`${JOB_MOVE}${job.jobName}`);
-    const wasWatched =
-      jobs.seenBefore.has(job.sourceNodeId) || jobs.seenBefore.has(job.targetNodeId);
+    const wasWatched = job.listedByNodeIds.some((nodeId) => jobs.seenBefore.has(nodeId));
     if (!wasRunning && !wasWatched) continue;
     failed.push({
       kind: 'failed',
@@ -361,6 +412,20 @@ export function describeSlotMigration(finding: SlotMigrationFinding): string {
     );
   }
   const quiet = minutes(finding.quietMs ?? 0);
+  if (finding.importFailing) {
+    const reason = oneLine(finding.reason ?? '');
+    const said = reason === '' ? 'The server gave no reason.' : `The server said: "${reason}".`;
+    const retried =
+      finding.retries === undefined
+        ? ''
+        : `, and its target has retried it ${finding.retries} time${finding.retries === 1 ? '' : 's'}`;
+    return (
+      `WARNING: Slot migration stuck: ${move} has kept failing for ${quiet}${retried}. ${said} ` +
+      `Check that ${target} can reach ${source} and log in to it, and that ${target} has the ` +
+      `memory and the good replicas the import needs. To stop it, run ` +
+      `CLUSTER MIGRATION CANCEL ID ${oneLine(finding.jobName ?? '')} on ${target}.`
+    );
+  }
   if (finding.atomic) {
     const state = finding.phase ? ` (state: ${oneLine(finding.phase)})` : '';
     return (

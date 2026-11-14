@@ -190,6 +190,8 @@ export interface SlotMigration {
   jobName?: string;
   lastUpdateAt?: number;
   remainingReplBytes?: number;
+  retries?: number;
+  lastError?: string;
 }
 
 export interface SlotMigrationCheck {
@@ -205,6 +207,7 @@ export interface FailedSlotMigration {
   targetNodeId: string;
   targetAddress: string;
   message: string;
+  listedByNodeIds: string[];
 }
 
 export interface SlotMigrationReport extends SlotMigrationCheck {
@@ -1045,7 +1048,10 @@ export class ClusterMetricsService {
         sourceNode: string | undefined,
         targetNode: string | undefined,
         isImport: boolean,
-        details: Pick<SlotMigration, 'phase' | 'lastUpdateAt' | 'remainingReplBytes'>,
+        details: Pick<
+          SlotMigration,
+          'phase' | 'lastUpdateAt' | 'remainingReplBytes' | 'retries' | 'lastError'
+        >,
       ) => {
         const source = findNode(sourceNode ?? '');
         const target = findNode(targetNode ?? '');
@@ -1104,7 +1110,12 @@ export class ClusterMetricsService {
             finishedJobs.add(task.id);
             continue;
           }
-          addJobView(task.id, task.slots, task.source, task.dest, isImport, { phase: task.state });
+          const retries = parseInt(task.retries ?? '', 10);
+          addJobView(task.id, task.slots, task.source, task.dest, isImport, {
+            phase: task.state,
+            ...(Number.isNaN(retries) ? {} : { retries }),
+            ...(task.last_error ? { lastError: task.last_error } : {}),
+          });
         }
         return;
       }
@@ -1115,9 +1126,15 @@ export class ClusterMetricsService {
         const isImport = job.operation?.toUpperCase() === 'IMPORT';
         if (FINISHED_MIGRATION_STATES.has(job.state)) {
           finishedJobs.add(job.name);
-          if (job.state !== 'failed' || (isImport && failedJobs.has(job.name))) continue;
+          if (job.state !== 'failed') continue;
         }
         if (job.state === 'failed') {
+          const known = failedJobs.get(job.name);
+          const listedByNodeIds = [...(known?.listedByNodeIds ?? []), primary.id];
+          if (known && isImport) {
+            failedJobs.set(job.name, { ...known, listedByNodeIds });
+            continue;
+          }
           const source = findNode(job.source_node ?? '');
           const target = findNode(job.target_node ?? '');
           failedJobs.set(job.name, {
@@ -1128,6 +1145,7 @@ export class ClusterMetricsService {
             targetNodeId: target?.id ?? job.target_node ?? '',
             targetAddress: target?.address ?? '',
             message: job.message ?? '',
+            listedByNodeIds,
           });
           continue;
         }

@@ -11,6 +11,7 @@ import {
   describeSlotMigration,
   judgeSlotMigrations,
   withAdoptedSlotMigrations,
+  isStuckFailingImport,
 } from '../slot-migration-detector';
 
 const T0 = 1_700_000_000_000;
@@ -57,6 +58,7 @@ function failedJob(overrides: Partial<FailedSlotMigration> = {}): FailedSlotMigr
     targetNodeId: B.id,
     targetAddress: B.address,
     message: 'Connection lost to target',
+    listedByNodeIds: [A.id],
     ...overrides,
   };
 }
@@ -208,6 +210,111 @@ describe('judgeSlotMigrations', () => {
       }
 
       expect(entries).toEqual(Array(4).fill(['running:job:job-1']));
+    });
+
+    describe('a Redis import its target keeps failing', () => {
+      const attempt = (phase: string, retries: number) => {
+        const target = job({
+          state: 'importing',
+          phase,
+          lastUpdateAt: undefined,
+          retries,
+          lastError: 'Connection refused',
+        });
+        return report({ migrations: [target], jobViews: [target] });
+      };
+      const retried = (
+        minutes: number,
+        phase = (i: number): string => (i % 2 === 0 ? 'failed' : 'connecting'),
+        retries = (i: number) => 60 * i,
+      ) =>
+        Array.from({ length: minutes + 1 }, (_, i): [number, SlotMigrationReport] => [
+          T0 + i * MINUTE,
+          attempt(phase(i), retries(i)),
+        ]);
+
+      it('is stuck once it has kept failing for 10 minutes', () => {
+        expect(run(retried(9)).stuck).toEqual([]);
+        expect(run(retried(10)).stuck).toEqual([
+          {
+            kind: 'stuck',
+            signature: 'stuck:job:job-1',
+            atomic: true,
+            slots: '0-100',
+            sourceNodeId: A.id,
+            sourceAddress: A.address,
+            targetNodeId: B.id,
+            targetAddress: B.address,
+            phase: 'failed',
+            quietMs: 10 * MINUTE,
+            importFailing: true,
+            jobName: 'job-1',
+            retries: 600,
+            reason: 'Connection refused',
+          },
+        ]);
+      });
+
+      it('is stuck when every read lands on a retry in progress', () => {
+        const reads = (minutes: number) => retried(minutes, () => 'connecting');
+
+        expect(run(reads(10)).stuck).toEqual([]);
+        expect(run(reads(11)).stuck).toHaveLength(1);
+      });
+
+      it('is stuck when its retry is held back and it stays failed', () => {
+        const stayFailed = () => 'failed';
+        const postponed = () => 3;
+
+        const judged = run(retried(10, stayFailed, postponed));
+
+        expect(judged.stuck).toEqual([expect.objectContaining({ retries: 3 })]);
+      });
+
+      it('is not stuck when a retry works and the import then streams', () => {
+        const streamsAfterOneRetry = (i: number) => (i === 0 ? 'failed' : 'streaming-buffer');
+        const once = () => 1;
+
+        const judged = run(retried(12, streamsAfterOneRetry, once));
+
+        expect(judged.stuck).toEqual([]);
+        expect(judged.held.size).toBe(0);
+      });
+
+      it('holds its warning while only its source is read', () => {
+        const source = job({ phase: 'send-bulk-and-stream', lastUpdateAt: undefined, retries: 0 });
+
+        const judged = run([
+          ...retried(10),
+          [
+            T0 + 11 * MINUTE,
+            report({
+              migrations: [source],
+              jobViews: [source],
+              readNodeIds: [A.id],
+              complete: false,
+            }),
+          ],
+        ]);
+
+        expect(judged.stuck).toEqual([]);
+        expect(judged.held).toEqual(new Set(['stuck:job:job-1']));
+        expect(isStuckFailingImport(judged.watch, 'job-1')).toBe(true);
+      });
+
+      it('lets its warning go once the import stops failing', () => {
+        const judged = run([...retried(10), [T0 + 11 * MINUTE, attempt('streaming-buffer', 600)]]);
+
+        expect(judged.stuck).toEqual([]);
+        expect(judged.held.size).toBe(0);
+        expect(isStuckFailingImport(judged.watch, 'job-1')).toBe(false);
+      });
+
+      it('no longer counts for the hot_shard hold once it is stuck', () => {
+        expect(isStuckFailingImport(run(retried(9)).watch, 'job-1')).toBe(false);
+        expect(isStuckFailingImport(run(retried(10)).watch, 'job-1')).toBe(true);
+        expect(isStuckFailingImport(undefined, 'job-1')).toBe(false);
+      });
     });
 
     it('measures the quiet time on the monitor clock, not against the server times', () => {
@@ -892,6 +999,24 @@ describe('judgeSlotMigrations', () => {
       expect(judged.failed).toEqual([]);
     });
 
+    it('is not reported when the node that lists it is read for the first time', () => {
+      const judged = run([
+        [T0, report({ readNodeIds: [B.id, C.id], complete: false })],
+        [T0 + MINUTE, report({ failed: [failedJob()] })],
+      ]);
+
+      expect(judged.failed).toEqual([]);
+    });
+
+    it('is reported when a node that lists it was read before', () => {
+      const judged = run([
+        [T0, report({ readNodeIds: [B.id, C.id], complete: false })],
+        [T0 + MINUTE, report({ failed: [failedJob({ listedByNodeIds: [A.id, B.id] })] })],
+      ]);
+
+      expect(judged.failed).toHaveLength(1);
+    });
+
     it('is still not repeated after a read that could not list it', () => {
       const judged = run([
         [T0, report()],
@@ -1052,6 +1177,42 @@ describe('describeSlotMigration', () => {
       'To stop it, run CLUSTER CANCELSLOTMIGRATIONS on 10.0.0.1:6379. ' +
         'That cancels every migration that node is the source of, not only this one.',
     );
+  });
+
+  it('says how long a Redis import has kept failing, what the server said and how to cancel it', () => {
+    const text = describeSlotMigration({
+      ...base,
+      kind: 'stuck',
+      signature: 's',
+      phase: 'failed',
+      quietMs: 12 * MINUTE,
+      importFailing: true,
+      jobName: 'abc123',
+      retries: 720,
+      reason: 'Connection refused (state: connecting, rdb_channel_state: none)',
+    });
+
+    expect(text).toBe(
+      'WARNING: Slot migration stuck: slots 0-100 from 10.0.0.1:6379 to 10.0.0.2:6379 has kept ' +
+        'failing for 12 minutes, and its target has retried it 720 times. The server said: ' +
+        '"Connection refused (state: connecting, rdb_channel_state: none)". Check that ' +
+        '10.0.0.2:6379 can reach 10.0.0.1:6379 and log in to it, and that 10.0.0.2:6379 has the ' +
+        'memory and the good replicas the import needs. To stop it, run ' +
+        'CLUSTER MIGRATION CANCEL ID abc123 on 10.0.0.2:6379.',
+    );
+  });
+
+  it('describes a failing Redis import without a retry count or a reason it was not given', () => {
+    const text = describeSlotMigration({
+      ...base,
+      kind: 'stuck',
+      signature: 's',
+      quietMs: 10 * MINUTE,
+      importFailing: true,
+      jobName: 'abc123',
+    });
+
+    expect(text).toContain('has kept failing for 10 minutes. The server gave no reason.');
   });
 
   it('describes stuck legacy markers without the atomic cancel command', () => {
