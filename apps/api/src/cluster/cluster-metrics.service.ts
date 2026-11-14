@@ -1098,12 +1098,12 @@ export class ClusterMetricsService {
         this.migrationJobsAskAgainAt.delete(withoutJobsKey);
         jobsReadNodeIds.add(primary.id);
         for (const task of tasks) {
-          if (!task.id || task.state === FAILED_REDIS_MIGRATION_STATE) continue;
+          const isImport = task.operation?.toLowerCase() === 'import';
+          if (!task.id || (task.state === FAILED_REDIS_MIGRATION_STATE && !isImport)) continue;
           if (FINISHED_REDIS_MIGRATION_STATES.has(task.state)) {
             finishedJobs.add(task.id);
             continue;
           }
-          const isImport = task.operation?.toLowerCase() === 'import';
           addJobView(task.id, task.slots, task.source, task.dest, isImport, { phase: task.state });
         }
         return;

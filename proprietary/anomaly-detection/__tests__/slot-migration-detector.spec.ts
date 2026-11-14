@@ -188,6 +188,28 @@ describe('judgeSlotMigrations', () => {
       expect(describeSlotMigration(judged.running[0])).not.toMatch(/SLOTMIGRATIONS/);
     });
 
+    it('keeps one running entry for a Redis import its target keeps retrying', () => {
+      const attempt = (phase: string) => {
+        const target = job({ state: 'importing', phase, lastUpdateAt: undefined });
+        return report({ migrations: [target], jobViews: [target] });
+      };
+      let watch: SlotMigrationWatch | undefined;
+      const entries: string[][] = [];
+
+      for (const [at, phase] of [
+        [T0, 'connecting'],
+        [T0 + MINUTE, 'failed'],
+        [T0 + 2 * MINUTE, 'connecting'],
+        [T0 + 3 * MINUTE, 'failed'],
+      ] as const) {
+        const judged = judgeSlotMigrations(watch, attempt(phase), at);
+        watch = judged.watch;
+        entries.push(judged.running.map((entry) => entry.signature));
+      }
+
+      expect(entries).toEqual(Array(4).fill(['running:job:job-1']));
+    });
+
     it('measures the quiet time on the monitor clock, not against the server times', () => {
       const skewed = job({ lastUpdateAt: T0 - 60 * MINUTE });
 

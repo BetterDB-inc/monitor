@@ -975,17 +975,44 @@ used_cpu_user:20.3\r
           },
         );
 
-        it('leaves out a failed task, which Redis retries or replaces', async () => {
-          mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
-          const failed = {
-            state: 'failed',
-            last_error:
-              'Main channel - Connection timeout (state: failed, rdb_channel_state: none)',
-            retries: 3,
-          };
+        const failed = {
+          state: 'failed',
+          last_error: 'Main channel - Connection timeout (state: failed, rdb_channel_state: none)',
+          retries: 3,
+        };
+
+        it('keeps a failed import as running, because its target retries it', async () => {
+          mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
           nodeClients({
             abc123node1: { jobsError: unknownJobs, tasks: [job({ ...migrate, ...failed })] },
             fff789node3: { jobsError: unknownJobs, tasks: [job({ ...importing, ...failed })] },
+          });
+
+          const report = await service.readSlotMigrations('conn-1');
+          const check = await service.checkSlotMigrations('conn-1');
+
+          expect(report.migrations).toEqual([
+            expect.objectContaining({
+              jobName: TASK_ID,
+              state: 'importing',
+              phase: 'failed',
+              sourceNodeId: 'abc123node1',
+              targetNodeId: 'fff789node3',
+            }),
+          ]);
+          expect(report.jobViews).toHaveLength(1);
+          expect(report.failed).toEqual([]);
+          expect(report.finishedJobs).toEqual([]);
+          expect(check).toEqual({
+            migrations: [expect.objectContaining({ jobName: TASK_ID })],
+            complete: true,
+          });
+        });
+
+        it('leaves out a failed task on its source, which keeps it until a new request', async () => {
+          mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+          nodeClients({
+            abc123node1: { jobsError: unknownJobs, tasks: [job({ ...migrate, ...failed })] },
           });
 
           const report = await service.readSlotMigrations('conn-1');
