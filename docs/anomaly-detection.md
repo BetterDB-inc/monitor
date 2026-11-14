@@ -705,7 +705,7 @@ The network rate of a hot shard (bytes in plus bytes out) is reported with it as
 
 The check needs three or more primaries that own slots, and Valkey 8.0+ with `cluster-slot-stats-enabled yes` on every node. It runs on the connection that reads the whole cluster, so a cluster whose nodes are registered one by one as separate connections is not checked. It is also off under the `vitals` export profile and with `METRICS_SLOT_STATS_TOP_N=0`, because the shard load is not measured then.
 
-Nothing is raised, and open events are kept as they are, while slots are moving: during a reshard, for two samples after a slot changes owner, and after a counter reset. `reshard_shard_skew` covers the reshard itself. A slot migration in flight, atomic or legacy, only delays a new event: the 60 seconds start over, and an open event can still resolve. An event that is resolved by hand is raised again only while its shard is at least 2 times the median, and a migration in flight delays that in the same way. The same holds when the monitor cannot ask every primary whether a slot is migrating. On Valkey 9.0+ that includes a monitoring user that may not run `CLUSTER GETSLOTMIGRATIONS`: no new event is raised until it is allowed (see [Minimum ACL](minimum-acl.md)). When no complete shard load sample arrives for 5 minutes, or `INFO` or `CLUSTER NODES` cannot be read for that long, open events are closed. That happens for example when one primary keeps failing. A connection that is disconnected is not polled at all, so its open events stay as they are until it is polled again.
+Nothing is raised, and open events are kept as they are, while slots are moving: during a reshard, for two samples after a slot changes owner, and after a counter reset. `reshard_shard_skew` covers the reshard itself. A slot migration in flight, atomic or legacy, only delays a new event: the 60 seconds start over, and an open event can still resolve. An event that is resolved by hand is raised again only while its shard is at least 2 times the median, and a migration in flight delays that in the same way. The same holds when the monitor cannot ask every primary whether a slot is migrating. A failed or suspect primary that owns no slots is not asked and does not count. On Valkey 9.0+ that includes a monitoring user that may not run `CLUSTER GETSLOTMIGRATIONS`: no new event is raised until it is allowed (see [Minimum ACL](minimum-acl.md)). When no complete shard load sample arrives for 5 minutes, or `INFO` or `CLUSTER NODES` cannot be read for that long, open events are closed. That happens for example when one primary keeps failing. A connection that is disconnected is not polled at all, so its open events stay as they are until it is polled again.
 
 **Hot keys**: when the hot primary runs an LFU `maxmemory-policy` (`allkeys-lfu` or `volatile-lfu`), the event also names the hottest keys of the shard. Right before a new event is raised, and at most every 5 minutes while it stays open, BetterDB asks the hot primary for the first 500 key names of each of the shard's top 3 slots (`CLUSTER GETKEYSINSLOT`) and reads the access frequency of each name (`OBJECT FREQ`). That is at most 3 commands plus 1,500 `OBJECT FREQ` calls in 7 round trips, with a 2 second limit for the whole read. It runs no `KEYS` and no `SCAN`, and reads no value. The 10 keys with the highest frequency are kept, and the first 3 go into the message:
 
@@ -738,6 +738,40 @@ In the last two cases the event is raised without key names, the detail has `key
   ```
 
   Then read `topKeys` from `GET /api/monitor/sessions/<session-id>/cross-reference?baseline=24h`.
+
+**Rebalance suggestion**: every open hot shard carries a suggestion, in the `rebalance` field of [`GET /api/anomaly/hot-shards`](#get-hot-shards) and in the `get_hot_shards` MCP tool. It is advice only. BetterDB moves no slot and sends nothing to the cluster for it beyond reads.
+
+The suggestion is one of two things:
+
+- A **plan**: slot ranges to move off the hot shard, the shard each range goes to, and the projected CPU of every shard before and after. It picks the ranges with the fewest keys that carry enough CPU, at most 8 ranges, and the coldest healthy shards as targets, an empty primary first and a shard in the hot shard's availability zone first on a tie. It uses as few targets as will do, at most 4. No target ends above 0.8 of a core or above 1.25 times the projected median: slots move whole, so the planner checks the load of the real ranges and takes slots back off a target that would end over the line. `effect` is `resolves` when the hot shard ends at or under 1.25 times the projected median, and `headroom` when the move only frees at least 25% of the shard's CPU.
+- **No plan**, with a `reason`, when moving slots will not help or should wait:
+
+  | `reason` | Meaning |
+  | --- | --- |
+  | `key_level` | One or a few slots carry the load: the slots that each take at least 20% of the shard's CPU add up to 0.8 of a core or more, or the rest of the slots carry under 25% of the shard's CPU. A slot cannot be split, so the fix is at the key: client-side caching, reads from replicas, or splitting the key. `pinnedSlots` lists them. |
+  | `cluster_hot` | All the other shards together cannot take even 25% of the shard's CPU without going over 0.8 of a core or over 1.25 times the projected median. Add a shard. |
+  | `too_many_targets` | The other shards have room, but not within 4 targets: the load would have to be spread over more shards than one suggestion covers. |
+  | `no_target` | No other healthy primary can take slots. |
+  | `unhealthy_node` | A primary that owns slots is failed or suspect. A failed or suspect primary with no slots, such as a node ID the cluster still lists until `CLUSTER FORGET`, does not block a plan and is never a target. |
+  | `migration_running` | A slot migration or reshard is running, or the monitor could not ask every primary before it made a new suggestion. |
+  | `settling` | Slots changed owner and the slot load is still being measured, or a shard in the last measurement is no longer a primary. |
+  | `slots_scattered` | The shard's slots are in too many small ranges to move enough load in 8 ranges. |
+  | `covered_by_other_plan` | The plan for another hot shard, once applied, leaves this shard at or under 1.25 times the median, so it gets no plan of its own. `coveredBy` lists those hot shards, each with `shardId` and `nodeAddr`: apply their plans first. |
+  | `conflicts_with_other_plan` | No plan for this hot shard fits next to the plans made before it: with all of them applied, a target or a hot shard that an earlier plan resolves would end over 1.25 times the median. It is also the answer when the loads those plans leave give this shard no plan, but the measured loads would. `conflictsWith` lists the hot shards whose plans are in the way, each with `shardId` and `nodeAddr`: apply their plans first, and this shard is planned again from the loads they leave. |
+
+  For `key_level` and `cluster_hot` the event message ends with the reason, for example `Rebalancing will not help: slot 9189 alone is 81% of this shard's CPU. Consider client-side caching, reads from replicas, or splitting key "session:global".` For `no_target`, `too_many_targets` and `slots_scattered` it ends with a short `No rebalance is suggested ...` sentence. The message is written once, when the event is raised, so `unhealthy_node`, `migration_running` and `settling`, which can pass while the event stays open, are never written into it. Neither are `covered_by_other_plan` and `conflicts_with_other_plan`, which change whenever the plan of another shard is made again or withdrawn. Read those from the API or the MCP tool.
+
+A slot that is at least 20% of the shard's CPU is never part of a plan: it would only move the problem. Neither is a slot that carries more CPU than any target has room for. `pinnedSlots` lists both kinds. The projection assumes that a slot's load moves with it one for one.
+
+When several shards are hot, their plans are made one after another, in the order the hot shards are listed, and each plan starts from the loads and the slot counts the plans before it leave, so an empty primary that an earlier plan fills counts in the median of the later ones. The `before` numbers of a later plan already count the slots an earlier plan moves, so two plans never fill the same room on a target twice. Such a plan names the earlier hot shards in `plannedAfter`; the list is empty for a plan that starts from the measured loads. A hot shard that is over 1.25 times the measured median, but at or under it once the earlier plans are counted, gets `covered_by_other_plan` and not `settling`.
+
+Each new plan is checked together with the plans before it: with all of them applied, no target and no hot shard that a plan resolves may end over 1.25 times the median of that final state. A later plan that fills another empty primary can fail that check, because the new slot owner pulls the median down under the earlier plans. That plan is then made again without the primaries that are still empty, and when that one fails the check too the shard gets `conflicts_with_other_plan`. Only what the new plan takes over the line counts: a kept plan that the load has since moved over the line on its own is not held against the plans made after it. `conflictsWith` names the earlier plans that move slots to a shard the new plan would take over the line, or that resolve a hot shard it would take over the line. When there is no such plan it names the ones that share a target with the new plan, and when there is none of those either, all of them.
+
+A later hot shard that gets no plan from the loads the earlier plans leave is planned once more from the measured loads alone. When that gives a plan, the answer is `conflicts_with_other_plan`. When it does not, the answer is the one from the measured loads, `key_level` for example, so a reason and its `pinnedSlots` never describe loads that exist only after plans that nobody has applied.
+
+A plan lists `warnings`, none of which block it: `source_fork` (the hot shard forks for the snapshot while it is the busiest node), `fewer_replicas` (the target has fewer replicas than the hot shard), `target_memory` (the keys moved, at the hot shard's average key size, would take the target past 80% of its `maxmemory`; `memoryShare` is the estimate) and `memory_unknown` (the target has no `maxmemory`, or `INFO` could not be read on it or on the hot shard). The estimate of a plan with `plannedAfter` also counts the keys those earlier plans bring to the same target, each at the average key size of its own hot shard, and is `memory_unknown` when one of those hot shards cannot be read.
+
+The suggestion is computed right before the event is raised and again every 5 minutes, or sooner when slots change owner, an empty primary joins or leaves, a shard that the plan moves slots to turns hot, or a primary that owns slots turns suspect, failed or healthy again. A shard that turns hot or stops being hot changes nothing else until the next 5 minutes are over, so one shard that goes over and under the line does not make every plan change with it. A `migration_running` or `settling` answer is not kept: it is computed again from every new measurement. A `covered_by_other_plan` or `conflicts_with_other_plan` answer is kept like a plan; it is computed again whenever a plan it names is, and it is withdrawn with that plan when a migration is found. A plan with `plannedAfter` is likewise computed again whenever a plan it names is, in the same call and in the order the hot shards are listed, so two kept plans never count each other as applied. A plan is withdrawn at once, without waiting for a new measurement, when a primary that owns slots turns failed or suspect or a measured shard stops being a primary. While a plan is kept, and whenever the suggestion is computed, a new measurement asks every primary whether a slot is migrating, unless a primary is failed or suspect (the answer is then `unhealthy_node` without asking). A kept plan is withdrawn as soon as a migration is found. When a primary does not answer and none of the others reports a migration, kept answers stay as they are, also past the 5 minutes, and are computed again once every primary has answered; a hot shard with no kept answer gets `migration_running` until then. A kept answer with no plan, `key_level` for example, stays as it is until it is computed again, and no primary is asked in between. For new plans it then reads the `memory` and `keyspace` sections of `INFO`, once on each hot shard and each target, after the hot key read has finished.
 
 Before you start one:
 
@@ -1177,6 +1211,8 @@ The open [`hot_shard`](#hot_shard) events of one cluster connection, with the nu
 
 `cpu` gives the shard's CPU rate per second, its share of the cluster, the cluster median and the ratio the rule used. `network` gives the same for bytes in plus bytes out, without a ratio: it is detail only, and it includes replication, counted once per replica. `topSlots` (up to 5) are ranked by CPU. `topKeys` (up to 10, full names) are ranked by `freq`, the LFU counter of the key (0 to 255). `keySource` is `lfu` when the keys were read and `unavailable` when they were not, with the reason in `keyNote`. `keysSampledAt` is the time of the read the names come from and `keysSampled` the number of keys whose frequency it got. When a later read gave no names, the names of the earlier read stay and `keyNote` says so. `eventId` is the id of the open event. `captureAvailable` is `true` when the key names are missing and a [capture on the hot primary](#hot_shard) can show them.
 
+`rebalance` is the [rebalance suggestion](#hot_shard): `kind` is `plan` or `no_plan`. A plan has `moves` (each with `targetShardId`, `targetAddr`, inclusive slot `ranges`, and the slots, keys and CPU it moves), `projection` (every shard's CPU, share and ratio to the median `before` and `after`, with its `role`), `medianBefore`, `medianAfter`, `pinnedSlots`, `warnings` and `plannedAfter` (the IDs of the hot shards whose plans its numbers count as applied; empty when it starts from the measured loads). A `no_plan` has a `reason` and `pinnedSlots`, `coveredBy` when the reason is `covered_by_other_plan` and `conflictsWith` when it is `conflicts_with_other_plan`. The field is missing for a moment after a restart, until the suggestion is computed again.
+
 **Response**:
 ```json
 [
@@ -1205,7 +1241,40 @@ The open [`hot_shard`](#hot_shard) events of one cluster connection, with the nu
     ],
     "keySource": "lfu",
     "keysSampled": 1012,
-    "keysSampledAt": 1704067200000
+    "keysSampledAt": 1704067200000,
+    "rebalance": {
+      "kind": "plan",
+      "action": "spread",
+      "effect": "resolves",
+      "sourceShardId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d",
+      "moves": [
+        {
+          "targetShardId": "9c4e1b7a2d5f8036a1c3e5f7092b4d6f8a0c2e4b",
+          "targetAddr": "10.0.0.3:6379",
+          "ranges": [[2000, 2410]],
+          "slotCount": 411,
+          "keyCount": 48210,
+          "cpuUsecPerSecond": 262000,
+          "shareOfShard": 0.28
+        }
+      ],
+      "pinnedSlots": [{ "slot": 1234, "shareOfShard": 0.62 }],
+      "projection": [
+        {
+          "shardId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d",
+          "nodeAddr": "10.0.0.1:6379",
+          "role": "source",
+          "before": { "cpuUsecPerSecond": 930000, "share": 0.61, "ratio": 3.1 },
+          "after": { "cpuUsecPerSecond": 668000, "share": 0.44, "ratio": 1.19 }
+        }
+      ],
+      "medianBefore": 300000,
+      "medianAfter": 562000,
+      "warnings": [
+        { "code": "source_fork", "shardId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d" }
+      ],
+      "plannedAfter": []
+    }
   }
 ]
 ```

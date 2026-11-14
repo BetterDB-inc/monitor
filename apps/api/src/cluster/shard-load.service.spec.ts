@@ -17,6 +17,7 @@ describe('ShardLoadService', () => {
 
     expect(service.getLatest('conn-a')).toBeNull();
     expect(service.getTopSlots('conn-a', 'n1', 5)).toEqual([]);
+    expect(service.getSlots('conn-a', 'n1')).toEqual([]);
   });
 
   it('keeps the latest sample of each connection apart', () => {
@@ -30,6 +31,10 @@ describe('ShardLoadService', () => {
     expect(service.getLatest('conn-a')).toBe(sample);
     expect(service.getLatest('conn-b')).toBeNull();
     expect(service.getTopSlots('conn-a', 'n1', 5)).toEqual([expect.objectContaining({ slot: 0 })]);
+    expect(service.getSlots('conn-a', 'n1')).toEqual([
+      expect.objectContaining({ slot: 0, cpuUsecPerSecond: 500 }),
+    ]);
+    expect(service.getSlots('conn-b', 'n1')).toEqual([]);
   });
 
   it('keeps the last sample across a reading that adds nothing', () => {

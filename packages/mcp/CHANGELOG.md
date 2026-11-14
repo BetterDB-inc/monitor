@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `get_cluster_nodes` returns `availabilityZone` and `shardId` for each node
   on Valkey 9.1 and later. On older versions `availabilityZone` is returned
   for nodes listed in the connection's zone map.
+- `get_hot_shards`: the hot shards open on a cluster, each with its top
+  slots, hot keys and a suggested slot rebalance (which slot ranges to move
+  to which shards, and the projected load), or the reason no move is
+  suggested. Read-only; nothing is moved.
 
 ### Changed
 

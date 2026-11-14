@@ -967,6 +967,58 @@ used_cpu_user:20.3\r
         await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: true });
       });
 
+      it.each(['noaddr', 'fail?', 'handshake'])(
+        'neither asks nor waits for a primary with no slots that is flagged %s',
+        async (flag) => {
+          mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+            primaries[0],
+            primaries[1],
+            { ...primaries[2], flags: ['master', flag], state: 'suspect' },
+          ]);
+          nodeClients({});
+          const dial = mockDiscoveryService.getNodeConnection.getMockImplementation()!;
+          mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => {
+            if (nodeId === 'fff789node3') throw new Error('ECONNREFUSED');
+            return dial(nodeId);
+          });
+
+          await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: true });
+          expect(mockDiscoveryService.getNodeConnection).not.toHaveBeenCalledWith(
+            'fff789node3',
+            undefined,
+          );
+        },
+      );
+
+      it('still asks a healthy primary that owns no slots, and is incomplete when it cannot be dialed', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({});
+        const dial = mockDiscoveryService.getNodeConnection.getMockImplementation()!;
+        mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => {
+          if (nodeId === 'fff789node3') throw new Error('ECONNREFUSED');
+          return dial(nodeId);
+        });
+
+        await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: false });
+        expect(mockDiscoveryService.getNodeConnection).toHaveBeenCalledWith('fff789node3', undefined);
+      });
+
+      it('is incomplete when a suspect primary that owns slots cannot be dialed', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+          primaries[0],
+          { ...primaries[1], flags: ['master', 'noaddr'], state: 'suspect' },
+          primaries[2],
+        ]);
+        nodeClients({});
+        const dial = mockDiscoveryService.getNodeConnection.getMockImplementation()!;
+        mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => {
+          if (nodeId === 'def456node2') throw new Error('ECONNREFUSED');
+          return dial(nodeId);
+        });
+
+        await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: false });
+      });
+
       it("is incomplete when no primary can be dialed and only the connection's own node answers", async () => {
         mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
         mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));

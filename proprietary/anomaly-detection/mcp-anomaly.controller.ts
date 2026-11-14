@@ -82,6 +82,16 @@ export class McpAnomalyController {
     }
   }
 
+  @Get('instance/:id/anomalies/hot-shards')
+  getHotShards(@Param('id', ValidateInstanceIdPipe) id: string) {
+    try {
+      this.registry.get(id);
+      return this.anomalyService.getHotShards(id);
+    } catch (error) {
+      throw mapMcpError(this.logger, error, 'Failed to get hot shards');
+    }
+  }
+
   @Get('instance/:id/history/replication-divergence')
   async getReplicationDivergence(
     @Param('id', ValidateInstanceIdPipe) id: string,
