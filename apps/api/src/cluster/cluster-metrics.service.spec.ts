@@ -12,6 +12,8 @@ describe('ClusterMetricsService', () => {
     evictNodeClient: jest.Mock;
     forgetTopology: jest.Mock;
     onIsolatedClient: jest.Mock;
+    onOwnNodeClient: jest.Mock;
+    releaseOwnNodeClient: jest.Mock;
   };
   let mockConnectionRegistry: {
     get: jest.Mock;
@@ -123,6 +125,8 @@ used_cpu_user:20.3\r
       evictNodeClient: jest.fn(),
       forgetTopology: jest.fn(),
       onIsolatedClient: jest.fn(),
+      onOwnNodeClient: jest.fn(),
+      releaseOwnNodeClient: jest.fn(),
     };
 
     mockConnectionRegistry = {
@@ -489,12 +493,13 @@ used_cpu_user:20.3\r
 
     function ownNodeClient(call: (...args: any[]) => Promise<unknown>) {
       const client = { status: 'ready', call: jest.fn(call), disconnect: jest.fn() };
-      mockDiscoveryService.onIsolatedClient.mockImplementation(
+      mockDiscoveryService.onOwnNodeClient.mockImplementation(
         async (_id: string, _timeoutMs: number, run: (own: typeof client) => Promise<unknown>) => {
           try {
             return await run(client);
-          } finally {
+          } catch (error) {
             client.disconnect();
+            throw error;
           }
         },
       );
@@ -736,6 +741,16 @@ used_cpu_user:20.3\r
         expect(report.migrations).toEqual([
           expect.objectContaining({ sourceNodeId: 'abc123node1', targetNodeId: 'fff789node3' }),
         ]);
+      });
+
+      it("closes the connection's kept own-node socket once a read reaches a primary", async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({});
+
+        await service.readSlotMigrations('conn-1');
+
+        expect(mockDiscoveryService.releaseOwnNodeClient).toHaveBeenCalledWith('conn-1');
+        expect(mockDiscoveryService.onOwnNodeClient).not.toHaveBeenCalled();
       });
 
       it('says that it read the primaries when it did', async () => {
@@ -1049,7 +1064,8 @@ used_cpu_user:20.3\r
 
         expect(check.complete).toBe(false);
         expect(check.migrations).toEqual([expect.objectContaining({ slot: 5461 })]);
-        expect(own.disconnect).toHaveBeenCalledTimes(1);
+        expect(own.disconnect).not.toHaveBeenCalled();
+        expect(mockDiscoveryService.releaseOwnNodeClient).not.toHaveBeenCalled();
       });
 
       it("is incomplete when no primary can be dialed and the connection's own node does not answer", async () => {
@@ -1082,7 +1098,7 @@ used_cpu_user:20.3\r
 
         await service.checkSlotMigrations('conn-1');
 
-        expect(mockDiscoveryService.onIsolatedClient).toHaveBeenCalledWith(
+        expect(mockDiscoveryService.onOwnNodeClient).toHaveBeenCalledWith(
           'conn-1',
           5_000,
           expect.any(Function),
@@ -1161,7 +1177,7 @@ used_cpu_user:20.3\r
       expect(migrations).toEqual([
         expect.objectContaining({ slot: 5461, sourceNodeId: 'abc123node1', targetNodeId: 'def456node2', state: 'migrating' }),
       ]);
-      expect(mockDiscoveryService.onIsolatedClient).toHaveBeenCalledWith(
+      expect(mockDiscoveryService.onOwnNodeClient).toHaveBeenCalledWith(
         'conn-1',
         5_000,
         expect.any(Function),

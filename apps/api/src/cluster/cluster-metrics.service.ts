@@ -1116,7 +1116,7 @@ export class ClusterMetricsService {
       // (GETSLOTMIGRATIONS) show up as well as legacy markers.
       const self = nodes.find((node) => node.flags.includes('myself')) ?? primaries[0];
       try {
-        await this.discoveryService.onIsolatedClient(
+        await this.discoveryService.onOwnNodeClient(
           connectionId,
           NODE_COMMAND_TIMEOUT_MS,
           (client) =>
@@ -1133,6 +1133,7 @@ export class ClusterMetricsService {
       }
     } else {
       this.loggedErrors.delete(`slotmigrations-${connectionId ?? ''}`);
+      this.discoveryService.releaseOwnNodeClient(connectionId);
     }
 
     return {

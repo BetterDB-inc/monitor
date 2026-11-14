@@ -40,6 +40,18 @@ export interface NodeHealth {
   error?: string;
 }
 
+interface OwnNodeClient {
+  shared: Valkey;
+  host: string | undefined;
+  port: number | undefined;
+  username: string | undefined;
+  password: string | undefined;
+  tls: Valkey['options']['tls'];
+  client: Valkey;
+  ready: Promise<void>;
+  connected: boolean;
+}
+
 // Per-connection discovery cache
 interface DiscoveryCache {
   nodes: DiscoveredNode[];
@@ -53,6 +65,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   // Per-connection discovery cache to prevent cross-connection cache contamination
   private discoveryCacheByConnection: Map<string, DiscoveryCache> = new Map();
   private discoveryInFlight: Map<string, Promise<DiscoveredNode[]>> = new Map();
+  private ownNodeClients: Map<string, OwnNodeClient> = new Map();
   private loggedConnectionErrors: Set<string> = new Set();
   private loggedGetConnectionErrors: Set<string> = new Set();
   private readonly MAX_LOGGED_ERRORS = 1000; // Prevent unbounded growth
@@ -148,6 +161,86 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     } finally {
       client.disconnect();
     }
+  }
+
+  async onOwnNodeClient<T>(
+    connectionId: string | undefined,
+    timeoutMs: number,
+    run: (client: Valkey) => Promise<T>,
+  ): Promise<T> {
+    const key = this.ownNodeKey(connectionId);
+    const shared = this.connectionRegistry.get(connectionId).getClient();
+    const { host, port, username, password, tls } = shared.options;
+    const kept = this.ownNodeClients.get(key);
+    const reusable =
+      kept !== undefined &&
+      kept.shared === shared &&
+      kept.host === host &&
+      kept.port === port &&
+      kept.username === username &&
+      kept.password === password &&
+      kept.tls === tls &&
+      (!kept.connected || kept.client.status === 'ready');
+    if (kept && !reusable) this.dropOwnNodeClient(key, kept);
+    const own = reusable ? kept : this.openOwnNodeClient(key, shared, timeoutMs);
+    try {
+      await own.ready;
+      return await run(own.client);
+    } catch (error) {
+      this.dropOwnNodeClient(key, own);
+      throw error;
+    }
+  }
+
+  releaseOwnNodeClient(connectionId: string | undefined): void {
+    const key = this.ownNodeKey(connectionId);
+    const kept = this.ownNodeClients.get(key);
+    if (kept) this.dropOwnNodeClient(key, kept);
+  }
+
+  private ownNodeKey(connectionId: string | undefined): string {
+    return connectionId || this.connectionRegistry.getDefaultId() || 'default';
+  }
+
+  private openOwnNodeClient(key: string, shared: Valkey, timeoutMs: number): OwnNodeClient {
+    const { host, port, username, password, tls } = shared.options;
+    const client = new Valkey({
+      host,
+      port,
+      username,
+      password,
+      tls,
+      lazyConnect: true,
+      enableOfflineQueue: false,
+      maxRetriesPerRequest: 0,
+      retryStrategy: () => null,
+      enableReadyCheck: false,
+      connectTimeout: timeoutMs,
+      commandTimeout: timeoutMs,
+      connectionName: 'BetterDB-Monitor-Own-Node',
+    });
+    client.on('error', () => undefined);
+    const own: OwnNodeClient = {
+      shared,
+      host,
+      port,
+      username,
+      password,
+      tls,
+      client,
+      ready: Promise.resolve(),
+      connected: false,
+    };
+    own.ready = client.connect().then(() => {
+      own.connected = true;
+    });
+    this.ownNodeClients.set(key, own);
+    return own;
+  }
+
+  private dropOwnNodeClient(key: string, own: OwnNodeClient): void {
+    if (this.ownNodeClients.get(key) === own) this.ownNodeClients.delete(key);
+    own.client.disconnect();
   }
 
   forgetTopology(connectionId?: string): void {
@@ -599,6 +692,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     for (const [key] of owned) this.discoveredNodes.delete(key);
     this.discoveryCacheByConnection.delete(connectionId);
     this.discoveryInFlight.delete(connectionId);
+    this.releaseOwnNodeClient(connectionId);
     await Promise.allSettled(owned.map(([, connection]) => this.closeNodeClient(connection.client)));
   }
 
@@ -632,6 +726,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     );
     this.discoveredNodes.clear();
     this.discoveryCacheByConnection.clear();
+    for (const [key, own] of [...this.ownNodeClients]) this.dropOwnNodeClient(key, own);
     this.logger.log('All node connections closed');
   }
 

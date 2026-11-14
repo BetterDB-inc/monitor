@@ -1097,6 +1097,152 @@ describe('ClusterDiscoveryService', () => {
     });
   });
 
+  describe('onOwnNodeClient', () => {
+    let shared: { options: Record<string, unknown>; call: jest.Mock };
+
+    function keptClient() {
+      const client = {
+        status: 'wait',
+        connect: jest.fn(async () => {
+          client.status = 'ready';
+        }),
+        call: jest.fn().mockResolvedValue('OK'),
+        disconnect: jest.fn(() => {
+          client.status = 'end';
+        }),
+        on: jest.fn(),
+      };
+      jest.mocked(Valkey).mockImplementationOnce(() => client as never);
+      return client;
+    }
+
+    const read = () =>
+      service.onOwnNodeClient('test-connection', 5_000, (own) =>
+        own.call('CLUSTER', 'GETSLOTMIGRATIONS'),
+      );
+
+    beforeEach(() => {
+      jest.mocked(Valkey).mockClear();
+      shared = {
+        options: { host: 'seed.example', port: 7001, username: 'u', password: 'p' },
+        call: jest.fn(),
+      };
+      mockDbClient.getClient.mockImplementation(() => shared);
+    });
+
+    it('keeps one socket of its own across reads, with bounded dial and commands', async () => {
+      const client = keptClient();
+
+      await expect(read()).resolves.toBe('OK');
+      await expect(read()).resolves.toBe('OK');
+
+      expect(jest.mocked(Valkey)).toHaveBeenCalledTimes(1);
+      expect(jest.mocked(Valkey)).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          host: 'seed.example',
+          port: 7001,
+          username: 'u',
+          password: 'p',
+          connectTimeout: 5_000,
+          commandTimeout: 5_000,
+          enableOfflineQueue: false,
+          maxRetriesPerRequest: 0,
+        }),
+      );
+      expect(client.connect).toHaveBeenCalledTimes(1);
+      expect(client.call).toHaveBeenCalledTimes(2);
+      expect(client.disconnect).not.toHaveBeenCalled();
+      expect(shared.call).not.toHaveBeenCalled();
+    });
+
+    it('takes the TLS options of the connection as they are', async () => {
+      const tls = { servername: 'seed.example', ca: 'ca' };
+      shared.options.tls = tls;
+      keptClient();
+
+      await read();
+
+      expect(jest.mocked(Valkey)).toHaveBeenLastCalledWith(expect.objectContaining({ tls }));
+    });
+
+    it('drops the socket when the work gives up and dials a new one on the next read', async () => {
+      const first = keptClient();
+      await expect(
+        service.onOwnNodeClient('test-connection', 5_000, () =>
+          Promise.reject(new Error('deadline')),
+        ),
+      ).rejects.toThrow('deadline');
+      const second = keptClient();
+
+      await read();
+
+      expect(first.disconnect).toHaveBeenCalledTimes(1);
+      expect(second.call).toHaveBeenCalledTimes(1);
+      expect(jest.mocked(Valkey)).toHaveBeenCalledTimes(2);
+    });
+
+    it('drops a socket that cannot be dialed, without running the work', async () => {
+      const first = keptClient();
+      first.connect.mockRejectedValueOnce(new Error('connect ETIMEDOUT'));
+      const work = jest.fn();
+
+      await expect(service.onOwnNodeClient('test-connection', 5_000, work)).rejects.toThrow(
+        'connect ETIMEDOUT',
+      );
+      const second = keptClient();
+      await read();
+
+      expect(work).not.toHaveBeenCalled();
+      expect(first.disconnect).toHaveBeenCalledTimes(1);
+      expect(second.connect).toHaveBeenCalledTimes(1);
+    });
+
+    it('dials a new socket once the kept one has closed', async () => {
+      const first = keptClient();
+      await read();
+      first.status = 'end';
+      const second = keptClient();
+
+      await read();
+
+      expect(first.disconnect).toHaveBeenCalledTimes(1);
+      expect(second.call).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ['the connection was reconnected', () => (shared = { ...shared })],
+      ['its TLS material was reloaded', () => (shared.options.tls = { ca: 'new' })],
+      ['its password changed', () => (shared.options.password = 'q')],
+      ['its port changed', () => (shared.options.port = 7002)],
+    ])('dials a new socket when %s', async (_, change) => {
+      const first = keptClient();
+      await read();
+      change();
+      const second = keptClient();
+
+      await read();
+
+      expect(first.disconnect).toHaveBeenCalledTimes(1);
+      expect(second.call).toHaveBeenCalledTimes(1);
+    });
+
+    it('closes the kept socket when released, when the connection goes and on shutdown', async () => {
+      const released = keptClient();
+      await read();
+      service.releaseOwnNodeClient('test-connection');
+      const removed = keptClient();
+      await read();
+      await service.releaseConnection('test-connection');
+      const shutDown = keptClient();
+      await read();
+      await service.disconnectAll();
+
+      expect(released.disconnect).toHaveBeenCalledTimes(1);
+      expect(removed.disconnect).toHaveBeenCalledTimes(1);
+      expect(shutDown.disconnect).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('healthCheckAll', () => {
     it("records the result on the checked client, not another connection's", async () => {
       const nodes = await service.discoverNodes();
