@@ -115,12 +115,16 @@ import {
   type RebalanceShard,
   type RebalanceVerdict,
   type ShardMemory,
+  type ShardServer,
   describeNoPlan,
   memoryWarnings,
   noRebalancePlan,
   planRebalances,
   shardMemoryFromInfo,
+  shardServerFromInfo,
+  withCommands,
 } from './rebalance-planner';
+import { isManagedProviderBuild, isManagedProviderHost } from '@app/monitor/provider-detector';
 import {
   BACKLOG_COVERAGE_CRITICAL_SEC,
   BACKLOG_COVERAGE_WARNING_SEC,
@@ -6765,8 +6769,8 @@ export class AnomalyService
         }
       } else {
         const earlier = [...kept.values()].map((last) => last.verdict);
-        const verdicts = await this.withMemoryWarnings(
-          connectionId,
+        const verdicts = await this.withShardFacts(
+          ctx,
           planRebalances(
             due.map(({ shardId }) => ({ hotShardId: shardId, slots: slots.get(shardId) ?? [] })),
             shards,
@@ -6783,8 +6787,8 @@ export class AnomalyService
     else this.hotShardRebalance.delete(connectionId);
   }
 
-  private async withMemoryWarnings(
-    connectionId: string,
+  private async withShardFacts(
+    ctx: ConnectionContext,
     verdicts: RebalanceVerdict[],
     earlier: readonly RebalanceVerdict[],
   ): Promise<RebalanceVerdict[]> {
@@ -6812,43 +6816,52 @@ export class AnomalyService
       ),
     ];
     const readings = await Promise.all(
-      shardIds.map((shardId) => this.readShardMemory(connectionId, shardId)),
+      shardIds.map((shardId) => this.readShardInfo(ctx.connectionId, shardId)),
     );
     const memory = new Map<string, ShardMemory>();
-    for (const [index, reading] of readings.entries()) {
+    const servers = new Map<string, ShardServer>();
+    for (const [index, info] of readings.entries()) {
+      const reading = info && shardMemoryFromInfo(info);
+      const server = info && shardServerFromInfo(info);
       if (reading) memory.set(shardIds[index], reading);
+      if (server) servers.set(shardIds[index], server);
     }
+    const providerManaged =
+      isManagedProviderHost(ctx.host) ||
+      readings.some((info) => isManagedProviderBuild(info?.server));
     return verdicts.map((verdict) =>
       verdict.kind === 'plan'
-        ? {
-            ...verdict,
-            warnings: [
-              ...verdict.warnings,
-              ...memoryWarnings(verdict, memory, countedBy.get(verdict) ?? []),
-            ],
-          }
+        ? withCommands(
+            {
+              ...verdict,
+              warnings: [
+                ...verdict.warnings,
+                ...memoryWarnings(verdict, memory, countedBy.get(verdict) ?? []),
+              ],
+            },
+            servers,
+            providerManaged,
+          )
         : verdict,
     );
   }
 
-  private async readShardMemory(
+  private async readShardInfo(
     connectionId: string,
     shardId: string,
-  ): Promise<ShardMemory | undefined> {
+  ): Promise<Record<string, Record<string, string> | undefined> | undefined> {
     if (!this.clusterDiscovery || !this.dialsDataNodes(connectionId)) return undefined;
     try {
       const raw = await this.readShard(
         connectionId,
         shardId,
-        'reading the memory of the shard timed out',
-        (client) => client.info('memory', 'keyspace'),
+        'reading INFO on the shard timed out',
+        (client) => client.info('memory', 'keyspace', 'server'),
       );
-      return shardMemoryFromInfo(
-        InfoParser.parse(raw) as Record<string, Record<string, string> | undefined>,
-      );
+      return InfoParser.parse(raw) as Record<string, Record<string, string> | undefined>;
     } catch (err) {
       this.logger.debug(
-        `Memory read failed for shard ${shardId}: ${err instanceof Error ? err.message : err}`,
+        `INFO read failed for shard ${shardId}: ${err instanceof Error ? err.message : err}`,
       );
       return undefined;
     }

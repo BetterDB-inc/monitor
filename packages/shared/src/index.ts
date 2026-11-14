@@ -13,6 +13,7 @@ export * from './types/version.types';
 export * from './types/agent-protocol';
 export * from './utils/key-patterns';
 export * from './utils/key-sizes';
+export * from './utils/key-display';
 export * from './utils/url-credentials';
 export * from './utils/glob';
 export * from './utils/incident-link';

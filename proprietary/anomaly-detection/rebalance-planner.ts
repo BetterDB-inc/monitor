@@ -99,6 +99,23 @@ export interface RebalanceWarning {
   memoryShare?: number;
 }
 
+export type RebalanceSupport =
+  | 'valkey_atomic'
+  | 'redis_atomic'
+  | 'none'
+  | 'provider_managed'
+  | 'unknown';
+
+export interface ShardServer {
+  dbType: 'valkey' | 'redis';
+  version: string;
+}
+
+export interface RebalanceCommand {
+  nodeAddr: string;
+  text: string;
+}
+
 export interface ShardMemory {
   usedBytes: number;
   maxBytes: number;
@@ -117,6 +134,8 @@ export interface RebalancePlan {
   medianAfter: number;
   warnings: RebalanceWarning[];
   plannedAfter: string[];
+  support?: RebalanceSupport;
+  commands?: RebalanceCommand[];
 }
 
 export interface RebalanceNoPlan {
@@ -806,6 +825,75 @@ export function memoryWarnings(
       ? [{ code: 'target_memory', shardId: move.targetShardId, memoryShare }]
       : [];
   });
+}
+
+export function shardServerFromInfo(
+  info: Record<string, Record<string, string> | undefined>,
+): ShardServer | undefined {
+  const server = info.server;
+  if (server?.valkey_version) return { dbType: 'valkey', version: server.valkey_version };
+  if (server?.redis_version) return { dbType: 'redis', version: server.redis_version };
+  return undefined;
+}
+
+const ATOMIC_MIGRATION_SINCE: Record<ShardServer['dbType'], [number, number]> = {
+  valkey: [9, 0],
+  redis: [8, 4],
+};
+
+function atomicMigration(server: ShardServer): boolean | undefined {
+  const [major, minor] = server.version.split('.').map(Number);
+  if (!Number.isInteger(major) || !Number.isInteger(minor)) return undefined;
+  const [sinceMajor, sinceMinor] = ATOMIC_MIGRATION_SINCE[server.dbType];
+  return major > sinceMajor || (major === sinceMajor && minor >= sinceMinor);
+}
+
+function supportOf(
+  servers: ReadonlyArray<ShardServer | undefined>,
+  providerManaged: boolean,
+): RebalanceSupport {
+  if (providerManaged) return 'provider_managed';
+  const atomic = servers.map((server) => server && atomicMigration(server));
+  if (atomic.some((known) => known === undefined)) return 'unknown';
+  const dbType = servers[0]?.dbType;
+  if (atomic.some((able) => !able) || servers.some((server) => server?.dbType !== dbType)) {
+    return 'none';
+  }
+  return dbType === 'valkey' ? 'valkey_atomic' : 'redis_atomic';
+}
+
+const rangeArgs = (ranges: ReadonlyArray<[number, number]>) =>
+  ranges.map(([start, end]) => `${start} ${end}`).join(' ');
+
+function commandsOf(plan: RebalancePlan, support: RebalanceSupport): RebalanceCommand[] {
+  if (support === 'valkey_atomic') {
+    const source = plan.projection.find((row) => row.role === 'source');
+    if (!source) return [];
+    const blocks = plan.moves.map(
+      (move) => `SLOTSRANGE ${rangeArgs(move.ranges)} NODE ${move.targetShardId}`,
+    );
+    return [{ nodeAddr: source.nodeAddr, text: `CLUSTER MIGRATESLOTS ${blocks.join(' ')}` }];
+  }
+  if (support === 'redis_atomic') {
+    return plan.moves.map((move) => ({
+      nodeAddr: move.targetAddr,
+      text: `CLUSTER MIGRATION IMPORT ${rangeArgs(move.ranges)}`,
+    }));
+  }
+  return [];
+}
+
+export function withCommands(
+  plan: RebalancePlan,
+  serverByShard: ReadonlyMap<string, ShardServer>,
+  providerManaged: boolean,
+): RebalancePlan {
+  const shardIds = [plan.sourceShardId, ...plan.moves.map((move) => move.targetShardId)];
+  const support = supportOf(
+    shardIds.map((shardId) => serverByShard.get(shardId)),
+    providerManaged,
+  );
+  return { ...plan, support, commands: commandsOf(plan, support) };
 }
 
 function listed(values: readonly (number | string)[]): string {

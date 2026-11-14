@@ -3951,7 +3951,7 @@ describe('AnomalyService', () => {
           `# Keyspace\r\ndb0:keys=${keys},expires=0,avg_ttl=0\r\n`;
         const warnings = () => (rebalance() as { warnings: unknown[] }).warnings;
         const memoryReads = (client: { info: jest.Mock }) =>
-          client.info.mock.calls.filter((args) => args.join() === 'memory,keyspace').length;
+          client.info.mock.calls.filter((args) => args.join() === 'memory,keyspace,server').length;
 
         function dialMemory(replies: Record<string, string | Error | Promise<string>>) {
           const clients = Object.fromEntries(
@@ -4182,6 +4182,125 @@ describe('AnomalyService', () => {
           await step(HOT, 6);
 
           expect(warnings()).toContainEqual({ code: 'memory_unknown', shardId: 'b0000000' });
+        });
+
+        describe('command', () => {
+          const server = (version: string) => `# Server\r\n${version}\r\n`;
+          const VALKEY_9 = server('redis_version:7.2.4\r\nvalkey_version:9.0.1');
+          const plan = () => rebalance() as { support: string; commands: unknown[] };
+
+          it('gives the command to run when every shard of the plan is Valkey 9', async () => {
+            spreadLoad();
+            dialMemory({
+              a0000000: VALKEY_9 + info(4 * GB, 8 * GB, 200),
+              b0000000: VALKEY_9 + info(GB, 8 * GB, 50),
+            });
+
+            await step(HOT, 6);
+
+            expect(plan()).toMatchObject({
+              support: 'valkey_atomic',
+              commands: [
+                {
+                  nodeAddr: '10.0.0.1:6379',
+                  text: 'CLUSTER MIGRATESLOTS SLOTSRANGE 100 107 NODE b0000000',
+                },
+              ],
+            });
+          });
+
+          it('gives no command when the target runs a version without one', async () => {
+            spreadLoad();
+            dialMemory({
+              a0000000: VALKEY_9 + info(4 * GB, 8 * GB, 200),
+              b0000000: server('redis_version:7.2.4\r\nvalkey_version:8.1.4') + info(GB, 8 * GB, 50),
+            });
+
+            await step(HOT, 6);
+
+            expect(plan()).toMatchObject({ support: 'none', commands: [] });
+          });
+
+          it('says the version is unknown when a shard of the plan cannot be read', async () => {
+            spreadLoad();
+            dialMemory({ a0000000: VALKEY_9 + info(4 * GB, 8 * GB, 200) });
+
+            await step(HOT, 6);
+
+            expect(plan()).toMatchObject({ support: 'unknown', commands: [] });
+          });
+
+          it('gives no command on a managed service', async () => {
+            spreadLoad();
+            ctx.host = 'my-cluster.abc123.clustercfg.use1.cache.amazonaws.com';
+            dialMemory({
+              a0000000: VALKEY_9 + info(4 * GB, 8 * GB, 200),
+              b0000000: VALKEY_9 + info(GB, 8 * GB, 50),
+            });
+
+            await step(HOT, 6);
+
+            expect(plan()).toMatchObject({ support: 'provider_managed', commands: [] });
+          });
+
+          it.each([
+            ['the hot shard', 'a0000000'],
+            ['a target', 'b0000000'],
+          ])(
+            'gives no command when %s reports a Redis Software build on its own host name',
+            async (_, reporting) => {
+              spreadLoad();
+              const reported = (shardId: string) =>
+                server(
+                  shardId === reporting
+                    ? 'redis_version:8.4.0\r\nredis_build_id:RedisLabs-5f0e1b2c3d4a'
+                    : 'redis_version:8.4.0\r\nredis_build_id:5f0e1b2c3d4a',
+                );
+              dialMemory({
+                a0000000: reported('a0000000') + info(4 * GB, 8 * GB, 200),
+                b0000000: reported('b0000000') + info(GB, 8 * GB, 50),
+              });
+
+              await step(HOT, 6);
+
+              expect(plan()).toMatchObject({ support: 'provider_managed', commands: [] });
+            },
+          );
+
+          it.each(['Amazon Linux 2023', 'Amazon ElastiCache'])(
+            'keeps the command when the host is not a managed one and the shards report %s',
+            async (os) => {
+              spreadLoad();
+              const reported = server(`redis_version:7.2.4\r\nvalkey_version:9.0.1\r\nos:${os}`);
+              dialMemory({
+                a0000000: reported + info(4 * GB, 8 * GB, 200),
+                b0000000: reported + info(GB, 8 * GB, 50),
+              });
+
+              await step(HOT, 6);
+
+              expect(plan()).toMatchObject({ support: 'valkey_atomic', commands: [{}] });
+            },
+          );
+
+          it('keeps the command when the MONITOR provider override names a managed service', async () => {
+            const original = process.env.MONITOR_PROVIDER_OVERRIDE;
+            process.env.MONITOR_PROVIDER_OVERRIDE = 'elasticache';
+            try {
+              spreadLoad();
+              dialMemory({
+                a0000000: VALKEY_9 + info(4 * GB, 8 * GB, 200),
+                b0000000: VALKEY_9 + info(GB, 8 * GB, 50),
+              });
+
+              await step(HOT, 6);
+
+              expect(plan()).toMatchObject({ support: 'valkey_atomic', commands: [{}] });
+            } finally {
+              if (original === undefined) delete process.env.MONITOR_PROVIDER_OVERRIDE;
+              else process.env.MONITOR_PROVIDER_OVERRIDE = original;
+            }
+          });
         });
 
         it('gives up on a target that does not answer and drops its client', async () => {
