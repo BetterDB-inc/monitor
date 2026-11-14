@@ -282,13 +282,13 @@ describe('CaptureTriggerRegistry', () => {
         if (connectionId === 'removed') throw new Error('Connection not found');
         return { allow: true, signals: {}, thresholds: {} };
       });
-      const timestamp = Date.now() + 1;
       await registry.createTrigger({ connectionId: 'removed', metricType: METRIC, anomalyType: ANOMALY });
       await registry.createTrigger({
         connectionId: CONNECTION_ID,
         metricType: METRIC,
         anomalyType: ANOMALY,
       });
+      const timestamp = Date.now() + 1;
       await storage.saveAnomalyEvent(makeAnomaly({ timestamp }), 'removed');
       await storage.saveAnomalyEvent(makeAnomaly({ timestamp: timestamp + 1 }), CONNECTION_ID);
 
