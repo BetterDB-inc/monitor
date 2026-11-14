@@ -720,6 +720,24 @@ used_cpu_user:20.3\r
         expect(report.jobViews.map((view) => view.state).sort()).toEqual(['importing', 'migrating']);
       });
 
+      it.each([
+        ['first', [primaries[1], primaries[2], primaries[0]]],
+        ['last', [primaries[2], primaries[1], primaries[0]]],
+      ])('names both nodes of a job when a node that only follows it is read %s', async (_, order) => {
+        const { source_node: _source, target_node: _target, ...ends } = running;
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(order);
+        nodeClients({
+          def456node2: { jobs: [job({ ...ends, operation: 'IMPORT', state: 'occurring-on-primary' })] },
+          fff789node3: { jobs: [job({ ...running, operation: 'IMPORT', state: 'waiting-for-paused' })] },
+        });
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect(report.migrations).toEqual([
+          expect.objectContaining({ sourceNodeId: 'abc123node1', targetNodeId: 'fff789node3' }),
+        ]);
+      });
+
       it('says that it read the primaries when it did', async () => {
         mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
         nodeClients({});

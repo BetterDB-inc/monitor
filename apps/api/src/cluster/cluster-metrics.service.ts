@@ -222,6 +222,10 @@ const MIGRATION_JOBS_ASK_AGAIN_MS = 5 * 60_000;
 const MAX_REMEMBERED_NODES_WITHOUT_MIGRATION_JOBS = 1000;
 const FULL_NODE_ID_LENGTH = 40;
 
+function namesBothEnds(migration: SlotMigration): boolean {
+  return migration.sourceNodeId !== '' && migration.targetNodeId !== '';
+}
+
 function byteCount(value: string | undefined): number | undefined {
   const bytes = Number(value);
   return value !== undefined && value !== '' && Number.isSafeInteger(bytes) && bytes >= 0
@@ -1066,7 +1070,10 @@ export class ClusterMetricsService {
           remainingReplBytes: byteCount(job.remaining_repl_size),
         };
         jobViews.push(view);
-        if (!(isImport && atomicJobs.has(job.name))) atomicJobs.set(job.name, view);
+        const known = atomicJobs.get(job.name);
+        if (!known || (namesBothEnds(view) && (!isImport || !namesBothEnds(known)))) {
+          atomicJobs.set(job.name, view);
+        }
       }
     };
 

@@ -439,16 +439,38 @@ describe('judgeSlotMigrations', () => {
         expect([...judged.held]).toEqual(['stuck:job:job-1']);
       });
 
-      it('is judged on its two ends once they are read again', () => {
-        const judged = run([
+      it('is judged on its two ends once its source has been watched for 10 minutes', () => {
+        const early = run([
           [T0, ownReplica],
           [T0 + MINUTE, both],
           [T0 + ATOMIC_MIGRATION_STALL_MS, both],
         ]);
-
-        expect(judged.stuck).toEqual([
-          expect.objectContaining({ quietMs: ATOMIC_MIGRATION_STALL_MS }),
+        const judged = run([
+          [T0, ownReplica],
+          [T0 + MINUTE, both],
+          [T0 + MINUTE + ATOMIC_MIGRATION_STALL_MS, both],
         ]);
+
+        expect(early.stuck).toEqual([]);
+        expect(judged.stuck).toEqual([
+          expect.objectContaining({ quietMs: MINUTE + ATOMIC_MIGRATION_STALL_MS }),
+        ]);
+      });
+
+      it('is not judged stuck on the first read of its two ends after the replica alone', () => {
+        const draining = (remainingReplBytes: number) => {
+          const exportedNow = job({ phase: 'waiting-to-pause', remainingReplBytes });
+          return report({ migrations: [exportedNow], jobViews: [exportedNow, imported] });
+        };
+
+        const judged = run([
+          [T0, ownReplica],
+          [T0 + 5 * MINUTE, ownReplica],
+          [T0 + 10 * MINUTE, ownReplica],
+          [T0 + 12 * MINUTE, draining(9_000)],
+        ]);
+
+        expect(judged.stuck).toEqual([]);
       });
     });
   });
@@ -483,13 +505,57 @@ describe('judgeSlotMigrations', () => {
       ]);
     });
 
-    it('is stuck when an end it reads for the first time reports nothing new', () => {
+    it('watches its source for 10 minutes from the first read that hears from it', () => {
+      const early = run([
+        [T0, targetOnly],
+        [T0 + ATOMIC_MIGRATION_STALL_MS, both],
+      ]);
       const judged = run([
         [T0, targetOnly],
+        [T0 + ATOMIC_MIGRATION_STALL_MS, both],
+        [T0 + 2 * ATOMIC_MIGRATION_STALL_MS, both],
+      ]);
+
+      expect(early.stuck).toEqual([]);
+      expect(judged.stuck).toEqual([
+        expect.objectContaining({ quietMs: 2 * ATOMIC_MIGRATION_STALL_MS }),
+      ]);
+    });
+
+    it('is not judged stuck on the first read of its source after the target alone', () => {
+      const draining = job({ phase: 'waiting-to-pause', remainingReplBytes: 9_000 });
+
+      const judged = run([
+        [T0, targetOnly],
+        [T0 + 5 * MINUTE, targetOnly],
+        [T0 + 10 * MINUTE, targetOnly],
+        [T0 + 12 * MINUTE, report({ migrations: [draining], jobViews: [draining, imported] })],
+      ]);
+
+      expect(judged.stuck).toEqual([]);
+    });
+
+    it('may be stuck at once when its source is read again unchanged after a gap', () => {
+      const judged = run([
+        [T0, both],
+        [T0 + 3 * MINUTE, targetOnly],
         [T0 + ATOMIC_MIGRATION_STALL_MS, both],
       ]);
 
       expect(judged.stuck).toHaveLength(1);
+    });
+
+    it('keeps a stuck warning from before a restart when its source is first read', () => {
+      const judged = run(
+        [
+          [T0, targetOnly],
+          [T0 + MINUTE, both],
+        ],
+        withAdoptedSlotMigrations(undefined, ['stuck:job:job-1']),
+      );
+
+      expect(judged.stuck).toEqual([]);
+      expect([...judged.held]).toEqual(['stuck:job:job-1']);
     });
 
     it('moves on when one end reports a change while the other cannot be read', () => {

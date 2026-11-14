@@ -39,6 +39,7 @@ type Views = Readonly<Record<string, ViewMark>>;
 interface WatchedMove {
   views: Views;
   since: number;
+  sourceSince?: number;
   atomic: boolean;
   nodeIds: string[];
   stuckBefore: boolean;
@@ -248,10 +249,14 @@ export function judgeSlotMigrations(
     const known = watch.moves.get(move.id);
     const unchanged = known !== undefined && !progressed(known.views, move.views);
     const since = known && unchanged ? known.since : now;
+    const sourceRead = move.views[SOURCE_VIEW] !== undefined;
+    const sourceSince =
+      (unchanged ? known?.sourceSince : undefined) ?? (sourceRead ? now : undefined);
     const views = merged(known?.views ?? {}, move.views);
     const quietMs = now - since;
+    const watchedMs = move.atomic ? now - (sourceSince ?? now) : quietMs;
     const stallMs = move.atomic ? ATOMIC_MIGRATION_STALL_MS : LEGACY_MIGRATION_STALL_MS;
-    const isStuck = quietMs >= stallMs && isTimed(move.atomic, views, move.views);
+    const isStuck = watchedMs >= stallMs && isTimed(move.atomic, views, move.views);
     const stuckSignature = `stuck:${move.id}`;
     const stuckBefore =
       isStuck ||
@@ -260,6 +265,7 @@ export function judgeSlotMigrations(
     moves.set(move.id, {
       views,
       since,
+      sourceSince,
       atomic: move.atomic,
       nodeIds: [move.sourceNodeId, move.targetNodeId].filter((nodeId) => nodeId !== ''),
       stuckBefore,
