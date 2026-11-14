@@ -6,8 +6,9 @@ export const LEGACY_MIGRATION_STALL_MS = 30 * 60_000;
 const MAX_REASON_LENGTH = 200;
 const SHORT_NODE_ID_LENGTH = 8;
 const SNAPSHOT_TAKING_PHASE = 'snapshotting';
-const SNAPSHOT_AWAITING_PHASE = 'receiving-snapshot';
+const TRACKING_PHASE = 'occurring-on-primary';
 const SOURCE_VIEW = 'migrating';
+const TRACKING_VIEW = 'tracking';
 const JOB_MOVE = 'job:';
 const LEGACY_MOVE = 'legacy:';
 
@@ -30,7 +31,6 @@ export interface SlotMigrationFinding {
 interface ViewMark {
   stamp: string;
   timed: boolean;
-  awaitsSource?: boolean;
   backlog?: number;
 }
 
@@ -116,15 +116,18 @@ function endpoints(migration: SlotMigration) {
   };
 }
 
+function viewOf(migration: SlotMigration): string {
+  const tracking =
+    migration.phase === TRACKING_PHASE ||
+    migration.sourceNodeId === '' ||
+    migration.targetNodeId === '';
+  return tracking ? TRACKING_VIEW : migration.state;
+}
+
 function markOf(migration: SlotMigration): ViewMark {
-  const awaitsSource = migration.phase === SNAPSHOT_AWAITING_PHASE;
   return {
     stamp: `${migration.phase ?? ''}|${migration.lastUpdateAt ?? ''}`,
-    timed:
-      migration.lastUpdateAt !== undefined &&
-      migration.phase !== SNAPSHOT_TAKING_PHASE &&
-      !awaitsSource,
-    awaitsSource,
+    timed: migration.lastUpdateAt !== undefined && migration.phase !== SNAPSHOT_TAKING_PHASE,
     backlog: migration.remainingReplBytes,
   };
 }
@@ -133,7 +136,7 @@ function movesOf(report: SlotMigrationReport): Move[] {
   const views = new Map<string, Record<string, ViewMark>>();
   for (const view of report.jobViews) {
     if (view.jobName === undefined) continue;
-    views.set(view.jobName, { ...views.get(view.jobName), [view.state]: markOf(view) });
+    views.set(view.jobName, { ...views.get(view.jobName), [viewOf(view)]: markOf(view) });
   }
   const moves: Move[] = [];
   const legacy = new Map<string, { first: SlotMigration; slots: number[] }>();
@@ -143,7 +146,7 @@ function movesOf(report: SlotMigrationReport): Move[] {
         id: `${JOB_MOVE}${migration.jobName}`,
         atomic: true,
         slots: migration.slotRange ?? `${migration.slot}`,
-        views: views.get(migration.jobName) ?? { [migration.state]: markOf(migration) },
+        views: views.get(migration.jobName) ?? { [viewOf(migration)]: markOf(migration) },
         phase: migration.phase,
         ...endpoints(migration),
       });
@@ -178,9 +181,9 @@ function progressed(before: Views, now: Views): boolean {
   });
 }
 
-function isTimed(views: Views, now: Views): boolean {
-  const sourceRead = now[SOURCE_VIEW] !== undefined;
-  return Object.values(views).every((view) => view.timed || (sourceRead && view.awaitsSource));
+function isTimed(atomic: boolean, views: Views, now: Views): boolean {
+  if (atomic && now[SOURCE_VIEW] === undefined) return false;
+  return Object.entries(views).every(([view, mark]) => view === TRACKING_VIEW || mark.timed);
 }
 
 function merged(before: Views, now: Views): Views {
@@ -248,7 +251,7 @@ export function judgeSlotMigrations(
     const views = merged(known?.views ?? {}, move.views);
     const quietMs = now - since;
     const stallMs = move.atomic ? ATOMIC_MIGRATION_STALL_MS : LEGACY_MIGRATION_STALL_MS;
-    const isStuck = quietMs >= stallMs && isTimed(views, move.views);
+    const isStuck = quietMs >= stallMs && isTimed(move.atomic, views, move.views);
     const stuckSignature = `stuck:${move.id}`;
     const stuckBefore =
       isStuck ||
@@ -339,10 +342,9 @@ export function describeSlotMigration(finding: SlotMigrationFinding): string {
   const target = nodeLabel(finding.targetAddress, finding.targetNodeId);
   const noun = /[-\s]/.test(finding.slots) ? 'slots' : 'slot';
   const move = `${noun} ${finding.slots} from ${source} to ${target}`;
-  const state = finding.phase ? ` (state: ${oneLine(finding.phase)})` : '';
 
   if (finding.kind === 'running') {
-    return `INFO: Slot migration running: ${move}${state}. This entry closes when the migration ends.`;
+    return `INFO: Slot migration running: ${move}. This entry closes when the migration ends.`;
   }
   if (finding.kind === 'failed') {
     const reason = oneLine(finding.reason ?? '');
@@ -354,6 +356,7 @@ export function describeSlotMigration(finding: SlotMigrationFinding): string {
   }
   const quiet = minutes(finding.quietMs ?? 0);
   if (finding.atomic) {
+    const state = finding.phase ? ` (state: ${oneLine(finding.phase)})` : '';
     return (
       `WARNING: Slot migration stuck: ${move} has not changed state or cut its replication ` +
       `backlog for ${quiet}${state}. Check for a save or AOF rewrite running on ${source}, ` +

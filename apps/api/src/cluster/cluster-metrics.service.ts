@@ -189,7 +189,6 @@ export interface SlotMigration {
   phase?: string;
   jobName?: string;
   lastUpdateAt?: number;
-  lastAckAt?: number;
   remainingReplBytes?: number;
 }
 
@@ -1064,7 +1063,6 @@ export class ClusterMetricsService {
           phase: job.state,
           jobName: job.name,
           lastUpdateAt: epochSecondsToMs(job.last_update_time),
-          lastAckAt: epochSecondsToMs(job.last_ack_time),
           remainingReplBytes: byteCount(job.remaining_repl_size),
         };
         jobViews.push(view);

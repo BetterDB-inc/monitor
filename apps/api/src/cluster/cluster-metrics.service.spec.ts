@@ -605,23 +605,22 @@ used_cpu_user:20.3\r
           expect.objectContaining({
             jobName: 'job-1',
             lastUpdateAt: 1_700_000_060_000,
-            lastAckAt: 1_700_000_090_000,
             remainingReplBytes: 4096,
             phase: 'snapshotting',
           }),
         ]);
+        expect(report.migrations[0]).not.toHaveProperty('lastAckAt');
         expect(report.failed).toEqual([]);
       });
 
       it('leaves out a time the server did not send', async () => {
         mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
-        const { last_ack_time: _ack, remaining_repl_size: _backlog, ...withoutAck } = running;
-        nodeClients({ abc123node1: { jobs: [job({ ...withoutAck, last_update_time: 'soon' })] } });
+        const { remaining_repl_size: _backlog, ...withoutBacklog } = running;
+        nodeClients({ abc123node1: { jobs: [job({ ...withoutBacklog, last_update_time: 'soon' })] } });
 
         const [migration] = (await service.readSlotMigrations('conn-1')).migrations;
 
         expect(migration.lastUpdateAt).toBeUndefined();
-        expect(migration.lastAckAt).toBeUndefined();
         expect(migration.remainingReplBytes).toBeUndefined();
       });
 

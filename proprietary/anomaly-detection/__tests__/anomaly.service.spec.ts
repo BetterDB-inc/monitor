@@ -4271,7 +4271,6 @@ describe('AnomalyService', () => {
       phase: 'waiting-to-snapshot',
       jobName: 'job-1',
       lastUpdateAt: BASE,
-      lastAckAt: BASE,
       ...overrides,
     });
 

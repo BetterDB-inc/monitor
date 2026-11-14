@@ -32,7 +32,6 @@ function job(overrides: Partial<SlotMigration> = {}): SlotMigration {
     phase: 'waiting-to-snapshot',
     jobName: 'job-1',
     lastUpdateAt: T0,
-    lastAckAt: T0,
     ...overrides,
   };
 }
@@ -145,21 +144,6 @@ describe('judgeSlotMigrations', () => {
       expect(after.running).toHaveLength(1);
     });
 
-    it('is stuck although its heartbeat keeps arriving', () => {
-      const judged = run([
-        [T0, report({ migrations: [job()] })],
-        [T0 + 5 * MINUTE, report({ migrations: [job({ lastAckAt: T0 + 5 * MINUTE })] })],
-        [
-          T0 + ATOMIC_MIGRATION_STALL_MS,
-          report({ migrations: [job({ lastAckAt: T0 + 10 * MINUTE })] }),
-        ],
-      ]);
-
-      expect(judged.stuck).toEqual([
-        expect.objectContaining({ quietMs: ATOMIC_MIGRATION_STALL_MS }),
-      ]);
-    });
-
     it.each([
       ['a status update', { lastUpdateAt: T0 + 9 * MINUTE }],
       ['a new state', { phase: 'replicating' }],
@@ -185,19 +169,8 @@ describe('judgeSlotMigrations', () => {
       expect(judged.stuck).toEqual([]);
     });
 
-    it('is still judged when the server sends no heartbeat time', () => {
-      const updateOnly = job({ lastAckAt: undefined });
-
-      const judged = run([
-        [T0, report({ migrations: [updateOnly] })],
-        [T0 + ATOMIC_MIGRATION_STALL_MS, report({ migrations: [updateOnly] })],
-      ]);
-
-      expect(judged.stuck).toHaveLength(1);
-    });
-
     it('measures the quiet time on the monitor clock, not against the server times', () => {
-      const skewed = job({ lastUpdateAt: T0 - 60 * MINUTE, lastAckAt: T0 - 60 * MINUTE });
+      const skewed = job({ lastUpdateAt: T0 - 60 * MINUTE });
 
       const judged = run([
         [T0, report({ migrations: [skewed] })],
@@ -398,15 +371,85 @@ describe('judgeSlotMigrations', () => {
       expect(judged.watch.moves.size).toBe(0);
     });
 
-    it('is judged from its target again in the states that carry a heartbeat', () => {
-      const importing = job({ state: 'importing', phase: 'waiting-for-paused' });
+    it('is not judged stuck from its target alone while its source drains the backlog', () => {
+      const draining = job({ phase: 'waiting-to-pause', remainingReplBytes: 9_000 });
+      const waiting = job({
+        state: 'importing',
+        phase: 'waiting-for-paused',
+        remainingReplBytes: 0,
+      });
+      const targetOnly = report({
+        migrations: [waiting],
+        jobViews: [waiting],
+        jobsReadNodeIds: [B.id, C.id],
+        complete: false,
+      });
 
       const judged = run([
-        [T0, report({ migrations: [importing] })],
-        [T0 + ATOMIC_MIGRATION_STALL_MS, report({ migrations: [importing] })],
+        [T0, report({ migrations: [draining], jobViews: [draining, waiting] })],
+        [T0 + 5 * MINUTE, targetOnly],
+        [T0 + ATOMIC_MIGRATION_STALL_MS, targetOnly],
       ]);
 
-      expect(judged.stuck).toHaveLength(1);
+      expect(judged.running).toHaveLength(1);
+      expect(judged.stuck).toEqual([]);
+    });
+
+    describe('that a replica only tracks', () => {
+      const tracked = job({
+        state: 'importing',
+        phase: 'occurring-on-primary',
+        sourceNodeId: '',
+        sourceAddress: '',
+        targetNodeId: '',
+        targetAddress: '',
+        remainingReplBytes: 0,
+      });
+      const ownReplica = report({
+        migrations: [tracked],
+        jobViews: [tracked],
+        readNodeIds: [C.id],
+        jobsReadNodeIds: [C.id],
+        complete: false,
+        ownNodeOnly: true,
+      });
+      const exported = job({ phase: 'waiting-to-pause' });
+      const imported = job({ state: 'importing', phase: 'waiting-for-paused' });
+      const both = report({ migrations: [exported], jobViews: [exported, imported] });
+
+      it('is never judged stuck', () => {
+        const judged = run([
+          [T0, ownReplica],
+          [T0 + 5 * MINUTE, ownReplica],
+          [T0 + 2 * ATOMIC_MIGRATION_STALL_MS, ownReplica],
+        ]);
+
+        expect(judged.running).toHaveLength(1);
+        expect(judged.stuck).toEqual([]);
+      });
+
+      it('holds a stuck warning while only the replica is read', () => {
+        const judged = run([
+          [T0, both],
+          [T0 + ATOMIC_MIGRATION_STALL_MS, both],
+          [T0 + ATOMIC_MIGRATION_STALL_MS + 5_000, ownReplica],
+        ]);
+
+        expect(judged.stuck).toEqual([]);
+        expect([...judged.held]).toEqual(['stuck:job:job-1']);
+      });
+
+      it('is judged on its two ends once they are read again', () => {
+        const judged = run([
+          [T0, ownReplica],
+          [T0 + MINUTE, both],
+          [T0 + ATOMIC_MIGRATION_STALL_MS, both],
+        ]);
+
+        expect(judged.stuck).toEqual([
+          expect.objectContaining({ quietMs: ATOMIC_MIGRATION_STALL_MS }),
+        ]);
+      });
     });
   });
 
@@ -416,7 +459,6 @@ describe('judgeSlotMigrations', () => {
       state: 'importing',
       phase: 'waiting-for-paused',
       lastUpdateAt: T0 - MINUTE,
-      lastAckAt: T0 - MINUTE,
     });
     const both = report({ migrations: [exported], jobViews: [exported, imported] });
     const sourceOnly = report({ migrations: [exported], jobViews: [exported] });
@@ -469,7 +511,8 @@ describe('judgeSlotMigrations', () => {
         [T0 + ATOMIC_MIGRATION_STALL_MS + 5_000, targetOnly],
       ]);
 
-      expect(judged.stuck).toEqual([expect.objectContaining({ signature: 'stuck:job:job-1' })]);
+      expect(judged.stuck).toEqual([]);
+      expect([...judged.held]).toEqual(['stuck:job:job-1']);
     });
   });
 
@@ -865,7 +908,7 @@ describe('describeSlotMigration', () => {
     targetAddress: B.address,
   };
 
-  it('says a migration is running and that the entry closes by itself', () => {
+  it('says a migration is running and that the entry closes by itself, without a state that goes stale', () => {
     const text = describeSlotMigration({
       ...base,
       kind: 'running',
@@ -874,7 +917,7 @@ describe('describeSlotMigration', () => {
     });
 
     expect(text).toBe(
-      'INFO: Slot migration running: slots 0-100 from 10.0.0.1:6379 to 10.0.0.2:6379 (state: snapshotting). This entry closes when the migration ends.',
+      'INFO: Slot migration running: slots 0-100 from 10.0.0.1:6379 to 10.0.0.2:6379. This entry closes when the migration ends.',
     );
   });
 
