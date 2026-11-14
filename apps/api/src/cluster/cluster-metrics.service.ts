@@ -218,12 +218,29 @@ export interface SlotMigrationReport extends SlotMigrationCheck {
 }
 
 const FINISHED_MIGRATION_STATES = new Set(['success', 'failed', 'cancelled']);
+const FINISHED_REDIS_MIGRATION_STATES = new Set(['completed', 'canceled']);
+const FAILED_REDIS_MIGRATION_STATE = 'failed';
 const MIGRATION_JOBS_ASK_AGAIN_MS = 5 * 60_000;
 const MAX_REMEMBERED_NODES_WITHOUT_MIGRATION_JOBS = 1000;
 const FULL_NODE_ID_LENGTH = 40;
 
 function namesBothEnds(migration: SlotMigration): boolean {
   return migration.sourceNodeId !== '' && migration.targetNodeId !== '';
+}
+
+function isUnknownCommand(message: string): boolean {
+  return /unknown (sub)?command/i.test(message);
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export function parseRedisMigrationTasks(raw: unknown): Record<string, string>[] {
+  if (!Array.isArray(raw)) {
+    throw new Error('CLUSTER MIGRATION STATUS did not reply with a list of tasks');
+  }
+  return parseSlotMigrationJobs(raw);
 }
 
 function byteCount(value: string | undefined): number | undefined {
@@ -887,8 +904,8 @@ export class ClusterMetricsService {
   /**
    * Slot migrations in progress, asked of every primary: legacy MIGRATING /
    * IMPORTING markers only appear on a node's own CLUSTER NODES line, and atomic
-   * slot migration jobs (Valkey 9+, CLUSTER MIGRATESLOTS) only show up in
-   * CLUSTER GETSLOTMIGRATIONS on the source and target nodes.
+   * slot migration jobs only show up on the source and target nodes, in
+   * CLUSTER GETSLOTMIGRATIONS (Valkey 9+) or CLUSTER MIGRATION STATUS (Redis 8.4+).
    */
   async getSlotMigrations(connectionId?: string): Promise<SlotMigration[]> {
     return (await this.checkSlotMigrations(connectionId)).migrations;
@@ -1009,26 +1026,85 @@ export class ClusterMetricsService {
         jobsReadNodeIds.add(primary.id);
         return;
       }
+      const warnOnce = (command: string, message: string) => {
+        const errorKey = /^NOPERM/i.test(message)
+          ? `${command}-noperm-${connectionId ?? ''}`
+          : `${command}-${primary.id}-${message}`;
+        if (!this.loggedErrors.has(errorKey)) {
+          this.addLoggedError(errorKey);
+          this.logger.warn(`${command} failed on ${primary.address}: ${message}`);
+        }
+      };
+      const failJobsRead = (command: string, message: string) => {
+        complete = false;
+        warnOnce(command, message);
+      };
+      const addJobView = (
+        name: string,
+        slotRanges: string | undefined,
+        sourceNode: string | undefined,
+        targetNode: string | undefined,
+        isImport: boolean,
+        details: Pick<SlotMigration, 'phase' | 'lastUpdateAt' | 'remainingReplBytes'>,
+      ) => {
+        const source = findNode(sourceNode ?? '');
+        const target = findNode(targetNode ?? '');
+        const firstSlot = parseInt((slotRanges ?? '').split(/[-\s]/)[0], 10);
+        const view: SlotMigration = {
+          slot: Number.isNaN(firstSlot) ? -1 : firstSlot,
+          slotRange: slotRanges,
+          sourceNodeId: source?.id ?? sourceNode ?? '',
+          sourceAddress: source?.address ?? '',
+          targetNodeId: target?.id ?? targetNode ?? '',
+          targetAddress: target?.address ?? '',
+          state: isImport ? 'importing' : 'migrating',
+          ...details,
+          jobName: name,
+        };
+        jobViews.push(view);
+        const known = atomicJobs.get(name);
+        if (!known || (namesBothEnds(view) && (!isImport || !namesBothEnds(known)))) {
+          atomicJobs.set(name, view);
+        }
+      };
       let jobs: Record<string, string>[];
       try {
         jobs = parseSlotMigrationJobs(await client.call('CLUSTER', 'GETSLOTMIGRATIONS'));
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        // Before Valkey 9 the subcommand does not exist; anything else is worth a line.
-        if (/unknown (sub)?command/i.test(message)) {
+        const message = errorText(error);
+        if (!isUnknownCommand(message)) {
+          failJobsRead('CLUSTER GETSLOTMIGRATIONS', message);
+          return;
+        }
+        let tasks: Record<string, string>[];
+        try {
+          tasks = parseRedisMigrationTasks(
+            await client.call('CLUSTER', 'MIGRATION', 'STATUS', 'ALL'),
+          );
+        } catch (redisError) {
+          const redisMessage = errorText(redisError);
+          const refused = /^NOPERM/i.test(redisMessage);
+          if (!refused && !isUnknownCommand(redisMessage)) {
+            failJobsRead('CLUSTER MIGRATION STATUS', redisMessage);
+            return;
+          }
+          if (refused) warnOnce('CLUSTER MIGRATION STATUS', redisMessage);
           if (options.rememberNodesWithoutJobs) {
             this.rememberNodeWithoutMigrationJobs(withoutJobsKey);
           }
           jobsReadNodeIds.add(primary.id);
           return;
         }
-        complete = false;
-        const errorKey = /^NOPERM/i.test(message)
-          ? `getslotmigrations-noperm-${connectionId ?? ''}`
-          : `getslotmigrations-${primary.id}-${message}`;
-        if (!this.loggedErrors.has(errorKey)) {
-          this.addLoggedError(errorKey);
-          this.logger.warn(`CLUSTER GETSLOTMIGRATIONS failed on ${primary.address}: ${message}`);
+        this.migrationJobsAskAgainAt.delete(withoutJobsKey);
+        jobsReadNodeIds.add(primary.id);
+        for (const task of tasks) {
+          if (!task.id || task.state === FAILED_REDIS_MIGRATION_STATE) continue;
+          if (FINISHED_REDIS_MIGRATION_STATES.has(task.state)) {
+            finishedJobs.add(task.id);
+            continue;
+          }
+          const isImport = task.operation?.toLowerCase() === 'import';
+          addJobView(task.id, task.slots, task.source, task.dest, isImport, { phase: task.state });
         }
         return;
       }
@@ -1041,9 +1117,9 @@ export class ClusterMetricsService {
           finishedJobs.add(job.name);
           if (job.state !== 'failed' || (isImport && failedJobs.has(job.name))) continue;
         }
-        const source = findNode(job.source_node ?? '');
-        const target = findNode(job.target_node ?? '');
         if (job.state === 'failed') {
+          const source = findNode(job.source_node ?? '');
+          const target = findNode(job.target_node ?? '');
           failedJobs.set(job.name, {
             jobName: job.name,
             slotRange: job.slot_ranges ?? '',
@@ -1055,25 +1131,11 @@ export class ClusterMetricsService {
           });
           continue;
         }
-        const firstSlot = parseInt((job.slot_ranges ?? '').split(/[-\s]/)[0], 10);
-        const view: SlotMigration = {
-          slot: Number.isNaN(firstSlot) ? -1 : firstSlot,
-          slotRange: job.slot_ranges,
-          sourceNodeId: source?.id ?? job.source_node ?? '',
-          sourceAddress: source?.address ?? '',
-          targetNodeId: target?.id ?? job.target_node ?? '',
-          targetAddress: target?.address ?? '',
-          state: isImport ? 'importing' : 'migrating',
+        addJobView(job.name, job.slot_ranges, job.source_node, job.target_node, isImport, {
           phase: job.state,
-          jobName: job.name,
           lastUpdateAt: epochSecondsToMs(job.last_update_time),
           remainingReplBytes: byteCount(job.remaining_repl_size),
-        };
-        jobViews.push(view);
-        const known = atomicJobs.get(job.name);
-        if (!known || (namesBothEnds(view) && (!isImport || !namesBothEnds(known)))) {
-          atomicJobs.set(job.name, view);
-        }
+        });
       }
     };
 

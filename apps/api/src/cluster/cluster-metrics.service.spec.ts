@@ -472,11 +472,23 @@ used_cpu_user:20.3\r
     ];
 
     function nodeClients(
-      byNode: Record<string, { nodes?: string; nodesError?: Error; jobs?: unknown; jobsError?: Error }>,
+      byNode: Record<
+        string,
+        {
+          nodes?: string;
+          nodesError?: Error;
+          jobs?: unknown;
+          jobsError?: Error;
+          tasks?: unknown;
+          tasksError?: Error;
+        }
+      >,
     ) {
+      const calls: string[] = [];
       mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => ({
         status: 'ready',
-        call: jest.fn(async (cmd: string, sub: string) => {
+        call: jest.fn(async (cmd: string, sub: string, ...rest: string[]) => {
+          calls.push([nodeId, cmd, sub, ...rest].join(' '));
           const reply = byNode[nodeId] ?? {};
           if (cmd === 'CLUSTER' && sub === 'NODES') {
             if (reply.nodesError) throw reply.nodesError;
@@ -486,9 +498,17 @@ used_cpu_user:20.3\r
             if (reply.jobsError) throw reply.jobsError;
             return reply.jobs ?? [];
           }
+          if (cmd === 'CLUSTER' && sub === 'MIGRATION') {
+            if (reply.tasksError) throw reply.tasksError;
+            if (reply.tasks === undefined) {
+              throw new Error("ERR unknown subcommand 'MIGRATION'. Try CLUSTER HELP.");
+            }
+            return reply.tasks;
+          }
           return null;
         }),
       }));
+      return calls;
     }
 
     function ownNodeClient(call: (...args: any[]) => Promise<unknown>) {
@@ -815,8 +835,8 @@ used_cpu_user:20.3\r
             status: 'ready',
             call: jest.fn(async (_cmd: string, sub: string) => {
               if (sub === 'NODES') return '';
-              asked.push(nodeId);
-              if (nodeId === 'def456node2') throw new Error("ERR unknown subcommand 'GETSLOTMIGRATIONS'");
+              if (sub === 'GETSLOTMIGRATIONS') asked.push(nodeId);
+              if (nodeId === 'def456node2') throw new Error(`ERR unknown subcommand '${sub}'`);
               return [];
             }),
           }));
@@ -869,6 +889,213 @@ used_cpu_user:20.3\r
           await service.getSlotMigrations('conn-1');
 
           expect(asked).toContain('def456node2');
+        });
+      });
+
+      describe('a Redis 8.4+ primary', () => {
+        const unknownJobs = new Error(
+          "ERR unknown subcommand 'GETSLOTMIGRATIONS'. Try CLUSTER HELP.",
+        );
+        const TASK_ID = '7f3a9c0e1b2d4f6a8c0e1b2d4f6a8c0e1b2d4f6a';
+        const migrate = {
+          id: TASK_ID,
+          slots: '0-1365',
+          source: 'abc123node1',
+          dest: 'fff789node3',
+          operation: 'migrate',
+          state: 'send-bulk-and-stream',
+          last_error: '',
+          retries: 0,
+          create_time: 1_700_000_000_000,
+          start_time: 1_700_000_000_100,
+          end_time: -1,
+          write_pause_ms: 0,
+        };
+        const importing = { ...migrate, operation: 'import', state: 'accumulate-buffer' };
+
+        it('is asked for its migration tasks when it does not know GETSLOTMIGRATIONS', async () => {
+          mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+          const calls = nodeClients({
+            abc123node1: { jobsError: unknownJobs, tasks: [job(migrate)] },
+            def456node2: { jobsError: unknownJobs, tasks: [] },
+            fff789node3: { jobsError: unknownJobs, tasks: [job(importing)] },
+          });
+
+          const report = await service.readSlotMigrations('conn-1');
+
+          expect(calls).toContain('abc123node1 CLUSTER MIGRATION STATUS ALL');
+          expect(report.migrations).toEqual([
+            {
+              slot: 0,
+              slotRange: '0-1365',
+              sourceNodeId: 'abc123node1',
+              sourceAddress: '192.168.1.10:6379',
+              targetNodeId: 'fff789node3',
+              targetAddress: '192.168.1.12:6379',
+              state: 'migrating',
+              phase: 'send-bulk-and-stream',
+              jobName: TASK_ID,
+            },
+          ]);
+          expect(report.jobViews).toHaveLength(2);
+          expect(report.complete).toBe(true);
+          expect(report.jobsReadNodeIds).toHaveLength(3);
+        });
+
+        it('holds the migration check while a task runs', async () => {
+          mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+          nodeClients({
+            abc123node1: { jobsError: unknownJobs, tasks: [job(migrate)] },
+            def456node2: { jobsError: unknownJobs, tasks: [] },
+            fff789node3: { jobsError: unknownJobs, tasks: [job(importing)] },
+          });
+
+          const check = await service.checkSlotMigrations('conn-1');
+
+          expect(check.complete).toBe(true);
+          expect(check.migrations).toEqual([expect.objectContaining({ jobName: TASK_ID })]);
+        });
+
+        it.each(['completed', 'canceled'])(
+          'names a task that ended as %s among the finished ones',
+          async (state) => {
+            mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+            nodeClients({
+              abc123node1: {
+                jobsError: unknownJobs,
+                tasks: [job({ ...migrate, state, end_time: 1_700_000_090_000 })],
+              },
+            });
+
+            const report = await service.readSlotMigrations('conn-1');
+
+            expect(report.migrations).toEqual([]);
+            expect(report.failed).toEqual([]);
+            expect(report.finishedJobs).toEqual([TASK_ID]);
+          },
+        );
+
+        it('leaves out a failed task, which Redis retries or replaces', async () => {
+          mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+          const failed = {
+            state: 'failed',
+            last_error:
+              'Main channel - Connection timeout (state: failed, rdb_channel_state: none)',
+            retries: 3,
+          };
+          nodeClients({
+            abc123node1: { jobsError: unknownJobs, tasks: [job({ ...migrate, ...failed })] },
+            fff789node3: { jobsError: unknownJobs, tasks: [job({ ...importing, ...failed })] },
+          });
+
+          const report = await service.readSlotMigrations('conn-1');
+
+          expect(report.migrations).toEqual([]);
+          expect(report.jobViews).toEqual([]);
+          expect(report.failed).toEqual([]);
+          expect(report.finishedJobs).toEqual([]);
+          expect(report.complete).toBe(true);
+        });
+
+        it.each([
+          ['it times out', { tasksError: new Error('Command timed out') }],
+          ['its reply is not a list of tasks', { tasks: 'OK' }],
+        ])('is incomplete when %s', async (_, reply) => {
+          mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+          nodeClients({ def456node2: { jobsError: unknownJobs, ...reply } });
+
+          const report = await service.readSlotMigrations('conn-1');
+
+          expect(report.complete).toBe(false);
+          expect(report.jobsReadNodeIds).not.toContain('def456node2');
+          expect(report.readNodeIds).toContain('def456node2');
+        });
+
+        describe('whose monitoring user may not run CLUSTER MIGRATION', () => {
+          const noperm = {
+            jobsError: unknownJobs,
+            tasksError: new Error(
+              "NOPERM User betterdb has no permissions to run the 'cluster|migration' command",
+            ),
+          };
+
+          it('counts as answered without tasks and logs the refusal once', async () => {
+            mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
+            nodeClients({ abc123node1: noperm, def456node2: noperm, fff789node3: noperm });
+            const warn = jest
+              .spyOn((service as unknown as { logger: Logger }).logger, 'warn')
+              .mockImplementation(() => undefined);
+
+            await service.readSlotMigrations('conn-1');
+            const report = await service.readSlotMigrations('conn-1');
+
+            expect(report.migrations).toEqual([]);
+            expect(report.complete).toBe(true);
+            expect(report.jobsReadNodeIds).toHaveLength(3);
+            expect(warn).toHaveBeenCalledTimes(1);
+          });
+
+          it('is not asked again by the watch for five minutes', async () => {
+            mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
+            const calls = nodeClients({ def456node2: noperm });
+            jest
+              .spyOn((service as unknown as { logger: Logger }).logger, 'warn')
+              .mockImplementation(() => undefined);
+            const watchRead = () =>
+              service.readSlotMigrations('conn-1', { rememberNodesWithoutJobs: true });
+
+            await watchRead();
+            calls.length = 0;
+            const report = await watchRead();
+
+            expect(
+              calls.filter((call) => call.startsWith('def456node2 CLUSTER MIGRATION')),
+            ).toEqual([]);
+            expect(report.complete).toBe(true);
+          });
+        });
+
+        it('counts a server with neither command as answered, without jobs', async () => {
+          mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+          nodeClients({
+            def456node2: {
+              jobsError: unknownJobs,
+              tasksError: new Error("ERR unknown subcommand 'MIGRATION'. Try CLUSTER HELP."),
+            },
+          });
+
+          const report = await service.readSlotMigrations('conn-1');
+
+          expect(report.migrations).toEqual([]);
+          expect(report.complete).toBe(true);
+          expect(report.jobsReadNodeIds).toHaveLength(3);
+        });
+
+        it('is asked again on every read of the watch', async () => {
+          mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
+          const calls = nodeClients({
+            abc123node1: { jobsError: unknownJobs, tasks: [job(migrate)] },
+          });
+          const watchRead = () =>
+            service.readSlotMigrations('conn-1', { rememberNodesWithoutJobs: true });
+
+          await watchRead();
+          calls.length = 0;
+          const report = await watchRead();
+
+          expect(calls).toContain('abc123node1 CLUSTER MIGRATION STATUS ALL');
+          expect(report.migrations).toEqual([expect.objectContaining({ jobName: TASK_ID })]);
+        });
+
+        it('is never asked of a node that lists jobs with GETSLOTMIGRATIONS', async () => {
+          mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+          const calls = nodeClients({
+            abc123node1: { jobs: [job(running)], tasks: [job(migrate)] },
+          });
+
+          await service.readSlotMigrations('conn-1');
+
+          expect(calls.filter((call) => call.includes('MIGRATION STATUS'))).toEqual([]);
         });
       });
     });

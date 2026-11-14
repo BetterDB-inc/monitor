@@ -169,6 +169,25 @@ describe('judgeSlotMigrations', () => {
       expect(judged.stuck).toEqual([]);
     });
 
+    it('runs a Redis task from both ends without judging it stuck or naming a Valkey command', () => {
+      const source = job({ phase: 'send-stream', lastUpdateAt: undefined });
+      const target = job({
+        state: 'importing',
+        phase: 'streaming-buffer',
+        lastUpdateAt: undefined,
+      });
+      const seen = report({ migrations: [source], jobViews: [source, target] });
+
+      const judged = run([
+        [T0, seen],
+        [T0 + 60 * MINUTE, seen],
+      ]);
+
+      expect(judged.running).toHaveLength(1);
+      expect(judged.stuck).toEqual([]);
+      expect(describeSlotMigration(judged.running[0])).not.toMatch(/SLOTMIGRATIONS/);
+    });
+
     it('measures the quiet time on the monitor clock, not against the server times', () => {
       const skewed = job({ lastUpdateAt: T0 - 60 * MINUTE });
 
