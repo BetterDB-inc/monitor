@@ -21329,6 +21329,40 @@ describe('AnomalyService', () => {
         expect(replica.disconnect).not.toHaveBeenCalled();
       });
 
+      const lateArrival = async (reply: () => Promise<string>) => {
+        let connect!: (client: typeof replica) => void;
+        getReplicaConnection.mockReturnValueOnce(new Promise((resolve) => (connect = resolve)));
+        replica.info.mockImplementation(reply);
+        const start = Date.now();
+        const clock = jest.spyOn(Date, 'now').mockReturnValue(start);
+        (service as any).crossCheckDeadline.set('conn-1', start + 600);
+        const first = await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
+        clock.mockReturnValue(start + 99);
+        connect(replica);
+        await settle();
+        clock.mockRestore();
+        return first;
+      };
+
+      it('sends nothing on a connection that arrives after the read timed out with a millisecond left', async () => {
+        const first = await lateArrival(() => new Promise(() => undefined));
+
+        expect(first.get(ADDR)).toMatchObject({ status: 'unreachable' });
+        expect(replica.info).not.toHaveBeenCalled();
+        expect(replica.disconnect).not.toHaveBeenCalled();
+      });
+
+      it('reads the replica over the kept connection on the poll after a late arrival', async () => {
+        await lateArrival(() => new Promise((resolve) => setTimeout(() => resolve(replicaReply(0)), 5)));
+        (service as any).crossCheckDeadline.set('conn-1', null);
+
+        const second = await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
+
+        expect(second.get(ADDR)).toMatchObject({ status: 'ok' });
+        expect(replica.info).toHaveBeenCalledTimes(1);
+        expect(replica.disconnect).not.toHaveBeenCalled();
+      });
+
       it('does not dial a hostname that resolves away from every connected replica', async () => {
         jest.spyOn(service as any, 'resolveHost').mockResolvedValue(new Set(['10.0.0.9']));
 

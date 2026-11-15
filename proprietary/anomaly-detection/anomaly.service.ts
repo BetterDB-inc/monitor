@@ -8406,6 +8406,7 @@ export class AnomalyService
    */
   private static readonly FANOUT_COMMAND_TIMEOUT_MS = 2_000;
   private static readonly PRIMARY_REREAD_RESERVE_MS = 500;
+  private static readonly REPLICA_READ_MIN_MS = 50;
   private static readonly REPLICA_READ_TIMED_OUT = 'Reading the replica timed out';
   private static readonly FANOUT_NODE_EVENT_LIMIT = 8;
 
@@ -11371,7 +11372,7 @@ export class AnomalyService
     ) => {
       const client = await pending;
       const remainingMs = deadline - Date.now();
-      if (remainingMs <= 0) throw new Error('no time left to read the replica');
+      if (remainingMs < AnomalyService.REPLICA_READ_MIN_MS) throw new Error('no time left to read the replica');
       try {
         const reply = await withTimeout(client.info('replication'), remainingMs, AnomalyService.REPLICA_READ_TIMED_OUT);
         return this.convertInfoToRecord(InfoParser.parse(reply));
