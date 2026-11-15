@@ -4515,7 +4515,7 @@ describe('AnomalyService', () => {
       ]);
     });
 
-    it('keeps one entry for a legacy reshard across a read between two slots', async () => {
+    it('keeps one entry and the 5 second pace for a legacy reshard across reads between slots', async () => {
       const marker = (slot: number) => ({
         slot,
         sourceNodeId: A.id,
@@ -4527,16 +4527,22 @@ describe('AnomalyService', () => {
       see([marker(10)]);
       await after(0);
       see([]);
-      await after(5_000);
+      for (let i = 0; i < 3; i += 1) await after(5_000);
       see([marker(11)]);
       await after(5_000);
 
+      expect(readSlotMigrations).toHaveBeenCalledTimes(5);
       expect(running()).toEqual([expect.objectContaining({ resolved: false })]);
 
       see([]);
-      await after(5_000);
-      await after(30_000);
+      for (let i = 0; i < 5; i += 1) await after(5_000);
 
+      expect(readSlotMigrations).toHaveBeenCalledTimes(10);
+      expect(running()).toEqual([expect.objectContaining({ resolved: false })]);
+
+      await after(5_000);
+
+      expect(readSlotMigrations).toHaveBeenCalledTimes(11);
       expect(running()).toEqual([expect.objectContaining({ resolved: true })]);
     });
 

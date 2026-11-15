@@ -1306,6 +1306,20 @@ describe('judgeSlotMigrations', () => {
       expect(after(30_000).unseen.size).toBe(0);
     });
 
+    it('keep the reshard pace only while they are inside those 30 seconds', () => {
+      const listed = report({ migrations: [marker(10)] });
+      const after = (ms: number, seen = report()) =>
+        run([
+          [T0, listed],
+          [T0 + ms, seen],
+        ]);
+      const unreadSource = report({ readNodeIds: [B.id, C.id], complete: false });
+
+      expect(after(25_000).busy).toBe(true);
+      expect(after(30_000).busy).toBe(false);
+      expect(after(30_000, unreadSource).busy).toBe(false);
+    });
+
     it('are kept while one of their two nodes cannot be read', () => {
       const judged = run([
         [T0, report({ migrations: [marker(10)] })],

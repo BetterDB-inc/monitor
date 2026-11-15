@@ -79,6 +79,7 @@ export interface SlotMigrationJudgement {
   stuck: SlotMigrationFinding[];
   failed: SlotMigrationFinding[];
   unseen: Set<string>;
+  busy: boolean;
   held: Set<string>;
 }
 
@@ -270,9 +271,12 @@ function couldNotBeSeen(move: WatchedMove, sight: Sight): boolean {
   return move.atomic ? watched.every(unread) : watched.some(unread);
 }
 
-function mayStillRun(move: WatchedMove, jobs: Sight, markers: Sight, now: number): boolean {
+function inLegacyGrace(move: WatchedMove, now: number): boolean {
+  return !move.atomic && now - move.listedAt < LEGACY_MOVE_GONE_GRACE_MS;
+}
+
+function mayStillRun(move: WatchedMove, jobs: Sight, markers: Sight): boolean {
   if (move.failing !== undefined) return !jobs.complete && !jobs.readNow.has(move.targetNodeId);
-  if (!move.atomic && now - move.listedAt < LEGACY_MOVE_GONE_GRACE_MS) return true;
   return couldNotBeSeen(move, move.atomic ? jobs : markers);
 }
 
@@ -309,6 +313,7 @@ export function judgeSlotMigrations(
   const stuck: SlotMigrationFinding[] = [];
   const failed: SlotMigrationFinding[] = [];
   const unseen = new Set<string>();
+  let busy = false;
   const held = new Set<string>();
   const listed = new Set<string>();
   const finished = new Set(report.finishedJobs.map((name) => `${JOB_MOVE}${name}`));
@@ -375,7 +380,9 @@ export function judgeSlotMigrations(
 
   for (const [id, move] of watch.moves) {
     if (moves.has(id) || finished.has(id)) continue;
-    if (!mayStillRun(move, jobs, markers, now)) continue;
+    const graced = inLegacyGrace(move, now);
+    if (!graced && !mayStillRun(move, jobs, markers)) continue;
+    if (graced) busy = true;
     moves.set(id, move);
     unseen.add(`running:${id}`);
     unseen.add(`stuck:${id}`);
@@ -417,6 +424,7 @@ export function judgeSlotMigrations(
     stuck,
     failed,
     unseen,
+    busy: busy || running.length > 0,
     held,
   };
 }

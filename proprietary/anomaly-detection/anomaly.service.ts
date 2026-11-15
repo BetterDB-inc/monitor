@@ -8778,7 +8778,7 @@ export class AnomalyService
         timestamp,
       );
       this.slotMigrationWatch.set(connectionId, judged.watch);
-      if (judged.running.length > 0) this.slotMigrationsListed.add(connectionId);
+      if (judged.busy) this.slotMigrationsListed.add(connectionId);
       else this.slotMigrationsListed.delete(connectionId);
 
       const gate = {
