@@ -21329,7 +21329,9 @@ describe('AnomalyService', () => {
         expect(replica.disconnect).not.toHaveBeenCalled();
       });
 
-      const lateArrival = async (reply: () => Promise<string>) => {
+      const healthyReply = () => new Promise<string>((resolve) => setTimeout(() => resolve(replicaReply(0)), 5));
+
+      const lateArrival = async (reply: () => Promise<string>, leftMs = 1) => {
         let connect!: (client: typeof replica) => void;
         getReplicaConnection.mockReturnValueOnce(new Promise((resolve) => (connect = resolve)));
         replica.info.mockImplementation(reply);
@@ -21337,7 +21339,7 @@ describe('AnomalyService', () => {
         const clock = jest.spyOn(Date, 'now').mockReturnValue(start);
         (service as any).crossCheckDeadline.set('conn-1', start + 600);
         const first = await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
-        clock.mockReturnValue(start + 99);
+        clock.mockReturnValue(start + 100 - leftMs);
         connect(replica);
         await settle();
         clock.mockRestore();
@@ -21353,12 +21355,26 @@ describe('AnomalyService', () => {
       });
 
       it('reads the replica over the kept connection on the poll after a late arrival', async () => {
-        await lateArrival(() => new Promise((resolve) => setTimeout(() => resolve(replicaReply(0)), 5)));
+        await lateArrival(healthyReply);
         (service as any).crossCheckDeadline.set('conn-1', null);
 
         const second = await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
 
         expect(second.get(ADDR)).toMatchObject({ status: 'ok' });
+        expect(replica.info).toHaveBeenCalledTimes(1);
+        expect(replica.disconnect).not.toHaveBeenCalled();
+      });
+
+      it('sends nothing on a connection that arrives with 49 ms of the read left', async () => {
+        await lateArrival(() => new Promise(() => undefined), 49);
+
+        expect(replica.info).not.toHaveBeenCalled();
+        expect(replica.disconnect).not.toHaveBeenCalled();
+      });
+
+      it('reads a connection that arrives with 50 ms of the read left', async () => {
+        await lateArrival(healthyReply, 50);
+
         expect(replica.info).toHaveBeenCalledTimes(1);
         expect(replica.disconnect).not.toHaveBeenCalled();
       });

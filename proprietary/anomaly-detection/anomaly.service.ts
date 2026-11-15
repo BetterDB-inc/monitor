@@ -11372,7 +11372,7 @@ export class AnomalyService
     ) => {
       const client = await pending;
       const remainingMs = deadline - Date.now();
-      if (remainingMs < AnomalyService.REPLICA_READ_MIN_MS) throw new Error('no time left to read the replica');
+      if (remainingMs < AnomalyService.REPLICA_READ_MIN_MS) throw new Error('too little time left to read the replica');
       try {
         const reply = await withTimeout(client.info('replication'), remainingMs, AnomalyService.REPLICA_READ_TIMED_OUT);
         return this.convertInfoToRecord(InfoParser.parse(reply));
