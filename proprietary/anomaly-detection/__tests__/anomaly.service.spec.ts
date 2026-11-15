@@ -21319,11 +21319,15 @@ describe('AnomalyService', () => {
       it('sends no command on a connection that arrives after the read budget', async () => {
         let connect!: (client: typeof replica) => void;
         getReplicaConnection.mockReturnValueOnce(new Promise((resolve) => (connect = resolve)));
-        (service as any).crossCheckDeadline.set('conn-1', Date.now() + 600);
+        const start = Date.now();
+        const clock = jest.spyOn(Date, 'now').mockReturnValue(start);
+        (service as any).crossCheckDeadline.set('conn-1', start + 600);
         await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
 
+        clock.mockReturnValue(start + 100);
         connect(replica);
         await settle();
+        clock.mockRestore();
 
         expect(replica.info).not.toHaveBeenCalled();
         expect(replica.disconnect).not.toHaveBeenCalled();
