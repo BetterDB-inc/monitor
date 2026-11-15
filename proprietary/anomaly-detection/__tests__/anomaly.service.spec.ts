@@ -4515,6 +4515,31 @@ describe('AnomalyService', () => {
       ]);
     });
 
+    it('keeps one entry for a legacy reshard across a read between two slots', async () => {
+      const marker = (slot: number) => ({
+        slot,
+        sourceNodeId: A.id,
+        sourceAddress: A.address,
+        targetNodeId: B.id,
+        targetAddress: B.address,
+        state: 'migrating',
+      });
+      see([marker(10)]);
+      await after(0);
+      see([]);
+      await after(5_000);
+      see([marker(11)]);
+      await after(5_000);
+
+      expect(running()).toEqual([expect.objectContaining({ resolved: false })]);
+
+      see([]);
+      await after(5_000);
+      await after(30_000);
+
+      expect(running()).toEqual([expect.objectContaining({ resolved: true })]);
+    });
+
     it('closes the entry of older markers that end while atomic jobs cannot be listed', async () => {
       const marker = {
         slot: 10,

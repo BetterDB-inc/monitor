@@ -175,6 +175,8 @@ export interface NodeStatsOptions {
   nodeIds?: ReadonlyArray<string>;
 }
 
+type NodeAddress = Pick<DiscoveredNode, 'id' | 'address'>;
+
 export interface SlotMigration {
   slot: number;
   sourceNodeId: string;
@@ -1010,15 +1012,35 @@ export class ClusterMetricsService {
     let complete = true;
     let markersComplete = true;
 
-    const readNode = async (primary: DiscoveredNode, client: Valkey): Promise<void> => {
+    const nodeNamedMyself = (nodesString: string): NodeAddress | undefined => {
+      const line = nodesString
+        .trim()
+        .split('\n')
+        .map((entry) => entry.split(' '))
+        .find((parts) => parts.length >= 3 && parts[2].split(',').includes('myself'));
+      if (!line) return undefined;
+      return nodesById.get(line[0]) ?? { id: line[0], address: line[1].split('@')[0] };
+    };
+
+    const readNode = async (client: Valkey, known?: NodeAddress): Promise<void> => {
+      let nodesString: string | undefined;
       try {
-        addLegacyMarkers((await client.call('CLUSTER', 'NODES')) as string);
-        nodesRead++;
-        readNodeIds.add(primary.id);
+        nodesString = (await client.call('CLUSTER', 'NODES')) as string;
+        addLegacyMarkers(nodesString);
       } catch (error) {
+        nodesString = undefined;
         complete = false;
         markersComplete = false;
-        this.logger.debug(`CLUSTER NODES failed on ${primary.address}: ${error}`);
+        this.logger.debug(
+          `CLUSTER NODES failed on ${known?.address ?? "the connection's own node"}: ${error}`,
+        );
+      }
+      const primary =
+        known ?? (nodesString === undefined ? undefined : nodeNamedMyself(nodesString));
+      if (!primary) return;
+      if (nodesString !== undefined) {
+        nodesRead++;
+        readNodeIds.add(primary.id);
       }
 
       const withoutJobsKey = `${connectionId ?? ''}:${primary.id}`;
@@ -1169,7 +1191,7 @@ export class ClusterMetricsService {
     if (!options.ownNodeOnly) {
       await Promise.all(
         primaries.map((primary) =>
-          this.onNode(primary, connectionId, NODE_COMMAND_TIMEOUT_MS, (client) => readNode(primary, client)).catch((error) => {
+          this.onNode(primary, connectionId, NODE_COMMAND_TIMEOUT_MS, (client) => readNode(client, primary)).catch((error) => {
             complete = false;
             markersComplete = false;
             this.logger.debug(`Slot migration check skipped ${primary.address}: ${error}`);
@@ -1194,14 +1216,13 @@ export class ClusterMetricsService {
       }
       // Ask it the same way as a primary, so atomic migrations it is part of
       // (GETSLOTMIGRATIONS) show up as well as legacy markers.
-      const self = nodes.find((node) => node.flags.includes('myself')) ?? primaries[0];
       try {
         await this.discoveryService.onOwnNodeClient(
           connectionId,
           NODE_COMMAND_TIMEOUT_MS,
           (client) =>
             withTimeout(
-              readNode(self, client),
+              readNode(client),
               NODE_COMMAND_TIMEOUT_MS,
               `The connection did not answer the slot migration check within ${NODE_COMMAND_TIMEOUT_MS}ms`,
             ),

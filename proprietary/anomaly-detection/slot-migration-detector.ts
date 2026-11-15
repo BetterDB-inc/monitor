@@ -4,6 +4,7 @@ export const ATOMIC_MIGRATION_STALL_MS = 10 * 60_000;
 export const LEGACY_MIGRATION_STALL_MS = 30 * 60_000;
 const FAILING_IMPORT_QUIET_MS = 10 * 60_000;
 const FAILING_IMPORT_MIN_FAILURES = 3;
+const LEGACY_MOVE_GONE_GRACE_MS = 30_000;
 
 const MAX_REASON_LENGTH = 200;
 const SHORT_NODE_ID_LENGTH = 8;
@@ -59,6 +60,8 @@ interface WatchedMove {
   failing?: Failing;
   atomic: boolean;
   nodeIds: string[];
+  targetNodeId: string;
+  listedAt: number;
   stuckBefore: boolean;
 }
 
@@ -174,12 +177,13 @@ function failingOf(
   known: Failing | undefined,
   failures: number,
   adopted: boolean,
+  targetRead: boolean,
   now: number,
 ): Failing | undefined {
   if (failures > 0) {
     return { since: known?.since ?? now, lastAt: now, count: (known?.count ?? 0) + failures };
   }
-  if (known && now - known.lastAt > FAILING_IMPORT_QUIET_MS) return undefined;
+  if (known && targetRead && now - known.lastAt > FAILING_IMPORT_QUIET_MS) return undefined;
   return known ?? (adopted ? { since: now, lastAt: now, count: 0 } : undefined);
 }
 
@@ -266,6 +270,12 @@ function couldNotBeSeen(move: WatchedMove, sight: Sight): boolean {
   return move.atomic ? watched.every(unread) : watched.some(unread);
 }
 
+function mayStillRun(move: WatchedMove, jobs: Sight, markers: Sight, now: number): boolean {
+  if (move.failing !== undefined) return !jobs.complete && !jobs.readNow.has(move.targetNodeId);
+  if (!move.atomic && now - move.listedAt < LEGACY_MOVE_GONE_GRACE_MS) return true;
+  return couldNotBeSeen(move, move.atomic ? jobs : markers);
+}
+
 function endedWhileUnwatched(
   id: string,
   report: SlotMigrationReport,
@@ -314,8 +324,9 @@ export function judgeSlotMigrations(
     const stuckSignature = `stuck:${move.id}`;
     const adopted = watch.adopted.has(stuckSignature);
     const retrying = Object.values(views).some((mark) => mark.retries !== undefined);
+    const targetRead = jobs.complete || jobs.readNow.has(move.targetNodeId);
     const failing = retrying
-      ? failingOf(known?.failing, newFailures(known?.views, move.views), adopted, now)
+      ? failingOf(known?.failing, newFailures(known?.views, move.views), adopted, targetRead, now)
       : undefined;
     const failedTooLong =
       failing !== undefined &&
@@ -337,6 +348,8 @@ export function judgeSlotMigrations(
       failing,
       atomic: move.atomic,
       nodeIds: [move.sourceNodeId, move.targetNodeId].filter((nodeId) => nodeId !== ''),
+      targetNodeId: move.targetNodeId,
+      listedAt: now,
       stuckBefore,
     });
     const { id, views: _views, ...shown } = move;
@@ -362,7 +375,7 @@ export function judgeSlotMigrations(
 
   for (const [id, move] of watch.moves) {
     if (moves.has(id) || finished.has(id)) continue;
-    if (!couldNotBeSeen(move, move.atomic ? jobs : markers)) continue;
+    if (!mayStillRun(move, jobs, markers, now)) continue;
     moves.set(id, move);
     unseen.add(`running:${id}`);
     unseen.add(`stuck:${id}`);

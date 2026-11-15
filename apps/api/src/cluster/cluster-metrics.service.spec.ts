@@ -511,6 +511,11 @@ used_cpu_user:20.3\r
       return calls;
     }
 
+    const ownNodes = (nodeId: string) => {
+      const node = primaries.find((primary) => primary.id === nodeId)!;
+      return `${node.id} ${node.address}@16379 myself,master - 0 0 1 connected\n`;
+    };
+
     function ownNodeClient(call: (...args: any[]) => Promise<unknown>) {
       const client = { status: 'ready', call: jest.fn(call), disconnect: jest.fn() };
       mockDiscoveryService.onOwnNodeClient.mockImplementation(
@@ -799,7 +804,9 @@ used_cpu_user:20.3\r
       it('says so when no primary could be dialed and it read its own node instead', async () => {
         mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
         mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));
-        ownNodeClient(async (_cmd: string, sub: string) => (sub === 'NODES' ? '' : [job(running)]));
+        ownNodeClient(async (_cmd: string, sub: string) =>
+          sub === 'NODES' ? ownNodes('abc123node1') : [job(running)],
+        );
 
         const report = await service.readSlotMigrations('conn-1');
 
@@ -811,7 +818,9 @@ used_cpu_user:20.3\r
       it("reads only the connection's own node when asked to", async () => {
         mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
         mockDiscoveryService.getNodeConnection.mockClear();
-        ownNodeClient(async (_cmd: string, sub: string) => (sub === 'NODES' ? '' : [job(running)]));
+        ownNodeClient(async (_cmd: string, sub: string) =>
+          sub === 'NODES' ? ownNodes('abc123node1') : [job(running)],
+        );
 
         const report = await service.readSlotMigrations('conn-1', { ownNodeOnly: true });
 
@@ -820,6 +829,38 @@ used_cpu_user:20.3\r
         expect(report.complete).toBe(false);
         expect(report.readNodeIds).toHaveLength(1);
         expect(report.migrations).toHaveLength(1);
+      });
+
+      it('files the own-node read under the node its own socket reached', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValue([
+          { ...primaries[0], flags: ['myself', 'master'] },
+          primaries[1],
+          primaries[2],
+        ]);
+        mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));
+        ownNodeClient(async (_cmd: string, sub: string) =>
+          sub === 'NODES' ? ownNodes('def456node2') : [],
+        );
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect(report.readNodeIds).toEqual(['def456node2']);
+        expect(report.jobsReadNodeIds).toEqual(['def456node2']);
+      });
+
+      it('names no node read when the own node does not answer CLUSTER NODES', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
+        mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));
+        ownNodeClient(async (_cmd: string, sub: string) => {
+          if (sub === 'NODES') throw new Error('Connection is closed.');
+          return [job(running)];
+        });
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect(report.readNodeIds).toEqual([]);
+        expect(report.jobsReadNodeIds).toEqual([]);
+        expect(report.complete).toBe(false);
       });
 
       it('counts a primary without the command as one that answered', async () => {
@@ -1364,7 +1405,9 @@ used_cpu_user:20.3\r
       it("asks the connection's own node on a socket of its own, not on the shared client", async () => {
         mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
         mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));
-        const own = ownNodeClient(async () => []);
+        const own = ownNodeClient(async (_cmd: string, sub: string) =>
+          sub === 'NODES' ? ownNodes('abc123node1') : [],
+        );
         mockClient.call.mockClear();
 
         await service.checkSlotMigrations('conn-1');

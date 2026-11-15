@@ -436,6 +436,54 @@ describe('judgeSlotMigrations', () => {
         expect(isStuckFailingImport(later.watch, 'job-1')).toBe(false);
       });
 
+      const failingEvery30s = (elapsed: number) =>
+        attempt('connecting', Math.floor(elapsed / 30_000));
+      const sourceOnly = (listed: SlotMigration[] = []) =>
+        report({ migrations: listed, jobViews: listed, jobsReadNodeIds: [A.id], complete: false });
+
+      it('keeps its warning across a read that reaches its source but not its target', () => {
+        let watch: SlotMigrationWatch | undefined;
+        const kept: boolean[] = [];
+        const stuck: boolean[] = [];
+        for (let elapsed = 0; elapsed <= 24 * MINUTE; elapsed += 30_000) {
+          const seen = elapsed === 12 * MINUTE ? sourceOnly() : failingEvery30s(elapsed);
+          const judged = judgeSlotMigrations(watch, seen, T0 + elapsed);
+          watch = judged.watch;
+          if (elapsed < 11 * MINUTE) continue;
+          stuck.push(judged.stuck.length > 0);
+          kept.push(
+            (judged.stuck.length > 0 || judged.unseen.has('stuck:job:job-1')) &&
+              isStuckFailingImport(watch, 'job-1'),
+          );
+        }
+
+        expect(kept.every(Boolean)).toBe(true);
+        expect(stuck.filter((s) => !s)).toHaveLength(1);
+      });
+
+      it('keeps counting its failures while only its source lists it', () => {
+        const source = job({ phase: 'send-bulk-and-stream', lastUpdateAt: undefined, retries: 0 });
+        const sightings = watchReads(30_000, 40 * MINUTE, (elapsed) =>
+          elapsed > 11 * MINUTE && elapsed < 23 * MINUTE
+            ? sourceOnly([source])
+            : failingEvery30s(elapsed),
+        );
+        const at = firstStuck(sightings) ?? Infinity;
+
+        expect(at).toBeLessThanOrEqual(11 * MINUTE);
+        expect(steadyFrom(sightings, at)).toBe(true);
+      });
+
+      it('still ends on a read of its target that no longer lists it', () => {
+        const judged = run([
+          ...retried(10),
+          [T0 + 11 * MINUTE, report({ jobsReadNodeIds: [B.id], complete: false })],
+        ]);
+
+        expect(judged.unseen.size).toBe(0);
+        expect(isStuckFailingImport(judged.watch, 'job-1')).toBe(false);
+      });
+
       it('no longer counts for the hot_shard hold once it is stuck', () => {
         expect(isStuckFailingImport(run(retried(9)).watch, 'job-1')).toBe(false);
         expect(isStuckFailingImport(run(retried(10)).watch, 'job-1')).toBe(true);
@@ -1223,6 +1271,39 @@ describe('judgeSlotMigrations', () => {
       ]);
 
       expect(judged.stuck).toEqual([]);
+    });
+
+    it('are kept through a read that lands between two slots', () => {
+      const between = run([
+        [T0, report({ migrations: [marker(10)] })],
+        [T0 + 5_000, report()],
+      ]);
+      const next = run([
+        [T0, report({ migrations: [marker(10)] })],
+        [T0 + 5_000, report()],
+        [T0 + 10_000, report({ migrations: [marker(11)] })],
+      ]);
+
+      expect([...between.unseen]).toEqual([
+        `running:legacy:${A.id}>${B.id}`,
+        `stuck:legacy:${A.id}>${B.id}`,
+      ]);
+      expect(next.running).toEqual([
+        expect.objectContaining({ signature: `running:legacy:${A.id}>${B.id}`, slots: '11' }),
+      ]);
+    });
+
+    it('are gone once 30 seconds pass without them', () => {
+      const listed = report({ migrations: [marker(10)] });
+
+      const after = (ms: number) =>
+        run([
+          [T0, listed],
+          [T0 + ms, report()],
+        ]);
+
+      expect(after(25_000).unseen.size).toBe(2);
+      expect(after(30_000).unseen.size).toBe(0);
     });
 
     it('are kept while one of their two nodes cannot be read', () => {
