@@ -294,6 +294,7 @@ describe('CaptureTriggerRegistry', () => {
 
       await registry.tick();
 
+      expect(healthGate.evaluate).toHaveBeenCalledWith('removed');
       expect(captureService.startSession).toHaveBeenCalledTimes(1);
       expect(captureService.startSession).toHaveBeenCalledWith(
         expect.objectContaining({ connectionId: CONNECTION_ID }),
