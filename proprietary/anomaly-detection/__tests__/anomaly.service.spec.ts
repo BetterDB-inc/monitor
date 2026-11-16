@@ -26151,6 +26151,18 @@ describe('AnomalyService', () => {
         ]);
       });
 
+      it('keeps the time of the adopted event on its line', async () => {
+        views.b = { a: { epoch: 9 } };
+
+        await rounds(5);
+
+        const loads = await Promise.all(storage.getAnomalyEvents.mock.results.map((result) => result.value));
+        const stored = loads.flat().find((event) => event.id === 'stored-1');
+        expect(service.getTopologyDisagreements('conn-1').disagreements).toMatchObject([
+          { eventId: 'stored-1', eventAt: stored.timestamp },
+        ]);
+      });
+
       it('closes an adopted event once the views have agreed for the configured rounds', async () => {
         await rounds(2);
         expect(storage.resolveAnomaly).not.toHaveBeenCalledWith('stored-1', expect.anything());
@@ -26313,7 +26325,25 @@ describe('AnomalyService', () => {
 
         const [event] = divergenceEvents();
         expect(service.getTopologyDisagreements('conn-1').disagreements).toMatchObject([
-          { id: 'config_epoch:a', confirmed: true, eventId: event.id, eventType: MetricType.TOPOLOGY_DIVERGENCE },
+          {
+            id: 'config_epoch:a',
+            confirmed: true,
+            eventId: event.id,
+            eventType: MetricType.TOPOLOGY_DIVERGENCE,
+            eventAt: event.timestamp,
+          },
+        ]);
+      });
+
+      it('keeps the time of the event once the event left the recent events', async () => {
+        views.b = { a: { epoch: 9 } };
+        await rounds(4);
+        const [event] = divergenceEvents();
+
+        (service as any).recentAnomalies = [];
+
+        expect(service.getTopologyDisagreements('conn-1').disagreements).toMatchObject([
+          { id: 'config_epoch:a', eventId: event.id, eventAt: event.timestamp },
         ]);
       });
 
@@ -26324,7 +26354,7 @@ describe('AnomalyService', () => {
         await service.resolveAnomaly(divergenceEvents()[0].id);
 
         expect(service.getTopologyDisagreements('conn-1').disagreements).toMatchObject([
-          { id: 'config_epoch:a', confirmed: false, eventId: null, eventType: null },
+          { id: 'config_epoch:a', confirmed: false, eventId: null, eventType: null, eventAt: null },
         ]);
       });
 

@@ -179,7 +179,7 @@ describe('summarizeDisagreements', () => {
       ],
     });
     const eventOf = (key: string) =>
-      key === old.key ? { eventId: 'e3', eventType: MetricType.TOPOLOGY_DIVERGENCE } : undefined;
+      key === old.key ? { eventId: 'e3', eventType: MetricType.TOPOLOGY_DIVERGENCE, eventAt: AT } : undefined;
 
     it('is kept without counts, after the lines of this round, and says when it was last seen', () => {
       const summary = summarizeDisagreements(
@@ -363,6 +363,7 @@ describe('summarizeDisagreements', () => {
         confirmed: false,
         eventId: null,
         eventType: null,
+        eventAt: null,
         since: AT - 10_000,
         rounds: 3,
         stale: false,
@@ -659,7 +660,7 @@ describe('summarizeDisagreements', () => {
       });
     const disagreements = [about('s001p', ['s000p']), about('s001r0', ['s000r0']), about('s002p', ['s000p'])];
     const eventOf = (key: string) =>
-      key === 'failure_flags:s002p' ? { eventId: 'e1', eventType: MetricType.TOPOLOGY_DIVERGENCE } : undefined;
+      key === 'failure_flags:s002p' ? { eventId: 'e1', eventType: MetricType.TOPOLOGY_DIVERGENCE, eventAt: AT } : undefined;
 
     const summary = summarizeDisagreements(round(cluster(3), { disagreements }), eventOf);
 
@@ -791,12 +792,21 @@ describe('summarizeDisagreements', () => {
         { value: 'missing', observers: ['s002p'] },
       ],
     });
-    const eventOf = jest.fn().mockReturnValue({ eventId: 'e7', eventType: MetricType.TOPOLOGY_DIVERGENCE });
+    const eventOf = jest.fn().mockReturnValue({
+      eventId: 'e7',
+      eventType: MetricType.TOPOLOGY_DIVERGENCE,
+      eventAt: AT - 40_000,
+    });
 
     const [line] = summarizeDisagreements(round(cluster(3), { disagreements: [membership] }), eventOf).disagreements;
 
     expect(eventOf).toHaveBeenCalledWith('membership:s001r0');
-    expect(line).toMatchObject({ confirmed: true, eventId: 'e7', eventType: MetricType.TOPOLOGY_DIVERGENCE });
+    expect(line).toMatchObject({
+      confirmed: true,
+      eventId: 'e7',
+      eventType: MetricType.TOPOLOGY_DIVERGENCE,
+      eventAt: AT - 40_000,
+    });
   });
 
   it('puts critical first, then confirmed, then the oldest', () => {
@@ -823,7 +833,7 @@ describe('summarizeDisagreements', () => {
       ],
     });
     const eventOf = (key: string) =>
-      key === 'failure_flags:s002p' ? { eventId: 'e1', eventType: MetricType.TOPOLOGY_DIVERGENCE } : undefined;
+      key === 'failure_flags:s002p' ? { eventId: 'e1', eventType: MetricType.TOPOLOGY_DIVERGENCE, eventAt: AT } : undefined;
 
     const summary = summarizeDisagreements(
       round(cluster(3), {

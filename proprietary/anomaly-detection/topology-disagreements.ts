@@ -26,6 +26,7 @@ const MEMBERSHIP_LABELS: Record<string, string> = {
 export interface DisagreementEvent {
   eventId: string;
   eventType: MetricType;
+  eventAt: number | null;
 }
 
 export interface DisagreementRound {
@@ -62,6 +63,7 @@ export interface DisagreementLine {
   confirmed: boolean;
   eventId: string | null;
   eventType: MetricType | null;
+  eventAt: number | null;
   since: number;
   rounds: number;
   stale: boolean;
@@ -362,6 +364,7 @@ export function summarizeDisagreements(
       confirmed: event !== undefined,
       eventId: event?.eventId ?? null,
       eventType: event?.eventType ?? null,
+      eventAt: event?.eventAt ?? null,
       since: Math.min(...drafts.map((draft) => draft.disagreement.firstSeenAt)),
       rounds: Math.max(...drafts.map((draft) => draft.disagreement.rounds)),
       stale,

@@ -840,6 +840,7 @@ export class AnomalyService
   private topologyDivergenceEventIds = new Map<string, Map<string, string>>();
   private topologyDivergenceEventOwners = new Map<string, string>();
   private topologyDivergenceEventSeverity = new Map<string, AnomalySeverity>();
+  private topologyDivergenceEventAt = new Map<string, number>();
   private topologyDivergenceOpen = new Map<string, Map<string, OpenDivergence>>();
   private topologyDivergenceAnchors = new Map<string, string>();
   private topologyDivergenceNodeTimeouts = new Map<string, { ms: number; readAt: number }>();
@@ -7459,6 +7460,7 @@ export class AnomalyService
       if (tracked.has(eventId)) continue;
       this.topologyDivergenceEventOwners.delete(eventId);
       this.topologyDivergenceEventSeverity.delete(eventId);
+      this.topologyDivergenceEventAt.delete(eventId);
     }
   }
 
@@ -7639,6 +7641,7 @@ export class AnomalyService
     const severity = divergenceSeverity(group);
     this.topologyDivergenceEventOwners.set(id, ctx.connectionId);
     this.topologyDivergenceEventSeverity.set(id, severity);
+    this.topologyDivergenceEventAt.set(id, timestamp);
     return {
       id,
       timestamp,
@@ -7671,6 +7674,7 @@ export class AnomalyService
       eventIds.set(signature, event.id);
       this.topologyDivergenceEventOwners.set(event.id, connectionId);
       this.topologyDivergenceEventSeverity.set(event.id, event.severity as AnomalySeverity);
+      this.topologyDivergenceEventAt.set(event.id, event.timestamp);
     }
     if (eventIds.size > 0) this.topologyDivergenceEventIds.set(connectionId, eventIds);
   }
@@ -7684,6 +7688,7 @@ export class AnomalyService
       if (owner !== connectionId) continue;
       this.topologyDivergenceEventOwners.delete(eventId);
       this.topologyDivergenceEventSeverity.delete(eventId);
+      this.topologyDivergenceEventAt.delete(eventId);
     }
     const watched = new Set(this.connectionClusterKeys.values());
     for (const [clusterKey, anchor] of [...this.topologyDivergenceAnchors]) {
@@ -10599,7 +10604,8 @@ export class AnomalyService
       const event = this.eventInMemory(eventId);
       if (event?.resolved === true) continue;
       const eventType = event?.metricType ?? MetricType.TOPOLOGY_DIVERGENCE;
-      for (const { key } of entry.group?.disagreements ?? []) events.set(key, { eventId, eventType });
+      const eventAt = this.topologyDivergenceEventAt.get(eventId) ?? event?.timestamp ?? null;
+      for (const { key } of entry.group?.disagreements ?? []) events.set(key, { eventId, eventType, eventAt });
     }
     return summarizeDisagreements(round, (key) => events.get(key));
   }
