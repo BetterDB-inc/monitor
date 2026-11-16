@@ -6,6 +6,7 @@ export interface NodeCollection {
 }
 
 interface CollectableNode {
+  id: string;
   address: string;
   flags: readonly string[];
   hostname?: string;
@@ -15,24 +16,18 @@ export function collectionOf(
   node: CollectableNode,
   viewingConnectionId: string | null,
   findIdByHostPort: (host: string, port: number) => string | null,
+  ownNodeIdOf: (connectionId: string) => string | undefined = () => undefined,
 ): NodeCollection {
   const address = parseNodeAddress(node.address);
+  const readingNodeAt = (host: string, port: number): string | null => {
+    const found = findIdByHostPort(host, port);
+    if (!found) return null;
+    const ownNodeId = ownNodeIdOf(found);
+    return ownNodeId && ownNodeId !== node.id ? null : found;
+  };
   const connectionId =
-    (address ? findIdByHostPort(address.host, address.port) : null) ??
-    (address && node.hostname ? findIdByHostPort(node.hostname, address.port) : null) ??
+    (address ? readingNodeAt(address.host, address.port) : null) ??
+    (address && node.hostname ? readingNodeAt(node.hostname, address.port) : null) ??
     (node.flags.includes('myself') ? viewingConnectionId : null);
   return connectionId ? { collected: true, connectionId } : { collected: false };
-}
-
-export function withinCluster(
-  clusterNodeIds: ReadonlySet<string>,
-  findIdByHostPort: (host: string, port: number) => string | null,
-  ownNodeIdOf: (connectionId: string) => string | undefined,
-): (host: string, port: number) => string | null {
-  return (host, port) => {
-    const connectionId = findIdByHostPort(host, port);
-    if (!connectionId) return null;
-    const ownNodeId = ownNodeIdOf(connectionId);
-    return ownNodeId && !clusterNodeIds.has(ownNodeId) ? null : connectionId;
-  };
 }

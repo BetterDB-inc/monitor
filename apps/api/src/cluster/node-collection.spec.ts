@@ -1,9 +1,9 @@
-import { collectionOf, withinCluster } from './node-collection';
+import { collectionOf } from './node-collection';
 
 describe('collectionOf', () => {
   const registered = (known: Record<string, string>) => (host: string, port: number) =>
     known[`${host}:${port}`] ?? null;
-  const node = { address: '10.0.0.2:6379', flags: ['master'] };
+  const node = { id: 'node-2', address: '10.0.0.2:6379', flags: ['master'] };
 
   it('says a node with a connection at its address is collected by that connection', () => {
     expect(collectionOf(node, 'seed', registered({ '10.0.0.2:6379': 'conn-2' }))).toEqual({
@@ -44,46 +44,60 @@ describe('collectionOf', () => {
   });
 
   it('says a node without a usable address is not collected', () => {
-    expect(collectionOf({ address: ':0', flags: ['master', 'noaddr'] }, 'seed', registered({}))).toEqual({
+    expect(collectionOf({ id: 'node-3', address: ':0', flags: ['master', 'noaddr'] }, 'seed', registered({}))).toEqual({
       collected: false,
     });
   });
 });
 
-describe('withinCluster', () => {
+describe('collectionOf with the node each connection reads', () => {
   const registered = (known: Record<string, string>) => (host: string, port: number) =>
     known[`${host}:${port}`] ?? null;
   const ownNodeIds = (known: Record<string, string>) => (connectionId: string) => known[connectionId];
-  const clusterNodeIds = new Set(['node-1', 'node-2']);
+  const node = { id: 'node-2', address: '10.0.0.2:6379', flags: ['master'] };
   const at = { '10.0.0.2:6379': 'conn-2' };
 
-  it('keeps a connection whose own node is in the cluster', () => {
-    const find = withinCluster(clusterNodeIds, registered(at), ownNodeIds({ 'conn-2': 'node-2' }));
-
-    expect(find('10.0.0.2', 6379)).toBe('conn-2');
+  it('counts a connection that reads this node', () => {
+    expect(collectionOf(node, 'seed', registered(at), ownNodeIds({ 'conn-2': 'node-2' }))).toEqual({
+      collected: true,
+      connectionId: 'conn-2',
+    });
   });
 
-  it('drops a connection at the address whose own node belongs to another cluster', () => {
-    const find = withinCluster(clusterNodeIds, registered(at), ownNodeIds({ 'conn-2': 'other-9' }));
-
-    expect(find('10.0.0.2', 6379)).toBeNull();
+  it('does not count a connection at the address that reads a node of another cluster', () => {
+    expect(collectionOf(node, 'seed', registered(at), ownNodeIds({ 'conn-2': 'other-9' }))).toEqual({
+      collected: false,
+    });
   });
 
-  it('keeps a connection whose own node is not known', () => {
-    const find = withinCluster(clusterNodeIds, registered(at), ownNodeIds({}));
+  it('does not count a connection at the address that reads another node of this cluster', () => {
+    const replaced = { ...node, id: 'node-1', flags: ['master', 'fail'] };
 
-    expect(find('10.0.0.2', 6379)).toBe('conn-2');
+    expect(collectionOf(replaced, 'seed', registered(at), ownNodeIds({ 'conn-2': 'node-2' }))).toEqual({
+      collected: false,
+    });
   });
 
-  it('finds no connection where none is registered', () => {
-    const find = withinCluster(clusterNodeIds, registered({}), ownNodeIds({}));
+  it('does not count a connection at the announced hostname that reads another node', () => {
+    const named = { ...node, hostname: 'node-2.internal' };
+    const byName = registered({ 'node-2.internal:6379': 'conn-2' });
 
-    expect(find('10.0.0.2', 6379)).toBeNull();
+    expect(collectionOf(named, 'seed', byName, ownNodeIds({ 'conn-2': 'node-1' }))).toEqual({ collected: false });
   });
 
-  it('leaves a node of another cluster at the same address not collected', () => {
-    const find = withinCluster(clusterNodeIds, registered(at), ownNodeIds({ 'conn-2': 'other-9' }));
+  it('counts a connection whose own node is not known', () => {
+    expect(collectionOf(node, 'seed', registered(at), ownNodeIds({}))).toEqual({
+      collected: true,
+      connectionId: 'conn-2',
+    });
+  });
 
-    expect(collectionOf({ address: '10.0.0.2:6379', flags: ['master'] }, 'seed', find)).toEqual({ collected: false });
+  it('still counts the viewing connection for its own node when another node is read at the address', () => {
+    const own = { ...node, flags: ['myself', 'master'] };
+
+    expect(collectionOf(own, 'seed', registered(at), ownNodeIds({ 'conn-2': 'node-1' }))).toEqual({
+      collected: true,
+      connectionId: 'seed',
+    });
   });
 });
