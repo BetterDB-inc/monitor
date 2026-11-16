@@ -1,14 +1,9 @@
+import type { ClusterNodeRef } from '@betterdb/shared';
 import type { ClusterNode } from '@app/common/types/metrics.types';
 import type { DivergenceGroup, DivergenceKind, TrackedDisagreement } from './topology-divergence';
 import { AnomalySeverity } from './types';
 
-export interface DivergenceNode {
-  nodeId: string;
-  address: string;
-  role: 'primary' | 'replica' | 'unknown';
-  shardId?: string;
-  availabilityZone?: string;
-}
+export type DivergenceNode = ClusterNodeRef;
 
 export interface DivergenceDetailPosition {
   value: string;
