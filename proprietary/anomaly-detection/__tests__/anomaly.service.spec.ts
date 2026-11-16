@@ -12662,6 +12662,61 @@ describe('AnomalyService', () => {
         expect(await nodeRead('stored-1')).toEqual({ ...REPLICA_NODE, collected: false });
       });
 
+      describe('in a correlated group', () => {
+        const groupOf = (event: AnomalyEvent) => ({
+          correlationId: 'grp-node',
+          timestamp: event.timestamp,
+          pattern: AnomalyPattern.UNKNOWN,
+          severity: AnomalySeverity.WARNING,
+          diagnosis: 'd',
+          recommendations: [],
+          anomalies: [event],
+        });
+
+        it('marks the node on the events of a recent group', async () => {
+          await poll();
+          const event = await raise();
+          (service as any).recentGroups.push(groupOf(event));
+
+          const [group] = await service.getRecentCorrelatedGroups();
+
+          expect(group.anomalies[0].node).toEqual({ ...PRIMARY_NODE, collected: true, connectionId: 'conn-1' });
+          expect(event.node).toEqual(PRIMARY_NODE);
+        });
+
+        it('marks the node on the events of a group read from storage', async () => {
+          storage.getCorrelatedGroups.mockResolvedValueOnce([
+            {
+              correlationId: 'grp-node',
+              timestamp: 1_000_000,
+              pattern: 'unknown',
+              severity: 'warning',
+              metricTypes: [],
+              connectionId: 'conn-1',
+              diagnosis: 'd',
+              recommendations: [],
+              anomalyIds: ['stored-1'],
+            },
+          ]);
+          storage.getCorrelatedGroupMembers.mockResolvedValueOnce([
+            storedRow({ id: 'stored-1', timestamp: 1_000_000, node: REPLICA_NODE as any }),
+          ]);
+
+          const [group] = await service.getRecentCorrelatedGroups(1);
+
+          expect(group.anomalies[0].node).toEqual({ ...REPLICA_NODE, collected: false });
+        });
+
+        it('leaves a group event without a node without one', async () => {
+          const event = await raise();
+          (service as any).recentGroups.push(groupOf(event));
+
+          const [group] = await service.getRecentCorrelatedGroups();
+
+          expect(group.anomalies[0]).not.toHaveProperty('node');
+        });
+      });
+
       it('marks the node on the events that are still open', async () => {
         await poll();
         const event = await raise();
