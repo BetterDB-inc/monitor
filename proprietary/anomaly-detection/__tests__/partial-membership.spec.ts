@@ -111,10 +111,22 @@ function judge(
   return { found, tracked };
 }
 
-function unclaimedMemberships(tracked: TrackedDisagreement[], found: PartialMembership[]): string[] {
+function unclaimedKeys(
+  tracked: TrackedDisagreement[],
+  found: PartialMembership[],
+  kind: TrackedDisagreement['kind'],
+): string[] {
   return unclaimedByPartialMembership(tracked, found)
-    .filter((entry) => entry.kind === 'membership')
+    .filter((entry) => entry.kind === kind)
     .map((entry) => entry.key);
+}
+
+function unclaimedMemberships(tracked: TrackedDisagreement[], found: PartialMembership[]): string[] {
+  return unclaimedKeys(tracked, found, 'membership');
+}
+
+function unclaimedSlotDisputes(tracked: TrackedDisagreement[], found: PartialMembership[]): string[] {
+  return unclaimedKeys(tracked, found, 'slot_owner');
 }
 
 function ids(peers: Array<{ nodeId: string }>): string[] {
@@ -413,6 +425,119 @@ describe('partiallyKnownNodes', () => {
     expect(ids(found[0].ownViewMissing)).toEqual(['p2']);
     expect(found[0].meet).toMatchObject({ command: 'CLUSTER MEET 10.0.0.8 6379' });
     expect(ids(found[0].meet?.runOn ?? [])).toEqual(['p2']);
+  });
+
+  describe('when its own view shows the slots of an owner it lacks as unassigned', () => {
+    const SLOTS_OF_P2 = 'slot_owner:p2|unassigned';
+    const SLOTS_OF_P3 = 'slot_owner:p3|unassigned';
+    const everyone = [view('p1'), view('p2'), view('p3')];
+    const lacksP2 = [...everyone, view('n1', { p2: null })];
+
+    it('holds the slot dispute from the first round', () => {
+      const { found, tracked } = judge(every(lacksP2, 0, 0));
+
+      expect(found).toHaveLength(1);
+      expect(found[0]).toMatchObject({
+        nodeId: 'n1',
+        confirmed: false,
+        disagreementKeys: ['membership:p2'],
+        slotDisputeKeys: [SLOTS_OF_P2],
+      });
+      expect(unclaimedSlotDisputes(tracked, found)).toEqual([]);
+    });
+
+    it('holds one slot dispute for each slot owner it lacks', () => {
+      const { found, tracked } = judge(every([...everyone, view('n1', { p2: null, p3: null })], 0, LONG_ENOUGH));
+
+      expect(found).toHaveLength(1);
+      expect(found[0].slotDisputeKeys).toEqual([SLOTS_OF_P2, SLOTS_OF_P3]);
+      expect(unclaimedSlotDisputes(tracked, found)).toEqual([]);
+    });
+
+    it('holds a slot dispute a new primary and its replica both explain', () => {
+      const views = [
+        ...['p1', 'p2', 'p3'].map((id) => view(id, {}, [NEW_REPLICA])),
+        view('n1', { p2: null }, [NEW_REPLICA]),
+        view('r1', { p2: null }, [{ ...NEW_REPLICA, flags: ['myself', 'slave'] }]),
+      ];
+      const { found, tracked } = judge(every(views, 0, LONG_ENOUGH));
+
+      expect(found.map((finding) => finding.nodeId)).toEqual(['n1', 'r1']);
+      expect(found.map((finding) => finding.slotDisputeKeys)).toEqual([[SLOTS_OF_P2], [SLOTS_OF_P2]]);
+      expect(unclaimedSlotDisputes(tracked, found)).toEqual([]);
+    });
+
+    it('keeps holding the slot dispute while the node gives no view', () => {
+      const rounds = [...every(lacksP2, 0, 2 * ROUND_MS), { at: 3 * ROUND_MS, views: everyone, unanswered: ['n1'] }];
+      const { found, tracked } = judge(rounds);
+
+      expect(found).toHaveLength(1);
+      expect(found[0]).toMatchObject({ nodeId: 'n1', ownViewMissing: [], slotDisputeKeys: [SLOTS_OF_P2] });
+      expect(unclaimedSlotDisputes(tracked, found)).toEqual([]);
+    });
+
+    it('leaves the slot dispute when it names another owner for the slots', () => {
+      const ownView = view('n1', { p2: null, p3: { slots: [[5461, 16383]] } });
+      const { found, tracked } = judge(every([...everyone, ownView], 0, LONG_ENOUGH));
+
+      expect(found).toHaveLength(1);
+      expect(found[0].slotDisputeKeys).toEqual([]);
+      expect(unclaimedSlotDisputes(tracked, found)).toEqual(['slot_owner:p2|p3']);
+    });
+
+    it('leaves the slot dispute when a peer that knows the owner sees the slots unassigned too', () => {
+      const views = [view('p1'), view('p2'), view('p3', { p2: { slots: [] } }), view('n1', { p2: null })];
+      const { found, tracked } = judge(every(views, 0, LONG_ENOUGH));
+
+      expect(found).toHaveLength(1);
+      expect(found[0].slotDisputeKeys).toEqual([]);
+      expect(unclaimedSlotDisputes(tracked, found)).toEqual([SLOTS_OF_P2]);
+    });
+
+    it('leaves the slot dispute when a third view gives the slots to another owner', () => {
+      const views = [view('p1'), view('p2'), view('p3', { p3: { slots: [[5461, 16383]] } }), view('n1', { p2: null })];
+      const { found, tracked } = judge(every(views, 0, LONG_ENOUGH));
+
+      expect(found).toHaveLength(1);
+      expect(found[0].slotDisputeKeys).toEqual([]);
+      expect(unclaimedSlotDisputes(tracked, found)).toEqual(['slot_owner:p2|p3|unassigned']);
+    });
+
+    it('leaves a slot dispute over an owner it knows', () => {
+      const ownView = view('n1', { p2: null, p3: { slots: [] } });
+      const { found, tracked } = judge(every([...everyone, ownView], 0, LONG_ENOUGH));
+
+      expect(found[0].slotDisputeKeys).toEqual([SLOTS_OF_P2]);
+      expect(unclaimedSlotDisputes(tracked, found)).toEqual([SLOTS_OF_P3]);
+    });
+
+    it('leaves a slot dispute voted by a peer that only lacks the new node', () => {
+      const views = [view('p1'), view('p2', { n1: null }), view('p3', { n1: null, p2: { slots: [] } })];
+      const { found, tracked } = judge(every(views, 0, LONG_ENOUGH));
+
+      expect(found).toHaveLength(1);
+      expect(found[0]).toMatchObject({ nodeId: 'n1', slotDisputeKeys: [] });
+      expect(unclaimedSlotDisputes(tracked, found)).toEqual([SLOTS_OF_P2]);
+    });
+
+    it('leaves the slot disputes of two slot owners that do not know each other', () => {
+      const views = [view('p1'), view('p2', { p3: null }), view('p3', { p2: null })];
+      const { found, tracked } = judge(every(views, 0, LONG_ENOUGH));
+
+      expect(found).toHaveLength(1);
+      expect(found[0]).toMatchObject({ nodeId: 'p2', slotDisputeKeys: [] });
+      expect(unclaimedSlotDisputes(tracked, found)).toEqual([SLOTS_OF_P2, SLOTS_OF_P3]);
+    });
+
+    it('lets go of a slot dispute that is still there once it has learned the owner', () => {
+      const learned = [...everyone, view('n1', { p2: { slots: [] } })];
+      const rounds = [...every(lacksP2, 0, 2 * ROUND_MS), { at: 3 * ROUND_MS, views: learned }];
+      const { found, tracked } = judge(rounds);
+
+      expect(found).toEqual([]);
+      expect(unclaimedSlotDisputes(tracked, found)).toEqual([SLOTS_OF_P2]);
+      expect(tracked.find((entry) => entry.key === SLOTS_OF_P2)).toMatchObject({ rounds: 4, lastSeenAt: 3 * ROUND_MS });
+    });
   });
 
   it('reads a handshake line on an address two node ids share as missing, not as handshake', () => {
