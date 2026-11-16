@@ -3,7 +3,10 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { portProblem } from './ports';
-import type { InvalidRun, ScenarioOptions, ScenarioResult } from './scenario';
+import type { InvalidRun, LicenseTier, ScenarioOptions, ScenarioResult } from './scenario';
+import type { ReplyProfile } from '../../test/load/fake-cluster';
+
+const CHILD_MARGIN_MS = 180_000;
 
 interface CliOptions {
   nodes: number[];
@@ -14,6 +17,9 @@ interface CliOptions {
   settleSeconds: number;
   hang: number;
   failover: boolean;
+  license: LicenseTier;
+  profile: ReplyProfile;
+  replyDelayMs: number;
   force: boolean;
   out?: string;
 }
@@ -28,6 +34,12 @@ const USAGE = `Usage: pnpm load:cluster [options]
   --settle 300          longest wait for auto-registration, seconds (default 300)
   --hang 0              nodes that accept TCP and stop replying (default 0)
   --failover            promote a replica of shard 1 halfway through the window
+  --license pro         pro or enterprise = licensed features on, through a local stand-in
+                        for the license server; community = no license (default pro)
+  --profile realistic   realistic = filled slow log, command log, latency events, 200 clients,
+                        60 commands in the stats and a keyspace to scan; empty = near-empty replies
+                        (default realistic)
+  --reply-delay-ms 0    hold every reply back this long, to stand in for a network (default 0)
   --out <dir>           also write one JSON file per run and report.md there
   --force               run even when the size does not fit the local port range
 
@@ -36,8 +48,14 @@ registered connection that is about one port per node (500 nodes: about 500).
 With every node registered it is nodes x nodes (100 nodes: 10,000; 500 nodes:
 250,000). A run that would take more than half of the machine's local port
 range is skipped unless --force is given, and a run that runs out of ports is
-stopped and reported as invalid.
+stopped and reported as invalid. A closed connection keeps its port for about
+30 seconds more, so a run that opens and closes many connections is marked
+suspect when open plus recently closed ports pass half of the range.
 `;
+
+function parseLicense(value: string): LicenseTier {
+  return value === 'community' || value === 'enterprise' ? value : 'pro';
+}
 
 function parseArgs(argv: string[]): CliOptions {
   const options: CliOptions = {
@@ -49,6 +67,9 @@ function parseArgs(argv: string[]): CliOptions {
     settleSeconds: 300,
     hang: 0,
     failover: false,
+    license: 'pro',
+    profile: 'realistic',
+    replyDelayMs: 0,
     force: false,
   };
   for (let index = 0; index < argv.length; index++) {
@@ -79,6 +100,15 @@ function parseArgs(argv: string[]): CliOptions {
       case '--failover':
         options.failover = true;
         break;
+      case '--license':
+        options.license = parseLicense(value());
+        break;
+      case '--profile':
+        options.profile = value() === 'empty' ? 'empty' : 'realistic';
+        break;
+      case '--reply-delay-ms':
+        options.replyDelayMs = Math.max(0, Number(value()) || 0);
+        break;
       case '--force':
         options.force = true;
         break;
@@ -95,9 +125,11 @@ function parseArgs(argv: string[]): CliOptions {
   return options;
 }
 
-function runChild(scenario: ScenarioOptions, workDir: string): ScenarioResult | InvalidRun | null {
+function runChild(scenario: ScenarioOptions, workDir: string): ScenarioResult | InvalidRun {
   const label = `${scenario.nodes}-${scenario.mode}`;
   const resultFile = join(workDir, `${label}.json`);
+  const stages = scenario.hang > 0 ? 2 : 1;
+  const timeoutMs = scenario.settleTimeoutMs + scenario.warmupMs * stages + scenario.measureMs + CHILD_MARGIN_MS;
   const child = spawnSync(
     process.execPath,
     [
@@ -114,11 +146,23 @@ function runChild(scenario: ScenarioOptions, workDir: string): ScenarioResult | 
       env: { ...process.env, CLUSTER_LOAD_SCENARIO: JSON.stringify(scenario), CLUSTER_LOAD_RESULT_FILE: resultFile },
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
+      timeout: timeoutMs,
+      killSignal: 'SIGKILL',
     },
   );
   if (child.status !== 0) {
-    process.stderr.write(`Run ${label} failed (exit ${child.status})\n${(child.stderr ?? '').slice(-2000)}\n`);
-    return null;
+    const reason =
+      child.signal || child.error
+        ? `stopped after ${Math.round(timeoutMs / 1000)}s without finishing`
+        : `failed with exit code ${child.status}`;
+    const errorLine = (child.stderr ?? '')
+      .split('\n')
+      .reverse()
+      .find((line) => /^\w*Error: /.test(line.trim()))
+      ?.trim()
+      .slice(0, 200);
+    process.stderr.write(`Run ${label} ${reason}\n${(child.stderr ?? '').slice(-2000)}\n`);
+    return { options: scenario, invalid: errorLine ? `${reason} (${errorLine})` : reason };
   }
   return JSON.parse(readFileSync(resultFile, 'utf8')) as ScenarioResult | InvalidRun;
 }
@@ -140,8 +184,12 @@ function summary(results: ScenarioResult[]): string {
     [
       'Nodes',
       'Mode',
+      'License',
+      'Replies',
+      'Reply delay ms',
       'Connections',
       'Sockets',
+      'Ports held',
       'Commands/s',
       'KB/s in',
       'KB/s out',
@@ -150,15 +198,22 @@ function summary(results: ScenarioResult[]): string {
       'Loop delay p99 ms',
       'CPU %',
       'Heap MB',
-      'RSS MB',
+      'RSS peak MB',
+      'Fake cluster CPU %',
+      'Fake cluster loop delay p99 ms',
+      'Suspect',
     ],
     results.map((result) => {
       const anomaly = result.pollers.AnomalyService;
       return [
         result.options.nodes,
         result.options.mode,
+        result.licenseTier,
+        result.options.profile,
+        result.options.replyDelayMs,
         `${result.connections.connected}/${result.connections.registered}`,
         result.server.socketsOpen,
+        result.server.portsHeld,
         result.server.commandsPerSecond,
         kb(result.server.bytesInPerSecond),
         kb(result.server.bytesOutPerSecond),
@@ -167,7 +222,10 @@ function summary(results: ScenarioResult[]): string {
         result.process.eventLoopDelayP99Ms,
         result.process.cpuPercent,
         result.process.heapUsedMb,
-        result.process.rssMb,
+        result.process.rssPeakMb,
+        result.fakeCluster.cpuPercent,
+        result.fakeCluster.eventLoopDelayP99Ms,
+        result.suspect.length ? 'yes' : '-',
       ];
     }),
   );
@@ -182,7 +240,16 @@ function details(result: ScenarioResult): string {
       .map((entry) => [entry.command, entry.perSecond, kb(entry.bytesOutPerSecond)]),
   );
   const pollers = table(
-    ['Poller', 'Interval ms', 'Ticks done / expected', 'Tick p50 ms', 'Tick p95 ms', 'Tick max ms', 'Commands per tick', 'Commands/s'],
+    [
+      'Poller',
+      'Interval ms',
+      'Ticks done / expected',
+      'Tick p50 ms',
+      'Tick p95 ms',
+      'Tick max ms',
+      'Commands per tick',
+      'Commands/s, counted in the monitor',
+    ],
     Object.entries(result.pollers)
       .filter(([, poller]) => poller.commandsPerSecond > 0 || poller.ticks > 0)
       .sort((left, right) => right[1].commandsPerSecond - left[1].commandsPerSecond)
@@ -214,6 +281,11 @@ function details(result: ScenarioResult): string {
     '',
     pollers,
     '',
+    `The fake cluster received ${result.server.commandsPerSecond} commands/s in total; that is the number to trust. ` +
+      `The per-poller numbers are counted inside the monitor and add up to ${result.clientCommandsPerSecond}/s. ` +
+      'A poller is charged for everything started inside its pass, including the handshake and reconnect commands of ' +
+      'a node connection it happened to open, and everything outside a poller pass is "background".',
+    '',
     callers,
     '',
     `Webhook events dispatched in the window: ${events || 'none'}.`,
@@ -240,6 +312,9 @@ function main(): void {
         measureMs: cli.measureSeconds * 1000,
         hang: cli.hang,
         failover: cli.failover,
+        license: cli.license,
+        profile: cli.profile,
+        replyDelayMs: cli.replyDelayMs,
       };
       const problem = cli.force ? null : portProblem(nodes, mode);
       if (problem) {
@@ -252,13 +327,20 @@ function main(): void {
       }
       process.stderr.write(`Running ${nodes} nodes, mode ${mode}...\n`);
       const result = runChild(scenario, workDir);
-      if (result && 'invalid' in result) invalid.push(result);
-      else if (result) results.push(result);
+      if (result.invalid !== undefined) invalid.push({ options: result.options, invalid: result.invalid });
+      else results.push(result as ScenarioResult);
     }
   }
 
   const notRun = invalid.map((run) => `- ${label(run)}: ${run.invalid}`);
-  const report = [summary(results), ...(notRun.length ? ['No numbers for:', notRun.join('\n')] : []), '', ...results.map(details)].join('\n\n');
+  const suspect = results.flatMap((result) => result.suspect.map((reason) => `- ${label(result)}: ${reason}`));
+  const report = [
+    summary(results),
+    ...(suspect.length ? ['Suspect, read these rows with care:', suspect.join('\n')] : []),
+    ...(notRun.length ? ['No numbers for:', notRun.join('\n')] : []),
+    '',
+    ...results.map(details),
+  ].join('\n\n');
   process.stdout.write(`${report}\n`);
   if (cli.out) writeFileSync(join(workDir, 'report.md'), `${report}\n`);
 }

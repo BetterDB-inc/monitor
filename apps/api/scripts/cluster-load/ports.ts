@@ -2,8 +2,9 @@ import { execFileSync } from 'child_process';
 import { readFileSync } from 'fs';
 
 export const PORTS_EXHAUSTED = 'ran out of local ports (EADDRNOTAVAIL)';
+const TIME_WAIT_SECONDS = 30;
 
-function ephemeralPortCount(): number | null {
+export function ephemeralPortCount(): number | null {
   try {
     if (process.platform === 'linux') {
       const [first, last] = readFileSync('/proc/sys/net/ipv4/ip_local_port_range', 'utf8').trim().split(/\s+/).map(Number);
@@ -21,6 +22,21 @@ function ephemeralPortCount(): number | null {
 
 export function expectedSockets(nodes: number, mode: 'seed' | 'auto'): number {
   return mode === 'auto' ? nodes * nodes + nodes : nodes + 16;
+}
+
+export function portsHeld(socketsOpen: number, socketsOpenedPerSecond: number): number {
+  return Math.round(socketsOpen + socketsOpenedPerSecond * TIME_WAIT_SECONDS);
+}
+
+export function portPressure(socketsOpen: number, socketsOpenedPerSecond: number): string | null {
+  const available = ephemeralPortCount();
+  if (available === null) return null;
+  const held = portsHeld(socketsOpen, socketsOpenedPerSecond);
+  if (held <= available / 2) return null;
+  return (
+    `about ${held.toLocaleString('en-US')} local ports were held, counting the ones a closed connection keeps for ` +
+    `${TIME_WAIT_SECONDS}s, out of ${available.toLocaleString('en-US')}`
+  );
 }
 
 export function portProblem(nodes: number, mode: 'seed' | 'auto'): string | null {
