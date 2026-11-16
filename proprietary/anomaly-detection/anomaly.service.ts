@@ -7015,11 +7015,17 @@ export class AnomalyService
     if (!discovery) throw new Error('the monitor does not connect to the cluster nodes directly');
     const budget = AnomalyService.FANOUT_COMMAND_TIMEOUT_MS;
     let abandoned = false;
+    let connected = () => {};
+    const reached = new Promise<void>((resolve) => {
+      connected = resolve;
+    });
     const writing = discovery.onNodeClientOnce(node, connectionId, budget, (client) => {
       if (abandoned) throw new Error(timedOut);
+      connected();
       return write(client);
     });
     try {
+      await withTimeout(Promise.race([reached, writing]), budget, timedOut);
       return await withTimeout(writing, budget, timedOut);
     } catch (err) {
       if (err instanceof Error && err.message === timedOut) abandoned = true;

@@ -4706,6 +4706,36 @@ describe('AnomalyService', () => {
             expect(execution()).toEqual({ available: true });
           });
 
+          it('gives MIGRATESLOTS its own time once the connection is open', async () => {
+            enable();
+            const { calls, source, discovery } = await planned();
+            const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+            ((discovery as any).onNodeClientOnce as jest.Mock).mockImplementationOnce(
+              async (_node: unknown, _connectionId: string, _timeoutMs: number, run: (client: unknown) => unknown) => {
+                await pause(40);
+                return run(source);
+              },
+            );
+            const answer = source.call.getMockImplementation()!;
+            source.call.mockImplementationOnce(async (...args: unknown[]) => {
+              await pause(40);
+              return answer(...args);
+            });
+            const budget = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+            (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 60;
+            try {
+              expect(await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN)).toMatchObject({
+                status: 'started',
+              });
+            } finally {
+              (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = budget;
+            }
+            expect(calls).toEqual([
+              ['CLUSTER', 'MIGRATESLOTS', 'SLOTSRANGE', '100', '107', 'NODE', 'b0000000'],
+            ]);
+            expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'migration_running' });
+          });
+
           it('follows a start whose MIGRATESLOTS did not answer in time', async () => {
             enable();
             const { source } = await planned();
