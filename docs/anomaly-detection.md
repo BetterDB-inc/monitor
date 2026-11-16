@@ -872,7 +872,7 @@ Cluster views diverge for 15s: 10.0.1.5:6379 (eu-west-1a) disagrees with 10.0.2.
 
 It is CRITICAL when slot owners are in dispute, because clients can then be sent to different nodes for the same key, and a WARNING otherwise. When the nodes of an open WARNING start to dispute slot owners as well, the WARNING is closed and a CRITICAL event is raised in its place. An open event is not lowered when the slot dispute ends. When exactly one node stands against the rest, the event carries that node's address as `nodeAddr`. The text is written when the event is raised; [`GET /api/anomaly/topology-divergence`](#get-topology-divergence) returns the current state. [`GET /api/anomaly/topology-disagreements`](#get-topology-disagreements) returns the same state as one line per disagreement with the number of views on each side, and one line per shard, which stays readable on a cluster of hundreds of nodes.
 
-In the web app the same summary is on the **Disagreements** tab of the Cluster page (`/cluster?tab=disagreements`). Each disagreement is one card with the number of views on each side and links to the nodes on it; a line that an open event covers links to the Anomaly Detection page. A disagreement the last round could not check again shows the time it was last seen and no counts. While an event is open for it, it stays in the list and in the count on the tab; without an event it is listed apart under **Not confirmed this round** and is not counted. On a merged line a side names every node that holds it, and `+N more` counts the nodes that are not listed. Below the cards every shard is one row: `Disputed`, `No disagreement` or `Not compared`, with a link to its disagreements and to the unconfirmed ones, and **Only disputed** hides the rest. The tab shows how many nodes were asked and how many answered, and says so when the counts are over a sample of the cluster. **Ask every node** runs a [full check](#start-a-full-topology-check): every node is asked once and the counts are then over the whole cluster. While it runs the tab shows how many nodes were asked; when it finishes the tab switches to the result, and **Sampled (live)** switches back. The result of a full check does not update, and the tab says so once it is more than a minute old. The tab needs the anomaly detection licence.
+In the web app the same summary is on the **Disagreements** tab of the Cluster page (`/cluster?tab=disagreements`). Each disagreement is one card with the number of views on each side and links to the nodes on it; a line that an open event covers links to the Anomaly Detection page. A disagreement the last round could not check again shows the time it was last seen and no counts. While an event is open for it, it stays in the list and in the count on the tab; without an event it is listed apart under **Not confirmed this round** and is not counted. On a merged line a side names every node that holds it, and `+N more` counts the nodes that are not listed. Below the cards every shard is one row: `Disputed`, `No disagreement` or `Not compared`, with a link to its disagreements and to the unconfirmed ones, and **Only disputed** hides the rest. The tab shows how many nodes were asked and how many answered, and says so when the counts are over a sample of the cluster. **Ask every node** runs a [full check](#start-a-full-topology-check): every node is asked once and the counts are then over the whole cluster. Only a workspace admin can start one; a read-only member sees a line that says so in place of the button, and can still look at a check an admin ran. While it runs the tab shows how many nodes were asked; when it finishes the tab switches to the result, and **Sampled (live)** switches back. The result of a full check does not update, and the tab says so once it is more than a minute old. When a check fails the tab says when and why, and the result of the check before it stays on offer under its own time. Switching to another connection goes back to the sampled result. The tab needs the anomaly detection licence.
 
 **When it closes.** The event closes after the views agree for 3 rounds in a row. A round in which the disagreement shows again starts that count over. A round in which the nodes of one side do not answer, or fewer than two views could be read, is neither agreement nor disagreement: the count is kept as it is and the event stays open. When that lasts 5 minutes the event is closed. An event that is resolved by hand is raised again while the views still differ. The event of a connection that is removed is closed. After a restart the open event is picked up instead of raised a second time.
 
@@ -1478,7 +1478,7 @@ POST /api/anomaly/topology-disagreements/full-check
 X-Connection-ID: <connection-id>
 ```
 
-Asks every node of the cluster for its view once, so that the counts are over the whole cluster and not over the sample of a round: "497 views against 3" where the round says "9 against 3". The call returns at once with `202` and the state of the check. Progress and the result are read from `fullCheck` of [`GET /api/anomaly/topology-disagreements`](#get-topology-disagreements). A request made while a check runs returns the running check and does not start a second one. It needs the anomaly detection licence.
+Asks every node of the cluster for its view once, so that the counts are over the whole cluster and not over the sample of a round: "497 views against 3" where the round says "9 against 3". The call returns at once with `202` and the state of the check. Progress and the result are read from `fullCheck` of [`GET /api/anomaly/topology-disagreements`](#get-topology-disagreements). A request made while a check runs returns the running check and does not start a second one. It needs the anomaly detection licence, and with workspaces on only an admin can call it: the check opens a connection to every node of the monitored cluster.
 
 | Field of `fullCheck` | Meaning |
 |-------|---------|
@@ -1487,6 +1487,7 @@ Asks every node of the cluster for its view once, so that the counts are over th
 | `startedAt`, `finishedAt` | When the check started and finished |
 | `asked`, `total` | How many nodes were asked so far, and how many there are to ask |
 | `retryAt` | When the next check can be started, once one has finished |
+| `lastFailure` | `null`, or `at` and `reason` of the last check when it broke before it finished. A result from the check before it is still in `summary`, with its own `finishedAt`. Cleared when the next check starts, and after 10 minutes |
 | `summary` | On `done` only: the result, in the shape of the summary above |
 
 In `summary` the counts are over every node that answered, and `coverage.complete` is `true` when all of them did. A node that gave no answer is in `unanswered` and is not counted as agreeing. The lines of a full check are not tracked: `tracked` is `false` and they have no `since` and no `rounds`, because the check is a single reading. They are never `stale`, and `lastSeenAt` is the time of the check. `confirmed`, `eventId` and `eventType` are set when an open event covers the same disagreement. **A full check raises no event and closes none**, and what it found is not kept between rounds: a disagreement that only it sees becomes an event when the rounds see it too.
@@ -1498,6 +1499,7 @@ In `summary` the counts are over every node that answered, and `coverage.complet
 A check cannot be run, and `unavailable` says so, when:
 
 - `no_direct_access`: the monitor reaches the cluster through one node only (an agent connection), so it cannot dial the others
+- `ssh_tunnel`: the connection goes through an SSH tunnel, and the addresses the nodes report are the ones inside the tunnel, which the monitor cannot dial
 - `raft_cluster`: the nodes of a Raft cluster share one agreed view, so there is nothing to compare
 - `no_cluster_view`: no cluster view has been read on the connection yet
 
@@ -1506,6 +1508,8 @@ A check cannot be run, and `unavailable` says so, when:
 | Status | When |
 |--------|------|
 | `402` | No anomaly detection licence |
+| `403` | The caller is a read-only member of the workspace. Only an admin can start a check |
+| `404` | The connection in the header is not registered |
 | `409` | A check cannot be run on this connection. The body has `reason` and the same in words as `message` |
 | `429` | The last check finished less than 30 seconds ago. The body has `retryAt` |
 | `503` | The node list of the cluster could not be read |
@@ -1519,7 +1523,8 @@ A check cannot be run, and `unavailable` says so, when:
   "finishedAt": null,
   "asked": 0,
   "total": 500,
-  "retryAt": null
+  "retryAt": null,
+  "lastFailure": null
 }
 ```
 
