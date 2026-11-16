@@ -410,6 +410,16 @@ describe('TopologyDivergenceMonitor', () => {
     const round = await poll('conn-1', 'a1', 0);
 
     expect(round?.failureFlags.size).toBe(0);
+    expect(round?.disagreements.map((d) => d.key)).not.toContain('failure_flags:c2');
+  });
+
+  it('keeps the entry of a view that lists a node as a member over one without an address', async () => {
+    const { poll } = harness();
+
+    const round = await poll('conn-1', 'a1', 0, { c2: { flags: ['master', 'noaddr'], address: ':0@0' } });
+
+    expect(round?.nodes.get('c2')).toMatchObject({ flags: ['master'], address: 'c2.internal:6379@16379' });
+    expect(round?.nodes.get('b2')).toMatchObject({ flags: ['master'] });
   });
 
   it('records no failure flags in a round that cannot compare', async () => {

@@ -198,7 +198,8 @@ describe('McpAnomalyController', () => {
     const summary = { status: 'ok', coverage: { nodes: 500, answered: 12, complete: false }, disagreements: [], shards: [] };
     svc.getTopologyDisagreements.mockReturnValue(summary);
 
-    expect(controller.getTopologyDisagreements('inst1')).toBe(summary);
+    expect(controller.getTopologyDisagreements('inst1', 'all')).toBe(summary);
+    expect(controller.getTopologyDisagreements('inst1')).toEqual({ ...summary, shardsListed: 'disputed' });
     expect(svc.getTopologyDisagreements).toHaveBeenCalledWith('inst1');
   });
 

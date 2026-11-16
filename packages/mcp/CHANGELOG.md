@@ -29,7 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   slot owners, config epochs, failure flags or membership, with the number
   of views on each side, and one line per shard. Built for large clusters:
   lines that differ only in the node they are about are merged, node lists
-  are capped at 25 and `coverage` says how many nodes answered.
+  are capped at 25 and `coverage` says how many nodes answered. Returns the
+  disputed shards and the totals of all of them; `shards: "all"` returns
+  one line per shard.
 
 ### Changed
 

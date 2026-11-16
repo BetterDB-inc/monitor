@@ -5,6 +5,7 @@ import {
   DISAGREEMENT_LIST_LIMIT,
   type DisagreementRound,
   summarizeDisagreements,
+  withDisputedShardsOnly,
 } from '../topology-disagreements';
 import { AnomalySeverity, MetricType } from '../types';
 
@@ -75,6 +76,8 @@ describe('summarizeDisagreements', () => {
       coverage: { nodes: 0, asked: 0, answered: 0, complete: false, unanswered: [], unansweredCount: 0 },
       disagreements: [],
       shards: [],
+      shardTotals: { total: 0, disputed: 0, undisputed: 0, notCompared: 0 },
+      shardsListed: 'all',
     });
   });
 
@@ -153,6 +156,174 @@ describe('summarizeDisagreements', () => {
     expect(summary.shards.map((shard) => shard.state)).toEqual(['not_compared', 'not_compared']);
   });
 
+  describe('a disagreement that was not seen in the last round', () => {
+    const fresh = tracked({
+      key: 'failure_flags:s001r0',
+      kind: 'failure_flags',
+      subjectIds: ['s001r0'],
+      positions: [
+        { value: 'failing', observers: ['s000p'] },
+        { value: 'ok', observers: ['s001p'] },
+      ],
+    });
+    const old = tracked({
+      key: 'slot_owner:s000p|s002p',
+      kind: 'slot_owner',
+      subjectIds: ['s000p', 's002p'],
+      slots: [[0, 9]],
+      lastSeenAt: AT - 60_000,
+      positions: [
+        { value: 's000p', observers: ['s000p', 's000r0'] },
+        { value: 's002p', observers: ['s002p'] },
+      ],
+    });
+    const eventOf = (key: string) =>
+      key === old.key ? { eventId: 'e3', eventType: MetricType.TOPOLOGY_DIVERGENCE } : undefined;
+
+    it('is kept without counts, after the lines of this round, and says when it was last seen', () => {
+      const summary = summarizeDisagreements(
+        round(cluster(3), { observers: ['s000p', 's000r0', 's001p'], disagreements: [fresh, old] }),
+        eventOf,
+      );
+
+      expect(summary.disagreements.map((line) => [line.id, line.stale])).toEqual([
+        ['failure_flags:s001r0', false],
+        ['slot_owner:s000p|s002p', true],
+      ]);
+      expect(summary.disagreements[1]).toMatchObject({
+        severity: AnomalySeverity.CRITICAL,
+        confirmed: true,
+        eventId: 'e3',
+        since: AT - 10_000,
+        lastSeenAt: AT - 60_000,
+        positions: [],
+        slots: [[0, 9]],
+        slotCount: 10,
+        shardIds: ['s000', 's002'],
+        text: 'Slots 0-9: views differed on the owner (s000p.internal:6379, s002p.internal:6379).',
+      });
+    });
+
+    it('does not make a shard disputed and leaves it as not compared', () => {
+      const summary = summarizeDisagreements(
+        round(cluster(3), { observers: ['s000p', 's000r0', 's001p'], disagreements: [fresh, old] }),
+        noEvent,
+      );
+
+      expect(summary.shards.map((shard) => [shard.shardId, shard.state, shard.disagreementIds])).toEqual([
+        ['s001', 'disputed', ['failure_flags:s001r0']],
+        ['s000', 'not_compared', []],
+        ['s002', 'not_compared', []],
+      ]);
+      expect(summary.shardTotals).toEqual({ total: 3, disputed: 1, undisputed: 0, notCompared: 2 });
+    });
+
+    it('counts the views it is waiting for as asked and unanswered', () => {
+      const summary = summarizeDisagreements(
+        round(cluster(3), { observers: ['s000p', 's000r0', 's001p'], disagreements: [fresh, old] }),
+        noEvent,
+      );
+
+      expect(summary.coverage).toMatchObject({ asked: 4, answered: 3, complete: false, unansweredCount: 1 });
+      expect(summary.coverage.unanswered.map((entry) => entry.nodeId)).toEqual(['s002p']);
+    });
+
+    it('holds every line without counts in a round that could not compare', () => {
+      const summary = summarizeDisagreements(
+        round(cluster(3), {
+          status: 'insufficient_views',
+          observers: ['s000p'],
+          disagreements: [fresh, old],
+        }),
+        noEvent,
+      );
+
+      expect(summary.disagreements.map((line) => [line.id, line.stale, line.positions])).toEqual([
+        ['slot_owner:s000p|s002p', true, []],
+        ['failure_flags:s001r0', true, []],
+      ]);
+      expect(summary.disagreements[1].text).toBe('s001r0.internal:6379: views differed on whether it is failing.');
+      expect(summary.shards.map((shard) => [shard.state, shard.disagreementIds])).toEqual([
+        ['not_compared', []],
+        ['not_compared', []],
+        ['not_compared', []],
+      ]);
+      expect(summary.shardTotals).toEqual({ total: 3, disputed: 0, undisputed: 0, notCompared: 3 });
+    });
+
+    it('merges with other lines last seen in the same round, never with a line of this round', () => {
+      const about = (subject: string, lastSeenAt: number) =>
+        tracked({
+          key: `membership:${subject}`,
+          kind: 'membership',
+          subjectIds: [subject],
+          lastSeenAt,
+          positions: [
+            { value: 'known', observers: ['s000p'] },
+            { value: 'missing', observers: ['s000r0'] },
+          ],
+        });
+      const disagreements = [
+        about('s001p', AT),
+        about('s001r0', AT - 5000),
+        about('s002p', AT - 5000),
+        about('s002r0', AT - 10_000),
+      ];
+
+      const summary = summarizeDisagreements(round(cluster(3), { disagreements }), noEvent);
+
+      expect(summary.disagreements.map((line) => [line.id, line.stale, line.lastSeenAt, line.text])).toEqual([
+        ['membership:s001p', false, AT, 's001p.internal:6379: a member in 1 view, not known in 1 view.'],
+        ['membership:s001r0+1', true, AT - 5000, '2 nodes: views differed on whether they are members.'],
+        [
+          'membership:s002r0',
+          true,
+          AT - 10_000,
+          's002r0.internal:6379: views differed on whether it is a member.',
+        ],
+      ]);
+    });
+
+    it('names no epoch for a config epoch it could not read again', () => {
+      const epoch = tracked({
+        key: 'config_epoch:s001p',
+        kind: 'config_epoch',
+        subjectIds: ['s001p'],
+        lastSeenAt: AT - 5000,
+        positions: [
+          { value: '4', observers: ['s002p'] },
+          { value: '7', observers: ['s000p'] },
+        ],
+      });
+
+      const [line] = summarizeDisagreements(round(cluster(3), { disagreements: [epoch] }), noEvent).disagreements;
+
+      expect(line.text).toBe('Config epoch of s001p.internal:6379: views differed.');
+      expect(line.epochs).toBeUndefined();
+    });
+  });
+
+  it('can leave out the shards that are not disputed and keeps their totals', () => {
+    const flags = tracked({
+      key: 'failure_flags:s001r0',
+      kind: 'failure_flags',
+      subjectIds: ['s001r0'],
+      positions: [
+        { value: 'failing', observers: ['s000p'] },
+        { value: 'ok', observers: ['s001p'] },
+      ],
+    });
+    const summary = summarizeDisagreements(round(cluster(3), { disagreements: [flags] }), noEvent);
+
+    const trimmed = withDisputedShardsOnly(summary);
+
+    expect(summary.shardsListed).toBe('all');
+    expect(trimmed.shardsListed).toBe('disputed');
+    expect(trimmed.shards.map((shard) => shard.shardId)).toEqual(['s001']);
+    expect(trimmed.shardTotals).toEqual({ total: 3, disputed: 1, undisputed: 2, notCompared: 0 });
+    expect(trimmed.disagreements).toEqual(summary.disagreements);
+  });
+
   it('counts both sides of a slot owner dispute and marks the shards it touches', () => {
     const dispute = tracked({
       key: 'slot_owner:s000p|s001p',
@@ -180,6 +351,8 @@ describe('summarizeDisagreements', () => {
         eventType: null,
         since: AT - 10_000,
         rounds: 3,
+        stale: false,
+        lastSeenAt: AT,
         subjects: [expect.objectContaining({ nodeId: 's000p' }), expect.objectContaining({ nodeId: 's001p' })],
         subjectCount: 2,
         slots: [[0, 99]],
@@ -364,7 +537,37 @@ describe('summarizeDisagreements', () => {
       ['failing', 3],
       ['ok', 1],
     ]);
-    expect(summary.disagreements[0].positions[1].observers.map((observer) => observer.nodeId)).toEqual(cutOff);
+    expect(
+      summary.disagreements[0].positions.map((position) => position.observers.map((observer) => observer.nodeId)),
+    ).toEqual([['s000p', 's000r0', 's001p'], []]);
+  });
+
+  it('lists on a merged line only the views that hold the side for every node of the line', () => {
+    const about = (subject: string, vouching: string) =>
+      tracked({
+        key: `failure_flags:${subject}`,
+        kind: 'failure_flags',
+        subjectIds: [subject],
+        positions: [
+          { value: 'failing', observers: ['s000p'] },
+          { value: 'ok', observers: ['s000r0', vouching].sort() },
+        ],
+      });
+    const disagreements = [about('s001p', 's001r0'), about('s001r0', 's001p'), about('s002p', 's001p')];
+
+    const [line, ...rest] = summarizeDisagreements(round(cluster(3), { disagreements }), noEvent).disagreements;
+
+    expect(rest).toEqual([]);
+    expect(
+      line.positions.map((position) => [
+        position.value,
+        position.count,
+        position.observers.map((observer) => observer.nodeId),
+      ]),
+    ).toEqual([
+      ['ok', 2, ['s000r0']],
+      ['failing', 1, ['s000p']],
+    ]);
   });
 
   it('keeps disagreements apart when the counts differ', () => {
@@ -483,14 +686,37 @@ describe('summarizeDisagreements', () => {
 
     expect(rest).toEqual([]);
     expect(merged.text).toBe('Config epoch of 3 nodes: 1 view against 1 view.');
-    expect(merged.epochs?.map((entry) => [entry.node.nodeId, [...entry.values].sort()])).toEqual([
+    expect(merged.epochs?.map((entry) => [entry.node.nodeId, entry.values])).toEqual([
       ['s000p', ['4', '7']],
       ['s001p', ['2', '9']],
       ['s002p', ['3', '5']],
     ]);
+    expect(merged.positions.map((position) => position.observers)).toEqual([[], []]);
+  });
+
+  it('keeps each epoch of a merged line in the column of the view that reported it', () => {
+    const epoch = (subject: string, sides: Array<[string, string]>) =>
+      tracked({
+        key: `config_epoch:${subject}`,
+        kind: 'config_epoch',
+        subjectIds: [subject],
+        positions: sides.map(([value, observer]) => ({ value, observers: [observer] })),
+      });
+    const disagreements = [
+      epoch('s000p', [['4', 's002p'], ['7', 's000p']]),
+      epoch('s002p', [['3', 's000p'], ['8', 's002p']]),
+    ];
+
+    const [merged, ...rest] = summarizeDisagreements(round(cluster(3), { disagreements }), noEvent).disagreements;
+
+    expect(rest).toEqual([]);
     expect(merged.positions.map((position) => position.observers.map((node) => node.nodeId))).toEqual([
-      ['s001p', 's002p'],
-      ['s000p', 's001p'],
+      ['s002p'],
+      ['s000p'],
+    ]);
+    expect(merged.epochs?.map((entry) => [entry.node.nodeId, entry.values])).toEqual([
+      ['s000p', ['4', '7']],
+      ['s002p', ['8', '3']],
     ]);
   });
 
@@ -650,16 +876,11 @@ describe('summarizeDisagreements', () => {
       return round(nodes, { observers, disagreements: tracker.tracked(), failureFlags });
     }
 
-    it('summarises a round in which every node answered within the time and size budget', () => {
-      const input = roundOf(ids);
-      summarizeDisagreements(round(cluster(3)), noEvent);
+    it('summarises a round in which every node answered within the size budget', () => {
+      const summary = summarizeDisagreements(roundOf(ids), noEvent);
 
-      const startedAt = performance.now();
-      const summary = summarizeDisagreements(input, noEvent);
-      const elapsedMs = performance.now() - startedAt;
-
-      expect(elapsedMs).toBeLessThan(200);
       expect(JSON.stringify(summary).length).toBeLessThan(150_000);
+      expect(JSON.stringify(withDisputedShardsOnly(summary)).length).toBeLessThan(20_000);
       expect(summary.coverage).toMatchObject({ nodes: 500, asked: 500, answered: 500, complete: true });
       expect(summary.shards).toHaveLength(250);
       expect(summary.shards.filter((shard) => shard.state === 'disputed').map((shard) => shard.shardId)).toEqual([

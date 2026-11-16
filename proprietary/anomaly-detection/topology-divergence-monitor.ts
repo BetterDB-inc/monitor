@@ -81,11 +81,12 @@ function myselfOf(nodes: ClusterNode[]): ClusterNode | undefined {
   return nodes.find((node) => node.flags.includes('myself'));
 }
 
+function isUnreachable(node: ClusterNode): boolean {
+  return node.flags.some((flag) => UNREACHABLE_FLAGS.includes(flag));
+}
+
 function isAccused(node: ClusterNode): boolean {
-  return (
-    node.flags.some((flag) => FAILING_FLAGS.includes(flag)) &&
-    !node.flags.some((flag) => UNREACHABLE_FLAGS.includes(flag))
-  );
+  return node.flags.some((flag) => FAILING_FLAGS.includes(flag)) && !isUnreachable(node);
 }
 
 export class TopologyDivergenceMonitor {
@@ -265,7 +266,8 @@ export class TopologyDivergenceMonitor {
     const selves = new Map<string, ClusterNode>();
     for (const view of views) {
       for (const node of view.nodes) {
-        if (!nodes.has(node.id)) nodes.set(node.id, node);
+        const kept = nodes.get(node.id);
+        if (!kept || (isUnreachable(kept) && !isUnreachable(node))) nodes.set(node.id, node);
         if (node.id === view.observerId) selves.set(node.id, node);
       }
     }

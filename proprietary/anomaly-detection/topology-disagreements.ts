@@ -63,6 +63,8 @@ export interface DisagreementLine {
   eventType: MetricType | null;
   since: number;
   rounds: number;
+  stale: boolean;
+  lastSeenAt: number;
   subjects: DivergenceNode[];
   subjectCount: number;
   slots?: number[][];
@@ -86,18 +88,28 @@ export interface ShardLine {
   disagreementIds: string[];
 }
 
+export interface ShardTotals {
+  total: number;
+  disputed: number;
+  undisputed: number;
+  notCompared: number;
+}
+
 export interface TopologyDisagreementSummary {
   status: 'ok' | 'insufficient_views' | 'not_sampled';
   sampledAt: number | null;
   coverage: DisagreementCoverage;
   disagreements: DisagreementLine[];
   shards: ShardLine[];
+  shardTotals: ShardTotals;
+  shardsListed: 'all' | 'disputed';
 }
 
 interface Draft {
   disagreement: TrackedDisagreement;
   positions: DivergencePosition[];
   event: DisagreementEvent | undefined;
+  stale: boolean;
 }
 
 interface Shard {
@@ -194,16 +206,28 @@ function mergeDrafts(drafts: Draft[]): Draft[][] {
     const { kind, key } = draft.disagreement;
     const subjects = subjectsByKind.get(kind) as Set<string>;
     const sided = draft.positions
-      .map((position) => ({ position, side: sideOf(kind, position, subjects) }))
-      .sort((x, y) => compareText(x.side, y.side) || compareText(x.position.value, y.position.value));
+      .map((position) => ({ position, side: sideOf(kind, position, subjects), holders: position.observers.join(',') }))
+      .sort(
+        (x, y) =>
+          compareText(x.side, y.side) ||
+          compareText(x.holders, y.holders) ||
+          compareText(x.position.value, y.position.value),
+      );
     const sides = sided.map(({ side }) => side).join(';');
-    const signature = kind === 'slot_owner' ? key : `${kind}|${draft.event?.eventId ?? ''}|${sides}`;
+    const seen = draft.stale ? draft.disagreement.lastSeenAt : '';
+    const signature = kind === 'slot_owner' ? key : `${kind}|${seen}|${draft.event?.eventId ?? ''}|${sides}`;
     const aligned = { ...draft, positions: sided.map(({ position }) => position) };
     const group = groups.get(signature);
     if (group) group.push(aligned);
     else groups.set(signature, [aligned]);
   }
   return [...groups.values()];
+}
+
+function heldByAll(sides: DivergencePosition[]): string[] {
+  const [first, ...rest] = sides;
+  const others = rest.map((side) => new Set(side.observers));
+  return first.observers.filter((id) => others.every((observers) => observers.has(id))).sort(compareText);
 }
 
 function slotsLabel(ranges: number[][]): string {
@@ -227,6 +251,8 @@ export function summarizeDisagreements(
       coverage: { nodes: 0, asked: 0, answered: 0, complete: false, unanswered: [], unansweredCount: 0 },
       disagreements: [],
       shards: [],
+      shardTotals: { total: 0, disputed: 0, undisputed: 0, notCompared: 0 },
+      shardsListed: 'all',
     };
   }
 
@@ -237,8 +263,15 @@ export function summarizeDisagreements(
 
   const members = [...nodes.values()].filter(isMember);
   const shards = shardsOf(members, nodes);
-  const unanswered = new Set(round.unanswered);
-  const answered = new Set(round.observers.filter((id) => !unanswered.has(id)));
+  const compared = round.status === 'ok';
+  const silent = new Set(round.unanswered);
+  const answered = new Set(round.observers.filter((id) => !silent.has(id)));
+  const held = [
+    ...new Set(round.disagreements.flatMap((entry) => entry.positions.flatMap((position) => position.observers))),
+  ]
+    .filter((id) => nodes.has(id) && !answered.has(id) && !silent.has(id))
+    .sort(compareText);
+  const unanswered = [...round.unanswered, ...held];
 
   const shardsTouching = (subjectIds: string[], slots: number[][] | undefined): string[] => {
     const touched = new Set<string>();
@@ -277,6 +310,18 @@ export function summarizeDisagreements(
     return `${kind === 'config_epoch' ? `Config epoch of ${who}` : who}: ${sides.join(', ')}.`;
   };
 
+  const staleTextOf = (kind: DivergenceKind, subjectIds: string[], slots: number[][], values: string[]) => {
+    if (kind === 'slot_owner') {
+      const owners = values.map((value) => (value === UNASSIGNED_SLOT_OWNER ? 'unassigned' : nameOf(value)));
+      return `${slotsLabel(slots)}: views differed on the owner (${owners.join(', ')}).`;
+    }
+    const merged = subjectIds.length > 1;
+    const who = merged ? `${subjectIds.length} nodes` : nameOf(subjectIds[0]);
+    if (kind === 'config_epoch') return `Config epoch of ${who}: views differed.`;
+    if (kind === 'membership') return `${who}: views differed on whether ${merged ? 'they are members' : 'it is a member'}.`;
+    return `${who}: views differed on whether ${merged ? 'they are failing' : 'it is failing'}.`;
+  };
+
   const lineOf = (group: Draft[]): DisagreementLine => {
     const drafts = [...group].sort((a, b) => compareText(a.disagreement.key, b.disagreement.key));
     const [first] = drafts;
@@ -290,7 +335,7 @@ export function summarizeDisagreements(
       return {
         value: position.value,
         count: position.observers.length,
-        observers: [...new Set(matches.flatMap((match) => match.observers))].sort(compareText),
+        observers: heldByAll(matches),
         values: matches.map((match) => match.value),
       };
     });
@@ -299,8 +344,9 @@ export function summarizeDisagreements(
         b.count - a.count || compareText(a.value, b.value) || compareText(a.observers[0] ?? '', b.observers[0] ?? ''),
     );
 
-    const perNodeValues = kind === 'config_epoch' && merged;
-    const positions: DisagreementPosition[] = sides.map((side) => ({
+    const { stale } = first;
+    const perNodeValues = kind === 'config_epoch' && merged && !stale;
+    const positions: DisagreementPosition[] = (stale ? [] : sides).map((side) => ({
       value: perNodeValues ? null : side.value,
       ...(kind === 'slot_owner' && side.value !== UNASSIGNED_SLOT_OWNER ? { owner: named(side.value) } : {}),
       count: side.count,
@@ -317,6 +363,8 @@ export function summarizeDisagreements(
       eventType: event?.eventType ?? null,
       since: Math.min(...drafts.map((draft) => draft.disagreement.firstSeenAt)),
       rounds: Math.max(...drafts.map((draft) => draft.disagreement.rounds)),
+      stale,
+      lastSeenAt: first.disagreement.lastSeenAt,
       subjects: listed(subjectIds),
       subjectCount: subjectIds.length,
       ...(kind === 'slot_owner' ? { slots, slotCount: countSlots(slots) } : {}),
@@ -330,7 +378,14 @@ export function summarizeDisagreements(
             })),
           }
         : {}),
-      text: textOf(kind, subjectIds, slots, positions),
+      text: stale
+        ? staleTextOf(
+            kind,
+            subjectIds,
+            slots,
+            sides.map((side) => side.value),
+          )
+        : textOf(kind, subjectIds, slots, positions),
     };
   };
 
@@ -338,11 +393,13 @@ export function summarizeDisagreements(
     disagreement,
     positions: splitFailing(disagreement, round.failureFlags),
     event: eventOf(disagreement.key),
+    stale: !compared || disagreement.lastSeenAt < round.at,
   }));
   const disagreements = mergeDrafts(drafts)
     .map(lineOf)
     .sort(
       (a, b) =>
+        Number(a.stale) - Number(b.stale) ||
         SEVERITY_RANK.indexOf(b.severity) - SEVERITY_RANK.indexOf(a.severity) ||
         Number(b.confirmed) - Number(a.confirmed) ||
         a.since - b.since ||
@@ -350,20 +407,22 @@ export function summarizeDisagreements(
     );
 
   const linesByShard = new Map<string, string[]>();
+  const unconfirmed = new Set<string>();
   for (const line of disagreements) {
     for (const shardId of line.shardIds) {
       const ids = linesByShard.get(shardId);
-      if (ids) ids.push(line.id);
+      if (line.stale) unconfirmed.add(shardId);
+      else if (ids) ids.push(line.id);
       else linesByShard.set(shardId, [line.id]);
     }
   }
 
-  const compared = round.status === 'ok';
   const shardLines = shards
     .map((shard): ShardLine => {
       const primary = primaryOf(shard.members);
       const disagreementIds = linesByShard.get(shard.shardId) ?? [];
-      const disputed = disagreementIds.length > 0 ? 'disputed' : 'undisputed';
+      const settled = unconfirmed.has(shard.shardId) ? 'not_compared' : 'undisputed';
+      const state = disagreementIds.length > 0 ? 'disputed' : settled;
       return {
         shardId: shard.shardId,
         primary: primary ? named(primary.id) : null,
@@ -373,7 +432,7 @@ export function summarizeDisagreements(
         slotCount: countSlots(shard.slots),
         nodes: shard.members.length,
         ownViews: shard.members.filter((node) => answered.has(node.id)).length,
-        state: compared ? disputed : 'not_compared',
+        state: compared ? state : 'not_compared',
         disagreementIds,
       };
     })
@@ -389,13 +448,33 @@ export function summarizeDisagreements(
     sampledAt: round.at,
     coverage: {
       nodes: members.length,
-      asked: round.observers.length,
+      asked: round.observers.length + held.length,
       answered: answered.size,
       complete: compared && members.length > 0 && members.every((node) => answered.has(node.id)),
-      unanswered: listed(round.unanswered),
-      unansweredCount: round.unanswered.length,
+      unanswered: listed(unanswered),
+      unansweredCount: unanswered.length,
     },
     disagreements,
     shards: shardLines,
+    shardTotals: totalsOf(shardLines),
+    shardsListed: 'all',
+  };
+}
+
+function totalsOf(shards: ShardLine[]): ShardTotals {
+  const count = (state: ShardLine['state']) => shards.filter((shard) => shard.state === state).length;
+  return {
+    total: shards.length,
+    disputed: count('disputed'),
+    undisputed: count('undisputed'),
+    notCompared: count('not_compared'),
+  };
+}
+
+export function withDisputedShardsOnly(summary: TopologyDisagreementSummary): TopologyDisagreementSummary {
+  return {
+    ...summary,
+    shards: summary.shards.filter((shard) => shard.state === 'disputed'),
+    shardsListed: 'disputed',
   };
 }

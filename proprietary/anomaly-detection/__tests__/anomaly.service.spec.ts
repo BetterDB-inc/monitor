@@ -26212,7 +26212,55 @@ describe('AnomalyService', () => {
           coverage: { nodes: 0, asked: 0, answered: 0, complete: false, unanswered: [], unansweredCount: 0 },
           disagreements: [],
           shards: [],
+          shardTotals: { total: 0, disputed: 0, undisputed: 0, notCompared: 0 },
+          shardsListed: 'all',
         });
+      });
+
+      it('keeps a disagreement without counts while the node that holds one side does not answer', async () => {
+        views.b = { a: { epoch: 9 } };
+        await rounds(2);
+        const lastSeenAt = now;
+        silent.add('b');
+
+        await rounds(1);
+
+        const summary = service.getTopologyDisagreements('conn-1');
+        expect(summary.status).toBe('ok');
+        expect(summary.disagreements).toMatchObject([
+          {
+            id: 'config_epoch:a',
+            stale: true,
+            lastSeenAt,
+            rounds: 2,
+            positions: [],
+            text: 'Config epoch of 10.0.0.1:6379: views differed.',
+          },
+        ]);
+        expect(summary.coverage).toMatchObject({ asked: 3, answered: 2, unansweredCount: 1 });
+        expect(summary.shards.map((shard) => [shard.shardId, shard.state, shard.disagreementIds])).toEqual([
+          ['a', 'not_compared', []],
+          ['b', 'undisputed', []],
+          ['c', 'undisputed', []],
+        ]);
+      });
+
+      it('keeps a disagreement without counts in a round that could not compare', async () => {
+        views.b = { a: { epoch: 9 } };
+        await rounds(2);
+        const lastSeenAt = now;
+        discovery.getNodeConnection.mockRejectedValue(new Error('ECONNREFUSED'));
+
+        await rounds(1);
+
+        const summary = service.getTopologyDisagreements('conn-1');
+        expect(summary.status).toBe('insufficient_views');
+        expect(summary.disagreements).toMatchObject([{ id: 'config_epoch:a', stale: true, lastSeenAt, positions: [] }]);
+        expect(summary.shards.map((shard) => [shard.state, shard.disagreementIds])).toEqual([
+          ['not_compared', []],
+          ['not_compared', []],
+          ['not_compared', []],
+        ]);
       });
 
       it('lists one undisputed line per shard while the views agree', async () => {
