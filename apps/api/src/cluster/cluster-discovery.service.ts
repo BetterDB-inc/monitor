@@ -77,6 +77,8 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   private readonly HEALTH_CHECK_INTERVAL = 30000; // 30 seconds
   private readonly MAX_CONNECTIONS = 512; // Maximum number of concurrent connections
   private readonly OWN_NODE_IDLE_MS = 5 * 60_000;
+  private pendingNodeClients = 0;
+  private nodeClientSlotWaiters: Array<() => void> = [];
 
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
@@ -502,28 +504,55 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       }
     }
 
-    if (this.discoveredNodes.size >= this.MAX_CONNECTIONS) {
-      this.logger.warn(
-        `Connection limit reached (${this.MAX_CONNECTIONS}). Cleaning up idle connections...`,
-      );
-      await this.cleanupIdleConnections(this.HEALTH_CHECK_INTERVAL);
-
-      if (this.discoveredNodes.size >= this.MAX_CONNECTIONS) {
-        const oldestNodeId = this.findOldestConnection();
-        if (oldestNodeId) {
-          this.logger.warn(`Closing oldest connection to ${oldestNodeId} to make room for new connection`);
-          const oldConnection = this.discoveredNodes.get(oldestNodeId);
-          if (oldConnection) {
-            await this.closeNodeClient(oldConnection.client);
-            this.discoveredNodes.delete(oldestNodeId);
-          }
-        }
-      }
-    }
     return null;
   }
 
+  private async reserveNodeClientSlot(): Promise<void> {
+    let cleanedUp = false;
+    while (this.discoveredNodes.size + this.pendingNodeClients >= this.MAX_CONNECTIONS) {
+      if (!cleanedUp) {
+        cleanedUp = true;
+        this.logger.warn(
+          `Connection limit reached (${this.MAX_CONNECTIONS}). Cleaning up idle connections...`,
+        );
+        await this.cleanupIdleConnections(this.HEALTH_CHECK_INTERVAL);
+        continue;
+      }
+      const oldestNodeId = this.findOldestConnection();
+      const oldest = oldestNodeId ? this.discoveredNodes.get(oldestNodeId) : undefined;
+      if (oldestNodeId && oldest) {
+        this.logger.warn(`Closing oldest connection to ${oldestNodeId} to make room for new connection`);
+        this.discoveredNodes.delete(oldestNodeId);
+        void this.closeNodeClient(oldest.client).catch(() => undefined);
+        continue;
+      }
+      await new Promise<void>((resolve) => this.nodeClientSlotWaiters.push(resolve));
+    }
+    this.pendingNodeClients += 1;
+  }
+
+  private releaseNodeClientSlot(): void {
+    this.pendingNodeClients -= 1;
+    for (const wake of this.nodeClientSlotWaiters.splice(0)) wake();
+  }
+
   private async openNodeClient(
+    key: string,
+    node: DiscoveredNode,
+    host: string,
+    port: number,
+    ownerId: string | undefined,
+    credentials: { username: string; password: string },
+  ): Promise<Valkey> {
+    await this.reserveNodeClientSlot();
+    try {
+      return await this.connectNodeClient(key, node, host, port, ownerId, credentials);
+    } finally {
+      this.releaseNodeClientSlot();
+    }
+  }
+
+  private async connectNodeClient(
     key: string,
     node: DiscoveredNode,
     host: string,
