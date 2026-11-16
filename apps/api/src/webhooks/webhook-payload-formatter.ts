@@ -4,6 +4,8 @@ import { WebhookPayloadFormat, incidentEventUrl } from '@betterdb/shared';
 const TITLE_LIMIT = 120;
 const SLACK_TEXT_LIMIT = 3000;
 const DISCORD_DESCRIPTION_LIMIT = 4096;
+const NODE_LIST_LIMIT = 5;
+const SHARD_ID_LENGTH = 8;
 const ANOMALY_PAGE_EVENTS: ReadonlySet<string> = new Set([
   'anomaly.detected',
   'anomaly.sequence.detected',
@@ -32,6 +34,34 @@ function summarize(data: Record<string, unknown>): { metric?: string; value?: nu
   const baseline =
     num(data['baseline']) ?? num(data['threshold']);
   return { metric, value, baseline };
+}
+
+function nodeLabel(value: unknown): string | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const node = value as Record<string, unknown>;
+  const address = str(node['address']);
+  if (!address) return undefined;
+  const role = str(node['role']);
+  const shardId = str(node['shardId']);
+  const details = [
+    role && role !== 'unknown' ? role : undefined,
+    shardId ? `shard ${shardId.slice(0, SHARD_ID_LENGTH)}` : undefined,
+    str(node['availabilityZone']),
+  ].filter((detail): detail is string => detail !== undefined);
+  const label = details.length > 0 ? `${address} (${details.join(', ')})` : address;
+  return node['collected'] === false ? `${label}, not collected` : label;
+}
+
+function nodeField(data: Record<string, unknown>): { name: string; value: string } | undefined {
+  const node = nodeLabel(data['node']);
+  if (node) return { name: 'Node', value: node };
+  const nodes = (Array.isArray(data['nodes']) ? data['nodes'] : [])
+    .map(nodeLabel)
+    .filter((label): label is string => label !== undefined);
+  if (nodes.length === 0) return undefined;
+  const shown = nodes.slice(0, NODE_LIST_LIMIT);
+  const rest = nodes.length - shown.length;
+  return { name: 'Nodes', value: [...shown, ...(rest > 0 ? [`and ${rest} more`] : [])].join('\n') };
 }
 
 /**
@@ -110,6 +140,8 @@ export function toSlack(payload: WebhookPayload, appBaseUrl?: string): Record<st
       text: `*Value / baseline:*\n${s.value ?? '?'} / ${s.baseline ?? '?'}`,
     });
   }
+  const node = nodeField(payload.data ?? {});
+  if (node) fields.push({ type: 'mrkdwn', text: `*${node.name}:*\n${escapeSlack(node.value)}` });
   const message = truncatedMessage(payload);
   const blocks: unknown[] = [
     { type: 'section', text: { type: 'mrkdwn', text: `*${escapeSlack(title)}*` } },
@@ -157,6 +189,8 @@ export function toDiscord(payload: WebhookPayload, appBaseUrl?: string): Record<
   if (s.value !== undefined || s.baseline !== undefined) {
     fields.push({ name: 'Value / baseline', value: `${s.value ?? '?'} / ${s.baseline ?? '?'}`, inline: true });
   }
+  const node = nodeField(payload.data ?? {});
+  if (node) fields.push({ name: node.name, value: escapeDiscord(node.value), inline: false });
   const link = dashboardLink(payload, appBaseUrl);
   const safeTitle = escapeDiscord(title);
   const message = truncatedMessage(payload);
