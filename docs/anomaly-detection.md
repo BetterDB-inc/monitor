@@ -528,7 +528,11 @@ On a cluster connection, an event names the node it is about in a `node` object:
 
 `nodeId`, `address`, `role`, `shardId` and `availabilityZone` are taken from the cluster view when the event is raised and stored with it, so an old event keeps the role and shard the node had then. `collected` and `connectionId` are not stored: they are worked out each time the event is read, from the connections registered at that moment. A node is collected when a registered connection points at its address, or reads it as its own node. With auto-registration off only the seed is collected.
 
-Events read from `GET /api/anomaly/events`, the entries of `GET /api/anomaly/incidents` and `GET /api/anomaly/incidents/:id`, and the same reads over MCP all carry `node`. Existing fields (`nodeAddr`, `replicaAddr`, `sourceHost`, `sourcePort`) keep their meaning.
+A `replication_role` event carries the role the node changed to, not the one it had before.
+
+Events read from `GET /api/anomaly/events`, the entries of `GET /api/anomaly/incidents` and `GET /api/anomaly/incidents/:id`, and the same reads over MCP all carry `node`. Each hot shard of `GET /api/anomaly/hot-shards` carries the `node` of its primary. Webhooks carry it too (see [Failing node on cluster alerts](./webhooks.md#failing-node-on-cluster-alerts)). Existing fields (`nodeAddr`, `replicaAddr`, `sourceHost`, `sourcePort`) keep their meaning.
+
+To see which nodes of a cluster are collected without waiting for an event, read `GET /api/metrics/cluster/nodes/discover` or the `get_cluster_nodes` MCP tool: every node carries `collected` and, when it is collected, `connectionId`. There a node also counts as collected when a connection points at its announced hostname.
 
 Which node each event type names:
 
@@ -1291,7 +1295,7 @@ X-Connection-ID: <connection-id>
 
 The open [`hot_shard`](#hot_shard) events of one cluster connection, with the numbers behind them. The connection header is required. The list is empty when no shard is hot. It is kept in memory and rebuilt from the next shard load sample after a restart.
 
-`cpu` gives the shard's CPU rate per second, its share of the cluster, the cluster median and the ratio the rule used. `network` gives the same for bytes in plus bytes out, without a ratio: it is detail only, and it includes replication, counted once per replica. `topSlots` (up to 5) are ranked by CPU. `topKeys` (up to 10, full names) are ranked by `freq`, the LFU counter of the key (0 to 255). `keySource` is `lfu` when the keys were read and `unavailable` when they were not, with the reason in `keyNote`. `keysSampledAt` is the time of the read the names come from and `keysSampled` the number of keys whose frequency it got. When a later read gave no names, the names of the earlier read stay and `keyNote` says so. `eventId` is the id of the open event. `captureAvailable` is `true` when the key names are missing and a [capture on the hot primary](#hot_shard) can show them.
+`cpu` gives the shard's CPU rate per second, its share of the cluster, the cluster median and the ratio the rule used. `network` gives the same for bytes in plus bytes out, without a ratio: it is detail only, and it includes replication, counted once per replica. `topSlots` (up to 5) are ranked by CPU. `topKeys` (up to 10, full names) are ranked by `freq`, the LFU counter of the key (0 to 255). `keySource` is `lfu` when the keys were read and `unavailable` when they were not, with the reason in `keyNote`. `keysSampledAt` is the time of the read the names come from and `keysSampled` the number of keys whose frequency it got. When a later read gave no names, the names of the earlier read stay and `keyNote` says so. `eventId` is the id of the open event. `captureAvailable` is `true` when the key names are missing and a [capture on the hot primary](#hot_shard) can show them. `node` names the hot primary, with whether it is collected (see [Failing node on cluster events](#failing-node-on-cluster-events)); it is left out when the primary is not in the cluster view.
 
 `rebalance` is the [rebalance suggestion](#hot_shard): `kind` is `plan` or `no_plan`. A plan has `moves` (each with `targetShardId`, `targetAddr`, inclusive slot `ranges`, and the slots, keys and CPU it moves), `projection` (every shard's CPU, share and ratio to the median `before` and `after`, with its `role`), `medianBefore`, `medianAfter`, `pinnedSlots`, `warnings`, `plannedAfter` (the IDs of the hot shards whose plans its numbers count as applied; empty when it starts from the measured loads), `support` and `commands` (each with the `nodeAddr` to run it on and the command `text`). A `no_plan` has a `reason` and `pinnedSlots`, and `coveredBy` when the reason is `covered_by_other_plan` and `conflictsWith` when it is `conflicts_with_other_plan`. The field is missing for a moment after a restart, until the suggestion is computed again.
 
@@ -1303,6 +1307,12 @@ The open [`hot_shard`](#hot_shard) events of one cluster connection, with the nu
     "captureAvailable": false,
     "shardId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d",
     "nodeAddr": "10.0.0.1:6379",
+    "node": {
+      "nodeId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d",
+      "address": "10.0.0.1:6379",
+      "role": "primary",
+      "collected": false
+    },
     "slotCount": 5461,
     "since": 1704067140000,
     "sampledAt": 1704067200000,
