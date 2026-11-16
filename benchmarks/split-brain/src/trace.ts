@@ -24,7 +24,8 @@ export function recordedWith(meta: TrialMeta, wanted: { nodeTimeoutMs: number; c
   if (meta.nodeTimeoutMs !== wanted.nodeTimeoutMs) {
     return `a node timeout of ${meta.nodeTimeoutMs} ms, not ${wanted.nodeTimeoutMs} ms`;
   }
-  if (meta.nodes.length !== wanted.clusterSize) return `${meta.nodes.length} nodes, not ${wanted.clusterSize}`;
+  const members = meta.nodes.filter((node) => node.role !== 'joiner').length;
+  if (members !== wanted.clusterSize) return `${members} nodes, not ${wanted.clusterSize}`;
   return null;
 }
 

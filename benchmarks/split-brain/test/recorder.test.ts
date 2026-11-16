@@ -51,8 +51,12 @@ test('owned slots are counted from the node\'s own line without migration marker
 });
 
 test('a resume is refused when a recorded trial used another setup', () => {
-  const meta = { nodeTimeoutMs: 5_000, nodes: new Array(6).fill({}) } as TrialMeta;
+  const members = new Array(6).fill({ role: 'primary' });
+  const meta = { nodeTimeoutMs: 5_000, nodes: members } as TrialMeta;
+  const joined = { nodeTimeoutMs: 5_000, nodes: [...members, { role: 'joiner' }] } as TrialMeta;
   assert.equal(recordedWith(meta, { nodeTimeoutMs: 5_000, clusterSize: 6 }), null);
+  assert.equal(recordedWith(joined, { nodeTimeoutMs: 5_000, clusterSize: 6 }), null);
   assert.match(recordedWith(meta, { nodeTimeoutMs: 15_000, clusterSize: 6 }) ?? '', /5000 ms, not 15000 ms/);
   assert.match(recordedWith(meta, { nodeTimeoutMs: 5_000, clusterSize: 12 }) ?? '', /6 nodes, not 12/);
+  assert.match(recordedWith(joined, { nodeTimeoutMs: 5_000, clusterSize: 12 }) ?? '', /6 nodes, not 12/);
 });
