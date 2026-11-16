@@ -59,11 +59,12 @@ pnpm test
 ```
 
 - `record` is resumable: trials that already have a trace are skipped. It
-  refuses to resume into a folder whose traces were recorded with another
-  `--node-timeout` or `--size`. Each lane is one cluster on its own Docker
-  network (`sbb-l<lane>`, subnet `172.30.<100+lane>.0/24`). At 6 nodes a lane
-  uses host ports `73<lane>1`–`73<lane>7`; with a larger `--size` the step
-  between lanes grows so that lanes never share a port. Options:
+  refuses to record into a folder that holds any trace recorded with another
+  `--node-timeout` or `--size`, whichever scenarios are asked for. Each lane
+  is one cluster on its own Docker network (`sbb-l<lane>`, subnet
+  `172.30.<100+lane>.0/24`). At 6 nodes a lane uses host ports
+  `73<lane>1`–`73<lane>7`; with a larger `--size` the step between lanes
+  grows so that lanes never share a port. Options:
   `--scenarios a,b`, `--node-timeout 5000`, `--size 6`, `--seed 697`.
 - Everything it creates is named `sbb-*` and labelled `sbb.bench=697`. It never
   touches other containers. `pnpm bench down` removes what is left after an

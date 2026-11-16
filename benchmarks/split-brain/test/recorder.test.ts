@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
+import { gzipSync } from 'node:zlib';
 import { type NodeSpec, PROBE_TIMEOUT_MS, laneSpec } from '../src/config';
 import { ownedSlots } from '../src/cluster';
 import { Probe } from '../src/recorder';
-import { recordedWith } from '../src/trace';
+import { otherSetup, recordedWith } from '../src/trace';
 import { type TrialMeta, legacySlots } from '../src/scenarios';
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -66,4 +70,22 @@ test('the legacy reshard never asks a primary for more slots than it can give', 
   assert.equal(legacySlots(5_462), 3_000);
   assert.equal(legacySlots(2_730), 1_501);
   assert.equal(legacySlots(1_092), 600);
+});
+
+test('every trace in the folder is checked, not only the trials asked for', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sbb-resume-'));
+  const write = (scenario: string, nodeTimeoutMs: number) => {
+    mkdirSync(join(dir, scenario), { recursive: true });
+    const meta = { trial: `${scenario}-001`, nodeTimeoutMs, nodes: new Array(6).fill({ role: 'primary' }) };
+    writeFileSync(join(dir, scenario, `${scenario}-001.jsonl.gz`), gzipSync(`${JSON.stringify(meta)}\n{}`));
+  };
+  try {
+    assert.equal(otherSetup(dir, { nodeTimeoutMs: 5_000, clusterSize: 6 }), null);
+    write('idle', 5_000);
+    assert.equal(otherSetup(dir, { nodeTimeoutMs: 5_000, clusterSize: 6 }), null);
+    write('slow-node', 15_000);
+    assert.match(otherSetup(dir, { nodeTimeoutMs: 5_000, clusterSize: 6 }) ?? '', /slow-node-001 was recorded with a node timeout of 15000 ms/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -29,6 +29,15 @@ export function recordedWith(meta: TrialMeta, wanted: { nodeTimeoutMs: number; c
   return null;
 }
 
+export function otherSetup(dir: string, wanted: { nodeTimeoutMs: number; clusterSize: number }): string | null {
+  for (const file of traceFiles(dir)) {
+    const meta = readMeta(file);
+    const mismatch = recordedWith(meta, wanted);
+    if (mismatch) return `${meta.trial} was recorded with ${mismatch}`;
+  }
+  return null;
+}
+
 export function traceFiles(dir: string): string[] {
   const found: string[] = [];
   for (const entry of readdirSync(dir)) {
