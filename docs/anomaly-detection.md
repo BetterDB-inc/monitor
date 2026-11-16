@@ -526,7 +526,7 @@ On a cluster connection, an event names the node it is about in a `node` object:
 | `collected` | `true` when a registered connection reads this node |
 | `connectionId` | That connection. Absent when `collected` is `false` |
 
-`nodeId`, `address`, `role`, `shardId` and `availabilityZone` are taken from the cluster view when the event is raised and stored with it, so an old event keeps the role and shard the node had then. `collected` and `connectionId` are not stored: they are worked out each time the event is read, from the connections registered at that moment. A node is collected when a registered connection points at its address, or reads it as its own node. With auto-registration off only the seed is collected.
+`nodeId`, `address`, `role`, `shardId` and `availabilityZone` are taken from the cluster view when the event is raised and stored with it, so an old event keeps the role and shard the node had then. `collected` and `connectionId` are not stored: they are worked out each time the event is read, from the connections registered at that moment. A node is collected when a registered connection reads it as its own node, or when a connection that belongs to the same cluster points at its address. A connection of another cluster that announces the same address does not count. With auto-registration off only the seed is collected.
 
 Events read from `GET /api/anomaly/events`, the entries of `GET /api/anomaly/incidents` and `GET /api/anomaly/incidents/:id`, and the same reads over MCP all carry `node`. Existing fields (`nodeAddr`, `replicaAddr`, `sourceHost`, `sourcePort`) keep their meaning.
 

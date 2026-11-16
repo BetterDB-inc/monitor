@@ -12529,14 +12529,61 @@ describe('AnomalyService', () => {
         expect(await nodeRead(event.id)).toEqual({ ...PRIMARY_NODE, collected: true, connectionId: 'conn-1' });
       });
 
-      it('marks the node collected by a connection registered at its address', async () => {
+      const registeredAt = (address: string, connectionId: string) =>
         registry().findIdByHostPort.mockImplementation((host: string, port: number) =>
-          host === '10.0.0.2' && port === 6380 ? 'conn-r' : null,
+          `${host}:${port}` === address ? connectionId : null,
         );
+      const clusterKeys = () => (service as any).connectionClusterKeys as Map<string, string>;
+      const pollOtherCluster = (connectionId: string) =>
+        poll({
+          ...mockCtx,
+          connectionId,
+          client: {
+            ...dbClient,
+            getClusterNodes: jest
+              .fn()
+              .mockResolvedValue([
+                clusterNode('otherA', '10.0.0.1:6379@16379', ['myself', 'master']),
+                clusterNode('otherB', '10.0.0.2:6380@16380', ['slave'], 'otherA'),
+              ]),
+            getClusterShards: jest.fn().mockResolvedValue(undefined),
+          },
+        } as ConnectionContext);
+
+      it('marks the node collected by a connection of the same cluster registered at its address', async () => {
+        registeredAt('10.0.0.2:6380', 'conn-r');
         await poll();
+        clusterKeys().set('conn-r', clusterKeys().get('conn-1')!);
         const event = await replicaEvent();
 
         expect(await nodeRead(event.id)).toEqual({ ...REPLICA_NODE, collected: true, connectionId: 'conn-r' });
+      });
+
+      it('does not count a connection of another cluster that announces the same address', async () => {
+        registeredAt('10.0.0.2:6380', 'conn-x');
+        await poll();
+        await pollOtherCluster('conn-x');
+        const event = await replicaEvent();
+
+        expect(clusterKeys().get('conn-x')).not.toBe(clusterKeys().get('conn-1'));
+        expect(await nodeRead(event.id)).toEqual({ ...REPLICA_NODE, collected: false });
+      });
+
+      it('does not count a connection at the address whose cluster is not known', async () => {
+        registeredAt('10.0.0.2:6380', 'conn-new');
+        await poll();
+        const event = await replicaEvent();
+
+        expect(await nodeRead(event.id)).toEqual({ ...REPLICA_NODE, collected: false });
+      });
+
+      it('finds the connection that reads the node before any connection at its address', async () => {
+        registeredAt('10.0.0.1:6379', 'conn-x');
+        await poll();
+        await pollOtherCluster('conn-x');
+        const event = await raise();
+
+        expect(await nodeRead(event.id)).toEqual({ ...PRIMARY_NODE, collected: true, connectionId: 'conn-1' });
       });
 
       it('marks a node no connection reads as not collected', async () => {

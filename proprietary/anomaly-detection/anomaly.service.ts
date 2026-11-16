@@ -10689,21 +10689,28 @@ export class AnomalyService
     return events.map((event) => this.withServedNode(event));
   }
 
-  private servedNode(node: ClusterNodeRef): ServedClusterNodeRef {
-    const address = splitHostPort(node.address);
+  private servedNode(node: ClusterNodeRef, eventConnectionId: string | undefined): ServedClusterNodeRef {
     const connectionId =
-      (address ? this.connectionRegistry.findIdByHostPort(address.host, address.port) : null) ??
-      this.clusterNodeViews
-        .connectionsOfNode(node.nodeId)
-        .find((id) => this.connectionRegistry.isListed(id));
+      this.clusterNodeViews.connectionsOfNode(node.nodeId).find((id) => this.connectionRegistry.isListed(id)) ??
+      this.connectionAtAddressOf(node, eventConnectionId);
     return connectionId ? { ...node, collected: true, connectionId } : { ...node, collected: false };
   }
 
-  private withServedNode<T extends { node?: ClusterNodeRef }>(
+  private connectionAtAddressOf(node: ClusterNodeRef, eventConnectionId: string | undefined): string | undefined {
+    const address = splitHostPort(node.address);
+    const found = address ? this.connectionRegistry.findIdByHostPort(address.host, address.port) : null;
+    if (!found || found === eventConnectionId) return found ?? undefined;
+    const clusterKey =
+      this.clusterKeyByNode.get(node.nodeId) ??
+      (eventConnectionId ? this.connectionClusterKeys.get(eventConnectionId) : undefined);
+    return clusterKey !== undefined && this.connectionClusterKeys.get(found) === clusterKey ? found : undefined;
+  }
+
+  private withServedNode<T extends { node?: ClusterNodeRef; connectionId?: string }>(
     item: T,
   ): Omit<T, 'node'> & { node?: ServedClusterNodeRef } {
     const { node, ...rest } = item;
-    return node ? { ...rest, node: this.servedNode(node) } : rest;
+    return node ? { ...rest, node: this.servedNode(node, item.connectionId) } : rest;
   }
 
   private withServedNodes(incident: IncidentTimeline): IncidentTimeline {
