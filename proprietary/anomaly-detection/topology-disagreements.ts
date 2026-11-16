@@ -28,6 +28,7 @@ export interface DisagreementEvent {
   eventId: string;
   eventType: MetricType;
   eventAt: number | null;
+  connectionId: string;
 }
 
 export type RoundDisagreement = TopologyDisagreement & Partial<Pick<TrackedDisagreement, 'firstSeenAt' | 'lastSeenAt' | 'rounds'>>;
@@ -67,6 +68,7 @@ export interface DisagreementLine {
   eventId: string | null;
   eventType: MetricType | null;
   eventAt: number | null;
+  eventConnectionId: string | null;
   tracked: boolean;
   since?: number;
   rounds?: number;
@@ -372,6 +374,7 @@ export function summarizeDisagreements(
       eventId: event?.eventId ?? null,
       eventType: event?.eventType ?? null,
       eventAt: event?.eventAt ?? null,
+      eventConnectionId: event?.connectionId ?? null,
       tracked,
       ...(tracked ? { since: Math.min(...seen), rounds: Math.max(...counted) } : {}),
       stale,

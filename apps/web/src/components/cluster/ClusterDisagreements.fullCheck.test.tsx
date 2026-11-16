@@ -33,6 +33,7 @@ function slotLine(patch: Partial<DisagreementLine> = {}): DisagreementLine {
     eventId: null,
     eventType: null,
     eventAt: null,
+    eventConnectionId: null,
     tracked: true,
     since: Date.now() - 30_000,
     rounds: 2,
@@ -289,6 +290,7 @@ describe('ClusterDisagreements full check', () => {
       eventId: 'event-1',
       eventType: 'topology_divergence',
       eventAt: finishedAt - 60_000,
+      eventConnectionId: 'conn-1',
     }));
     render(view(reportOf(check)));
 

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen, within, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import { INCIDENT_LOOKBACK_MS } from '@betterdb/shared';
 import { ClusterDisagreements } from './ClusterDisagreements';
 import type {
   DisagreementLine,
@@ -51,6 +52,7 @@ function slotLine(patch: Partial<DisagreementLine> = {}): DisagreementLine {
     eventId: 'event-1',
     eventType: 'topology_divergence',
     eventAt: AT - 20_000,
+    eventConnectionId: 'conn-1',
     since: AT - 30_000,
     rounds: 6,
     stale: false,
@@ -90,6 +92,7 @@ function flagsLine(patch: Partial<DisagreementLine> = {}): DisagreementLine {
     eventId: null,
     eventType: null,
     eventAt: null,
+    eventConnectionId: null,
     since: AT - 10_000,
     rounds: 2,
     stale: false,
@@ -316,6 +319,38 @@ describe('ClusterDisagreements', () => {
     expect(within(counting).getByText('Not confirmed yet, seen in 2 rounds')).toBeInTheDocument();
   });
 
+  it('opens the event under the connection that holds it', () => {
+    show(summaryOf({ disagreements: [slotLine({ eventConnectionId: 'conn-anchor' })] }));
+
+    expect(
+      within(lineOf(slotLine().text)).getByRole('link', { name: 'Open event' }),
+    ).toHaveAttribute(
+      'href',
+      `/anomalies/incidents/by-event/event-1?at=${AT - 20_000}&connection=conn-anchor`,
+    );
+  });
+
+  it('links to the anomalies page for an event older than the incident history', () => {
+    const eventAt = AT - INCIDENT_LOOKBACK_MS - 1;
+    show(summaryOf({ sampledAt: AT, disagreements: [slotLine({ eventAt })] }));
+
+    expect(
+      within(lineOf(slotLine().text)).getByRole('link', { name: 'Open event' }),
+    ).toHaveAttribute('href', '/anomalies');
+  });
+
+  it('still opens an event at the edge of the incident history', () => {
+    const eventAt = AT - INCIDENT_LOOKBACK_MS;
+    show(summaryOf({ sampledAt: AT, disagreements: [slotLine({ eventAt })] }));
+
+    expect(
+      within(lineOf(slotLine().text)).getByRole('link', { name: 'Open event' }),
+    ).toHaveAttribute(
+      'href',
+      `/anomalies/incidents/by-event/event-1?at=${eventAt}&connection=conn-1`,
+    );
+  });
+
   it('links to the anomalies page when the time of the event is not known', () => {
     show(summaryOf({ disagreements: [slotLine({ eventAt: null })] }));
 
@@ -438,6 +473,7 @@ describe('ClusterDisagreements', () => {
       eventId: null,
       eventType: null,
       eventAt: null,
+      eventConnectionId: null,
       stale: true,
       lastSeenAt: AT - 60_000,
       positions: [],
@@ -582,6 +618,7 @@ describe('ClusterDisagreements', () => {
       eventId: null,
       eventType: null,
       eventAt: null,
+      eventConnectionId: null,
       stale: true,
       positions: [],
       text: 'Slots 0-9: views differed on the owner (s000p.internal:6379, s001p.internal:6379).',

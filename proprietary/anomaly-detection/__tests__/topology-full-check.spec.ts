@@ -654,7 +654,7 @@ describe('fullCheckView', () => {
       null,
       (key) =>
         key.startsWith('slot_owner:')
-          ? { eventId: 'e1', eventType: MetricType.TOPOLOGY_DIVERGENCE, eventAt: AT - 60_000 }
+          ? { eventId: 'e1', eventType: MetricType.TOPOLOGY_DIVERGENCE, eventAt: AT - 60_000, connectionId: 'c1' }
           : undefined,
     );
 
@@ -674,6 +674,7 @@ describe('fullCheckView', () => {
       confirmed: true,
       eventId: 'e1',
       eventAt: AT - 60_000,
+      eventConnectionId: 'c1',
     });
     expect(view.summary?.disagreements[0].positions.map((position) => position.count)).toEqual([497, 3]);
     expect(view.summary?.disagreements[0]).not.toHaveProperty('since');
