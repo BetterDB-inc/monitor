@@ -520,17 +520,17 @@ On a cluster connection, an event names the node it is about in a `node` object:
 | --- | --- |
 | `nodeId` | The node's cluster id |
 | `address` | `host:port` as the cluster reports it, without the bus port |
-| `role` | `primary`, `replica`, or `unknown` for a node that is still joining or has left the cluster view |
+| `role` | `primary`, `replica`, or `unknown` for a node that is still joining or has left the cluster view, and when the cluster view is too old to say |
 | `shardId` | From `CLUSTER SHARDS`. Absent on servers without that command |
 | `availabilityZone` | From the server, or from the connection's zone map. Absent when neither gives one |
 | `collected` | `true` when a registered connection reads this node |
 | `connectionId` | That connection. Absent when `collected` is `false` |
 
-`nodeId`, `address`, `role`, `shardId` and `availabilityZone` are taken from the cluster view when the event is raised and stored with it, so an old event keeps the role and shard the node had then. `collected` and `connectionId` are not stored: they are worked out each time the event is read, from the connections registered at that moment. A node is collected when a registered connection points at its address, or reads it as its own node. With auto-registration off only the seed is collected.
+`nodeId`, `address`, `role`, `shardId` and `availabilityZone` are taken from the cluster view when the event is raised and stored with it, so an old event keeps the role and shard the node had then. The connections of one cluster share one view, the latest any of them read. When no connection has read `CLUSTER NODES` for 3 poll intervals (at least 30 seconds), the node is still named but its `role` is `unknown`, since a failover may have changed it. `collected` and `connectionId` are not stored: they are worked out each time the event is read, from the connections registered at that moment. A node is collected when a registered connection reads it as its own node, or when a connection that belongs to the same cluster points at its address. A connection of another cluster that announces the same address does not count. With auto-registration off only the seed is collected.
 
 A `replication_role` event carries the role the node changed to, not the one it had before.
 
-Events read from `GET /api/anomaly/events`, the entries of `GET /api/anomaly/incidents` and `GET /api/anomaly/incidents/:id`, and the same reads over MCP all carry `node`. Each hot shard of `GET /api/anomaly/hot-shards` carries the `node` of its primary. Webhooks carry it too (see [Failing node on cluster alerts](./webhooks.md#failing-node-on-cluster-alerts)). Existing fields (`nodeAddr`, `replicaAddr`, `sourceHost`, `sourcePort`) keep their meaning.
+Events read from `GET /api/anomaly/events`, the events of each group of `GET /api/anomaly/groups`, the entries of `GET /api/anomaly/incidents` and `GET /api/anomaly/incidents/:id`, and the same reads over MCP all carry `node`. Each hot shard of `GET /api/anomaly/hot-shards` carries the `node` of its primary. Webhooks carry it too (see [Failing node on cluster alerts](./webhooks.md#failing-node-on-cluster-alerts)). Existing fields (`nodeAddr`, `replicaAddr`, `sourceHost`, `sourcePort`) keep their meaning.
 
 To see which nodes of a cluster are collected without waiting for an event, read `GET /api/metrics/cluster/nodes/discover` or the `get_cluster_nodes` MCP tool: every node carries `collected` and, when it is collected, `connectionId`. There a node also counts as collected when a connection points at its announced hostname.
 
@@ -544,10 +544,10 @@ Which node each event type names:
 | `replication_divergence`, `resync_escalation`, `replica_slot_state` | The replica in `replicaAddr`, not the primary the event was read on |
 | `cluster_topology` | Duplicate primary: the primary with the stale claim. Replica stuck on a primary that is gone: the replica |
 | `hostname_staleness` | The node whose announced hostname is stale |
-| `ghost_membership` | The ghost node, or the node that rejoined after `CLUSTER FORGET` |
+| `ghost_membership` | Ghost entry: the live node at the endpoint the ghost entries point to. A ghost id is not a node, so the ghost ids stay in the message. Forget and rejoin: the node that rejoined after `CLUSTER FORGET` |
 | `failover_churn` | The primary that owns the shard now |
 | `slot_migration`, `slot_migration_stuck` | The source node of the migration |
-| `config_drift`, `acl_drift` | The first node that differs from the rest |
+| `config_drift`, `acl_drift` | A drift between nodes: the first node the event lists, which is the connection the event is filed under. The event compares the nodes and does not say which one is wrong, so this node may hold the value the others share; the message lists every node with its value. An ACL reload: the node whose ruleset changed |
 | `topology_divergence` | The node whose view differs when one node disagrees with the others. None when several nodes stand on each side: `GET /api/anomaly/topology-divergence` lists every node of both sides |
 | `cluster_state` | None. `cluster_state:fail` is a state of the whole cluster, not of one node |
 | `raft_health` | None. Elections and quorum are a state of the cluster's Raft group, not a fault of one node |

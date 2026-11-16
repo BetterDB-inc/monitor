@@ -15,7 +15,7 @@ import { AnomalyService } from './anomaly.service';
 import { IncidentTimeline } from './incident-timeline';
 import {
   AnomalyEvent,
-  CorrelatedAnomalyGroup,
+  ServedCorrelatedAnomalyGroup,
   BufferStats,
   AnomalySummary,
   FanoutCoverage,
@@ -103,7 +103,7 @@ export class AnomalyController {
     @Query('pattern') pattern?: AnomalyPattern,
     @Query('startTime') startTime?: string,
     @Query('endTime') endTime?: string,
-  ): Promise<CorrelatedAnomalyGroup[]> {
+  ): Promise<ServedCorrelatedAnomalyGroup[]> {
     const parsedLimit = limit ? parseInt(limit, 10) : 50;
     const { parsedStartTime, parsedEndTime } = parseTimeRange(startTime, endTime);
 

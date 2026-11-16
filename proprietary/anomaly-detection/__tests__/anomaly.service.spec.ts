@@ -12457,6 +12457,24 @@ describe('AnomalyService', () => {
       expect(event.node).toEqual(REPLICA_NODE);
     });
 
+    it('names the node whose hostname is stale, not the node that was read', async () => {
+      let now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+      dbClient.getClusterNodes = jest
+        .fn()
+        .mockResolvedValue(
+          viewOf('primA').map((node) => (node.id === 'primA' ? { ...node, hostname: 'a.example' } : node)),
+        );
+      await poll();
+      now += 31_000;
+      await poll();
+
+      const [event] = service.getRecentEvents().filter((e) => e.metricType === MetricType.HOSTNAME_STALENESS);
+
+      expect(event.node).toEqual(REPLICA_NODE);
+      expect(event).not.toHaveProperty('nodeSubject');
+    });
+
     it('names no node on a cluster-wide event', async () => {
       await poll();
 
@@ -12512,6 +12530,44 @@ describe('AnomalyService', () => {
       expect(own.node?.nodeId).toBe('primA');
     });
 
+    describe('when the view of the cluster is old', () => {
+      const READ_AT = 1_700_000_000_000;
+
+      beforeEach(async () => {
+        jest.spyOn(Date, 'now').mockReturnValue(READ_AT);
+        await poll();
+      });
+
+      it('keeps the role up to 30 seconds after the read', async () => {
+        const event = await raise({ timestamp: READ_AT + 30_000 });
+
+        expect(event.node).toEqual(PRIMARY_NODE);
+      });
+
+      it('names the node with an unknown role after that', async () => {
+        const event = await raise({ timestamp: READ_AT + 30_001 });
+
+        expect(event.node).toEqual({ ...PRIMARY_NODE, role: 'unknown' });
+      });
+
+      it('waits three polls when those take longer than 30 seconds', async () => {
+        jest.spyOn(service as any, 'getIntervalMs').mockReturnValue(20_000);
+
+        const event = await raise({ timestamp: READ_AT + 60_000 });
+
+        expect(event.node).toEqual(PRIMARY_NODE);
+      });
+
+      it('trusts the role again once any connection of the cluster reads it', async () => {
+        (Date.now as jest.Mock).mockReturnValue(READ_AT + 60_000);
+        await poll({ ...mockCtx, connectionId: 'conn-2', port: 6380 });
+
+        const event = await raise({ timestamp: READ_AT + 60_000 });
+
+        expect(event.node).toEqual(PRIMARY_NODE);
+      });
+    });
+
     it('names the node on an event another service raises through the sink', async () => {
       await poll();
       const event = raised({ metricType: MetricType.COMMAND_P99 });
@@ -12547,14 +12603,80 @@ describe('AnomalyService', () => {
         expect(await nodeRead(event.id)).toEqual({ ...PRIMARY_NODE, collected: true, connectionId: 'conn-1' });
       });
 
-      it('marks the node collected by a connection registered at its address', async () => {
-        registry().findIdByHostPort.mockImplementation((host: string, port: number) =>
-          host === '10.0.0.2' && port === 6380 ? 'conn-r' : null,
+      it('names and marks collected the node an agent connection reads', async () => {
+        const agentCtx = {
+          ...mockCtx,
+          connectionId: 'conn-agent',
+          host: 'agent',
+          port: 0,
+          connectionType: 'agent',
+        } as ConnectionContext;
+        await poll(agentCtx);
+        const own = await raise({}, agentCtx);
+        const other = await raise(
+          { metricType: MetricType.CLUSTER_TOPOLOGY, nodeSubject: { nodeId: 'repB' } },
+          agentCtx,
         );
+
+        expect(await nodeRead(own.id)).toEqual({ ...PRIMARY_NODE, collected: true, connectionId: 'conn-agent' });
+        expect(await nodeRead(other.id)).toEqual({ ...REPLICA_NODE, collected: false });
+      });
+
+      const registeredAt = (address: string, connectionId: string) =>
+        registry().findIdByHostPort.mockImplementation((host: string, port: number) =>
+          `${host}:${port}` === address ? connectionId : null,
+        );
+      const clusterKeys = () => (service as any).connectionClusterKeys as Map<string, string>;
+      const pollOtherCluster = (connectionId: string) =>
+        poll({
+          ...mockCtx,
+          connectionId,
+          client: {
+            ...dbClient,
+            getClusterNodes: jest
+              .fn()
+              .mockResolvedValue([
+                clusterNode('otherA', '10.0.0.1:6379@16379', ['myself', 'master']),
+                clusterNode('otherB', '10.0.0.2:6380@16380', ['slave'], 'otherA'),
+              ]),
+            getClusterShards: jest.fn().mockResolvedValue(undefined),
+          },
+        } as ConnectionContext);
+
+      it('marks the node collected by a connection of the same cluster registered at its address', async () => {
+        registeredAt('10.0.0.2:6380', 'conn-r');
         await poll();
+        clusterKeys().set('conn-r', clusterKeys().get('conn-1')!);
         const event = await replicaEvent();
 
         expect(await nodeRead(event.id)).toEqual({ ...REPLICA_NODE, collected: true, connectionId: 'conn-r' });
+      });
+
+      it('does not count a connection of another cluster that announces the same address', async () => {
+        registeredAt('10.0.0.2:6380', 'conn-x');
+        await poll();
+        await pollOtherCluster('conn-x');
+        const event = await replicaEvent();
+
+        expect(clusterKeys().get('conn-x')).not.toBe(clusterKeys().get('conn-1'));
+        expect(await nodeRead(event.id)).toEqual({ ...REPLICA_NODE, collected: false });
+      });
+
+      it('does not count a connection at the address whose cluster is not known', async () => {
+        registeredAt('10.0.0.2:6380', 'conn-new');
+        await poll();
+        const event = await replicaEvent();
+
+        expect(await nodeRead(event.id)).toEqual({ ...REPLICA_NODE, collected: false });
+      });
+
+      it('finds the connection that reads the node before any connection at its address', async () => {
+        registeredAt('10.0.0.1:6379', 'conn-x');
+        await poll();
+        await pollOtherCluster('conn-x');
+        const event = await raise();
+
+        expect(await nodeRead(event.id)).toEqual({ ...PRIMARY_NODE, collected: true, connectionId: 'conn-1' });
       });
 
       it('marks a node no connection reads as not collected', async () => {
@@ -12595,6 +12717,61 @@ describe('AnomalyService', () => {
         expect(await nodeRead('stored-1')).toEqual({ ...REPLICA_NODE, collected: false });
       });
 
+      describe('in a correlated group', () => {
+        const groupOf = (event: AnomalyEvent) => ({
+          correlationId: 'grp-node',
+          timestamp: event.timestamp,
+          pattern: AnomalyPattern.UNKNOWN,
+          severity: AnomalySeverity.WARNING,
+          diagnosis: 'd',
+          recommendations: [],
+          anomalies: [event],
+        });
+
+        it('marks the node on the events of a recent group', async () => {
+          await poll();
+          const event = await raise();
+          (service as any).recentGroups.push(groupOf(event));
+
+          const [group] = await service.getRecentCorrelatedGroups();
+
+          expect(group.anomalies[0].node).toEqual({ ...PRIMARY_NODE, collected: true, connectionId: 'conn-1' });
+          expect(event.node).toEqual(PRIMARY_NODE);
+        });
+
+        it('marks the node on the events of a group read from storage', async () => {
+          storage.getCorrelatedGroups.mockResolvedValueOnce([
+            {
+              correlationId: 'grp-node',
+              timestamp: 1_000_000,
+              pattern: 'unknown',
+              severity: 'warning',
+              metricTypes: [],
+              connectionId: 'conn-1',
+              diagnosis: 'd',
+              recommendations: [],
+              anomalyIds: ['stored-1'],
+            },
+          ]);
+          storage.getCorrelatedGroupMembers.mockResolvedValueOnce([
+            storedRow({ id: 'stored-1', timestamp: 1_000_000, node: REPLICA_NODE as any }),
+          ]);
+
+          const [group] = await service.getRecentCorrelatedGroups(1);
+
+          expect(group.anomalies[0].node).toEqual({ ...REPLICA_NODE, collected: false });
+        });
+
+        it('leaves a group event without a node without one', async () => {
+          const event = await raise();
+          (service as any).recentGroups.push(groupOf(event));
+
+          const [group] = await service.getRecentCorrelatedGroups();
+
+          expect(group.anomalies[0]).not.toHaveProperty('node');
+        });
+      });
+
       it('marks the node on the events that are still open', async () => {
         await poll();
         const event = await raise();
@@ -12617,6 +12794,17 @@ describe('AnomalyService', () => {
 
         expect(incident.entries[0].node).toEqual({ ...REPLICA_NODE, collected: false });
         expect(detail?.entries[0].node).toEqual({ ...REPLICA_NODE, collected: false });
+      });
+
+      it('does not work out collection for the incident gauges', async () => {
+        const rows = [storedRow({ id: 'in-1', node: REPLICA_NODE as any })];
+        storage.getAnomalyEvents.mockImplementation(async ({ order }: any) => (order === 'asc' ? [] : rows));
+        const served = jest.spyOn(service as any, 'servedNode');
+
+        await (service as any).updateIncidentGauges(0);
+
+        expect(prometheusService.updateActiveIncidents).toHaveBeenCalled();
+        expect(served).not.toHaveBeenCalled();
       });
     });
 
@@ -15713,7 +15901,7 @@ describe('AnomalyService', () => {
         matchedPatterns: AnomalyPattern[],
         status: string,
       ) => ({ connectionIds, matchedPatterns, recovery: { status } });
-      const timelines = jest.spyOn(service, 'getIncidentTimelines').mockResolvedValue([
+      const timelines = jest.spyOn(service as any, 'readIncidentTimelines').mockResolvedValue([
         timeline(['conn-1', 'conn-2'], [AnomalyPattern.RETRY_STORM, AnomalyPattern.MEMORY_PRESSURE], 'active'),
         timeline(['conn-1'], [], 'recovering'),
         timeline([], [], 'degraded'),
@@ -15738,7 +15926,7 @@ describe('AnomalyService', () => {
     it('still publishes the summary when incidents cannot be read', async () => {
       polled('conn-1');
       recent(anomaly('conn-1', AnomalySeverity.CRITICAL));
-      jest.spyOn(service, 'getIncidentTimelines').mockRejectedValue(new Error('storage down'));
+      jest.spyOn(service as any, 'readIncidentTimelines').mockRejectedValue(new Error('storage down'));
 
       await expect((service as any).updatePrometheusSummary()).resolves.toBeUndefined();
 
@@ -15747,7 +15935,7 @@ describe('AnomalyService', () => {
     });
 
     it('clears incident gauges only after three failed refreshes in a row', async () => {
-      const read = jest.spyOn(service, 'getIncidentTimelines').mockRejectedValue(new Error('storage down'));
+      const read = jest.spyOn(service as any, 'readIncidentTimelines').mockRejectedValue(new Error('storage down'));
 
       await (service as any).updatePrometheusSummary();
       await (service as any).updatePrometheusSummary();
@@ -15767,7 +15955,7 @@ describe('AnomalyService', () => {
     it('keeps reading back to the oldest open incident', async () => {
       const now = Date.now();
       const oldEvent = now - 3 * 3600_000;
-      const read = jest.spyOn(service, 'getIncidentTimelines').mockResolvedValue([
+      const read = jest.spyOn(service as any, 'readIncidentTimelines').mockResolvedValue([
         {
           lastEventAt: oldEvent,
           recovery: { status: 'degraded' },
@@ -23567,7 +23755,7 @@ describe('AnomalyService', () => {
         it('skips an incident gauge refresh while one is still running', async () => {
           let release!: (value: unknown[]) => void;
           const timelines = jest
-            .spyOn(service, 'getIncidentTimelines')
+            .spyOn(service as any, 'readIncidentTimelines')
             .mockReturnValue(new Promise((resolve) => (release = resolve)) as never);
 
           const first = (service as any).updateIncidentGauges(0);

@@ -94,3 +94,47 @@ describe('resolveNodeRef', () => {
     expect(resolveNodeRef(undefined, { nodeId: 'primary-1' })).toBeUndefined();
   });
 });
+
+describe('buildNodeDirectory with two ids at one address', () => {
+  const live = node({ id: 'live-1', address: '10.0.0.9:6379@16379', flags: ['slave'], master: 'primary-1' });
+  const atAddress = (nodes: ClusterNode[]) =>
+    resolveNodeRef(buildNodeDirectory(nodes), { address: '10.0.0.9:6379' })?.nodeId;
+
+  it.each([['fail'], ['noaddr'], ['handshake']])('prefers the live node over one flagged %s', (flag) => {
+    const stale = node({ id: 'stale-1', address: '10.0.0.9:6379@16379', flags: ['master', flag] });
+
+    expect(atAddress([live, stale])).toBe('live-1');
+    expect(atAddress([stale, live])).toBe('live-1');
+  });
+
+  it('prefers the node that answered the read among live nodes', () => {
+    const own = node({ id: 'own-1', address: '10.0.0.9:6379@16379', flags: ['myself', 'master'] });
+
+    expect(atAddress([own, live])).toBe('own-1');
+    expect(atAddress([live, own])).toBe('own-1');
+  });
+
+  it('keeps the first of two nodes that are equally live', () => {
+    const twin = node({ id: 'twin-1', address: '10.0.0.9:6379@16379' });
+
+    expect(atAddress([live, twin])).toBe('live-1');
+  });
+
+  it('gives a stale hostname to the live node that announces it now', () => {
+    const gone = node({ id: 'gone-1', address: '10.0.0.8:6379@16379', flags: ['master', 'fail'], hostname: 'node-9' });
+    const named = { ...live, hostname: 'node-9' };
+
+    const directory = buildNodeDirectory([named, gone]);
+
+    expect(resolveNodeRef(directory, { address: 'node-9:6379' })?.nodeId).toBe('live-1');
+    expect(resolveNodeRef(directory, { address: '10.0.0.8:6379' })?.nodeId).toBe('gone-1');
+  });
+
+  it('still finds each of the two by its id', () => {
+    const stale = node({ id: 'stale-1', address: '10.0.0.9:6379@16379', flags: ['master', 'fail'] });
+    const directory = buildNodeDirectory([live, stale]);
+
+    expect(resolveNodeRef(directory, { nodeId: 'stale-1' })?.nodeId).toBe('stale-1');
+    expect(resolveNodeRef(directory, { nodeId: 'live-1' })?.nodeId).toBe('live-1');
+  });
+});

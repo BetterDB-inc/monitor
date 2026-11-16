@@ -249,7 +249,7 @@ import {
   parseSlotMigrationJobs,
 } from '@app/cluster/cluster-metrics.service';
 import { withConfiguredZones, withShardMetadata } from '@app/cluster/shard-metadata';
-import { resolveNodeRef, type NodeDirectory } from '@app/cluster/node-ref';
+import { resolveNodeRef } from '@app/cluster/node-ref';
 import { ClusterNodeViews, nodeOfEvent } from './event-node';
 import {
   type DivergenceGroup,
@@ -507,6 +507,7 @@ import {
   ANOMALY_WEBHOOK_SINK,
   AnomalyWebhookSink,
   ServedAnomalyEvent,
+  ServedCorrelatedAnomalyGroup,
   isRetryTrigger,
 } from './types';
 
@@ -9442,18 +9443,23 @@ export class AnomalyService
   }
 
   private stampNode(anomaly: AnomalyEvent, connectionId: string | undefined): void {
-    const node = connectionId
-      ? nodeOfEvent(anomaly, this.nodeDirectoryOf(connectionId), this.clusterNodeViews.ownNodeId(connectionId))
-      : anomaly.node;
+    const node = connectionId ? this.nodeInClusterView(anomaly, connectionId) : anomaly.node;
     if (node) anomaly.node = node;
     delete anomaly.nodeSubject;
   }
 
-  private nodeDirectoryOf(connectionId: string): NodeDirectory | undefined {
-    const clusterKey = this.connectionClusterKeys.get(connectionId);
-    if (!clusterKey) return this.clusterNodeViews.freshest([connectionId]);
-    const members = [...this.connectionClusterKeys].filter(([, key]) => key === clusterKey).map(([peer]) => peer);
-    return this.clusterNodeViews.freshest([connectionId, ...members]);
+  private nodeInClusterView(anomaly: AnomalyEvent, connectionId: string): ClusterNodeRef | undefined {
+    const view = this.clusterNodeViews.view(this.nodeViewKeyOf(connectionId));
+    const roleKnown = !view || anomaly.timestamp - view.readAt <= this.nodeViewStaleMs();
+    return nodeOfEvent(anomaly, view?.directory, this.clusterNodeViews.ownNodeId(connectionId), roleKnown);
+  }
+
+  private nodeViewStaleMs(): number {
+    return Math.max(3 * this.getIntervalMs(), AnomalyService.NODE_VIEW_STALE_MS);
+  }
+
+  private nodeViewKeyOf(connectionId: string): string {
+    return this.connectionClusterKeys.get(connectionId) ?? connectionId;
   }
 
   private rememberClusterNodes(
@@ -9462,11 +9468,10 @@ export class AnomalyService
     shards: ClusterShard[] | undefined,
     readAt: number,
   ): void {
-    const described = withConfiguredZones(
-      withShardMetadata(nodes, shards),
-      this.connectionRegistry.getNodeAvailabilityZones(connectionId),
+    const zones = this.connectionRegistry.getNodeAvailabilityZones(connectionId);
+    this.clusterNodeViews.remember(connectionId, this.nodeViewKeyOf(connectionId), nodes, readAt, () =>
+      withConfiguredZones(withShardMetadata(nodes, shards), zones),
     );
-    this.clusterNodeViews.remember(connectionId, described, readAt);
   }
 
   private async addAnomaly(
@@ -10102,6 +10107,16 @@ export class AnomalyService
     endTime?: number,
     limit = 50,
   ): Promise<IncidentTimeline[]> {
+    const incidents = await this.readIncidentTimelines(connectionId, startTime, endTime, limit);
+    return incidents.map((incident) => this.withServedNodes(incident));
+  }
+
+  private async readIncidentTimelines(
+    connectionId: string | undefined,
+    startTime: number | undefined,
+    endTime: number | undefined,
+    limit: number,
+  ): Promise<IncidentTimeline[]> {
     const now = Date.now();
     const { maxSpanMs } = DEFAULT_INCIDENT_TIMELINE_OPTIONS;
     const from = Math.max(
@@ -10109,13 +10124,12 @@ export class AnomalyService
       now - MAX_INCIDENT_LOOKBACK_MS,
     );
     const window = await this.loadIncidentWindow(connectionId, from - 2 * maxSpanMs, endTime);
-    const incidents = await this.incidentsOf(window, (all) =>
+    return this.incidentsOf(window, (all) =>
       all
         .filter((t) => t.lastEventAt >= from && (endTime === undefined || t.startedAt <= endTime))
         .reverse()
         .slice(0, limit),
     );
-    return incidents.map((incident) => this.withServedNodes(incident));
   }
 
   private async incidentsOf(
@@ -10254,13 +10268,14 @@ export class AnomalyService
   ): Promise<IncidentTimeline | null> {
     const startedAt = incidentStartOf(incidentId);
     if (startedAt === null) {
-      const timelines = await this.getIncidentTimelines(
+      const timelines = await this.readIncidentTimelines(
         connectionId,
         startTime,
         undefined,
         Number.MAX_SAFE_INTEGER,
       );
-      return timelines.find((t) => t.incidentId === incidentId) ?? null;
+      const found = timelines.find((t) => t.incidentId === incidentId);
+      return found ? this.withServedNodes(found) : null;
     }
     const window = await this.loadIncidentWindow(connectionId, startedAt, startedAt);
     const [incident] = await this.incidentsOf(window, (all) =>
@@ -10695,31 +10710,38 @@ export class AnomalyService
     return events.map((event) => this.withServedNode(event));
   }
 
-  private servedNode(node: ClusterNodeRef): ServedClusterNodeRef {
-    const address = splitHostPort(node.address);
+  private servedNode(node: ClusterNodeRef, eventConnectionId: string | undefined): ServedClusterNodeRef {
     const connectionId =
-      (address ? this.connectionRegistry.findIdByHostPort(address.host, address.port) : null) ??
-      this.clusterNodeViews
-        .connectionsOfNode(node.nodeId)
-        .find((id) => this.connectionRegistry.isListed(id));
+      this.clusterNodeViews.connectionsOfNode(node.nodeId).find((id) => this.connectionRegistry.isListed(id)) ??
+      this.connectionAtAddressOf(node, eventConnectionId);
     return connectionId ? { ...node, collected: true, connectionId } : { ...node, collected: false };
   }
 
-  private webhookNodeOf(event: { node?: ClusterNodeRef }): { node?: ServedClusterNodeRef } {
-    return event.node ? { node: this.servedNode(event.node) } : {};
+  private webhookNodeOf(event: { node?: ClusterNodeRef; connectionId?: string }): { node?: ServedClusterNodeRef } {
+    return event.node ? { node: this.servedNode(event.node, event.connectionId) } : {};
   }
 
   private servedNodeAt(connectionId: string, address: string): { node?: ServedClusterNodeRef } {
-    const directory = this.nodeDirectoryOf(connectionId);
-    const node = directory ? resolveNodeRef(directory, { address }) : undefined;
-    return node ? { node: this.servedNode(node) } : {};
+    const directory = this.clusterNodeViews.view(this.nodeViewKeyOf(connectionId))?.directory;
+    const node = resolveNodeRef(directory, { address });
+    return node ? { node: this.servedNode(node, connectionId) } : {};
   }
 
-  private withServedNode<T extends { node?: ClusterNodeRef }>(
+  private connectionAtAddressOf(node: ClusterNodeRef, eventConnectionId: string | undefined): string | undefined {
+    const address = splitHostPort(node.address);
+    const found = address ? this.connectionRegistry.findIdByHostPort(address.host, address.port) : null;
+    if (!found || found === eventConnectionId) return found ?? undefined;
+    const clusterKey =
+      this.clusterKeyByNode.get(node.nodeId) ??
+      (eventConnectionId ? this.connectionClusterKeys.get(eventConnectionId) : undefined);
+    return clusterKey !== undefined && this.connectionClusterKeys.get(found) === clusterKey ? found : undefined;
+  }
+
+  private withServedNode<T extends { node?: ClusterNodeRef; connectionId?: string }>(
     item: T,
   ): Omit<T, 'node'> & { node?: ServedClusterNodeRef } {
     const { node, ...rest } = item;
-    return node ? { ...rest, node: this.servedNode(node) } : rest;
+    return node ? { ...rest, node: this.servedNode(node, item.connectionId) } : rest;
   }
 
   private withServedNodes(incident: IncidentTimeline): IncidentTimeline {
@@ -10850,6 +10872,20 @@ export class AnomalyService
     pattern?: AnomalyPattern,
     limit = DEFAULT_CORRELATED_GROUP_RESULTS,
     connectionId?: string,
+  ): Promise<ServedCorrelatedAnomalyGroup[]> {
+    const groups = await this.readCorrelatedGroups(startTime, endTime, pattern, limit, connectionId);
+    return groups.map((group) => ({
+      ...group,
+      anomalies: group.anomalies.map((event) => this.withServedNode(event)),
+    }));
+  }
+
+  private async readCorrelatedGroups(
+    startTime: number | undefined,
+    endTime: number | undefined,
+    pattern: AnomalyPattern | undefined,
+    limit: number,
+    connectionId: string | undefined,
   ): Promise<CorrelatedAnomalyGroup[]> {
     const cacheThreshold = Date.now() - this.cacheTtlMs;
     const boundedLimit = Number.isFinite(limit)
@@ -11535,6 +11571,7 @@ export class AnomalyService
   }
 
   private static readonly TOPOLOGY_CLAIM_STALE_MS = 30_000;
+  private static readonly NODE_VIEW_STALE_MS = 30_000;
   private static readonly TOPOLOGY_BACKOFF_MAX_POLLS = 8;
 
   /** A fan-out read the node refused for its credentials, not for reachability. */
@@ -13049,7 +13086,7 @@ export class AnomalyService
     this.incidentGaugesInFlight = true;
     try {
       const from = Math.min(since, this.openIncidentSince ?? Date.now() - MAX_INCIDENT_LOOKBACK_MS);
-      const timelines = await this.getIncidentTimelines(undefined, from, undefined, Number.MAX_SAFE_INTEGER);
+      const timelines = await this.readIncidentTimelines(undefined, from, undefined, Number.MAX_SAFE_INTEGER);
       const open: Array<{ connectionIds: string[]; patterns: string[]; status: string }> = [];
       let oldestOpen: number | null = null;
       for (const timeline of timelines) {

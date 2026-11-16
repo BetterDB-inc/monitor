@@ -19,32 +19,49 @@ const REPLICA_SUBJECT_METRICS: ReadonlySet<MetricType> = new Set([
 const METRICS_WITHOUT_OWN_NODE: ReadonlySet<MetricType> = new Set([MetricType.TOPOLOGY_DIVERGENCE]);
 
 interface NodeView {
+  read: () => readonly ClusterNode[];
+  readAt: number;
+  directory?: NodeDirectory;
+}
+
+export interface ClusterNodeView {
   directory: NodeDirectory;
   readAt: number;
 }
 
 export class ClusterNodeViews {
   private readonly views = new Map<string, NodeView>();
+  private readonly viewKeys = new Map<string, string>();
   private readonly ownNodeIds = new Map<string, string>();
 
-  remember(connectionId: string, nodes: readonly ClusterNode[], readAt: number): void {
-    const directory = buildNodeDirectory(nodes);
-    this.views.set(connectionId, { directory, readAt });
-    if (directory.selfId) this.ownNodeIds.set(connectionId, directory.selfId);
+  remember(
+    connectionId: string,
+    viewKey: string,
+    nodes: readonly ClusterNode[],
+    readAt: number,
+    describe: () => readonly ClusterNode[] = () => nodes,
+  ): void {
+    const ownNodeId = nodes.find((node) => node.flags.includes('myself'))?.id;
+    if (ownNodeId) this.ownNodeIds.set(connectionId, ownNodeId);
+    if (this.viewKeys.get(connectionId) !== viewKey) {
+      this.leaveView(connectionId);
+      this.viewKeys.set(connectionId, viewKey);
+    }
+    const held = this.views.get(viewKey);
+    if (held && held.readAt > readAt) return;
+    this.views.set(viewKey, { read: describe, readAt });
   }
 
   forget(connectionId: string): void {
-    this.views.delete(connectionId);
+    this.leaveView(connectionId);
     this.ownNodeIds.delete(connectionId);
   }
 
-  freshest(connectionIds: Iterable<string>): NodeDirectory | undefined {
-    let freshest: NodeView | undefined;
-    for (const connectionId of connectionIds) {
-      const view = this.views.get(connectionId);
-      if (view && (!freshest || view.readAt > freshest.readAt)) freshest = view;
-    }
-    return freshest?.directory;
+  view(viewKey: string): ClusterNodeView | undefined {
+    const view = this.views.get(viewKey);
+    if (!view) return undefined;
+    view.directory ??= buildNodeDirectory(view.read());
+    return { directory: view.directory, readAt: view.readAt };
   }
 
   ownNodeId(connectionId: string): string | undefined {
@@ -53,6 +70,16 @@ export class ClusterNodeViews {
 
   connectionsOfNode(nodeId: string): string[] {
     return [...this.ownNodeIds].filter(([, own]) => own === nodeId).map(([connectionId]) => connectionId);
+  }
+
+  private leaveView(connectionId: string): void {
+    const viewKey = this.viewKeys.get(connectionId);
+    if (viewKey === undefined) return;
+    this.viewKeys.delete(connectionId);
+    for (const held of this.viewKeys.values()) {
+      if (held === viewKey) return;
+    }
+    this.views.delete(viewKey);
   }
 }
 
@@ -73,8 +100,18 @@ export function nodeOfEvent(
   event: AnomalyEvent,
   directory: NodeDirectory | undefined,
   ownNodeId: string | undefined,
+  roleKnown = true,
 ): ClusterNodeRef | undefined {
   if (event.node) return event.node;
+  const node = nodeInView(event, directory, ownNodeId);
+  return node && !roleKnown ? { ...node, role: 'unknown' } : node;
+}
+
+function nodeInView(
+  event: AnomalyEvent,
+  directory: NodeDirectory | undefined,
+  ownNodeId: string | undefined,
+): ClusterNodeRef | undefined {
   if (!directory || METRICS_WITHOUT_NODE.has(event.metricType)) return undefined;
   if (event.nodeSubject) return subjectOfDetector(event.nodeSubject, directory);
   if (event.replicaAddr && REPLICA_SUBJECT_METRICS.has(event.metricType)) {

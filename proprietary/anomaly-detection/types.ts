@@ -434,3 +434,7 @@ export interface AnomalyWebhookSink {
 }
 
 export type ServedAnomalyEvent = Omit<AnomalyEvent, 'node'> & { node?: ServedClusterNodeRef };
+
+export type ServedCorrelatedAnomalyGroup = Omit<CorrelatedAnomalyGroup, 'anomalies'> & {
+  anomalies: ServedAnomalyEvent[];
+};
