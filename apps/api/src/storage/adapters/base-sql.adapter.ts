@@ -16,16 +16,31 @@ import {
   StoredCommandLogEntry,
   CommandLogType,
 } from '../../common/interfaces/storage-port.interface';
-import { WebhookPayloadFormat, type ClusterNodeRef } from '@betterdb/shared';
+import { WebhookPayloadFormat, type ClusterNodeRef, type ClusterNodeRole } from '@betterdb/shared';
 import { normalizeDetectorConfigMap } from '../../anomaly/anomaly.types';
 
-function parseNodeRef(raw: unknown): ClusterNodeRef | undefined {
-  if (typeof raw !== 'string' || raw === '') return undefined;
+const NODE_ROLES: readonly ClusterNodeRole[] = ['primary', 'replica', 'unknown'];
+
+function parseJson(raw: string): unknown {
   try {
-    return JSON.parse(raw) as ClusterNodeRef;
+    return JSON.parse(raw);
   } catch {
     return undefined;
   }
+}
+
+function parseNodeRef(raw: unknown): ClusterNodeRef | undefined {
+  const parsed = typeof raw === 'string' ? parseJson(raw) : undefined;
+  if (typeof parsed !== 'object' || parsed === null) return undefined;
+  const { nodeId, address, role, shardId, availabilityZone } = parsed as Record<string, unknown>;
+  if (typeof nodeId !== 'string' || typeof address !== 'string') return undefined;
+  return {
+    nodeId,
+    address,
+    role: NODE_ROLES.find((known) => known === role) ?? 'unknown',
+    ...(typeof shardId === 'string' ? { shardId } : {}),
+    ...(typeof availabilityZone === 'string' ? { availabilityZone } : {}),
+  };
 }
 
 /**
