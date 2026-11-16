@@ -1,4 +1,4 @@
-import type { ClusterNodeRef } from '@betterdb/shared';
+import type { ClusterNodeRef, ServedClusterNodeRef } from '@betterdb/shared';
 import type { StoredAnomalyEvent } from '@app/common/interfaces/storage-port.interface';
 import type { RegressionKind } from '../latency-regression/types';
 import type { RetryAmplificationContributor } from './retry-amplification-attribution';
@@ -432,3 +432,5 @@ export interface AnomalyWebhookSink {
   dispatchAnomalyWebhook(anomaly: StoredAnomalyEvent): Promise<void>;
   dispatchSequenceWebhook(group: CorrelatedAnomalyGroup): Promise<void>;
 }
+
+export type ServedAnomalyEvent = Omit<AnomalyEvent, 'node'> & { node?: ServedClusterNodeRef };

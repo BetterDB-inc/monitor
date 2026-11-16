@@ -197,6 +197,7 @@ describe('AnomalyService', () => {
             listMembers: jest.fn().mockReturnValue([]),
             sentinelDataNodeCredentials: jest.fn().mockReturnValue(null),
             findIdByHostPort: jest.fn().mockReturnValue(null),
+            isListed: jest.fn().mockReturnValue(true),
             getNodeAvailabilityZones: jest.fn().mockReturnValue(undefined),
           },
         },
@@ -12509,6 +12510,96 @@ describe('AnomalyService', () => {
       const event = await raise();
 
       expect(event.node).toBeUndefined();
+    });
+
+    describe('when the events are read', () => {
+      const registry = () => (service as any).connectionRegistry;
+      const replicaEvent = () =>
+        raise({ metricType: MetricType.CLUSTER_TOPOLOGY, nodeSubject: { nodeId: 'repB' } });
+      const nodeRead = async (id: string) => (await service.getRecentAnomalies()).find((e) => e.id === id)?.node;
+      const storedRow = (overrides: Partial<AnomalyEvent> = {}) => ({
+        ...raised({ timestamp: Date.now() - 20 * 60_000, ...overrides }),
+        anomalyType: 'spike',
+      });
+
+      it('marks the node collected by the connection that reads it', async () => {
+        await poll();
+        const event = await raise();
+
+        expect(await nodeRead(event.id)).toEqual({ ...PRIMARY_NODE, collected: true, connectionId: 'conn-1' });
+      });
+
+      it('marks the node collected by a connection registered at its address', async () => {
+        registry().findIdByHostPort.mockImplementation((host: string, port: number) =>
+          host === '10.0.0.2' && port === 6380 ? 'conn-r' : null,
+        );
+        await poll();
+        const event = await replicaEvent();
+
+        expect(await nodeRead(event.id)).toEqual({ ...REPLICA_NODE, collected: true, connectionId: 'conn-r' });
+      });
+
+      it('marks a node no connection reads as not collected', async () => {
+        await poll();
+        const event = await replicaEvent();
+
+        expect(await nodeRead(event.id)).toEqual({ ...REPLICA_NODE, collected: false });
+      });
+
+      it('does not count a retired connection that used to read the node', async () => {
+        await poll();
+        const event = await raise();
+        registry().isListed.mockReturnValue(false);
+
+        expect(await nodeRead(event.id)).toEqual({ ...PRIMARY_NODE, collected: false });
+      });
+
+      it('leaves the event in memory as it was raised', async () => {
+        await poll();
+        const event = await raise();
+
+        await nodeRead(event.id);
+
+        expect(event.node).toEqual(PRIMARY_NODE);
+      });
+
+      it('leaves an event without a node without one', async () => {
+        const event = await raise();
+
+        const [read] = (await service.getRecentAnomalies()).filter((e) => e.id === event.id);
+
+        expect(read).not.toHaveProperty('node');
+      });
+
+      it('marks the node on an event read from storage', async () => {
+        storage.getAnomalyEvents.mockResolvedValueOnce([storedRow({ id: 'stored-1', node: REPLICA_NODE as any })]);
+
+        expect(await nodeRead('stored-1')).toEqual({ ...REPLICA_NODE, collected: false });
+      });
+
+      it('marks the node on the events that are still open', async () => {
+        await poll();
+        const event = await raise();
+
+        const open = await service.getRecentAnomalies(undefined, undefined, undefined, undefined, 100, 'conn-1', true);
+
+        expect(open.find((e) => e.id === event.id)?.node).toEqual({
+          ...PRIMARY_NODE,
+          collected: true,
+          connectionId: 'conn-1',
+        });
+      });
+
+      it('marks the node on every entry of an incident', async () => {
+        const rows = [storedRow({ id: 'in-1', node: REPLICA_NODE as any })];
+        storage.getAnomalyEvents.mockImplementation(async ({ order }: any) => (order === 'asc' ? [] : rows));
+
+        const [incident] = await service.getIncidentTimelines('conn-1');
+        const detail = await service.getIncidentTimeline(incident.incidentId, 'conn-1');
+
+        expect(incident.entries[0].node).toEqual({ ...REPLICA_NODE, collected: false });
+        expect(detail?.entries[0].node).toEqual({ ...REPLICA_NODE, collected: false });
+      });
     });
   });
 

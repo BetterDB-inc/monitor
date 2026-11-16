@@ -181,5 +181,16 @@ describe('ClusterNodeViews', () => {
 
     expect(views.freshest(['conn-a'])).toBeUndefined();
     expect(views.ownNodeId('conn-a')).toBeUndefined();
+    expect(views.connectionsOfNode('primary-a')).toEqual([]);
+  });
+
+  it('answers with the connections that read a node as their own', () => {
+    const views = new ClusterNodeViews();
+    views.remember('conn-a', seenFrom(PRIMARY_A), 1_000);
+    views.remember('conn-a2', seenFrom(PRIMARY_A), 1_000);
+    views.remember('conn-b', seenFrom(PRIMARY_B), 1_000);
+
+    expect(views.connectionsOfNode('primary-a')).toEqual(['conn-a', 'conn-a2']);
+    expect(views.connectionsOfNode('replica-a')).toEqual([]);
   });
 });

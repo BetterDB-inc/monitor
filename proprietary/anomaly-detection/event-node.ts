@@ -50,6 +50,10 @@ export class ClusterNodeViews {
   ownNodeId(connectionId: string): string | undefined {
     return this.ownNodeIds.get(connectionId);
   }
+
+  connectionsOfNode(nodeId: string): string[] {
+    return [...this.ownNodeIds].filter(([, own]) => own === nodeId).map(([connectionId]) => connectionId);
+  }
 }
 
 function subjectOfDetector(

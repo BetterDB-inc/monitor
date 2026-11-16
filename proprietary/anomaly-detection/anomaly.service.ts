@@ -37,6 +37,8 @@ import {
   ReplicationRecoveredData,
   WebhookEventType,
   clusterNodeState,
+  type ClusterNodeRef,
+  type ServedClusterNodeRef,
 } from '@betterdb/shared';
 import { AnomalySavedBus, SavedAnomaly } from '@app/common/services/anomaly-saved-bus';
 import { ClientListCache } from '@app/common/services/client-list-cache';
@@ -503,6 +505,7 @@ import {
   MetricSample,
   ANOMALY_WEBHOOK_SINK,
   AnomalyWebhookSink,
+  ServedAnomalyEvent,
   isRetryTrigger,
 } from './types';
 
@@ -10100,12 +10103,13 @@ export class AnomalyService
       now - MAX_INCIDENT_LOOKBACK_MS,
     );
     const window = await this.loadIncidentWindow(connectionId, from - 2 * maxSpanMs, endTime);
-    return this.incidentsOf(window, (all) =>
+    const incidents = await this.incidentsOf(window, (all) =>
       all
         .filter((t) => t.lastEventAt >= from && (endTime === undefined || t.startedAt <= endTime))
         .reverse()
         .slice(0, limit),
     );
+    return incidents.map((incident) => this.withServedNodes(incident));
   }
 
   private async incidentsOf(
@@ -10256,7 +10260,7 @@ export class AnomalyService
     const [incident] = await this.incidentsOf(window, (all) =>
       all.filter((t) => t.incidentId === incidentId),
     );
-    return incident ?? null;
+    return incident ? this.withServedNodes(incident) : null;
   }
 
   async findIncidentIdByEvent(
@@ -10672,6 +10676,48 @@ export class AnomalyService
     limit = 100,
     connectionId?: string,
     activeOnly = false,
+  ): Promise<ServedAnomalyEvent[]> {
+    const events = await this.readRecentAnomalies(
+      startTime,
+      endTime,
+      severity,
+      metricType,
+      limit,
+      connectionId,
+      activeOnly,
+    );
+    return events.map((event) => this.withServedNode(event));
+  }
+
+  private servedNode(node: ClusterNodeRef): ServedClusterNodeRef {
+    const address = splitHostPort(node.address);
+    const connectionId =
+      (address ? this.connectionRegistry.findIdByHostPort(address.host, address.port) : null) ??
+      this.clusterNodeViews
+        .connectionsOfNode(node.nodeId)
+        .find((id) => this.connectionRegistry.isListed(id));
+    return connectionId ? { ...node, collected: true, connectionId } : { ...node, collected: false };
+  }
+
+  private withServedNode<T extends { node?: ClusterNodeRef }>(
+    item: T,
+  ): Omit<T, 'node'> & { node?: ServedClusterNodeRef } {
+    const { node, ...rest } = item;
+    return node ? { ...rest, node: this.servedNode(node) } : rest;
+  }
+
+  private withServedNodes(incident: IncidentTimeline): IncidentTimeline {
+    return { ...incident, entries: incident.entries.map((entry) => this.withServedNode(entry)) };
+  }
+
+  private async readRecentAnomalies(
+    startTime: number | undefined,
+    endTime: number | undefined,
+    severity: AnomalySeverity | undefined,
+    metricType: MetricType | undefined,
+    limit: number,
+    connectionId: string | undefined,
+    activeOnly: boolean,
   ): Promise<AnomalyEvent[]> {
     // Active-incident feed (e.g. the data-loss banner): return every UNRESOLVED
     // event of any age. Must query durable storage — the in-memory cache is
