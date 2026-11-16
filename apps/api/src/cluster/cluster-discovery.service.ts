@@ -166,6 +166,48 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     }
   }
 
+  async onNodeClientOnce<T>(
+    nodeId: string,
+    connectionId: string | undefined,
+    timeoutMs: number,
+    run: (client: Valkey) => Promise<T>,
+  ): Promise<T> {
+    const ownerId = connectionId || this.connectionRegistry.getDefaultId() || undefined;
+    this.assertDialsDataNodes(ownerId, nodeId);
+    const node = (await this.discoverNodes(ownerId)).find((n) => n.id === nodeId);
+    if (!node) throw new Error(`Node ${nodeId} not found in cluster`);
+    const parsed = parseNodeAddress(node.address);
+    if (!parsed) throw new Error(`Invalid node address: ${node.address}`);
+    const { username, password } = this.connectionRegistry.get(ownerId).getClient().options;
+    const client = new Valkey({
+      host: parsed.host,
+      port: parsed.port,
+      username: username || '',
+      password: password || '',
+      tls: this.nodeTlsOptions(ownerId, parsed.host, node.hostname),
+      lazyConnect: true,
+      enableOfflineQueue: false,
+      maxRetriesPerRequest: 0,
+      retryStrategy: () => null,
+      enableReadyCheck: false,
+      connectTimeout: timeoutMs,
+      commandTimeout: timeoutMs,
+      connectionName: `BetterDB-Monitor-Node-${nodeId.substring(0, 8)}`,
+    });
+    let refused: Error | undefined;
+    client.on('error', (err: Error) => {
+      refused ??= err;
+    });
+    try {
+      await client.connect().catch((err: unknown) => {
+        throw refused ?? err;
+      });
+      return await run(client);
+    } finally {
+      client.disconnect();
+    }
+  }
+
   async onOwnNodeClient<T>(
     connectionId: string | undefined,
     timeoutMs: number,

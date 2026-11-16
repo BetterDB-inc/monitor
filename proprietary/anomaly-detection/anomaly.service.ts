@@ -139,7 +139,7 @@ import {
   executionBlocker,
   followRun,
   runNodesOf,
-  isCancelledJob,
+  cancelledFailure,
   isRunKept,
   migrateSlotsArgs,
   recheckFailure,
@@ -880,6 +880,7 @@ export class AnomalyService
   private rebalanceStarting = new Set<string>();
   private rebalanceFollowedAt = new Map<string, number>();
   private cancelsInFlight = new Map<string, { count: number; requestedBefore?: number }>();
+  private failuresHeldForCancel = new Map<string, SlotMigrationFinding[]>();
   private slotMigrationReadOnPoll = new Map<
     string,
     { timestamp: number; report: SlotMigrationReport }
@@ -1604,6 +1605,7 @@ export class AnomalyService
     this.replicaSlotEventIds.delete(connectionId);
     this.orphanedSlotLastProbe.delete(connectionId);
     this.slotMigrationWatch.delete(connectionId);
+    this.failuresHeldForCancel.delete(connectionId);
     this.slotMigrationCheckedAt.delete(connectionId);
     this.slotMigrationOwnNodeUntil.delete(connectionId);
     this.slotMigrationDialMissSince.delete(connectionId);
@@ -7003,6 +7005,28 @@ export class AnomalyService
     }
   }
 
+  private async writeShard<T>(
+    connectionId: string,
+    shardId: string,
+    timedOut: string,
+    write: (client: NodeClient) => Promise<T>,
+  ): Promise<T> {
+    const discovery = this.clusterDiscovery;
+    if (!discovery) throw new Error('the monitor does not connect to the cluster nodes directly');
+    const budget = AnomalyService.FANOUT_COMMAND_TIMEOUT_MS;
+    let abandoned = false;
+    const writing = discovery.onNodeClientOnce(shardId, connectionId, budget, (client) => {
+      if (abandoned) throw new Error(timedOut);
+      return write(client);
+    });
+    try {
+      return await withTimeout(writing, budget, timedOut);
+    } catch (err) {
+      if (err instanceof Error && err.message === timedOut) abandoned = true;
+      throw err;
+    }
+  }
+
   private rebalanceTopologyBlocker(
     sample: ShardLoadSample | null,
     nodes: ClusterNode[],
@@ -8872,12 +8896,21 @@ export class AnomalyService
         metricType: MetricType.SLOT_MIGRATION_STUCK,
       });
       const runs = [...(this.rebalanceRuns.get(connectionId)?.values() ?? [])];
-      for (const finding of judged.failed) {
-        if (runs.some((run) => isCancelledJob(run, finding))) continue;
+      const held: SlotMigrationFinding[] = [];
+      const failures = [...(this.failuresHeldForCancel.get(connectionId) ?? []), ...judged.failed];
+      for (const finding of failures) {
+        const verdicts = runs.map((run) => cancelledFailure(run, finding, timestamp));
+        if (verdicts.includes('cancelled')) continue;
+        if (verdicts.includes('cancel_pending')) {
+          held.push(finding);
+          continue;
+        }
         const event = this.buildSlotMigrationEvent(connectionId, timestamp, finding);
         this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
         await this.addAnomaly(event, ctx);
       }
+      if (held.length > 0) this.failuresHeldForCancel.set(connectionId, held);
+      else this.failuresHeldForCancel.delete(connectionId);
     } catch (err) {
       this.logger.debug(
         `Slot migration check failed for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
@@ -10682,13 +10715,20 @@ export class AnomalyService
       };
       let sent = false;
       try {
-        await this.readShard(connectionId, plan.sourceShardId, timedOut, (client) => {
+        await this.writeShard(connectionId, plan.sourceShardId, timedOut, (client) => {
           sent = true;
           return client.call('CLUSTER', ...migrateSlotsArgs(plan));
         });
       } catch (err) {
         const late = err instanceof Error && err.message === timedOut;
-        if (late && !sent) return { status: 'refused', message: notConnected };
+        if (!sent) {
+          return {
+            status: 'refused',
+            message: late
+              ? notConnected
+              : `Could not connect to the hot shard (${errorText(err)}); no migration was started`,
+          };
+        }
         this.refusedRebalancePlans.set(plan, 'server_refused');
         if (late) record();
         return { status: 'refused', message: errorText(err) };
@@ -10787,12 +10827,21 @@ export class AnomalyService
     if (!runs || run?.state !== 'running') return { status: 'not_running' };
     const key = `${connectionId}\n${sourceShardId}`;
     const earlier = run.cancelAcceptedAt !== undefined || this.cancelsInFlight.has(key);
+    const sourceRead =
+      report !== undefined &&
+      (report.complete || (report.jobsReadNodeIds ?? []).includes(sourceShardId));
+    if (!earlier && !sourceRead) {
+      return {
+        status: 'refused',
+        message: 'Could not read the slot migrations on the hot shard, so no cancel was sent',
+      };
+    }
     const cancelling = {
       ...run,
       cancelRequestedAt: Date.now(),
       failedBeforeCancel: earlier
         ? run.failedBeforeCancel
-        : (report?.failed.map((entry) => entry.jobName) ?? run.failedBeforeCancel),
+        : report?.failed.map((entry) => entry.jobName),
     };
     runs.set(sourceShardId, cancelling);
     const inFlight = this.cancelsInFlight.get(key) ?? {
@@ -10802,7 +10851,7 @@ export class AnomalyService
     inFlight.count += 1;
     this.cancelsInFlight.set(key, inFlight);
     try {
-      await this.readShard(
+      await this.writeShard(
         connectionId,
         sourceShardId,
         `CLUSTER CANCELSLOTMIGRATIONS did not answer within ${AnomalyService.FANOUT_COMMAND_TIMEOUT_MS}ms`,
@@ -10823,13 +10872,11 @@ export class AnomalyService
       if (inFlight.count === 0) this.cancelsInFlight.delete(key);
     }
     const current = runs.get(sourceShardId);
-    const accepted = {
-      ...(current?.state === 'running' ? current : cancelling),
-      cancelAcceptedAt: Date.now(),
-    };
-    if (current?.state === 'running') runs.set(sourceShardId, accepted);
     this.slotMigrationCheckedAt.delete(connectionId);
     this.rebalanceFollowedAt.delete(connectionId);
+    if (current && current.state !== 'running') return { status: 'cancelling', run: runView(current) };
+    const accepted = { ...(current ?? cancelling), cancelAcceptedAt: Date.now() };
+    if (current) runs.set(sourceShardId, accepted);
     return { status: 'cancelling', run: runView(accepted) };
   }
 

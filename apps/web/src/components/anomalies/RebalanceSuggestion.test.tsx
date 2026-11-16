@@ -163,22 +163,48 @@ describe('RebalanceSuggestion', () => {
       ]);
     });
 
-    it('sends the moves the admin saw when the plan changes while the dialog is open', async () => {
-      runRebalance.mockRejectedValue(new ApiError('Conflict', 409, { reason: 'plan_changed' }));
+    const replaced = () =>
+      plan({
+        execution: { available: true },
+        moves: [{ ...plan().moves[0], ranges: [[5000, 6000]] }],
+      });
+
+    it('holds the start back until the admin reviews a plan that changed while the dialog is open', async () => {
+      runRebalance.mockResolvedValue({});
       const client = await show([hotShard(runnable())]);
       fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
       const dialog = await screen.findByRole('dialog');
 
-      const replaced = plan({
-        execution: { available: true },
-        moves: [{ ...plan().moves[0], ranges: [[5000, 6000]] }],
-      });
-      getHotShards.mockResolvedValue([hotShard(replaced)]);
+      getHotShards.mockResolvedValue([hotShard(replaced())]);
       await act(async () => {
         await client.invalidateQueries();
       });
+      await waitFor(() =>
+        expect(within(dialog).getByRole('button', { name: 'Start the migration' })).toBeDisabled(),
+      );
       expect(dialog).toHaveTextContent('2000');
       expect(dialog).not.toHaveTextContent('5000');
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Review the new plan' }));
+      const reviewed = await screen.findByRole('dialog');
+      expect(reviewed).toHaveTextContent('5000');
+      expect(reviewed).not.toHaveTextContent('2000');
+      fireEvent.click(within(reviewed).getByRole('button', { name: 'Start the migration' }));
+
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      expect(runRebalance).toHaveBeenCalledTimes(1);
+      expect(runRebalance).toHaveBeenCalledWith(SOURCE, [
+        { targetShardId: TARGET, ranges: [[5000, 6000]] },
+      ]);
+    });
+
+    it('offers the new plan once the server says the plan changed', async () => {
+      runRebalance.mockRejectedValue(new ApiError('Conflict', 409, { reason: 'plan_changed' }));
+      await show([hotShard(runnable())]);
+      fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+
+      getHotShards.mockResolvedValue([hotShard(replaced())]);
       fireEvent.click(within(dialog).getByRole('button', { name: 'Start the migration' }));
 
       expect(await within(dialog).findByRole('alert')).toHaveTextContent(
@@ -187,6 +213,15 @@ describe('RebalanceSuggestion', () => {
       expect(runRebalance).toHaveBeenCalledWith(SOURCE, [
         { targetShardId: TARGET, ranges: [[2000, 2410]] },
       ]);
+      await waitFor(() =>
+        expect(within(dialog).getByRole('button', { name: 'Start the migration' })).toBeDisabled(),
+      );
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Review the new plan' }));
+      const reviewed = await screen.findByRole('dialog');
+      expect(reviewed).toHaveTextContent('5000');
+      expect(within(reviewed).queryByRole('alert')).toBeNull();
+      expect(within(reviewed).getByRole('button', { name: 'Start the migration' })).toBeEnabled();
     });
 
     it('says why the monitor refused and keeps the dialog open', async () => {

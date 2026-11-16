@@ -7,7 +7,7 @@ import { metricsApi } from '../../api/metrics';
 import { useCanMutate } from '../../hooks/useCanMutate';
 import { useOpenHotShards } from '../../hooks/useOpenHotShards';
 import { copyToClipboard } from '../../lib/clipboard';
-import { REBALANCE_BLOCKED } from './anomaly-display';
+import { REBALANCE_BLOCKED, formatRatio, formatSlotRanges, shortShardId } from './anomaly-display';
 import type {
   HotShardDetail,
   RebalanceCommand,
@@ -40,10 +40,8 @@ interface Props {
   connectionId: string | undefined;
 }
 
-const short = (shardId: string) => shardId.substring(0, 8);
 const percent = (share: number) => `${Math.round(share * 100)}%`;
 const ofCore = (cpuUsecPerSecond: number) => percent(cpuUsecPerSecond / 1_000_000);
-const ratio = (value: number) => `${Number(value.toFixed(2))}x`;
 const compact = new Intl.NumberFormat('en', { notation: 'compact', maximumSignificantDigits: 2 });
 const keys = (count: number) => compact.format(count).toLowerCase();
 
@@ -53,14 +51,12 @@ function listed(parts: string[]): string {
 }
 
 function describeMove(move: RebalanceMove): string {
-  const ranges = move.ranges.map(([start, end]) =>
-    start === end ? `${start}` : `${start}-${end}`,
-  );
+  const ranges = formatSlotRanges(move.ranges);
   const single = move.slotCount === 1;
   return (
     `Move slot${single ? '' : 's'} ${listed(ranges)} ` +
     `(${move.slotCount} slot${single ? '' : 's'}, ${percent(move.shareOfShard)} of this shard's CPU, ` +
-    `about ${keys(move.keyCount)} keys) to shard ${short(move.targetShardId)} at ${move.targetAddr}.`
+    `about ${keys(move.keyCount)} keys) to shard ${shortShardId(move.targetShardId)} at ${move.targetAddr}.`
   );
 }
 
@@ -73,14 +69,14 @@ function describePinned(pinned: RebalancePinnedSlot[]): string {
 }
 
 function describeWarning(warning: RebalanceWarning): string {
-  const shard = `shard ${short(warning.shardId)}`;
+  const shard = `shard ${shortShardId(warning.shardId)}`;
   switch (warning.code) {
     case 'source_fork':
       return 'The hot shard forks to send the slots, while it is the busiest node.';
     case 'fewer_replicas':
-      return `Shard ${short(warning.shardId)} has fewer replicas than the hot shard.`;
+      return `Shard ${shortShardId(warning.shardId)} has fewer replicas than the hot shard.`;
     case 'target_memory':
-      return `Shard ${short(warning.shardId)} would be at about ${percent(warning.memoryShare ?? 0)} of its memory limit after the move.`;
+      return `Shard ${shortShardId(warning.shardId)} would be at about ${percent(warning.memoryShare ?? 0)} of its memory limit after the move.`;
     case 'memory_unknown':
       return `The memory room of ${shard} is not known.`;
   }
@@ -252,21 +248,29 @@ function RunPlan({ plan, onRun }: { plan: RebalancePlan; onRun: (plan: Rebalance
   );
 }
 
+const movesKey = (plan: RebalancePlan) =>
+  plan.moves
+    .map((move) => `${move.targetShardId}:${formatSlotRanges(move.ranges).join(',')}`)
+    .join(' ');
+
 function RunDialog({
   shown,
   current,
   connectionId,
+  onReview,
   onClose,
 }: {
   shown: RebalancePlan;
   current: RebalancePlan | undefined;
   connectionId: string | undefined;
+  onReview: (plan: RebalancePlan) => void;
   onClose: () => void;
 }) {
   const queryClient = useQueryClient();
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const source = shown.projection.find((row) => row.role === 'source');
+  const changed = current !== undefined && movesKey(current) !== movesKey(shown);
   const refresh = () =>
     Promise.all([
       queryClient.invalidateQueries({ queryKey: ['open-hot-shards', connectionId] }),
@@ -327,7 +331,15 @@ function RunDialog({
           <Button variant="outline" disabled={sending} onClick={onClose}>
             Keep the plan
           </Button>
-          <Button disabled={sending || current?.execution?.available !== true} onClick={run}>
+          {changed && (
+            <Button variant="outline" disabled={sending} onClick={() => onReview(current)}>
+              Review the new plan
+            </Button>
+          )}
+          <Button
+            disabled={sending || changed || current?.execution?.available !== true}
+            onClick={run}
+          >
             {sending ? 'Starting…' : 'Start the migration'}
           </Button>
         </DialogFooter>
@@ -338,7 +350,7 @@ function RunDialog({
 
 function describePlannedAfter(plan: RebalancePlan): string {
   const earlier = plan.plannedAfter.map(
-    (shardId) => plan.projection.find((row) => row.shardId === shardId)?.nodeAddr ?? short(shardId),
+    (shardId) => plan.projection.find((row) => row.shardId === shardId)?.nodeAddr ?? shortShardId(shardId),
   );
   return `These numbers count the suggestion${earlier.length === 1 ? '' : 's'} for ${listed(earlier)} as applied.`;
 }
@@ -355,8 +367,8 @@ function Plan({ plan, onRun }: { plan: RebalancePlan; onRun: (plan: RebalancePla
         {source && (
           <p>
             {plan.effect === 'resolves'
-              ? `This brings the shard from ${ratio(source.before.ratio)} to ${ratio(source.after.ratio)} the median.`
-              : `This frees ${percent(moved)} of the shard's CPU. The shard stays at ${ratio(source.after.ratio)} the median, but the load that stays has more of the node to itself.`}
+              ? `This brings the shard from ${formatRatio(source.before.ratio)} to ${formatRatio(source.after.ratio)} the median.`
+              : `This frees ${percent(moved)} of the shard's CPU. The shard stays at ${formatRatio(source.after.ratio)} the median, but the load that stays has more of the node to itself.`}
           </p>
         )}
         <ul className="list-disc pl-5">
@@ -382,7 +394,7 @@ function Plan({ plan, onRun }: { plan: RebalancePlan; onRun: (plan: RebalancePla
             {rows.map((row) => (
               <TableRow key={row.shardId}>
                 <TableCell>
-                  <span className="font-mono">{short(row.shardId)}</span>{' '}
+                  <span className="font-mono">{shortShardId(row.shardId)}</span>{' '}
                   <span className="text-muted-foreground">
                     {row.nodeAddr} · {row.role === 'source' ? 'Hot shard' : 'Target'}
                   </span>
@@ -394,7 +406,7 @@ function Plan({ plan, onRun }: { plan: RebalancePlan; onRun: (plan: RebalancePla
                   {percent(row.before.share)} → {percent(row.after.share)}
                 </TableCell>
                 <TableCell className="whitespace-nowrap">
-                  {ratio(row.before.ratio)} → {ratio(row.after.ratio)}
+                  {formatRatio(row.before.ratio)} → {formatRatio(row.after.ratio)}
                 </TableCell>
               </TableRow>
             ))}
@@ -452,7 +464,7 @@ export function RebalanceSuggestion({ connectionId }: Props) {
       {shards.map((shard) => {
         const verdict = shard.rebalance;
         if (!verdict) return null;
-        const title = `Suggested rebalance for hot shard ${short(shard.shardId)} at ${shard.nodeAddr}`;
+        const title = `Suggested rebalance for hot shard ${shortShardId(shard.shardId)} at ${shard.nodeAddr}`;
         return (
           <Card key={shard.eventId} role="region" aria-label={title}>
             <CardHeader>
@@ -479,9 +491,11 @@ export function RebalanceSuggestion({ connectionId }: Props) {
       })}
       {confirmed && (
         <RunDialog
+          key={movesKey(confirmed)}
           shown={confirmed}
           current={current}
           connectionId={connectionId}
+          onReview={setConfirmed}
           onClose={() => setConfirmed(null)}
         />
       )}

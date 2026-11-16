@@ -11,7 +11,7 @@ import type {
   RebalanceRunJob,
   RebalanceRunState,
 } from '../../types/anomaly';
-import { REBALANCE_BLOCKED } from './anomaly-display';
+import { REBALANCE_BLOCKED, formatRatio, formatSlotRanges, shortShardId } from './anomaly-display';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
@@ -26,9 +26,6 @@ import {
 
 const RUNNING_POLL_MS = 5000;
 const IDLE_POLL_MS = 30000;
-
-const short = (shardId: string) => shardId.substring(0, 8);
-const ratio = (value: number) => `${Number(value.toFixed(2))}x`;
 
 const RUN_STATE: Record<RebalanceRunState, string> = {
   running: 'Running',
@@ -48,9 +45,7 @@ const JOB_STATE: Record<RebalanceJobState, string> = {
 };
 
 function describeJob(job: RebalanceRunJob): string {
-  const ranges = job.ranges
-    .map(([start, end]) => (start === end ? `${start}` : `${start}-${end}`))
-    .join(', ');
+  const ranges = formatSlotRanges(job.ranges).join(', ');
   const phase = job.state === 'running' && job.phase ? ` (${job.phase})` : '';
   const message = job.message ? `: ${job.message}` : '';
   return `Slots ${ranges} to ${job.targetAddr}: ${JOB_STATE[job.state]}${phase}${message}.`;
@@ -60,8 +55,8 @@ function describeOutcome(run: RebalanceRun): string | null {
   if (run.state !== 'succeeded') return null;
   if (!run.outcome) return 'Measuring the load now that the slots have moved.';
   return (
-    `Projected ${ratio(run.outcome.projectedRatio)} the median for the hot shard; ` +
-    `measured ${ratio(run.outcome.actualRatio)}.`
+    `Projected ${formatRatio(run.outcome.projectedRatio)} the median for the hot shard; ` +
+    `measured ${formatRatio(run.outcome.actualRatio)}.`
   );
 }
 
@@ -161,7 +156,7 @@ export function RebalanceRuns({ connectionId }: Props) {
         </p>
       )}
       {runs.map((run) => {
-        const title = `Slot rebalance from shard ${short(run.sourceShardId)} at ${run.sourceAddr}`;
+        const title = `Slot rebalance from shard ${shortShardId(run.sourceShardId)} at ${run.sourceAddr}`;
         const outcome = describeOutcome(run);
         return (
           <Card key={`${run.sourceShardId} ${run.startedAt}`} role="region" aria-label={title}>

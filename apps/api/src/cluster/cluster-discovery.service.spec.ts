@@ -1097,6 +1097,73 @@ describe('ClusterDiscoveryService', () => {
     });
   });
 
+  describe('onNodeClientOnce', () => {
+    function onceClient() {
+      const handlers: Record<string, (err: Error) => void> = {};
+      const client = {
+        connect: jest.fn().mockResolvedValue(undefined),
+        call: jest.fn().mockResolvedValue('OK'),
+        disconnect: jest.fn(),
+        on: jest.fn((event: string, handler: (err: Error) => void) => {
+          handlers[event] = handler;
+        }),
+        handlers,
+      };
+      jest.mocked(Valkey).mockImplementationOnce(() => client as never);
+      return client;
+    }
+
+    it('sends the work to the node on a socket of its own that never resends, and closes it', async () => {
+      await service.discoverNodes('test-connection');
+      const client = onceClient();
+
+      const reply = await service.onNodeClientOnce('node1-id-abc123', 'test-connection', 2_000, (own) =>
+        own.call('CLUSTER', 'CANCELSLOTMIGRATIONS'),
+      );
+
+      expect(reply).toBe('OK');
+      expect(jest.mocked(Valkey)).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          host: '192.168.1.10',
+          port: 6379,
+          username: 'testuser',
+          password: 'testpass',
+          connectTimeout: 2_000,
+          commandTimeout: 2_000,
+          enableOfflineQueue: false,
+          maxRetriesPerRequest: 0,
+        }),
+      );
+      const calls = jest.mocked(Valkey).mock.calls as unknown as Array<[{ retryStrategy: () => unknown }]>;
+      const options = calls[calls.length - 1][0];
+      expect(options.retryStrategy()).toBeNull();
+      expect(client.call).toHaveBeenCalledWith('CLUSTER', 'CANCELSLOTMIGRATIONS');
+      expect(client.disconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it('names why the node refused the connection, without running the work', async () => {
+      await service.discoverNodes('test-connection');
+      const client = onceClient();
+      client.connect.mockImplementation(async () => {
+        client.handlers.error(new Error('WRONGPASS invalid username-password pair'));
+        throw new Error('Connection is closed.');
+      });
+      const work = jest.fn();
+
+      await expect(
+        service.onNodeClientOnce('node1-id-abc123', 'test-connection', 2_000, work),
+      ).rejects.toThrow('WRONGPASS invalid username-password pair');
+      expect(work).not.toHaveBeenCalled();
+      expect(client.disconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses a node it does not know', async () => {
+      await expect(
+        service.onNodeClientOnce('non-existent-id', 'test-connection', 2_000, jest.fn()),
+      ).rejects.toThrow('Node non-existent-id not found in cluster');
+    });
+  });
+
   describe('onOwnNodeClient', () => {
     let shared: { options: Record<string, unknown>; call: jest.Mock };
 

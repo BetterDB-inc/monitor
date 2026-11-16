@@ -14,6 +14,13 @@ import {
 } from 'lucide-react';
 import type { RebalanceExecutionBlocker } from '../../types/anomaly';
 
+export const shortShardId = (shardId: string) => shardId.substring(0, 8);
+
+export const formatRatio = (value: number) => `${Number(value.toFixed(2))}x`;
+
+export const formatSlotRanges = (ranges: ReadonlyArray<readonly [number, number]>) =>
+  ranges.map(([start, end]) => (start === end ? `${start}` : `${start}-${end}`));
+
 export const SEVERITY_CONFIG = {
   critical: {
     color: 'text-destructive',
