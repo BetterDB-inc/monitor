@@ -4394,8 +4394,8 @@ describe('AnomalyService', () => {
               })),
             );
             (discovery as any).onNodeClientOnce = jest.fn(
-              async (nodeId: string, _connectionId: string, _timeoutMs: number, run: (client: unknown) => unknown) =>
-                run(clients[nodeId]),
+              async (node: { id: string }, _connectionId: string, _timeoutMs: number, run: (client: unknown) => unknown) =>
+                run(clients[node.id]),
             );
             migrations = [];
             report = { jobViews: [], finishedJobs: [], failed: [], complete: true };
@@ -4407,6 +4407,8 @@ describe('AnomalyService', () => {
           }
 
           const pollNodes = () => IDS.map((id) => ({ id, flags: ['master'], slots: slotsOf[id] }));
+
+          const replyError = (message: string) => Object.assign(new Error(message), { name: 'ReplyError' });
 
           async function planned() {
             spreadLoad();
@@ -4509,7 +4511,11 @@ describe('AnomalyService', () => {
             expect(result).toMatchObject({
               status: 'changed',
               reason: 'plan_changed',
-              rebalance: { kind: 'plan', moves: [{ targetShardId: 'b0000000' }] },
+              rebalance: {
+                kind: 'plan',
+                moves: [{ targetShardId: 'b0000000' }],
+                execution: { available: true },
+              },
             });
             expect(calls).toEqual([]);
           });
@@ -4540,7 +4546,11 @@ describe('AnomalyService', () => {
 
             const result = await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN);
 
-            expect(result).toMatchObject({ status: 'changed', reason: 'slots_moved' });
+            expect(result).toMatchObject({
+              status: 'changed',
+              reason: 'slots_moved',
+              rebalance: { kind: 'plan', execution: { available: false, blockedBy: 'plan_outdated' } },
+            });
             expect(calls).toEqual([]);
             expect((service as any).hotShardRebalance.get('conn-a')?.has('hot_shard:a0000000')).toBe(
               false,
@@ -4610,11 +4620,33 @@ describe('AnomalyService', () => {
             report.jobViews = [listed()];
             await service.cancelRebalance('conn-a', 'a0000000');
 
+            const source = expect.objectContaining({ id: 'a0000000', address: ADDRS[0] });
             expect((discovery as any).onNodeClientOnce.mock.calls.map((call: unknown[]) => call.slice(0, 3))).toEqual([
-              ['a0000000', 'conn-a', budget],
-              ['a0000000', 'conn-a', budget],
+              [source, 'conn-a', budget],
+              [source, 'conn-a', budget],
             ]);
             expect((discovery.getNodeConnection as jest.Mock).mock.calls.length).toBe(shared);
+          });
+
+          it('dials the hot shard at the address the re-check read', async () => {
+            enable();
+            const { discovery } = await planned();
+            const isolated = (discovery as any).discoverNodesIsolated as jest.Mock;
+            const answer = isolated.getMockImplementation()!;
+            const moved = async () =>
+              (await answer()).map((node: { id: string }) =>
+                node.id === 'a0000000' ? { ...node, address: '10.9.9.9:6379' } : node,
+              );
+            isolated.mockImplementation(moved);
+
+            await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN);
+            report.jobViews = [listed()];
+            await service.cancelRebalance('conn-a', 'a0000000');
+
+            const dialled = (discovery as any).onNodeClientOnce.mock.calls.map(
+              (call: Array<{ address: string }>) => call[0].address,
+            );
+            expect(dialled).toEqual(['10.9.9.9:6379', '10.9.9.9:6379']);
           });
 
           it('records no run when the hot shard refuses the connection', async () => {
@@ -4729,9 +4761,9 @@ describe('AnomalyService', () => {
             clock += 1;
             const second = service.cancelRebalance('conn-a', 'a0000000');
             await new Promise((resolve) => setTimeout(resolve, 0));
-            refuseFirst(new Error('NOPERM'));
+            refuseFirst(replyError('NOPERM'));
             expect(await first).toMatchObject({ status: 'refused' });
-            refuseSecond(new Error('NOPERM'));
+            refuseSecond(replyError('NOPERM'));
             expect(await second).toMatchObject({ status: 'refused' });
 
             const run = (service as any).rebalanceRuns.get('conn-a').get('a0000000');
@@ -4834,7 +4866,7 @@ describe('AnomalyService', () => {
             await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN);
             report.jobViews = [listed()];
             await service.followRebalanceRuns('conn-a');
-            source.call.mockRejectedValueOnce(new Error('NOPERM'));
+            source.call.mockRejectedValueOnce(replyError('NOPERM'));
 
             expect(await service.cancelRebalance('conn-a', 'a0000000')).toEqual({
               status: 'refused',
@@ -5018,9 +5050,9 @@ describe('AnomalyService', () => {
             listedByNodeIds: ['b0000000'],
           };
 
-          async function failAfterRun(cancel: boolean) {
+          async function failAfterRun(cancel: boolean | 'timed_out') {
             enable();
-            await planned();
+            const { source } = await planned();
             await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN);
             report.jobViews = [listed()];
             await service.followRebalanceRuns('conn-a');
@@ -5036,7 +5068,22 @@ describe('AnomalyService', () => {
               'conn-a',
               judgeSlotMigrations(undefined, running as any, clock - 5_000).watch,
             );
-            if (cancel) await service.cancelRebalance('conn-a', 'a0000000');
+            if (cancel === 'timed_out') {
+              source.call.mockImplementationOnce(() => new Promise(() => undefined));
+              const budget = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+              (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;
+              try {
+                expect(await service.cancelRebalance('conn-a', 'a0000000')).toEqual({
+                  status: 'refused',
+                  message:
+                    'CLUSTER CANCELSLOTMIGRATIONS did not answer within 20ms; the cancel may still have taken effect',
+                });
+              } finally {
+                (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = budget;
+              }
+            } else if (cancel) {
+              await service.cancelRebalance('conn-a', 'a0000000');
+            }
             report.jobViews = [];
             report.finishedJobs = ['job-1'];
             report.failed = [failedImport];
@@ -5064,6 +5111,53 @@ describe('AnomalyService', () => {
               state: 'cancelled',
               jobs: [{ state: 'cancelled' }],
             });
+          });
+
+          it('ends a run whose cancel timed out as cancelled and raises no failure for it', async () => {
+            const added = await failAfterRun('timed_out');
+
+            expect(added).not.toHaveBeenCalled();
+            expect((await service.followRebalanceRuns('conn-a'))[0]).toMatchObject({
+              state: 'cancelled',
+              jobs: [{ state: 'cancelled' }],
+            });
+          });
+
+          it('treats a cancel whose connection closed after it was sent as possibly done', async () => {
+            enable();
+            const { source } = await planned();
+            await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN);
+            report.jobViews = [listed()];
+            await service.followRebalanceRuns('conn-a');
+            source.call.mockRejectedValueOnce(new Error('Connection is closed.'));
+
+            expect(await service.cancelRebalance('conn-a', 'a0000000')).toEqual({
+              status: 'refused',
+              message:
+                'The connection to the hot shard closed after CLUSTER CANCELSLOTMIGRATIONS was sent (Connection is closed.); the cancel may still have taken effect',
+            });
+            const run = (service as any).rebalanceRuns.get('conn-a').get('a0000000');
+            expect(run.cancelAcceptedAt).toBeDefined();
+          });
+
+          it('keeps a run running when the cancel could not reach the hot shard', async () => {
+            enable();
+            const { discovery } = await planned();
+            await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN);
+            report.jobViews = [listed()];
+            await service.followRebalanceRuns('conn-a');
+            ((discovery as any).onNodeClientOnce as jest.Mock).mockRejectedValueOnce(
+              new Error('WRONGPASS invalid username-password pair'),
+            );
+
+            expect(await service.cancelRebalance('conn-a', 'a0000000')).toEqual({
+              status: 'refused',
+              message:
+                'Could not connect to the hot shard (WRONGPASS invalid username-password pair); no cancel was sent',
+            });
+            const run = (service as any).rebalanceRuns.get('conn-a').get('a0000000');
+            expect(run.cancelRequestedAt).toBeUndefined();
+            expect(run.cancelAcceptedAt).toBeUndefined();
           });
 
           it('still reports a run that failed on its own', async () => {
@@ -5120,7 +5214,7 @@ describe('AnomalyService', () => {
             await detect();
             expect(added).not.toHaveBeenCalled();
 
-            refuse(new Error('NOPERM'));
+            refuse(replyError('NOPERM'));
             expect(await cancelling).toMatchObject({ status: 'refused' });
             clock += 1_000;
             await detect();

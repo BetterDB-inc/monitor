@@ -53,6 +53,7 @@ function describeJob(job: RebalanceRunJob): string {
 
 function describeOutcome(run: RebalanceRun): string | null {
   if (run.state !== 'succeeded') return null;
+  if (run.outcomeUnavailable) return 'The load after the move could not be measured.';
   if (!run.outcome) return 'Measuring the load now that the slots have moved.';
   return (
     `Projected ${formatRatio(run.outcome.projectedRatio)} the median for the hot shard; ` +
@@ -141,7 +142,11 @@ export function RebalanceRuns({ connectionId }: Props) {
   const { data: runs, error } = usePolling<RebalanceRun[]>({
     fetcher: () => metricsApi.getRebalanceRuns(),
     interval: (data) =>
-      data?.some((run) => run.state === 'running' || (run.state === 'succeeded' && !run.outcome))
+      data?.some(
+        (run) =>
+          run.state === 'running' ||
+          (run.state === 'succeeded' && !run.outcome && !run.outcomeUnavailable),
+      )
         ? RUNNING_POLL_MS
         : IDLE_POLL_MS,
     enabled: !!connectionId,

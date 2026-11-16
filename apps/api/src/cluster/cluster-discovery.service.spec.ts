@@ -1113,19 +1113,28 @@ describe('ClusterDiscoveryService', () => {
       return client;
     }
 
+    const node = (address = '10.0.0.9:7000') => ({
+      id: 'node1-id-abc123',
+      address,
+      role: 'master' as const,
+      slots: [],
+      configEpoch: 0,
+      state: 'healthy' as const,
+      flags: ['master'],
+    });
+
     it('sends the work to the node on a socket of its own that never resends, and closes it', async () => {
-      await service.discoverNodes('test-connection');
       const client = onceClient();
 
-      const reply = await service.onNodeClientOnce('node1-id-abc123', 'test-connection', 2_000, (own) =>
+      const reply = await service.onNodeClientOnce(node(), 'test-connection', 2_000, (own) =>
         own.call('CLUSTER', 'CANCELSLOTMIGRATIONS'),
       );
 
       expect(reply).toBe('OK');
       expect(jest.mocked(Valkey)).toHaveBeenLastCalledWith(
         expect.objectContaining({
-          host: '192.168.1.10',
-          port: 6379,
+          host: '10.0.0.9',
+          port: 7000,
           username: 'testuser',
           password: 'testpass',
           connectTimeout: 2_000,
@@ -1142,7 +1151,6 @@ describe('ClusterDiscoveryService', () => {
     });
 
     it('names why the node refused the connection, without running the work', async () => {
-      await service.discoverNodes('test-connection');
       const client = onceClient();
       client.connect.mockImplementation(async () => {
         client.handlers.error(new Error('WRONGPASS invalid username-password pair'));
@@ -1151,16 +1159,16 @@ describe('ClusterDiscoveryService', () => {
       const work = jest.fn();
 
       await expect(
-        service.onNodeClientOnce('node1-id-abc123', 'test-connection', 2_000, work),
+        service.onNodeClientOnce(node(), 'test-connection', 2_000, work),
       ).rejects.toThrow('WRONGPASS invalid username-password pair');
       expect(work).not.toHaveBeenCalled();
       expect(client.disconnect).toHaveBeenCalledTimes(1);
     });
 
-    it('refuses a node it does not know', async () => {
+    it('refuses an address it cannot read', async () => {
       await expect(
-        service.onNodeClientOnce('non-existent-id', 'test-connection', 2_000, jest.fn()),
-      ).rejects.toThrow('Node non-existent-id not found in cluster');
+        service.onNodeClientOnce(node('nope'), 'test-connection', 2_000, jest.fn()),
+      ).rejects.toThrow('Invalid node address: nope');
     });
   });
 

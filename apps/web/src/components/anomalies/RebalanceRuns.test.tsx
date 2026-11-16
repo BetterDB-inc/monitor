@@ -100,6 +100,21 @@ describe('RebalanceRuns', () => {
     expect(await panel()).toHaveTextContent('Measuring the load now that the slots have moved.');
   });
 
+  it('says when the load after the move could not be measured', async () => {
+    await show([
+      run({
+        state: 'succeeded',
+        endedAt: 5_000,
+        jobs: [{ ...run().jobs[0], state: 'succeeded' }],
+        outcomeUnavailable: true,
+      }),
+    ]);
+
+    const region = await panel();
+    expect(region).toHaveTextContent('The load after the move could not be measured.');
+    expect(region).not.toHaveTextContent('Measuring the load');
+  });
+
   it('keeps the last runs and their cancel when a refresh fails', async () => {
     const client = await show([run()]);
     await panel();

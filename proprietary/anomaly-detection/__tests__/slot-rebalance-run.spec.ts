@@ -12,6 +12,7 @@ import {
   sameMoves,
   startRun,
   withOutcome,
+  REBALANCE_OUTCOME_WAIT_MS,
   type RunNode,
   type RunReport,
 } from '../slot-rebalance-run';
@@ -123,6 +124,14 @@ describe('slot rebalance run', () => {
       expect(executionBlocker(plan({ support: undefined }), allowed)).toBe('unsupported_server');
       expect(executionBlocker(plan(), { ...allowed, migrationRunning: true })).toBe(
         'migration_running',
+      );
+    });
+
+    it('names a plan the server cannot run before the missing node connections', () => {
+      const undialled = { ...allowed, dialed: false };
+      expect(executionBlocker(plan({ support: 'redis_atomic' }), undialled)).toBe('unsupported_server');
+      expect(executionBlocker(plan({ support: 'provider_managed' }), undialled)).toBe(
+        'provider_managed',
       );
     });
   });
@@ -469,14 +478,25 @@ describe('slot rebalance run', () => {
         settling,
         shards: [shard('src', 300_000), shard('tgt1', 200_000), shard('tgt2', 250_000)],
       });
-      expect(withOutcome(succeeded, sample(69_999)).outcome).toBeUndefined();
-      expect(withOutcome(succeeded, sample(70_000, true)).outcome).toBeUndefined();
-      expect(withOutcome(succeeded, sample(70_000)).outcome).toEqual({
+      expect(withOutcome(succeeded, sample(69_999), 69_999).outcome).toBeUndefined();
+      expect(withOutcome(succeeded, sample(70_000, true), 70_000).outcome).toBeUndefined();
+      expect(withOutcome(succeeded, sample(70_000), 70_000).outcome).toEqual({
         projectedRatio: 1.2,
         actualRatio: 1.2,
         measuredAt: 70_000,
       });
-      expect(withOutcome({ ...succeeded, state: 'cancelled' }, sample(70_000)).outcome).toBeUndefined();
+      expect(withOutcome({ ...succeeded, state: 'cancelled' }, sample(70_000), 70_000).outcome).toBeUndefined();
+    });
+
+    it('gives up on the outcome when no settled sample measured the hot shard in time', () => {
+      const succeeded = { ...started(), state: 'succeeded' as const, endedAt: 10_000 };
+      const due = 10_000 + REBALANCE_OUTCOME_WAIT_MS;
+      expect(withOutcome(succeeded, null, due - 1).outcomeUnavailable).toBeUndefined();
+      const run = withOutcome(succeeded, null, due);
+      expect(run.outcomeUnavailable).toBe(true);
+      expect(run.outcome).toBeUndefined();
+      expect(runView(run).outcomeUnavailable).toBe(true);
+      expect(withOutcome({ ...succeeded, state: 'cancelled' }, null, due).outcomeUnavailable).toBeUndefined();
     });
 
     it('keeps a run for an hour after it ends', () => {

@@ -12,6 +12,7 @@ import type {
 
 export const REBALANCE_JOB_LISTING_GRACE_MS = 60_000;
 export const REBALANCE_OUTCOME_SETTLE_MS = 60_000;
+export const REBALANCE_OUTCOME_WAIT_MS = 10 * 60_000;
 export const REBALANCE_RUN_KEPT_MS = 60 * 60_000;
 export const REBALANCE_FOLLOW_MS = 5_000;
 export const REBALANCE_CANCEL_PENDING_MS = 10_000;
@@ -100,6 +101,7 @@ export interface RebalanceRunView {
   state: RebalanceRunState;
   endedAt?: number;
   outcome?: { projectedRatio: number; actualRatio: number; measuredAt: number };
+  outcomeUnavailable?: boolean;
 }
 
 export interface RunJob extends RebalanceRunJob {
@@ -147,9 +149,9 @@ export function executionBlocker(
   facts: { enabled: boolean; dialed: boolean; migrationRunning: boolean },
 ): RebalanceExecutionBlocker | undefined {
   if (!facts.enabled) return 'flag_off';
-  if (!facts.dialed) return 'not_dialed';
   if (plan.support === 'provider_managed') return 'provider_managed';
   if (plan.support !== 'valkey_atomic') return 'unsupported_server';
+  if (!facts.dialed) return 'not_dialed';
   if (facts.migrationRunning) return 'migration_running';
   return undefined;
 }
@@ -396,21 +398,36 @@ export function followRun(
   return { ...run, jobs, state, ...(state === 'running' ? {} : { endedAt: now }) };
 }
 
-export function withOutcome(run: RebalanceRun, sample: ShardLoadSample | null): RebalanceRun {
-  if (run.state !== 'succeeded' || run.outcome || run.endedAt === undefined || !sample) return run;
-  if (sample.settling || sample.timestamp < run.endedAt + REBALANCE_OUTCOME_SETTLE_MS) return run;
+function measuredOutcome(
+  run: RebalanceRun,
+  endedAt: number,
+  sample: ShardLoadSample | null,
+): RebalanceRun['outcome'] {
+  if (!sample || sample.settling || sample.timestamp < endedAt + REBALANCE_OUTCOME_SETTLE_MS) {
+    return undefined;
+  }
   const shards = sample.shards.filter((shard) => shard.slotCount > 0);
   const source = shards.find((shard) => shard.nodeId === run.sourceShardId);
-  if (!source) return run;
+  if (!source) return undefined;
   const cpuMedian = median(shards.map((shard) => shard.cpuUsecPerSecond));
   return {
-    ...run,
-    outcome: {
-      projectedRatio: run.projectedRatio,
-      actualRatio: hotShardRatio(source.cpuUsecPerSecond, cpuMedian),
-      measuredAt: sample.timestamp,
-    },
+    projectedRatio: run.projectedRatio,
+    actualRatio: hotShardRatio(source.cpuUsecPerSecond, cpuMedian),
+    measuredAt: sample.timestamp,
   };
+}
+
+export function withOutcome(
+  run: RebalanceRun,
+  sample: ShardLoadSample | null,
+  now: number,
+): RebalanceRun {
+  if (run.state !== 'succeeded' || run.outcome || run.outcomeUnavailable) return run;
+  if (run.endedAt === undefined) return run;
+  const outcome = measuredOutcome(run, run.endedAt, sample);
+  if (outcome) return { ...run, outcome };
+  if (now - run.endedAt >= REBALANCE_OUTCOME_WAIT_MS) return { ...run, outcomeUnavailable: true };
+  return run;
 }
 
 export function cancelledFailure(

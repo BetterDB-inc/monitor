@@ -239,6 +239,7 @@ export interface RebalanceRun {
   state: RebalanceRunState;
   endedAt?: number;
   outcome?: { projectedRatio: number; actualRatio: number; measuredAt: number };
+  outcomeUnavailable?: boolean;
 }
 
 export interface RebalanceNoPlan {
