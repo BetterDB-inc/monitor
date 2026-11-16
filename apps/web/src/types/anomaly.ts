@@ -374,7 +374,16 @@ export interface TopologyDisagreementSummary {
   shards: DisagreementShard[];
 }
 
-export type FullCheckBlocker = 'no_direct_access' | 'raft_cluster' | 'no_cluster_view';
+export type FullCheckBlocker =
+  | 'no_direct_access'
+  | 'ssh_tunnel'
+  | 'raft_cluster'
+  | 'no_cluster_view';
+
+export interface FullCheckFailure {
+  at: number;
+  reason: string;
+}
 
 export interface TopologyFullCheck {
   state: 'none' | 'running' | 'done';
@@ -384,6 +393,7 @@ export interface TopologyFullCheck {
   asked: number;
   total: number;
   retryAt: number | null;
+  lastFailure: FullCheckFailure | null;
   summary?: TopologyDisagreementSummary;
 }
 

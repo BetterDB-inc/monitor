@@ -38,6 +38,7 @@ const running: TopologyFullCheck = {
   asked: 0,
   total: 500,
   retryAt: null,
+  lastFailure: null,
 };
 
 describe('useClusterDisagreements', () => {

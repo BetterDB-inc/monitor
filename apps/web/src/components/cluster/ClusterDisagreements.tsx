@@ -14,6 +14,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { useCanMutate } from '@/hooks/useCanMutate';
 import { useNow } from '@/hooks/useNow';
 import { isOpenDisagreement } from '@/lib/clusterDisagreements';
 import { nodeHref } from '@/lib/clusterNodeHref';
@@ -26,6 +27,7 @@ import type {
   DisagreementShard,
   DisagreementShardState,
   DivergenceNode,
+  FullCheckFailure,
   TopologyDisagreementReport,
   TopologyDisagreementSummary,
   TopologyFullCheck,
@@ -42,7 +44,17 @@ type ResultShown = 'sampled' | 'full';
 
 interface AwaitedCheck {
   after: number | null;
+  failedAt: number | null;
   error: Error | null;
+}
+
+interface ClusterDisagreementsProps {
+  summary: TopologyDisagreementReport | undefined;
+  error?: Error | null;
+  connectionId?: string;
+  onAskEveryNode?: () => void;
+  asking?: boolean;
+  askError?: Error | null;
 }
 
 const SEVERITY_BADGE: Record<
@@ -358,11 +370,50 @@ function TakenLine({ takenAt }: { takenAt: number }) {
   return <p className="text-sm text-muted-foreground">{takenText(takenAt, now)}</p>;
 }
 
+function failureText(check: TopologyFullCheck, failure: FullCheckFailure): string {
+  const failed = `The last full check failed at ${new Date(failure.at).toLocaleTimeString()}: ${failure.reason}.`;
+  if (check.state !== 'done' || check.finishedAt === null) return failed;
+  const earlier = new Date(check.finishedAt).toLocaleTimeString();
+  return `${failed} The full check on offer is the one before it, taken ${earlier}.`;
+}
+
+function AskEveryNode({
+  check,
+  canAsk,
+  asking,
+  onAsk,
+}: {
+  check: TopologyFullCheck;
+  canAsk: boolean;
+  asking: boolean;
+  onAsk: () => void;
+}) {
+  if (check.unavailable) {
+    return <p className="text-sm text-muted-foreground">{check.unavailable.text}</p>;
+  }
+  if (!canAsk) {
+    return (
+      <p className="text-sm text-muted-foreground">Only a workspace admin can ask every node.</p>
+    );
+  }
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      disabled={asking || check.state === 'running'}
+      onClick={onAsk}
+    >
+      Ask every node
+    </Button>
+  );
+}
+
 function FullCheckBar({
   check,
   shown,
   onShow,
   onAsk,
+  canAsk,
   asking,
   askError,
 }: {
@@ -370,6 +421,7 @@ function FullCheckBar({
   shown: ResultShown;
   onShow: (shown: ResultShown) => void;
   onAsk: () => void;
+  canAsk: boolean;
   asking: boolean;
   askError?: Error | null;
 }) {
@@ -400,18 +452,7 @@ function FullCheckBar({
         ) : (
           <span />
         )}
-        {check.unavailable ? (
-          <p className="text-sm text-muted-foreground">{check.unavailable.text}</p>
-        ) : (
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={asking || check.state === 'running'}
-            onClick={onAsk}
-          >
-            Ask every node
-          </Button>
-        )}
+        <AskEveryNode check={check} canAsk={canAsk} asking={asking} onAsk={onAsk} />
       </div>
       {check.state === 'running' && (
         <p role="status" aria-label="Full check progress" className="text-sm text-muted-foreground">
@@ -421,6 +462,11 @@ function FullCheckBar({
       {askError && (
         <p role="alert" className="text-sm text-destructive">
           {askError.message}
+        </p>
+      )}
+      {check.lastFailure && (
+        <p role="alert" className="text-sm text-destructive">
+          {failureText(check, check.lastFailure)}
         </p>
       )}
     </div>
@@ -529,28 +575,29 @@ function Result({
   );
 }
 
-export function ClusterDisagreements({
+export function ClusterDisagreements(props: ClusterDisagreementsProps) {
+  return <ConnectionDisagreements key={props.connectionId ?? ''} {...props} />;
+}
+
+function ConnectionDisagreements({
   summary,
   error,
   connectionId,
   onAskEveryNode,
   asking = false,
   askError,
-}: {
-  summary: TopologyDisagreementReport | undefined;
-  error?: Error | null;
-  connectionId?: string;
-  onAskEveryNode?: () => void;
-  asking?: boolean;
-  askError?: Error | null;
-}) {
+}: ClusterDisagreementsProps) {
+  const canAsk = useCanMutate();
   const [pickedCheck, setPickedCheck] = useState<number | null>(null);
   const [awaited, setAwaited] = useState<AwaitedCheck | null>(null);
   const check = summary?.fullCheck;
   const finishedAt = check?.state === 'done' ? check.finishedAt : null;
+  const failedAt = check?.lastFailure?.at ?? null;
   const full = check?.state === 'done' ? check.summary : undefined;
 
   if (awaited && askError && askError !== awaited.error) {
+    setAwaited(null);
+  } else if (awaited && failedAt !== null && failedAt !== awaited.failedAt) {
     setAwaited(null);
   } else if (awaited && finishedAt !== null && finishedAt !== awaited.after) {
     setPickedCheck(finishedAt);
@@ -575,7 +622,7 @@ export function ClusterDisagreements({
     setPickedCheck(result === 'full' ? finishedAt : null);
   };
   const ask = () => {
-    setAwaited({ after: finishedAt, error: askError ?? null });
+    setAwaited({ after: finishedAt, failedAt, error: askError ?? null });
     onAskEveryNode?.();
   };
 
@@ -587,6 +634,7 @@ export function ClusterDisagreements({
           shown={shown}
           onShow={show}
           onAsk={ask}
+          canAsk={canAsk}
           asking={asking}
           askError={askError}
         />
