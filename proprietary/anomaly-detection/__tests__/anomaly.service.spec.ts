@@ -26285,6 +26285,46 @@ describe('AnomalyService', () => {
         expect(partialEvents()).toHaveLength(1);
       });
 
+      it('keeps an unbracketed IPv6 address whole in the node address and the webhook source', async () => {
+        const ipv4 = MEMBERS.n;
+        MEMBERS.n = { ...ipv4, host: '2001:db8::7' };
+        try {
+          await rounds(19);
+        } finally {
+          MEMBERS.n = ipv4;
+        }
+
+        expect(partialEvents()).toHaveLength(1);
+        expect(partialEvents()[0]).toMatchObject({ nodeAddr: '2001:db8::7:6379', dedupeKey: 'partial_membership:n' });
+        expect(partialEvents()[0].message).toContain('Run `CLUSTER MEET 2001:db8::7 6379` on 10.0.0.2:6379');
+        expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledWith(
+          expect.objectContaining({
+            dedupeKey: 'partial_membership:n',
+            sourceHost: '2001:db8::7',
+            sourcePort: 6379,
+          }),
+        );
+      });
+
+      it('gives no command for a node listed under a host name', async () => {
+        const ipv4 = MEMBERS.n;
+        MEMBERS.n = { ...ipv4, host: 'node-7.internal' };
+        try {
+          await rounds(19);
+        } finally {
+          MEMBERS.n = ipv4;
+        }
+
+        expect(partialEvents()).toHaveLength(1);
+        expect(partialEvents()[0].nodeAddr).toBe('node-7.internal:6379');
+        expect(partialEvents()[0].message).not.toContain('Run `');
+        expect(partialEvents()[0].message).toContain(
+          'Its address node-7.internal:6379 has a host name where CLUSTER MEET needs an IP address, ' +
+            'so no command can be given.',
+        );
+        expect(report().partialMembership[0]).toMatchObject({ command: null, runOn: [] });
+      });
+
       it('names both sets and the command in the report', async () => {
         await rounds(19);
 
