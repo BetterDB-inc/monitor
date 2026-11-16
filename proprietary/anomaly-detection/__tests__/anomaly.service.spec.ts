@@ -12512,6 +12512,44 @@ describe('AnomalyService', () => {
       expect(own.node?.nodeId).toBe('primA');
     });
 
+    describe('in the poll that first learns the cluster', () => {
+      const raisedDuring = async (detector: string) => {
+        let event: AnomalyEvent | undefined;
+        jest.spyOn(service as any, detector).mockImplementation(async () => {
+          event = await raise();
+        });
+        await poll();
+        return event;
+      };
+
+      beforeEach(() => {
+        dbClient.getClusterNodes = jest
+          .fn()
+          .mockRejectedValueOnce(new Error('busy'))
+          .mockResolvedValue(viewOf('primA'));
+      });
+
+      it('names the node on an event raised after the cluster key is set', async () => {
+        const event = await raisedDuring('detectOrphanedSlotKeys');
+
+        expect((service as any).connectionClusterKeys.has('conn-1')).toBe(true);
+        expect(event?.node).toEqual(PRIMARY_NODE);
+      });
+
+      it('names the node on an event raised before the cluster key is set', async () => {
+        const event = await raisedDuring('detectDuplicatePrimaries');
+
+        expect(event?.node).toEqual(PRIMARY_NODE);
+      });
+
+      it('names the node on the events of the polls that follow', async () => {
+        await poll();
+        await poll();
+
+        expect((await raise()).node).toEqual(PRIMARY_NODE);
+      });
+    });
+
     describe('when the view of the cluster is old', () => {
       const READ_AT = 1_700_000_000_000;
 

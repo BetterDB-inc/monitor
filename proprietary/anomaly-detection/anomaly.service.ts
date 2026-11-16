@@ -9453,7 +9453,9 @@ export class AnomalyService
   }
 
   private nodeViewKeyOf(connectionId: string): string {
-    return this.connectionClusterKeys.get(connectionId) ?? connectionId;
+    return (
+      this.clusterNodeViews.keyOf(connectionId) ?? this.connectionClusterKeys.get(connectionId) ?? connectionId
+    );
   }
 
   private rememberClusterNodes(
@@ -9463,7 +9465,8 @@ export class AnomalyService
     readAt: number,
   ): void {
     const zones = this.connectionRegistry.getNodeAvailabilityZones(connectionId);
-    this.clusterNodeViews.remember(connectionId, this.nodeViewKeyOf(connectionId), nodes, readAt, () =>
+    const viewKey = this.clusterKeyOfNodes(nodes) ?? connectionId;
+    this.clusterNodeViews.remember(connectionId, viewKey, nodes, readAt, () =>
       withConfiguredZones(withShardMetadata(nodes, shards), zones),
     );
   }
@@ -9731,19 +9734,23 @@ export class AnomalyService
   }
 
   private rememberClusterKey(connectionId: string, nodes: ClusterNode[]): void {
-    const liveKey = clusterKeyFromNodes(nodes);
-    if (!liveKey) {
+    const clusterKey = this.clusterKeyOfNodes(nodes);
+    if (!clusterKey) {
       this.forgetClusterKey(connectionId);
       return;
     }
     const nodeIds = nodes.map((node) => node.id);
-    const known = nodeIds.map((id) => this.clusterKeyByNode.get(id)).find(Boolean);
-    const clusterKey = known ?? liveKey;
     const previousView = this.clusterViews.get(connectionId);
     this.clusterViews.set(connectionId, new Set(nodeIds));
     nodeIds.forEach((id) => this.clusterKeyByNode.set(id, clusterKey));
     this.connectionClusterKeys.set(connectionId, clusterKey);
     if (previousView) this.releaseClusterNodes(previousView);
+  }
+
+  private clusterKeyOfNodes(nodes: readonly ClusterNode[]): string | undefined {
+    const liveKey = clusterKeyFromNodes(nodes);
+    if (!liveKey) return undefined;
+    return nodes.map((node) => this.clusterKeyByNode.get(node.id)).find(Boolean) ?? liveKey;
   }
 
   private releaseClusterNodes(nodeIds: ReadonlySet<string>): void {

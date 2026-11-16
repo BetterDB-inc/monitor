@@ -64,6 +64,10 @@ export class ClusterNodeViews {
     return { directory: view.directory, readAt: view.readAt };
   }
 
+  keyOf(connectionId: string): string | undefined {
+    return this.viewKeys.get(connectionId);
+  }
+
   ownNodeId(connectionId: string): string | undefined {
     return this.ownNodeIds.get(connectionId);
   }
