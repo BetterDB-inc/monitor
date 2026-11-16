@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
+import { incidentEventPath } from '@betterdb/shared';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -132,15 +133,20 @@ function NodeChips({
   );
 }
 
+function eventHref(eventId: string, eventAt: number | null, connectionId?: string): string {
+  if (eventAt === null) return EVENTS_PATH;
+  return incidentEventPath(eventId, eventAt, connectionId);
+}
+
 function coverageText(coverage: DisagreementCoverage): string {
   if (coverage.complete) return `All ${plural(coverage.nodes, 'node')} answered`;
   return `${coverage.asked} of ${plural(coverage.nodes, 'node')} asked, ${coverage.answered} answered`;
 }
 
-function LineStanding({ line }: { line: DisagreementLine }) {
+function LineStanding({ line, connectionId }: { line: DisagreementLine; connectionId?: string }) {
   if (line.confirmed && line.eventId) {
     return (
-      <Link to={EVENTS_PATH} className="text-xs underline">
+      <Link to={eventHref(line.eventId, line.eventAt, connectionId)} className="text-xs underline">
         Open event
       </Link>
     );
@@ -183,7 +189,7 @@ function DisagreementCard({
             </span>
           )
         )}
-        <LineStanding line={line} />
+        <LineStanding line={line} connectionId={connectionId} />
       </div>
       {line.kind !== 'slot_owner' && (
         <div
@@ -473,6 +479,14 @@ function FullCheckBar({
   );
 }
 
+function RefreshError() {
+  return (
+    <p role="alert" className="text-sm text-destructive">
+      The disagreements could not be refreshed. This is the last answer.
+    </p>
+  );
+}
+
 function Result({
   summary,
   takenAt,
@@ -486,10 +500,13 @@ function Result({
 }) {
   if (summary.status === 'not_sampled') {
     return (
-      <EmptyState
-        title="Not sampled yet"
-        description="The views of the nodes are compared in rounds, and this cluster has had none yet. A cluster that is not a gossip cluster, or one with the topology divergence check switched off, is never sampled."
-      />
+      <div className="space-y-3">
+        {error && <RefreshError />}
+        <EmptyState
+          title="Not sampled yet"
+          description="The views of the nodes are compared in rounds, and this cluster has had none yet. A cluster that is not a gossip cluster, or one with the topology divergence check switched off, is never sampled."
+        />
+      </div>
     );
   }
 
@@ -513,11 +530,7 @@ function Result({
           {oneOff && <TakenLine takenAt={takenAt} />}
         </CardHeader>
         <CardContent className="space-y-3">
-          {error && (
-            <p role="alert" className="text-sm text-destructive">
-              The disagreements could not be refreshed. This is the last answer.
-            </p>
-          )}
+          {error && <RefreshError />}
           {!compared && (
             <p role="alert" className="text-sm text-destructive">
               Fewer than two nodes answered, so nothing could be compared.

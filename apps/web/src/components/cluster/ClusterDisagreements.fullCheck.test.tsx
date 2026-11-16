@@ -32,6 +32,7 @@ function slotLine(patch: Partial<DisagreementLine> = {}): DisagreementLine {
     confirmed: false,
     eventId: null,
     eventType: null,
+    eventAt: null,
     tracked: true,
     since: Date.now() - 30_000,
     rounds: 2,
@@ -287,6 +288,7 @@ describe('ClusterDisagreements full check', () => {
       confirmed: true,
       eventId: 'event-1',
       eventType: 'topology_divergence',
+      eventAt: finishedAt - 60_000,
     }));
     render(view(reportOf(check)));
 
@@ -295,7 +297,7 @@ describe('ClusterDisagreements full check', () => {
     const line = screen.getByRole('article', { name: FULL_TEXT });
     expect(within(line).getByRole('link', { name: 'Open event' })).toHaveAttribute(
       'href',
-      '/anomalies',
+      `/anomalies/incidents/by-event/event-1?at=${finishedAt - 60_000}&connection=conn-1`,
     );
   });
 

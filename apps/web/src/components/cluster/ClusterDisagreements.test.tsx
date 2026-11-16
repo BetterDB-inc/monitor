@@ -50,6 +50,7 @@ function slotLine(patch: Partial<DisagreementLine> = {}): DisagreementLine {
     confirmed: true,
     eventId: 'event-1',
     eventType: 'topology_divergence',
+    eventAt: AT - 20_000,
     since: AT - 30_000,
     rounds: 6,
     stale: false,
@@ -88,6 +89,7 @@ function flagsLine(patch: Partial<DisagreementLine> = {}): DisagreementLine {
     confirmed: false,
     eventId: null,
     eventType: null,
+    eventAt: null,
     since: AT - 10_000,
     rounds: 2,
     stale: false,
@@ -219,6 +221,30 @@ describe('ClusterDisagreements', () => {
     expect(screen.queryByText(/No disagreements/)).not.toBeInTheDocument();
   });
 
+  it('says when an unsampled answer could not be refreshed', () => {
+    show(
+      summaryOf({
+        status: 'not_sampled',
+        sampledAt: null,
+        coverage: {
+          nodes: 0,
+          asked: 0,
+          answered: 0,
+          complete: false,
+          unanswered: [],
+          unansweredCount: 0,
+        },
+        shards: [],
+      }),
+      new Error('network down'),
+    );
+
+    expect(screen.getByText('Not sampled yet')).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'The disagreements could not be refreshed. This is the last answer.',
+    );
+  });
+
   it('shows a skeleton while the first answer is on its way', () => {
     show(undefined);
 
@@ -277,17 +303,25 @@ describe('ClusterDisagreements', () => {
     );
   });
 
-  it('links a confirmed line to the anomalies page and says when one is still counted', () => {
+  it('links a confirmed line to its event and says when one is still counted', () => {
     show(summaryOf({ disagreements: [slotLine(), flagsLine()] }));
 
     const confirmed = lineOf(slotLine().text);
     const counting = lineOf(flagsLine().text);
     expect(within(confirmed).getByRole('link', { name: 'Open event' })).toHaveAttribute(
       'href',
-      '/anomalies',
+      `/anomalies/incidents/by-event/event-1?at=${AT - 20_000}&connection=conn-1`,
     );
     expect(within(counting).queryByRole('link', { name: 'Open event' })).not.toBeInTheDocument();
     expect(within(counting).getByText('Not confirmed yet, seen in 2 rounds')).toBeInTheDocument();
+  });
+
+  it('links to the anomalies page when the time of the event is not known', () => {
+    show(summaryOf({ disagreements: [slotLine({ eventAt: null })] }));
+
+    expect(
+      within(lineOf(slotLine().text)).getByRole('link', { name: 'Open event' }),
+    ).toHaveAttribute('href', '/anomalies');
   });
 
   it('tells suspected from failed on a failure line', () => {
@@ -403,6 +437,7 @@ describe('ClusterDisagreements', () => {
       confirmed: false,
       eventId: null,
       eventType: null,
+      eventAt: null,
       stale: true,
       lastSeenAt: AT - 60_000,
       positions: [],
@@ -546,6 +581,7 @@ describe('ClusterDisagreements', () => {
       confirmed: false,
       eventId: null,
       eventType: null,
+      eventAt: null,
       stale: true,
       positions: [],
       text: 'Slots 0-9: views differed on the owner (s000p.internal:6379, s001p.internal:6379).',

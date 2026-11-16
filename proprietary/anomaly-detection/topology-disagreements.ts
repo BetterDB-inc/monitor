@@ -27,6 +27,7 @@ const MEMBERSHIP_LABELS: Record<string, string> = {
 export interface DisagreementEvent {
   eventId: string;
   eventType: MetricType;
+  eventAt: number | null;
 }
 
 export type RoundDisagreement = TopologyDisagreement & Partial<Pick<TrackedDisagreement, 'firstSeenAt' | 'lastSeenAt' | 'rounds'>>;
@@ -65,6 +66,7 @@ export interface DisagreementLine {
   confirmed: boolean;
   eventId: string | null;
   eventType: MetricType | null;
+  eventAt: number | null;
   tracked: boolean;
   since?: number;
   rounds?: number;
@@ -369,6 +371,7 @@ export function summarizeDisagreements(
       confirmed: event !== undefined,
       eventId: event?.eventId ?? null,
       eventType: event?.eventType ?? null,
+      eventAt: event?.eventAt ?? null,
       tracked,
       ...(tracked ? { since: Math.min(...seen), rounds: Math.max(...counted) } : {}),
       stale,

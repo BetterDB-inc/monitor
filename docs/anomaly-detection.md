@@ -1375,7 +1375,7 @@ Each entry of `disagreements` is one thing the views disagree about:
 |-------|---------|
 | `kind` | `slot_owner`, `config_epoch`, `failure_flags` or `membership` |
 | `severity` | `critical` for `slot_owner`, `warning` for the others |
-| `confirmed`, `eventId`, `eventType` | `confirmed` is `true` when an open event covers the line; `eventId` and `eventType` then point at that event. Both are `null` while the disagreement is still being counted, and after the event was resolved by hand |
+| `confirmed`, `eventId`, `eventType`, `eventAt` | `confirmed` is `true` when an open event covers the line; `eventId` and `eventType` then point at that event, and `eventAt` is the time it was raised. All three are `null` while the disagreement is still being counted, and after the event was resolved by hand |
 | `since`, `rounds` | When it was first seen, and for how many rounds in a row |
 | `stale`, `lastSeenAt` | `stale` is `true` when the line was not seen in the last round; `lastSeenAt` is the round it was last seen in. See below |
 | `subjects`, `subjectCount` | The nodes the line is about. For `slot_owner` these are the nodes claimed as owner |
@@ -1418,6 +1418,7 @@ Node lists (`subjects`, `observers`, `unanswered`, `epochs`) hold at most 25 ent
       "confirmed": true,
       "eventId": "0c1f6f0e-6d0f-4d3e-9a55-0f2f8f3f6a11",
       "eventType": "topology_divergence",
+      "eventAt": 1704067180000,
       "since": 1704067170000,
       "rounds": 6,
       "stale": false,

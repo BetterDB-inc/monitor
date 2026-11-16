@@ -652,7 +652,10 @@ describe('fullCheckView', () => {
     const view = fullCheckView(
       { state: 'done', startedAt: AT, finishedAt: AT + 900, asked: 500, total: 500, outcome },
       null,
-      (key) => (key.startsWith('slot_owner:') ? { eventId: 'e1', eventType: MetricType.TOPOLOGY_DIVERGENCE } : undefined),
+      (key) =>
+        key.startsWith('slot_owner:')
+          ? { eventId: 'e1', eventType: MetricType.TOPOLOGY_DIVERGENCE, eventAt: AT - 60_000 }
+          : undefined,
     );
 
     expect(view).toMatchObject({
@@ -670,6 +673,7 @@ describe('fullCheckView', () => {
       tracked: false,
       confirmed: true,
       eventId: 'e1',
+      eventAt: AT - 60_000,
     });
     expect(view.summary?.disagreements[0].positions.map((position) => position.count)).toEqual([497, 3]);
     expect(view.summary?.disagreements[0]).not.toHaveProperty('since');
