@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -39,7 +40,12 @@ export const PINNED_FILES = [
   'proprietary/anomaly-detection/topology-divergence-report.ts',
   'proprietary/anomaly-detection/duplicate-primary-detector.ts',
   'proprietary/anomaly-detection/types.ts',
+  'proprietary/anomaly-detection/anomaly.service.ts',
+  'apps/api/src/cluster/cluster-metrics.service.ts',
+  'apps/api/src/common/types/metrics.types.ts',
   'apps/api/src/database/parsers/metrics.parser.ts',
+  'apps/api/src/database/parsers/info.parser.ts',
+  'apps/api/src/metrics/commandstats-parser.ts',
 ];
 
 export interface ProductPin {
@@ -56,7 +62,13 @@ function currentHashes(): Record<string, string> {
 }
 
 export function writePin(commit: string): ProductPin {
-  const pin = { commit, files: currentHashes() };
+  const git = (args: string[]) => execFileSync('git', args, { cwd: repoRoot, encoding: 'utf8' }).trim();
+  const resolved = git(['rev-parse', '--verify', `${commit}^{commit}`]);
+  const differing = git(['diff', '--name-only', resolved, '--', ...PINNED_FILES]);
+  if (differing) {
+    throw new Error(`the working tree differs from ${resolved.slice(0, 8)} in: ${differing.split('\n').join(', ')}`);
+  }
+  const pin = { commit: resolved.slice(0, 8), files: currentHashes() };
   writeFileSync(pinFile, `${JSON.stringify(pin, null, 2)}\n`);
   return pin;
 }
@@ -67,7 +79,7 @@ export function assertPinned(): ProductPin {
   const changed = PINNED_FILES.filter((file) => pin.files[file] !== now[file]);
   if (changed.length > 0) {
     throw new Error(
-      `detector files differ from pinned commit ${pin.commit}: ${changed.join(', ')}. ` +
+      `product files differ from pinned commit ${pin.commit}: ${changed.join(', ')}. ` +
         'Re-run the cross-check tests, then `bench pin <commit>`.',
     );
   }
