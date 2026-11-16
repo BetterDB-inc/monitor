@@ -26485,6 +26485,57 @@ describe('AnomalyService', () => {
         }
       });
 
+      describe('once every view lists the node again', () => {
+        beforeEach(async () => {
+          await rounds(19);
+          knows.b = EVERYONE;
+          knows.c = EVERYONE;
+        });
+
+        it('lists its open event without the peers and the command while the event closes', async () => {
+          const [{ id }] = partialEvents();
+          expect(report().partialMembership).toMatchObject([{ seen: true, command: 'CLUSTER MEET 10.0.0.7 6379' }]);
+
+          await rounds(2);
+
+          expect(openPartialEvents()).toHaveLength(1);
+          expect(report().partialMembership).toEqual([
+            {
+              eventId: id,
+              confirmed: true,
+              seen: false,
+              since: expect.any(Number),
+              node: expect.objectContaining({ nodeId: 'n', address: '10.0.0.7:6379' }),
+              knownBy: [],
+              notKnownBy: [],
+              ownViewMissing: [],
+              command: null,
+              runOn: [],
+              disagreements: [],
+            },
+          ]);
+        });
+
+        it('lists nothing once the event has closed', async () => {
+          await rounds(3);
+
+          expect(openPartialEvents()).toHaveLength(0);
+          expect(report().partialMembership).toEqual([]);
+        });
+      });
+
+      it('marks a node kept through a round with too few views as seen', async () => {
+        await rounds(19);
+        for (const id of ['b', 'c', 'n']) silent.add(id);
+
+        await rounds(1);
+
+        expect(report()).toMatchObject({
+          status: 'insufficient_views',
+          partialMembership: [{ seen: true, node: { nodeId: 'n' }, command: 'CLUSTER MEET 10.0.0.7 6379' }],
+        });
+      });
+
       it('keeps its event apart from the cluster view divergence events', async () => {
         await rounds(19);
 
@@ -26506,6 +26557,30 @@ describe('AnomalyService', () => {
         expect(report().partialMembership.map((entry) => entry.node.nodeId)).toEqual(['c']);
       });
 
+      it('keeps the event of a node that misses one read while another node holds the same disagreement', async () => {
+        (service as any).topologyDivergenceSettings.randomNodes = 5;
+        MEMBERS.m = { host: '10.0.0.8', epoch: 0, slots: '' };
+        const everyone = [...EVERYONE, 'm'];
+        const withoutB = everyone.filter((id) => id !== 'b');
+        knows = { a: everyone, b: everyone, c: everyone, n: withoutB, m: withoutB };
+        try {
+          await rounds(19);
+          const raised = partialEvents().map((e) => e.dedupeKey).sort();
+          expect(raised).toEqual(['partial_membership:m', 'partial_membership:n']);
+
+          silent.add('n');
+          await rounds(1);
+          expect(openPartialEvents()).toHaveLength(2);
+
+          silent.delete('n');
+          await rounds(1);
+          expect(openPartialEvents()).toHaveLength(2);
+          expect(partialEvents()).toHaveLength(2);
+        } finally {
+          delete MEMBERS.m;
+        }
+      });
+
       describe('when every peer that lists it starts to flag it as failing', () => {
         const membershipLines = () =>
           [...report().divergences, ...report().partialMembership]
@@ -26525,12 +26600,28 @@ describe('AnomalyService', () => {
           expect(openPartialEvents()).toHaveLength(1);
         });
 
+        it('counts it afresh in the round being judged when a newer round was sampled meanwhile', async () => {
+          flagsBy.b = { c: 'master,fail?' };
+          const monitor = (service as any).topologyDivergence;
+          (dbClient.getConfigValues as jest.Mock).mockImplementationOnce(async () => {
+            for (const state of monitor.clusters.values()) state.last = { ...state.last };
+            return { 'cluster-node-timeout': '15000' };
+          });
+
+          await rounds(1);
+
+          expect(dbClient.getConfigValues).toHaveBeenCalledTimes(1);
+          expect(divergenceEvents()).toHaveLength(0);
+        });
+
         it('lists the disagreement once', async () => {
           await rounds(1);
 
           expect(membershipLines()).toHaveLength(1);
           expect(report().divergences).toMatchObject([{ eventId: null, disagreements: [{ kind: 'membership' }] }]);
-          expect(report().partialMembership).toMatchObject([{ node: { nodeId: 'n' }, disagreements: [] }]);
+          expect(report().partialMembership).toMatchObject([
+            { node: { nodeId: 'n' }, seen: false, command: null, notKnownBy: [], disagreements: [] },
+          ]);
         });
 
         it('keeps its event and raises no other when the flag clears within the configured rounds', async () => {

@@ -278,6 +278,7 @@ import {
   type TopologyDivergenceReport,
   buildDivergenceDetail,
   buildPartialMembershipDetail,
+  closingPartialMembershipDetail,
   divergenceMessage,
   divergenceSeverity,
   outranksSeverity,
@@ -7468,7 +7469,9 @@ export class AnomalyService
       clusterKey,
       () => new Map<string, OpenDivergence<PartialMembership>>(),
     );
-    const renamed = comparable ? renamedPartialMemberships(openPartial, partial) : [];
+    const silent = new Set(round.unanswered);
+    const answered = new Set(round.observers.filter((nodeId) => !silent.has(nodeId)));
+    const renamed = comparable ? renamedPartialMemberships(openPartial, partial, answered) : [];
 
     await this.settleTopologyEvents({
       ctx,
@@ -7574,7 +7577,13 @@ export class AnomalyService
     const found = this.partiallyKnownNodesOf(round, eventIds);
     const sides = membershipSides(round.disagreements, found, round.at, previous?.sides);
     const switched = [...sides].filter(([key, side]) => (previous?.sides.get(key) ?? side) !== side);
-    for (const [key] of switched) this.topologyDivergence.recount(clusterKey, key, round.at);
+    const recounted = new Map(
+      switched.flatMap(([key]) => {
+        const entry = this.topologyDivergence.recount(clusterKey, key, round.at);
+        return entry ? [[key, entry] as const] : [];
+      }),
+    );
+    round.disagreements = round.disagreements.map((entry) => recounted.get(entry.key) ?? entry);
     const counted = switched.length > 0 ? this.partiallyKnownNodesOf(round, eventIds) : found;
     this.partialMembershipRounds.set(clusterKey, { found: counted, sides });
     return counted;
@@ -10799,10 +10808,9 @@ export class AnomalyService
       seen,
     );
     const raisedPartial = raisedFindings.map(({ signature, eventId, group }) =>
-      buildPartialMembershipDetail(group, seen.has(signature) ? round.disagreements : [], round.nodes, {
-        eventId,
-        confirmed: true,
-      }),
+      seen.has(signature)
+        ? buildPartialMembershipDetail(group, round.disagreements, round.nodes, { eventId, confirmed: true })
+        : closingPartialMembershipDetail(group, round.nodes, eventId),
     );
     const raisedNodes = new Set(raisedFindings.map(({ signature }) => signature));
     const countingPartial = found

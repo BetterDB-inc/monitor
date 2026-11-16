@@ -983,25 +983,39 @@ describe('membershipSides', () => {
 
 describe('renamedPartialMemberships', () => {
   const [finding] = judge(every(KNOWN_BY_P1_ONLY, 0, LONG_ENOUGH)).found;
-  const underOldName = { ...finding, signature: partialMembershipSignature('p2'), nodeId: 'p2' };
+  const underOldName = { ...finding, signature: partialMembershipSignature('p9'), nodeId: 'p9' };
+  const lacking = underOldName.notKnownBy.map((peer) => peer.nodeId);
+  const answered = new Set(['p9', ...lacking]);
 
   it('names an open finding whose disagreements another finding now holds', () => {
     const open = new Map([[underOldName.signature, { group: underOldName }]]);
-    expect(renamedPartialMemberships(open, [finding])).toEqual(['partial_membership:p2']);
+    expect(renamedPartialMemberships(open, [finding], answered)).toEqual(['partial_membership:p9']);
+  });
+
+  it('leaves a finding whose node gave no view in the round', () => {
+    const open = new Map([[underOldName.signature, { group: underOldName }]]);
+    expect(renamedPartialMemberships(open, [finding], new Set(lacking))).toEqual([]);
+  });
+
+  it('leaves a finding while a peer that lacked its node gave no view in the round', () => {
+    const open = new Map([[underOldName.signature, { group: underOldName }]]);
+    expect(lacking.length).toBeGreaterThan(0);
+    expect(renamedPartialMemberships(open, [finding], new Set(['p9', ...lacking.slice(1)]))).toEqual([]);
   });
 
   it('leaves a finding that is still found', () => {
     const open = new Map([[finding.signature, { group: finding }]]);
-    expect(renamedPartialMemberships(open, [finding])).toEqual([]);
+    expect(renamedPartialMemberships(open, [finding], answered)).toEqual([]);
   });
 
   it('leaves a finding whose disagreements no finding holds', () => {
     const open = new Map([[underOldName.signature, { group: underOldName }]]);
-    expect(renamedPartialMemberships(open, [])).toEqual([]);
-    expect(renamedPartialMemberships(open, [{ ...finding, disagreementKeys: ['membership:p9'] }])).toEqual([]);
+    const elsewhere = [{ ...finding, disagreementKeys: ['membership:p8'] }];
+    expect(renamedPartialMemberships(open, [], answered)).toEqual([]);
+    expect(renamedPartialMemberships(open, elsewhere, answered)).toEqual([]);
   });
 
   it('leaves an open event whose finding it never saw', () => {
-    expect(renamedPartialMemberships(new Map([[underOldName.signature, {}]]), [finding])).toEqual([]);
+    expect(renamedPartialMemberships(new Map([[underOldName.signature, {}]]), [finding], answered)).toEqual([]);
   });
 });

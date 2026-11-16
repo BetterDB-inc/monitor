@@ -363,11 +363,14 @@ export function membershipSides(
 export function renamedPartialMemberships(
   open: ReadonlyMap<string, { group?: PartialMembership }>,
   found: PartialMembership[],
+  answered: ReadonlySet<string>,
 ): string[] {
   const current = new Set(found.map((finding) => finding.signature));
   const held = new Set(found.flatMap((finding) => finding.disagreementKeys));
+  const read = (finding: PartialMembership) =>
+    [finding.nodeId, ...finding.notKnownBy.map((peer) => peer.nodeId)].every((nodeId) => answered.has(nodeId));
   const lost = (finding: PartialMembership) =>
-    !current.has(finding.signature) && finding.disagreementKeys.some((key) => held.has(key));
+    !current.has(finding.signature) && read(finding) && finding.disagreementKeys.some((key) => held.has(key));
   return [...open].filter(([, entry]) => entry.group && lost(entry.group)).map(([signature]) => signature);
 }
 

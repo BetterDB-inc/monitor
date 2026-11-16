@@ -130,11 +130,13 @@ export class TopologyDivergenceMonitor {
     this.clusters.get(clusterKey)?.tracker.restart(key);
   }
 
-  recount(clusterKey: string, key: string, at: number): void {
+  recount(clusterKey: string, key: string, at: number): TrackedDisagreement | undefined {
     const state = this.clusters.get(clusterKey);
     const recounted = state?.tracker.recount(key, at);
-    if (!state?.last || !recounted) return;
-    state.last.disagreements = state.last.disagreements.map((entry) => (entry.key === key ? recounted : entry));
+    if (state?.last && recounted) {
+      state.last.disagreements = state.last.disagreements.map((entry) => (entry.key === key ? recounted : entry));
+    }
+    return recounted;
   }
 
   forgetConnection(connectionId: string): void {

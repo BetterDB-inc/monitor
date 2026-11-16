@@ -41,6 +41,7 @@ export interface PartialMembershipGapNode extends DivergenceNode {
 export interface PartialMembershipDetail {
   eventId: string | null;
   confirmed: boolean;
+  seen: boolean;
   since: number;
   node: DivergenceNode;
   knownBy: DivergenceNode[];
@@ -219,6 +220,7 @@ export function buildPartialMembershipDetail(
   return {
     eventId: state.eventId,
     confirmed: state.confirmed,
+    seen: true,
     since: finding.firstSeenAt,
     node: named(finding),
     knownBy: finding.knownBy.map(named),
@@ -229,5 +231,25 @@ export function buildPartialMembershipDetail(
     disagreements: disagreements
       .filter((disagreement) => keys.has(disagreement.key))
       .map((disagreement) => toDetailDisagreement(disagreement, nodes, held)),
+  };
+}
+
+export function closingPartialMembershipDetail(
+  finding: PartialMembership,
+  nodes: ReadonlyMap<string, ClusterNode>,
+  eventId: string,
+): PartialMembershipDetail {
+  return {
+    eventId,
+    confirmed: true,
+    seen: false,
+    since: finding.firstSeenAt,
+    node: namedPeer(finding, nodes),
+    knownBy: [],
+    notKnownBy: [],
+    ownViewMissing: [],
+    command: null,
+    runOn: [],
+    disagreements: [],
   };
 }

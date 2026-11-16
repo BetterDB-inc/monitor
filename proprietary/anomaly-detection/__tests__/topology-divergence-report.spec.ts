@@ -4,6 +4,7 @@ import {
   DIVERGENCE_SEVERITY_BY_KIND,
   buildDivergenceDetail,
   buildPartialMembershipDetail,
+  closingPartialMembershipDetail,
   divergenceMessage,
   divergenceSeverity,
   outranksSeverity,
@@ -264,6 +265,7 @@ describe('buildPartialMembershipDetail', () => {
     expect(detail).toEqual({
       eventId: 'evt-2',
       confirmed: true,
+      seen: true,
       since: 85000,
       node: { nodeId: 'n0', address: '10.9.9.9:7000', role: 'primary' },
       knownBy: [toDivergenceNode('a', NODES)],
@@ -321,9 +323,43 @@ describe('buildPartialMembershipDetail', () => {
     expect(detail).toMatchObject({ node: { nodeId: 'n0', address: 'redis-7.svc:6379' }, command: null, runOn: [] });
   });
 
-  it('lists no disagreement for a finding the round no longer holds', () => {
-    const detail = buildPartialMembershipDetail(finding, [], NODES, { eventId: 'evt-2', confirmed: true });
+});
 
-    expect(detail).toMatchObject({ eventId: 'evt-2', node: { nodeId: 'n0' }, disagreements: [] });
+describe('closingPartialMembershipDetail', () => {
+  const finding: PartialMembership = {
+    signature: 'partial_membership:n0',
+    nodeId: 'n0',
+    address: '10.9.9.9:7000',
+    knownBy: [{ nodeId: 'a', address: '10.0.1.5:6379' }],
+    notKnownBy: [{ nodeId: 'b', address: '10.0.2.7:6379', status: 'missing' }],
+    ownViewMissing: [{ nodeId: 'c', address: '10.0.3.2:6379', status: 'noaddr' }],
+    disagreementKeys: ['membership:n0'],
+    slotDisputeKeys: [],
+    firstSeenAt: 85000,
+    rounds: 20,
+    confirmed: true,
+    meet: {
+      ip: '10.9.9.9',
+      port: 7000,
+      busPort: 17000,
+      command: 'CLUSTER MEET 10.9.9.9 7000',
+      runOn: [{ nodeId: 'b', address: '10.0.2.7:6379' }],
+    },
+  };
+
+  it('keeps the node and its event, and none of the peers, the command or the disagreements', () => {
+    expect(closingPartialMembershipDetail(finding, NODES, 'evt-2')).toEqual({
+      eventId: 'evt-2',
+      confirmed: true,
+      seen: false,
+      since: 85000,
+      node: { nodeId: 'n0', address: '10.9.9.9:7000', role: 'primary' },
+      knownBy: [],
+      notKnownBy: [],
+      ownViewMissing: [],
+      command: null,
+      runOn: [],
+      disagreements: [],
+    });
   });
 });

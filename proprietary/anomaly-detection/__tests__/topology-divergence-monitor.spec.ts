@@ -221,13 +221,15 @@ describe('TopologyDivergenceMonitor', () => {
     expect(round?.disagreements.map((d) => d.key)).toEqual(['failure_flags:c2']);
   });
 
-  it('shows a count started over in the round it holds', async () => {
+  it('returns a count started over and shows it in the round it holds', async () => {
     const { monitor, poll } = harness();
     await poll('conn-2', 'b1', 0, { c2: failing });
     await poll('conn-2', 'b1', INTERVAL, { c2: failing });
 
-    monitor.recount(CLUSTER, 'failure_flags:c2', INTERVAL);
+    const recounted = monitor.recount(CLUSTER, 'failure_flags:c2', INTERVAL);
 
+    expect(recounted).toMatchObject({ key: 'failure_flags:c2', firstSeenAt: INTERVAL, rounds: 1 });
+    expect(monitor.recount(CLUSTER, 'failure_flags:c9', INTERVAL)).toBeUndefined();
     expect(monitor.lastRound(CLUSTER)?.disagreements).toMatchObject([
       { key: 'failure_flags:c2', firstSeenAt: INTERVAL, rounds: 1 },
     ]);
