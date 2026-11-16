@@ -338,6 +338,39 @@ function meetCommand(endpoint: Endpoint, runOn: MembershipPeer[]): MeetCommand {
   };
 }
 
+export type MembershipSide = 'partial_membership' | 'topology_divergence';
+
+export interface PartialMembershipRound {
+  found: PartialMembership[];
+  sides: Map<string, MembershipSide>;
+}
+
+export function membershipSides(
+  disagreements: TrackedDisagreement[],
+  found: PartialMembership[],
+  at: number,
+  previous: ReadonlyMap<string, MembershipSide> = new Map(),
+): Map<string, MembershipSide> {
+  const claimed = new Set(found.flatMap((finding) => finding.disagreementKeys));
+  return new Map(
+    disagreements.filter(isMembership).map(({ key, lastSeenAt }): [string, MembershipSide] => {
+      const side = claimed.has(key) ? 'partial_membership' : 'topology_divergence';
+      return [key, lastSeenAt >= at ? side : (previous.get(key) ?? side)];
+    }),
+  );
+}
+
+export function renamedPartialMemberships(
+  open: ReadonlyMap<string, { group?: PartialMembership }>,
+  found: PartialMembership[],
+): string[] {
+  const current = new Set(found.map((finding) => finding.signature));
+  const held = new Set(found.flatMap((finding) => finding.disagreementKeys));
+  const lost = (finding: PartialMembership) =>
+    !current.has(finding.signature) && finding.disagreementKeys.some((key) => held.has(key));
+  return [...open].filter(([, entry]) => entry.group && lost(entry.group)).map(([signature]) => signature);
+}
+
 export function unclaimedByPartialMembership<T extends { key: string }>(
   disagreements: T[],
   found: PartialMembership[],

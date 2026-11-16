@@ -310,4 +310,20 @@ describe('buildPartialMembershipDetail', () => {
       disagreements: [{ kind: 'membership', eventId: null, eventType: null }],
     });
   });
+
+  it('gives no command for a node whose address has a host name, and still gives the address', () => {
+    const { meet: _meet, ...named } = finding;
+    const detail = buildPartialMembershipDetail({ ...named, address: 'redis-7.svc:6379' }, [membership], NODES, {
+      eventId: 'evt-2',
+      confirmed: true,
+    });
+
+    expect(detail).toMatchObject({ node: { nodeId: 'n0', address: 'redis-7.svc:6379' }, command: null, runOn: [] });
+  });
+
+  it('lists no disagreement for a finding the round no longer holds', () => {
+    const detail = buildPartialMembershipDetail(finding, [], NODES, { eventId: 'evt-2', confirmed: true });
+
+    expect(detail).toMatchObject({ eventId: 'evt-2', node: { nodeId: 'n0' }, disagreements: [] });
+  });
 });

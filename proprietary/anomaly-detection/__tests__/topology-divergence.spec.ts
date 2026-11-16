@@ -676,6 +676,36 @@ describe('DivergenceTracker', () => {
 
     expect(tracker.tracked()).toMatchObject([{ firstSeenAt: 11000, rounds: 1 }]);
   });
+
+  it('counts a disagreement afresh from a given round, with the time each observer lacked the node', () => {
+    const tracker = new DivergenceTracker();
+    const lacking: TopologyDisagreement = {
+      key: 'membership:p2',
+      kind: 'membership',
+      subjectIds: ['p2'],
+      positions: [
+        { value: 'known', observers: ['a'] },
+        { value: 'missing', observers: ['b'] },
+      ],
+    };
+    tracker.observe(round(1000, [lacking]));
+    tracker.observe(round(6000, [lacking]));
+
+    const recounted = tracker.recount('membership:p2', 6000);
+
+    const fresh = { firstSeenAt: 6000, rounds: 1, gapStreaks: { b: { firstSeenAt: 6000, rounds: 1 } } };
+    expect(recounted).toMatchObject(fresh);
+    expect(tracker.tracked()).toMatchObject([fresh]);
+
+    tracker.observe(round(11000, [lacking]));
+    expect(tracker.tracked()).toMatchObject([
+      { firstSeenAt: 6000, rounds: 2, gapStreaks: { b: { firstSeenAt: 6000, rounds: 2 } } },
+    ]);
+  });
+
+  it('has nothing to count afresh for a disagreement it does not hold', () => {
+    expect(new DivergenceTracker().recount('membership:p2', 6000)).toBeUndefined();
+  });
 });
 
 describe('confirmedDisagreements', () => {

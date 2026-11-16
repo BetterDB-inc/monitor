@@ -163,19 +163,27 @@ export function divergenceSeverity(group: DivergenceGroup): AnomalySeverity {
   return SEVERITY_ORDER[Math.max(...ranks)];
 }
 
+function namedNodes(ids: string[], nodes: ReadonlyMap<string, ClusterNode>): DivergenceNode[] {
+  return ids.map((id) => toDivergenceNode(id, nodes));
+}
+
+function namedPeer(peer: MembershipPeer, nodes: ReadonlyMap<string, ClusterNode>): DivergenceNode {
+  const [node] = namedNodes([peer.nodeId], nodes);
+  return { ...node, address: peer.address || node.address };
+}
+
 function toDetailDisagreement(
   disagreement: TrackedDisagreement,
   nodes: ReadonlyMap<string, ClusterNode>,
   held: { eventId: string | null; eventType: DivergenceEventType },
 ): DivergenceDetailDisagreement {
-  const named = (ids: string[]) => ids.map((id) => toDivergenceNode(id, nodes));
   return {
     kind: disagreement.kind,
-    subject: named(disagreement.subjectIds),
+    subject: namedNodes(disagreement.subjectIds, nodes),
     ...(disagreement.slots ? { slots: disagreement.slots } : {}),
     positions: disagreement.positions.map((position) => ({
       value: position.value,
-      observers: named(position.observers),
+      observers: namedNodes(position.observers, nodes),
     })),
     rounds: disagreement.rounds,
     since: disagreement.firstSeenAt,
@@ -189,13 +197,12 @@ export function buildDivergenceDetail(
   nodes: ReadonlyMap<string, ClusterNode>,
   state: DivergenceEventState,
 ): TopologyDivergenceDetail {
-  const named = (ids: string[]) => ids.map((id) => toDivergenceNode(id, nodes));
   const held = { eventId: state.eventId, eventType: 'topology_divergence' as const };
   return {
     eventId: state.eventId,
     confirmed: state.confirmed,
     since: divergenceSince(group),
-    sides: [{ nodes: named(group.dissent) }, { nodes: named(group.others) }],
+    sides: [{ nodes: namedNodes(group.dissent, nodes) }, { nodes: namedNodes(group.others, nodes) }],
     disagreements: group.disagreements.map((disagreement) => toDetailDisagreement(disagreement, nodes, held)),
   };
 }
@@ -206,10 +213,7 @@ export function buildPartialMembershipDetail(
   nodes: ReadonlyMap<string, ClusterNode>,
   state: DivergenceEventState,
 ): PartialMembershipDetail {
-  const named = (peer: MembershipPeer): DivergenceNode => {
-    const node = toDivergenceNode(peer.nodeId, nodes);
-    return { ...node, address: peer.address || node.address };
-  };
+  const named = (peer: MembershipPeer) => namedPeer(peer, nodes);
   const keys = new Set([...finding.disagreementKeys, ...finding.slotDisputeKeys]);
   const held = { eventId: state.eventId, eventType: 'partial_membership' as const };
   return {

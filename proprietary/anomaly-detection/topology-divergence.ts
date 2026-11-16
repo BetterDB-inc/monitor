@@ -365,6 +365,16 @@ export class DivergenceTracker {
     this.entries.delete(key);
   }
 
+  recount(key: string, at: number): TrackedDisagreement | undefined {
+    const entry = this.entries.get(key);
+    if (!entry) return undefined;
+    const fresh = { firstSeenAt: at, rounds: 1 };
+    const gapStreaks = Object.fromEntries(Object.keys(entry.gapStreaks ?? {}).map((observer) => [observer, fresh]));
+    const recounted = { ...entry, ...fresh, ...(entry.gapStreaks ? { gapStreaks } : {}) };
+    this.entries.set(key, recounted);
+    return { ...recounted };
+  }
+
   clear(): void {
     this.entries.clear();
   }

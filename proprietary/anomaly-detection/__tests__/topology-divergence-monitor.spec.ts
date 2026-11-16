@@ -221,6 +221,20 @@ describe('TopologyDivergenceMonitor', () => {
     expect(round?.disagreements.map((d) => d.key)).toEqual(['failure_flags:c2']);
   });
 
+  it('shows a count started over in the round it holds', async () => {
+    const { monitor, poll } = harness();
+    await poll('conn-2', 'b1', 0, { c2: failing });
+    await poll('conn-2', 'b1', INTERVAL, { c2: failing });
+
+    monitor.recount(CLUSTER, 'failure_flags:c2', INTERVAL);
+
+    expect(monitor.lastRound(CLUSTER)?.disagreements).toMatchObject([
+      { key: 'failure_flags:c2', firstSeenAt: INTERVAL, rounds: 1 },
+    ]);
+    const next = await poll('conn-2', 'b1', 2 * INTERVAL, { c2: failing });
+    expect(next?.disagreements).toMatchObject([{ key: 'failure_flags:c2', firstSeenAt: INTERVAL, rounds: 2 }]);
+  });
+
   it('says it cannot compare while only a connection that cannot read is polling', async () => {
     const { monitor, poll, asked } = harness();
 
