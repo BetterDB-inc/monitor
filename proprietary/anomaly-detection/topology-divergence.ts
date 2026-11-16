@@ -26,11 +26,17 @@ export interface SlotStreak {
   rounds: number;
 }
 
+export interface GapStreak {
+  firstSeenAt: number;
+  rounds: number;
+}
+
 export interface TrackedDisagreement extends TopologyDisagreement {
   firstSeenAt: number;
   lastSeenAt: number;
   rounds: number;
   slotStreaks?: SlotStreak[];
+  gapStreaks?: Record<string, GapStreak>;
 }
 
 export interface DivergenceRound {
@@ -55,12 +61,13 @@ export interface DivergenceGroup {
 export const TOPOLOGY_DIVERGENCE_BLIND_MS = 5 * 60_000;
 export const TOPOLOGY_DIVERGENCE_SIGNATURE_PREFIX = 'topology_divergence:';
 export const UNASSIGNED_SLOT_OWNER = 'unassigned';
+export const KNOWN_MEMBER = 'known';
+export const FAILING_FLAGS = ['fail', 'fail?'];
 
 const SLOT_COUNT = 16384;
-const FAILING_FLAGS = ['fail', 'fail?'];
 const FINISHED_MIGRATION_STATES = ['success', 'failed', 'cancelled'];
 
-type MemberStatus = 'known' | 'handshake' | 'noaddr';
+type MemberStatus = typeof KNOWN_MEMBER | 'handshake' | 'noaddr';
 
 interface ViewIndex {
   observerId: string;
@@ -68,12 +75,12 @@ interface ViewIndex {
   status: Map<string, MemberStatus>;
 }
 
-function compareText(a: string, b: string): number {
+export function compareText(a: string, b: string): number {
   if (a < b) return -1;
   return a > b ? 1 : 0;
 }
 
-function sortedUnique(values: Iterable<string>): string[] {
+export function sortedUnique(values: Iterable<string>): string[] {
   return [...new Set(values)].sort(compareText);
 }
 
@@ -83,14 +90,14 @@ function hostPort(address: string): string {
 
 function statusOf(node: ClusterNode): MemberStatus {
   if (node.flags.includes('handshake')) return 'handshake';
-  return node.flags.includes('noaddr') ? 'noaddr' : 'known';
+  return node.flags.includes('noaddr') ? 'noaddr' : KNOWN_MEMBER;
 }
 
 function indexViews(views: TopologyView[]): ViewIndex[] {
   const idsByAddress = new Map<string, Set<string>>();
   for (const view of views) {
     for (const node of view.nodes) {
-      if (statusOf(node) !== 'known') continue;
+      if (statusOf(node) !== KNOWN_MEMBER) continue;
       const address = hostPort(node.address);
       const ids = idsByAddress.get(address);
       if (ids) ids.add(node.id);
@@ -103,9 +110,9 @@ function indexViews(views: TopologyView[]): ViewIndex[] {
     const status = new Map<string, MemberStatus>();
     for (const node of view.nodes) {
       const nodeStatus = statusOf(node);
-      if (nodeStatus === 'known') {
+      if (nodeStatus === KNOWN_MEMBER) {
         known.set(node.id, node);
-        status.set(node.id, 'known');
+        status.set(node.id, KNOWN_MEMBER);
       } else if (nodeStatus === 'noaddr') {
         if (!status.has(node.id)) status.set(node.id, 'noaddr');
       }
@@ -328,9 +335,11 @@ export class DivergenceTracker {
   observe(round: DivergenceRound): void {
     const comparable = round.views >= 2;
     const { seen, joined } = this.matchToEntries(comparable ? round.disagreements : []);
-    for (const [key, disagreement] of seen) this.entries.set(key, this.advance({ ...disagreement, key }, round.at));
-
     const unanswered = new Set(round.unanswered);
+    for (const [key, disagreement] of seen) {
+      this.entries.set(key, this.advance({ ...disagreement, key }, round.at, unanswered));
+    }
+
     for (const [key, entry] of this.entries) {
       if (seen.has(key)) continue;
       const answeringSides = entry.positions.filter((position) =>
@@ -342,7 +351,7 @@ export class DivergenceTracker {
 
     for (const disagreement of joined) {
       const key = this.freeSlotDisputeKey(slotDisputeOwners(disagreement));
-      this.entries.set(key, this.advance({ ...disagreement, key }, round.at));
+      this.entries.set(key, this.advance({ ...disagreement, key }, round.at, unanswered));
     }
   }
 
@@ -395,15 +404,42 @@ export class DivergenceTracker {
     return slotDisputeKey(owners, nth);
   }
 
-  private advance(disagreement: TopologyDisagreement, at: number): TrackedDisagreement {
+  private advance(
+    disagreement: TopologyDisagreement,
+    at: number,
+    unanswered: ReadonlySet<string>,
+  ): TrackedDisagreement {
     const previous = this.entries.get(disagreement.key);
     if (disagreement.slots?.length) {
       const slotStreaks = this.slotStreaksAfter(previous?.slotStreaks ?? [], disagreement.slots, at);
       const [{ firstSeenAt, rounds }] = slotStreaks;
       return { ...disagreement, firstSeenAt, lastSeenAt: at, rounds, slotStreaks };
     }
-    if (!previous) return { ...disagreement, firstSeenAt: at, lastSeenAt: at, rounds: 1 };
-    return { ...disagreement, firstSeenAt: previous.firstSeenAt, lastSeenAt: at, rounds: previous.rounds + 1 };
+    const tracked: TrackedDisagreement = {
+      ...disagreement,
+      firstSeenAt: previous?.firstSeenAt ?? at,
+      lastSeenAt: at,
+      rounds: (previous?.rounds ?? 0) + 1,
+    };
+    if (disagreement.kind !== 'membership') return tracked;
+    return { ...tracked, gapStreaks: this.gapStreaksAfter(previous?.gapStreaks ?? {}, disagreement, at, unanswered) };
+  }
+
+  private gapStreaksAfter(
+    previous: Record<string, GapStreak>,
+    disagreement: TopologyDisagreement,
+    at: number,
+    unanswered: ReadonlySet<string>,
+  ): Record<string, GapStreak> {
+    const held = Object.entries(previous).filter(([observer]) => unanswered.has(observer));
+    const lacking = disagreement.positions
+      .filter((position) => position.value !== KNOWN_MEMBER)
+      .flatMap((position) => position.observers)
+      .map((observer): [string, GapStreak] => {
+        const streak = previous[observer];
+        return [observer, { firstSeenAt: streak?.firstSeenAt ?? at, rounds: (streak?.rounds ?? 0) + 1 }];
+      });
+    return Object.fromEntries([...held, ...lacking]);
   }
 
   private slotStreaksAfter(previous: SlotStreak[], slots: number[][], at: number): SlotStreak[] {

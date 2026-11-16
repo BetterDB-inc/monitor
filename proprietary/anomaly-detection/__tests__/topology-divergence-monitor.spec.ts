@@ -105,7 +105,7 @@ describe('TopologyDivergenceMonitor', () => {
     ]);
   });
 
-  it('keeps how each view lists a node whose membership is in dispute', async () => {
+  it('keeps how each view lists a node whose membership is in dispute and the node that lacks it', async () => {
     const { poll, answers } = harness();
     answers.set(
       'b1',
@@ -118,8 +118,9 @@ describe('TopologyDivergenceMonitor', () => {
 
     const round = await poll('conn-1', 'a1', 0);
 
-    expect([...(round?.sightings.keys() ?? [])]).toEqual(['a2']);
+    expect([...(round?.sightings.keys() ?? [])]).toEqual(['a2', 'b1']);
     expect(round?.sightings.get('a2')?.map((sighting) => sighting.observerId)).toEqual(['a1', 'c1']);
+    expect(round?.sightings.get('b1')?.map((sighting) => sighting.observerId)).toEqual(['a1', 'b1', 'c1']);
   });
 
   it('keeps no sightings while every view lists the same nodes', async () => {

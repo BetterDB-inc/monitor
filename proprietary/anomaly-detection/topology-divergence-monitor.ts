@@ -1,6 +1,7 @@
 import type { ClusterNode } from '@app/common/types/metrics.types';
 import {
   DivergenceTracker,
+  FAILING_FLAGS,
   type TopologyView,
   type TrackedDisagreement,
   compareTopologyViews,
@@ -23,7 +24,6 @@ export const TOPOLOGY_DIVERGENCE_MAX_ACCUSED = 2;
 export const TOPOLOGY_DIVERGENCE_IDLE_ROUNDS = 3;
 export const TOPOLOGY_DIVERGENCE_BACKOFF_MAX_ROUNDS = 8;
 
-const FAILING_FLAGS = ['fail', 'fail?'];
 const UNREACHABLE_FLAGS = ['handshake', 'noaddr'];
 
 export interface DivergencePoll {
