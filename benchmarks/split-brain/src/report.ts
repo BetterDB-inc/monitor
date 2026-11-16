@@ -147,6 +147,32 @@ function shownTable(results: Results): string {
   );
 }
 
+function controlViewsTable(results: Results, scenarios: string[]): string {
+  const rows = scenarios.map((scenario) => {
+    const trials = results.of(scenario);
+    const differed = trials.filter((trial) => trial.shown.split > 0);
+    const raised = trials.filter((trial) => trial.cells.some((cell) => cell.raised > 0));
+    const identical = raised.filter((trial) => trial.shown.split === 0);
+    return [
+      scenario,
+      `${differed.length}/${trials.length}`,
+      `${raised.length}/${trials.length}`,
+      `${raised.length - identical.length}`,
+      `${identical.length}`,
+    ];
+  });
+  return table(
+    [
+      'scenario',
+      'trials with any view difference',
+      'trials with an event at any setting',
+      'of those, with a view difference',
+      'of those, with identical views',
+    ],
+    rows,
+  );
+}
+
 function droppedTable(results: Results): string {
   const rows = results.scenarios.map((scenario) => {
     const trials = results.of(scenario);
@@ -434,7 +460,7 @@ function setupTable(results: Results, pin: ProductPin): string {
       ['cluster', `${first.nodes} nodes, ${first.nodes / 2} primaries and ${first.nodes / 2} replicas, 3 zones`],
       ['cluster-node-timeout', `${first.nodeTimeoutMs} ms`],
       ['scenarios', `${results.kind('fault').length} faults, ${results.kind('control').length} controls`],
-      ['trials', `${results.trials.length} (${Math.min(...perScenario)}–${Math.max(...perScenario)} per scenario)`],
+      ['trials', `${results.trials.length} (${[...new Set([Math.min(...perScenario), Math.max(...perScenario)])].join('–')} per scenario)`],
       ['recording', 'every node asked once a second for CLUSTER NODES, CLUSTER INFO and CLUSTER GETSLOTMIGRATIONS'],
       ['round interval', `${ROUND_INTERVAL_MS / 1000} s`],
       [
@@ -501,6 +527,8 @@ export function buildReport(input: {
     '## 6. Controls: false positives',
     'Any event raised between the start of the operation and the end of the recording.',
     controlTables(results, controls),
+    'Views and events side by side. A view difference means the views of two answering nodes differed at some sampled second (flags, primary, config epoch or slots, read once a second without the detector). "At any setting" covers every coverage, N, vantage and join variant. An event in a trial with identical views did not come from a disagreement the one-second samples could see.',
+    controlViewsTable(results, controls),
     '## 7. What the first event says',
     'N = 3. "Only after the window" counts replays whose first event came after the fault was healed.',
     firstEventTable(results, [...faults, ...controls]),
