@@ -1,12 +1,13 @@
-import { spawnSync } from 'child_process';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs';
+import { spawnSync, type SpawnSyncReturns } from 'child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { portProblem } from './ports';
+import { TIME_WAIT_SECONDS, portProblem } from './ports';
 import type { InvalidRun, LicenseTier, ScenarioOptions, ScenarioResult } from './scenario';
 import type { ReplyProfile } from '../../test/load/fake-cluster';
 
 const CHILD_MARGIN_MS = 180_000;
+const CHILD_OUTPUT_LIMIT_MB = 64;
 
 interface CliOptions {
   nodes: number[];
@@ -49,12 +50,36 @@ With every node registered it is nodes x nodes (100 nodes: 10,000; 500 nodes:
 250,000). A run that would take more than half of the machine's local port
 range is skipped unless --force is given, and a run that runs out of ports is
 stopped and reported as invalid. A closed connection keeps its port for about
-30 seconds more, so a run that opens and closes many connections is marked
-suspect when open plus recently closed ports pass half of the range.
+${TIME_WAIT_SECONDS} seconds more on this system, so a run that opens and closes many
+connections is marked suspect when open plus recently closed ports pass half
+of the range.
 `;
 
-function parseLicense(value: string): LicenseTier {
-  return value === 'community' || value === 'enterprise' ? value : 'pro';
+const LICENSES: readonly LicenseTier[] = ['pro', 'enterprise', 'community'];
+const PROFILES: readonly ReplyProfile[] = ['realistic', 'empty'];
+const MODES: ReadonlyArray<'seed' | 'auto'> = ['seed', 'auto'];
+
+function rejectValue(flag: string, value: string, expected: string): never {
+  process.stderr.write(`Unknown value "${value}" for ${flag}, expected ${expected}.\n\n${USAGE}`);
+  process.exit(1);
+}
+
+function oneOf<T extends string>(flag: string, value: string, allowed: readonly T[]): T {
+  return allowed.find((candidate) => candidate === value) ?? rejectValue(flag, value, allowed.join(' or '));
+}
+
+function atLeast(flag: string, value: string, minimum: number): number {
+  const parsed = Number(value);
+  if (value.trim() === '' || !Number.isFinite(parsed) || parsed < minimum) {
+    return rejectValue(flag, value, `a number of ${minimum} or more`);
+  }
+  return parsed;
+}
+
+function listOf<T>(flag: string, value: string, parse: (item: string) => T): T[] {
+  const items = value.split(',').filter((item) => item !== '');
+  if (items.length === 0) return rejectValue(flag, value, 'a comma-separated list');
+  return items.map(parse);
 }
 
 function parseArgs(argv: string[]): CliOptions {
@@ -77,37 +102,37 @@ function parseArgs(argv: string[]): CliOptions {
     const value = (): string => argv[++index] ?? '';
     switch (flag) {
       case '--nodes':
-        options.nodes = value().split(',').map(Number).filter((count) => count > 1);
+        options.nodes = listOf(flag, value(), (item) => Math.round(atLeast(flag, item, 2)));
         break;
       case '--modes':
-        options.modes = value().split(',').filter((mode): mode is 'seed' | 'auto' => mode === 'seed' || mode === 'auto');
+        options.modes = listOf(flag, value(), (item) => oneOf(flag, item, MODES));
         break;
       case '--replicas':
-        options.replicas = Number(value());
+        options.replicas = Math.round(atLeast(flag, value(), 0));
         break;
       case '--warmup':
-        options.warmupSeconds = Number(value());
+        options.warmupSeconds = atLeast(flag, value(), 0);
         break;
       case '--measure':
-        options.measureSeconds = Number(value());
+        options.measureSeconds = atLeast(flag, value(), 1);
         break;
       case '--settle':
-        options.settleSeconds = Number(value());
+        options.settleSeconds = atLeast(flag, value(), 0);
         break;
       case '--hang':
-        options.hang = Number(value());
+        options.hang = Math.round(atLeast(flag, value(), 0));
         break;
       case '--failover':
         options.failover = true;
         break;
       case '--license':
-        options.license = parseLicense(value());
+        options.license = oneOf(flag, value(), LICENSES);
         break;
       case '--profile':
-        options.profile = value() === 'empty' ? 'empty' : 'realistic';
+        options.profile = oneOf(flag, value(), PROFILES);
         break;
       case '--reply-delay-ms':
-        options.replyDelayMs = Math.max(0, Number(value()) || 0);
+        options.replyDelayMs = atLeast(flag, value(), 0);
         break;
       case '--force':
         options.force = true;
@@ -123,6 +148,15 @@ function parseArgs(argv: string[]): CliOptions {
     }
   }
   return options;
+}
+
+function failureReason(child: SpawnSyncReturns<string>, timeoutMs: number): string {
+  const code = (child.error as NodeJS.ErrnoException | undefined)?.code;
+  if (code === 'ETIMEDOUT') return `stopped after ${Math.round(timeoutMs / 1000)}s without finishing`;
+  if (code === 'ENOBUFS') return `stopped because it printed more than ${CHILD_OUTPUT_LIMIT_MB} MB`;
+  if (child.error) return `could not be started (${child.error.message})`;
+  if (child.signal) return `crashed, killed by ${child.signal}`;
+  return `failed with exit code ${child.status}`;
 }
 
 function runChild(scenario: ScenarioOptions, workDir: string): ScenarioResult | InvalidRun {
@@ -145,20 +179,18 @@ function runChild(scenario: ScenarioOptions, workDir: string): ScenarioResult | 
       cwd: join(__dirname, '..', '..'),
       env: { ...process.env, CLUSTER_LOAD_SCENARIO: JSON.stringify(scenario), CLUSTER_LOAD_RESULT_FILE: resultFile },
       encoding: 'utf8',
-      maxBuffer: 64 * 1024 * 1024,
+      maxBuffer: CHILD_OUTPUT_LIMIT_MB * 1024 * 1024,
       timeout: timeoutMs,
       killSignal: 'SIGKILL',
     },
   );
   if (child.status !== 0) {
-    const reason =
-      child.signal || child.error
-        ? `stopped after ${Math.round(timeoutMs / 1000)}s without finishing`
-        : `failed with exit code ${child.status}`;
+    const reason = failureReason(child, timeoutMs);
     const errorLine = (child.stderr ?? '')
       .split('\n')
       .reverse()
-      .find((line) => /^\w*Error: /.test(line.trim()))
+      .map((line) => /(?:^\s*\w*Error: |FATAL ERROR: ).*/.exec(line)?.[0])
+      .find((line) => line !== undefined)
       ?.trim()
       .slice(0, 200);
     process.stderr.write(`Run ${label} ${reason}\n${(child.stderr ?? '').slice(-2000)}\n`);
@@ -187,7 +219,7 @@ function summary(results: ScenarioResult[]): string {
       'License',
       'Replies',
       'Reply delay ms',
-      'Connections',
+      'Connections up / registered / expected',
       'Sockets',
       'Ports held',
       'Commands/s',
@@ -211,7 +243,7 @@ function summary(results: ScenarioResult[]): string {
         result.licenseTier,
         result.options.profile,
         result.options.replyDelayMs,
-        `${result.connections.connected}/${result.connections.registered}`,
+        `${result.connections.connected} / ${result.connections.registered} / ${result.connections.expected}`,
         result.server.socketsOpen,
         result.server.portsHeld,
         result.server.commandsPerSecond,
@@ -343,6 +375,7 @@ function main(): void {
   ].join('\n\n');
   process.stdout.write(`${report}\n`);
   if (cli.out) writeFileSync(join(workDir, 'report.md'), `${report}\n`);
+  else rmSync(workDir, { recursive: true, force: true });
 }
 
 main();

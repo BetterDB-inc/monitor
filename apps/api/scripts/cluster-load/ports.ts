@@ -2,7 +2,8 @@ import { execFileSync } from 'child_process';
 import { readFileSync } from 'fs';
 
 export const PORTS_EXHAUSTED = 'ran out of local ports (EADDRNOTAVAIL)';
-const TIME_WAIT_SECONDS = 30;
+const TIME_WAIT_SECONDS_BY_PLATFORM: Partial<Record<NodeJS.Platform, number>> = { darwin: 30, linux: 60, win32: 120 };
+export const TIME_WAIT_SECONDS = TIME_WAIT_SECONDS_BY_PLATFORM[process.platform] ?? 60;
 
 export function ephemeralPortCount(): number | null {
   try {

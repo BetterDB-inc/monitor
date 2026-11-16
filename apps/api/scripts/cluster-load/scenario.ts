@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'async_hooks';
-import { mkdtempSync, writeFileSync } from 'fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { createServer } from 'http';
 import { Socket, type AddressInfo } from 'net';
 import { tmpdir } from 'os';
@@ -48,7 +48,7 @@ export interface ScenarioResult {
   suspect: string[];
   licenseTier: string;
   windowSeconds: number;
-  connections: { registered: number; connected: number };
+  connections: { expected: number; registered: number; connected: number };
   server: {
     commandsPerSecond: number;
     bytesInPerSecond: number;
@@ -176,8 +176,8 @@ function applyEnvironment(
   options: ScenarioOptions,
   seed: { host: string; port: number },
   entitlementUrl: string | null,
+  dataDir: string,
 ): void {
-  const dataDir = mkdtempSync(join(tmpdir(), 'betterdb-cluster-load-'));
   for (const key of [
     'BETTERDB_LICENSE_KEY',
     'BETTERDB_OFFLINE_LICENSE',
@@ -215,15 +215,18 @@ export async function runScenario(options: ScenarioOptions): Promise<ScenarioRes
     profile: options.profile,
     replyDelayMs: options.replyDelayMs,
   });
+  const dataDir = mkdtempSync(join(tmpdir(), 'betterdb-cluster-load-'));
   try {
-    return await measure(options, cluster);
+    return await measure(options, cluster, dataDir);
   } finally {
     await cluster.stop();
+    rmSync(dataDir, { recursive: true, force: true });
   }
 }
 
-async function measure(options: ScenarioOptions, cluster: RemoteCluster): Promise<ScenarioResult> {
-  applyEnvironment(options, cluster.nodes[0], options.license === 'community' ? null : await startEntitlementStub(options.license));
+async function measure(options: ScenarioOptions, cluster: RemoteCluster, dataDir: string): Promise<ScenarioResult> {
+  const entitlementUrl = options.license === 'community' ? null : await startEntitlementStub(options.license);
+  applyEnvironment(options, cluster.nodes[0], entitlementUrl, dataDir);
 
   const context = new AsyncLocalStorage<string>();
   const clientCommands = new Map<string, number>();
@@ -319,6 +322,11 @@ async function measure(options: ScenarioOptions, cluster: RemoteCluster): Promis
   const expected = options.mode === 'auto' ? cluster.nodes.length : 1;
   const deadline = Date.now() + options.settleTimeoutMs;
   while (Date.now() < deadline && registry.list().length < expected) await pause(1000);
+  if (registry.list().length < expected) {
+    throw new InvalidRunError(
+      `${registry.list().length} of ${expected} nodes registered within ${Math.round(options.settleTimeoutMs / 1000)}s`,
+    );
+  }
   await pause(options.warmupMs);
 
   for (let index = 0; index < options.hang; index++) await cluster.hang(cluster.nodes.length - 1 - index);
@@ -407,7 +415,7 @@ async function measure(options: ScenarioOptions, cluster: RemoteCluster): Promis
     suspect,
     licenseTier: licenseTier(),
     windowSeconds: round(windowSeconds),
-    connections: { registered: connections.length, connected },
+    connections: { expected, registered: connections.length, connected },
     server: {
       commandsPerSecond: round(stats.totalCommands / windowSeconds),
       bytesInPerSecond: Math.round(stats.bytesIn / windowSeconds),

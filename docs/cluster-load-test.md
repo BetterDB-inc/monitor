@@ -47,7 +47,7 @@ detectors, latency regression and the config monitor run on every tier.
 |---|---|---|
 | `CLIENT LIST` | 200 clients plus BetterDB's own | 20 clients plus BetterDB's own |
 | `SLOWLOG GET`, `COMMANDLOG GET` | 128 entries, one new entry every 10 s | empty |
-| `LATENCY LATEST`, `LATENCY HISTORY` | 4 events, 60 samples each | empty |
+| `LATENCY LATEST`, `LATENCY HISTORY` | 4 events, 60 samples each, all from before the start, no new spikes | empty |
 | `INFO commandstats`, `INFO latencystats` | 60 commands | 11 commands |
 | Keyspace (`SCAN`, `TYPE`, `MEMORY USAGE`, `OBJECT`, `TTL`) | at least 20,000 string keys per node | no keys |
 
@@ -62,12 +62,13 @@ Over a fixed window, after a warm-up:
 | Commands/s | Commands the whole cluster received from BetterDB |
 | KB/s received | Reply bytes BetterDB had to read and parse |
 | Busiest node cmd/s | Load on the single node that got the most commands |
+| Connections up / registered / expected | BetterDB connections that are up, that exist, and that the setup should have |
 | Sockets | Open connections from BetterDB to the cluster |
 | Poll time | How long one pass of a poller takes, p50 and p95 |
 | Ticks done / expected | Whether a poller keeps up with its own interval |
 | Commands per tick | Commands one pass of a poller sends |
 | CPU, heap, RSS peak | Cost inside the BetterDB process. RSS is the highest value seen in the window |
-| Loop delay | How late the BetterDB event loop ran, p99 |
+| Loop delay | How late the BetterDB event loop ran, p99, above the 10 ms sampling interval |
 | Ports held | Open sockets plus the ports that closed connections still hold |
 | Fake cluster CPU and loop delay | Load on the fake cluster itself, to tell a slow fake from a slow monitor |
 | Events | Webhook events raised in the window, by type |
@@ -127,10 +128,12 @@ anyway. A run that does run out of ports is stopped and listed as invalid
 instead of printing numbers. So on macOS the "every node" setup can only be
 measured for small clusters.
 
-A closed connection keeps its local port for about 30 seconds. A run that
-opens and closes many connections can therefore use far more ports than it has
-sockets open. The **Ports held** column counts both, and a run is marked
-suspect when that number passes half of the local port range.
+A closed connection keeps its local port for a while: about 30 seconds on
+macOS, 60 on Linux, 120 on Windows. A run that opens and closes many
+connections can therefore use far more ports than it has sockets open. The
+**Ports held** column counts both, using the time of the system the test runs
+on, and a run is marked suspect when that number passes half of the local port
+range.
 
 ## When a run is not trusted
 
@@ -139,10 +142,12 @@ suspect when that number passes half of the local port range.
   p99 (slow replies may then come from the fake, not from BetterDB), or when
   the ports held pass half of the local port range.
 - **No numbers.** The run is listed with its reason and left out of the tables.
-  That happens when it ran out of local ports, when more registered
-  connections were down at the end of the window than nodes were made to hang,
-  when the license did not come up as asked, when the run did not finish in
-  time, or when it crashed.
+  That happens when it ran out of local ports, when not every node was
+  registered before the settle time ran out, when more registered connections
+  were down at the end of the window than nodes were made to hang, when the
+  license did not come up as asked, when the run did not finish in time, or
+  when it crashed. A crash is listed with its signal and error line, so a run
+  that ran out of memory reads "killed by SIGABRT" with the heap limit message.
 
 ## Reading the output
 
@@ -173,8 +178,14 @@ suspect when that number passes half of the local port range.
   a millisecond, which is faster than any real network. Reads that go to one
   node after another look cheaper than they are across zones. Rows measured
   with a delay say so in the "Reply delay ms" column.
+- **Loop delay** is reported above the 10 ms sampling interval. Figures taken
+  before the test subtracted that interval are 10 ms higher and cannot be
+  compared with the ones printed now.
 - Run it on a quiet machine. The API and the fake cluster each use one CPU
   core; other load on the machine changes the poll times.
+- The test removes its temporary data directory when a run ends. A run that
+  is killed for running out of time leaves one behind in the system's
+  temporary folder, named `betterdb-cluster-load-`.
 
 ## Limits of the method
 
@@ -191,5 +202,10 @@ suspect when that number passes half of the local port range.
 - A failover is always clean: the replica is promoted at once and every node
   agrees. Disagreeing nodes and slow convergence are not covered.
 - The fake never answers `MOVED`, `ASK` or `READONLY`.
+- Key names are made up per node. `CLUSTER GETKEYSINSLOT` lists as many keys as
+  the slot statistics count, but `CLUSTER KEYSLOT` does not map those names
+  back to that slot.
+- In the `empty` profile the key counts (`DBSIZE`, `INFO keyspace`, slot
+  statistics) still say three keys per slot while `SCAN` finds none.
 - The fake cluster is one single-threaded process. Its CPU and loop delay are
   reported so that a saturated fake is not mistaken for a slow monitor.
