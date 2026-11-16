@@ -1,22 +1,36 @@
 import { useState } from 'react';
 import { Check, Copy } from 'lucide-react';
+import { useQueryClient } from '@tanstack/react-query';
 import { displayKeyName } from '@betterdb/shared';
+import { ApiError } from '../../api/client';
+import { metricsApi } from '../../api/metrics';
+import { useCanMutate } from '../../hooks/useCanMutate';
 import { useOpenHotShards } from '../../hooks/useOpenHotShards';
 import { copyToClipboard } from '../../lib/clipboard';
 import type {
   HotShardDetail,
   RebalanceCommand,
+  RebalanceExecutionBlocker,
   RebalanceMove,
   RebalanceNoPlan,
   RebalanceNoPlanReason,
   RebalancePinnedSlot,
   RebalancePlan,
+  RebalanceRecheckFailure,
   RebalanceSupport,
   RebalanceWarning,
 } from '../../types/anomaly';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '../ui/dialog';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../ui/table';
 
 const COPIED_FOR_MS = 2000;
@@ -160,7 +174,7 @@ function CommandLine({ command, label }: { command: RebalanceCommand; label?: st
   );
 }
 
-function Commands({ plan }: { plan: RebalancePlan }) {
+function Commands({ plan, runnable }: { plan: RebalancePlan; runnable: boolean }) {
   const support = plan.support ?? 'unknown';
   const commands = plan.commands ?? [];
   if ((support !== 'valkey_atomic' && support !== 'redis_atomic') || commands.length === 0) {
@@ -181,7 +195,7 @@ function Commands({ plan }: { plan: RebalancePlan }) {
         {valkey
           ? `Run this on the hot shard (${commands[0].nodeAddr}). The server starts all of the moves or none.`
           : 'Run each command on its target shard.'}{' '}
-        BetterDB does not run it.
+        {runnable ? 'Or start it from BetterDB below.' : 'BetterDB does not run it.'}
       </p>
       {commands.map((command) => (
         <CommandLine
@@ -194,6 +208,129 @@ function Commands({ plan }: { plan: RebalancePlan }) {
   );
 }
 
+const BLOCKED: Partial<Record<RebalanceExecutionBlocker, string>> = {
+  flag_off:
+    'Running a plan from BetterDB is off. An operator can turn it on with BETTERDB_SLOT_MIGRATION=true.',
+  not_dialed: 'BetterDB does not connect to the cluster nodes directly, so it cannot run this plan.',
+  migration_running: 'A slot migration is running. A plan can run once it ends.',
+};
+
+const REFUSED: Record<
+  RebalanceRecheckFailure | 'plan_changed' | 'no_plan' | RebalanceExecutionBlocker,
+  string
+> = {
+  plan_changed: 'The suggestion changed since you opened it. Review the new one.',
+  no_plan: 'There is no suggestion to run any more.',
+  slots_moved: 'The hot shard no longer owns these slots. A new suggestion follows.',
+  source_unhealthy: 'The hot shard is not a healthy primary now.',
+  target_unhealthy: 'A target shard is not a healthy primary now.',
+  flag_off: BLOCKED.flag_off ?? '',
+  not_dialed: BLOCKED.not_dialed ?? '',
+  migration_running: BLOCKED.migration_running ?? '',
+  provider_managed: 'Slot commands are not supported on this managed service.',
+  unsupported_server: 'Running a plan needs Valkey 9.0 or later on every shard of the plan.',
+};
+
+function refusal(err: unknown): string {
+  if (!(err instanceof ApiError)) return err instanceof Error ? err.message : String(err);
+  const payload = (err.payload ?? {}) as { reason?: string; blockedBy?: string; message?: string };
+  const code = (payload.reason ?? payload.blockedBy) as keyof typeof REFUSED | undefined;
+  if (code && REFUSED[code]) return REFUSED[code];
+  return payload.message ?? err.message;
+}
+
+function RunPlan({ plan, connectionId }: { plan: RebalancePlan; connectionId: string | undefined }) {
+  const canMutate = useCanMutate();
+  const queryClient = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const execution = plan.execution;
+  if (!execution || !canMutate) return null;
+  if (!execution.available) {
+    const blocked = execution.blockedBy && BLOCKED[execution.blockedBy];
+    const relevant = execution.blockedBy !== 'flag_off' || plan.support === 'valkey_atomic';
+    return blocked && relevant ? <p className="text-muted-foreground">{blocked}</p> : null;
+  }
+  const source = plan.projection.find((row) => row.role === 'source');
+  const refresh = () =>
+    Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['open-hot-shards', connectionId] }),
+      queryClient.invalidateQueries({ queryKey: ['slot-rebalance-runs', connectionId] }),
+    ]);
+  const run = async () => {
+    setSending(true);
+    setError(null);
+    try {
+      await metricsApi.runRebalance(
+        plan.sourceShardId,
+        plan.moves.map(({ targetShardId, ranges }) => ({ targetShardId, ranges })),
+      );
+      setOpen(false);
+    } catch (err) {
+      setError(refusal(err));
+    } finally {
+      setSending(false);
+      await refresh();
+    }
+  };
+  return (
+    <>
+      <Button
+        size="sm"
+        onClick={() => {
+          setError(null);
+          setOpen(true);
+        }}
+      >
+        Run this plan
+      </Button>
+      <Dialog open={open} onOpenChange={(next) => !sending && setOpen(next)}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Run this rebalance?</DialogTitle>
+            <DialogDescription>
+              BetterDB sends one CLUSTER MIGRATESLOTS to the hot shard
+              {source ? ` at ${source.nodeAddr}` : ''}. The server moves all of these slots or none.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 text-sm">
+            <ul className="list-disc pl-5">
+              {plan.moves.map((move) => (
+                <li key={move.targetShardId}>{describeMove(move)}</li>
+              ))}
+            </ul>
+            {plan.warnings.length > 0 && (
+              <ul className="list-disc pl-5 text-yellow-600 dark:text-yellow-500">
+                {plan.warnings.map((warning) => (
+                  <li key={`${warning.code} ${warning.shardId}`}>{describeWarning(warning)}</li>
+                ))}
+              </ul>
+            )}
+            <p className="text-muted-foreground">
+              Cancel stops every slot migration on the hot shard, not only these. Slots already moved
+              stay on their target.
+            </p>
+            {error && (
+              <p role="alert" className="text-destructive">
+                {error}
+              </p>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" disabled={sending} onClick={() => setOpen(false)}>
+              Keep the plan
+            </Button>
+            <Button disabled={sending} onClick={run}>
+              {sending ? 'Starting…' : 'Start the migration'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
 function describePlannedAfter(plan: RebalancePlan): string {
   const earlier = plan.plannedAfter.map(
     (shardId) => plan.projection.find((row) => row.shardId === shardId)?.nodeAddr ?? short(shardId),
@@ -201,7 +338,8 @@ function describePlannedAfter(plan: RebalancePlan): string {
   return `These numbers count the suggestion${earlier.length === 1 ? '' : 's'} for ${listed(earlier)} as applied.`;
 }
 
-function Plan({ plan }: { plan: RebalancePlan }) {
+function Plan({ plan, connectionId }: { plan: RebalancePlan; connectionId: string | undefined }) {
+  const canMutate = useCanMutate();
   const source = plan.projection.find((row) => row.role === 'source');
   const moved = plan.moves.reduce((total, move) => total + move.shareOfShard, 0);
   const rows = plan.projection.filter((row) => row.role !== 'other');
@@ -273,7 +411,8 @@ function Plan({ plan }: { plan: RebalancePlan }) {
           ))}
         </ul>
       )}
-      <Commands plan={plan} />
+      <Commands plan={plan} runnable={canMutate && plan.execution?.available === true} />
+      <RunPlan plan={plan} connectionId={connectionId} />
     </div>
   );
 }
@@ -318,7 +457,7 @@ export function RebalanceSuggestion({ connectionId }: Props) {
             </CardHeader>
             <CardContent className="text-sm">
               {verdict.kind === 'plan' ? (
-                <Plan plan={verdict} />
+                <Plan plan={verdict} connectionId={connectionId} />
               ) : (
                 <NoPlan verdict={verdict} shard={shard} />
               )}

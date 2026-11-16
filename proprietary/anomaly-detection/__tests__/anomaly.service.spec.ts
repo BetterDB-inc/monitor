@@ -4344,6 +4344,279 @@ describe('AnomalyService', () => {
           });
         });
 
+        describe('execution', () => {
+          const server = (version: string) => `# Server\r\n${version}\r\n`;
+          const VALKEY_9 = server('redis_version:7.2.4\r\nvalkey_version:9.0.1');
+          const MOVES = [{ targetShardId: 'b0000000', ranges: [[100, 107]] as Array<[number, number]> }];
+          const ADMIN = { userId: 'u1', email: 'admin@example.com' };
+          const execution = () => (rebalance() as { execution?: unknown } | undefined)?.execution;
+          let slotsOf: Record<string, number[][]>;
+          let migrations: unknown[];
+          let report: {
+            jobViews: unknown[];
+            finishedJobs: string[];
+            failed: unknown[];
+            complete: boolean;
+          };
+
+          function enable() {
+            const config = (service as any).configService;
+            const get = config.get;
+            jest
+              .spyOn(config, 'get')
+              .mockImplementation((key: unknown) =>
+                key === 'BETTERDB_SLOT_MIGRATION' ? 'true' : get(key),
+              );
+          }
+
+          function dialRun() {
+            const { clients, discovery } = dialMemory({
+              a0000000: VALKEY_9 + info(4 * GB, 8 * GB, 200),
+              b0000000: VALKEY_9 + info(GB, 8 * GB, 50),
+              c0000000: VALKEY_9 + info(GB, 8 * GB, 50),
+            });
+            const calls: string[][] = [];
+            const source = clients.a0000000 as unknown as { call: jest.Mock };
+            source.call = jest.fn(async (...args: string[]) => {
+              calls.push(args);
+              return 'OK';
+            });
+            slotsOf = { a0000000: [[100, 119]], b0000000: [[10, 11]], c0000000: [[20, 21]] };
+            (discovery as any).discoverNodesIsolated = jest.fn(async () =>
+              IDS.map((id, i) => ({
+                id,
+                address: ADDRS[i],
+                role: 'master',
+                state: 'healthy',
+                flags: ['master'],
+                slots: slotsOf[id],
+              })),
+            );
+            migrations = [];
+            report = { jobViews: [], finishedJobs: [], failed: [], complete: true };
+            (service as any).clusterMetrics = {
+              checkSlotMigrations: jest.fn(async () => ({ migrations, complete: true })),
+              readSlotMigrations: jest.fn(async () => ({ ...report, migrations })),
+            };
+            return { calls, source };
+          }
+
+          async function planned() {
+            spreadLoad();
+            const dialled = dialRun();
+            await step(HOT, 6);
+            return dialled;
+          }
+
+          const listed = (phase = 'snapshotting') => ({
+            jobName: 'job-1',
+            sourceNodeId: 'a0000000',
+            targetNodeId: 'b0000000',
+            slotRange: '100-107',
+            phase,
+          });
+
+          it('offers a run only while the switch is on', async () => {
+            await planned();
+            expect(execution()).toEqual({ available: false, blockedBy: 'flag_off' });
+
+            enable();
+
+            expect(execution()).toEqual({ available: true });
+          });
+
+          it('offers no run when the plan has no Valkey 9 command', async () => {
+            enable();
+            spreadLoad();
+            dialMemory({
+              a0000000: VALKEY_9 + info(4 * GB, 8 * GB, 200),
+              b0000000: server('redis_version:7.2.4\r\nvalkey_version:8.1.4') + info(GB, 8 * GB, 50),
+            });
+            await step(HOT, 6);
+
+            expect(execution()).toEqual({ available: false, blockedBy: 'unsupported_server' });
+          });
+
+          it('sends one MIGRATESLOTS to the source and holds the plan while it runs', async () => {
+            enable();
+            const { calls } = await planned();
+
+            const result = await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN);
+
+            expect(result).toMatchObject({
+              status: 'started',
+              run: {
+                sourceShardId: 'a0000000',
+                sourceAddr: ADDRS[0],
+                startedBy: ADMIN,
+                state: 'running',
+                jobs: [{ targetShardId: 'b0000000', ranges: [[100, 107]], state: 'starting' }],
+              },
+            });
+            expect(calls).toEqual([
+              ['CLUSTER', 'MIGRATESLOTS', 'SLOTSRANGE', '100', '107', 'NODE', 'b0000000'],
+            ]);
+            expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'migration_running' });
+            expect(await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN)).toMatchObject({
+              status: 'changed',
+              reason: 'no_plan',
+            });
+            expect(calls).toHaveLength(1);
+          });
+
+          it('starts a double click once', async () => {
+            enable();
+            const { calls } = await planned();
+
+            const results = await Promise.all([
+              service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN),
+              service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN),
+            ]);
+
+            expect(results.map((result) => result.status)).toEqual(['started', 'blocked']);
+            expect(results[1]).toEqual({ status: 'blocked', blockedBy: 'migration_running' });
+            expect(calls).toHaveLength(1);
+          });
+
+          it('refuses a cached plan once the switch is off', async () => {
+            const { calls } = await planned();
+
+            expect(await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN)).toEqual({
+              status: 'blocked',
+              blockedBy: 'flag_off',
+            });
+            expect(calls).toEqual([]);
+          });
+
+          it('refuses moves that differ from the plan it holds', async () => {
+            enable();
+            const { calls } = await planned();
+
+            const result = await service.runRebalance(
+              'conn-a',
+              'a0000000',
+              [{ targetShardId: 'c0000000', ranges: [[100, 107]] }],
+              ADMIN,
+            );
+
+            expect(result).toMatchObject({
+              status: 'changed',
+              reason: 'plan_changed',
+              rebalance: { kind: 'plan', moves: [{ targetShardId: 'b0000000' }] },
+            });
+            expect(calls).toEqual([]);
+          });
+
+          it('refuses and plans again when the source no longer owns the slots', async () => {
+            enable();
+            const { calls } = await planned();
+            slotsOf.a0000000 = [[104, 119]];
+
+            const result = await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN);
+
+            expect(result).toMatchObject({ status: 'changed', reason: 'slots_moved' });
+            expect(calls).toEqual([]);
+            expect((service as any).hotShardRebalance.get('conn-a')?.has('hot_shard:a0000000')).toBe(
+              false,
+            );
+          });
+
+          it('refuses while a slot migration runs on the cluster', async () => {
+            enable();
+            const { calls } = await planned();
+            migrations = [{ jobName: 'other', slot: 5 }];
+
+            expect(await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN)).toEqual({
+              status: 'blocked',
+              blockedBy: 'migration_running',
+            });
+            expect(calls).toEqual([]);
+          });
+
+          it('records no run when the server refuses MIGRATESLOTS', async () => {
+            enable();
+            const { source } = await planned();
+            source.call.mockRejectedValueOnce(new Error("ERR I don't know about node b0000000"));
+
+            expect(await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN)).toEqual({
+              status: 'refused',
+              message: "ERR I don't know about node b0000000",
+            });
+            expect(await service.followRebalanceRuns('conn-a')).toEqual([]);
+            expect(execution()).toEqual({ available: true });
+          });
+
+          it('follows the job until the target owns the slots', async () => {
+            enable();
+            await planned();
+            await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN);
+            report.jobViews = [listed()];
+
+            expect((await service.followRebalanceRuns('conn-a'))[0]).toMatchObject({
+              state: 'running',
+              jobs: [{ jobName: 'job-1', state: 'running', phase: 'snapshotting' }],
+            });
+
+            report.complete = false;
+            report.jobViews = [];
+            expect((await service.followRebalanceRuns('conn-a'))[0].state).toBe('running');
+
+            report.complete = true;
+            report.finishedJobs = ['job-1'];
+            slotsOf.a0000000 = [[108, 119]];
+            slotsOf.b0000000 = [[10, 11], [100, 107]];
+
+            expect((await service.followRebalanceRuns('conn-a'))[0]).toMatchObject({
+              state: 'succeeded',
+              endedAt: clock,
+              jobs: [{ state: 'succeeded' }],
+            });
+          });
+
+          it('cancels only a run of its own that is still running', async () => {
+            enable();
+            const { calls } = await planned();
+            expect(await service.cancelRebalance('conn-a', 'a0000000')).toEqual({
+              status: 'not_running',
+            });
+            await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN);
+            report.jobViews = [listed()];
+
+            expect(await service.cancelRebalance('conn-a', 'a0000000')).toMatchObject({
+              status: 'cancelling',
+              run: { sourceShardId: 'a0000000' },
+            });
+            expect(calls.at(-1)).toEqual(['CLUSTER', 'CANCELSLOTMIGRATIONS']);
+
+            report.jobViews = [];
+            report.finishedJobs = ['job-1'];
+            const sent = calls.length;
+
+            expect(await service.cancelRebalance('conn-a', 'a0000000')).toEqual({
+              status: 'not_running',
+            });
+            expect(calls).toHaveLength(sent);
+            expect((await service.followRebalanceRuns('conn-a'))[0].state).toBe('cancelled');
+          });
+
+          it('drops a run an hour after it ended', async () => {
+            enable();
+            await planned();
+            await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN);
+            report.finishedJobs = ['job-1'];
+            report.jobViews = [listed()];
+            await service.followRebalanceRuns('conn-a');
+            report.jobViews = [];
+            slotsOf.a0000000 = [[108, 119]];
+            slotsOf.b0000000 = [[10, 11], [100, 107]];
+            await service.followRebalanceRuns('conn-a');
+
+            clock += 60 * 60_000;
+
+            expect(await service.followRebalanceRuns('conn-a')).toEqual([]);
+          });
+        });
+
         it('gives up on a target that does not answer and drops its client', async () => {
           const budget = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
           (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;

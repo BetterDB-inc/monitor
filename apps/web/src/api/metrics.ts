@@ -52,6 +52,8 @@ import type {
   AnomalyBufferStats,
   FanoutCoverage,
   HotShardDetail,
+  RebalanceMove,
+  RebalanceRun,
   ReplicaDivergenceHistory,
   IncidentTimeline,
 } from '../types/anomaly';
@@ -460,6 +462,20 @@ export const metricsApi = {
   getAnomalyCoverage: () => fetchApi<FanoutCoverage[]>('/anomaly/coverage'),
 
   getHotShards: () => fetchApi<HotShardDetail[]>('/anomaly/hot-shards'),
+
+  runRebalance: (shardId: string, moves: Array<Pick<RebalanceMove, 'targetShardId' | 'ranges'>>) =>
+    fetchApi<RebalanceRun>(`/anomaly/hot-shards/${encodeURIComponent(shardId)}/rebalance`, {
+      method: 'POST',
+      body: JSON.stringify({ moves }),
+    }),
+
+  getRebalanceRuns: () => fetchApi<RebalanceRun[]>('/anomaly/slot-rebalance'),
+
+  cancelRebalance: (sourceShardId: string) =>
+    fetchApi<RebalanceRun>('/anomaly/slot-rebalance/cancel', {
+      method: 'POST',
+      body: JSON.stringify({ sourceShardId }),
+    }),
 
   getReplicationDivergence: (params?: { startTime?: number; endTime?: number }) => {
     const query = new URLSearchParams();
