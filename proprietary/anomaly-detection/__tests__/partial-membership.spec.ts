@@ -320,6 +320,53 @@ describe('partiallyKnownNodes', () => {
     });
   });
 
+  describe('when a held link is gone and another link confirms the node', () => {
+    const lacksP3 = 4 * ROUND_MS;
+    const confirmedAt = lacksP3 + LONG_ENOUGH;
+    const heldAt = confirmedAt + ROUND_MS;
+    const at = heldAt + ROUND_MS;
+    const rounds: Round[] = [
+      ...every([view('p1'), view('p2', { n1: null }), view('n1'), view('p3')], 0, lacksP3 - ROUND_MS),
+      ...every([view('p1'), view('p2', { n1: null }), view('n1', { p3: null }), view('p3')], lacksP3, confirmedAt),
+      { at: heldAt, views: [view('p1'), view('p2', { n1: null })], unanswered: ['n1', 'p3'] },
+      { at, views: [view('p2'), view('n1', { p3: null }), view('p3')], unanswered: ['p1'] },
+    ];
+
+    it('holds the old disagreement and sees the other one', () => {
+      const { tracked } = judge(rounds);
+      const memberships = tracked.filter((entry) => entry.kind === 'membership');
+
+      expect(memberships).toMatchObject([
+        { key: 'membership:n1', lastSeenAt: heldAt, positions: [{ observers: ['p1'] }, { observers: ['p2'] }] },
+        { key: 'membership:p3', lastSeenAt: at },
+      ]);
+    });
+
+    it('names the peers that list the node in that round and gives the command only where it is needed', () => {
+      const [finding, ...others] = judge(rounds).found;
+
+      expect(others).toEqual([]);
+      expect(finding).toMatchObject({ nodeId: 'n1', confirmed: true });
+      expect(ids(finding.knownBy)).toEqual(['p2', 'p3']);
+      expect(finding.notKnownBy).toEqual([]);
+      expect(ids(finding.ownViewMissing)).toEqual(['p3']);
+      expect(ids(finding.meet?.runOn ?? [])).toEqual(['p3']);
+
+      const message = partialMembershipMessage(finding, at);
+      expect(message).toContain('Known by 10.0.0.2:6379, 10.0.0.3:6379.');
+      expect(message).not.toContain('Not known by');
+      expect(message).toContain('Its own view is missing 10.0.0.3:6379.');
+      expect(message).toContain('Run `CLUSTER MEET 10.0.0.7 6379` on 10.0.0.3:6379.');
+    });
+
+    it('takes its age from the link that is still there', () => {
+      const [finding] = judge(rounds).found;
+
+      expect(finding.firstSeenAt).toBe(lacksP3);
+      expect(partialMembershipMessage(finding, at)).toContain(`for ${(at - lacksP3) / 1000}s.`);
+    });
+  });
+
   describe('when a dispute is held because one side gave no view', () => {
     const p2 = BASE[1];
     const p3 = BASE[2];

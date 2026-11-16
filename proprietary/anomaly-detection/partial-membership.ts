@@ -2,7 +2,6 @@ import { isIP } from 'net';
 import type { ClusterNode } from '@app/common/types/metrics.types';
 import {
   FAILING_FLAGS,
-  KNOWN_MEMBER,
   type MembershipGap,
   type TopologyDisagreement,
   type TopologyView,
@@ -81,6 +80,7 @@ interface Link {
   status: MembershipGap;
   key: string;
   answered: boolean;
+  gone: boolean;
 }
 
 const BUS_PORT_OFFSET = 10_000;
@@ -193,7 +193,6 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
   const open = input.openNodeIds ?? new Set<string>();
   const memberships = input.disagreements.filter(isMembership);
   const byKey = new Map(memberships.map((disagreement) => [disagreement.key, disagreement]));
-  const bySubject = new Map(memberships.map((disagreement) => [disagreement.subjectIds[0], disagreement]));
 
   const endpoints = new Map<string, Endpoint | null>();
   const endpointFor = (id: string): Endpoint | null => {
@@ -232,13 +231,10 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
   const links = memberships
     .flatMap((disagreement): Link[] => {
       const [subject] = disagreement.subjectIds;
-      return lackingObservers(disagreement).map(({ observer, status }) => ({
-        observer,
-        subject,
-        status,
-        key: disagreement.key,
-        answered: selves.has(observer) && !lists(observer, subject),
-      }));
+      return lackingObservers(disagreement).map(({ observer, status }) => {
+        const gone = selves.has(observer) && lists(observer, subject);
+        return { observer, subject, status, key: disagreement.key, answered: selves.has(observer) && !gone, gone };
+      });
     })
     .filter(claims);
 
@@ -272,11 +268,9 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
   );
 
   const found = [...filed].map(([hub, own]): PartialMembership => {
-    const about = bySubject.get(hub);
-    const knowers = about
-      ? about.positions.filter((position) => position.value === KNOWN_MEMBER).flatMap((position) => position.observers)
-      : own.flatMap((link) => (byKey.get(link.key) as TrackedDisagreement).positions).flatMap((side) => side.observers);
-    const history = own.map((link) => {
+    const knowers = (sightings.get(hub) ?? []).map((sighting) => sighting.observerId);
+    const lasting = own.filter((link) => !link.gone);
+    const history = (lasting.length > 0 ? lasting : own).map((link) => {
       const dispute = byKey.get(link.key) as TrackedDisagreement;
       const { firstSeenAt, rounds } = dispute.gapStreaks?.[link.observer] ?? dispute;
       return { firstSeenAt, rounds, seen: dispute.lastSeenAt >= at };
@@ -296,7 +290,7 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
       nodeId: hub,
       address: addressOf(endpoint),
       knownBy: sortedUnique(knowers)
-        .filter((id) => id !== hub && selves.has(id) && lists(id, hub))
+        .filter((id) => id !== hub && selves.has(id))
         .map(peer),
       notKnownBy,
       ownViewMissing,

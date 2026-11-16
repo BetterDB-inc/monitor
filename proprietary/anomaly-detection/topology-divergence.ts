@@ -28,7 +28,7 @@ export interface SlotStreak {
 
 export interface GapStreak {
   firstSeenAt: number;
-  lastSeenAt: number;
+  lastAnsweredAt: number;
   rounds: number;
 }
 
@@ -350,7 +350,7 @@ export function lackingObservers(disagreement: TopologyDisagreement): LackingObs
 export function durationOf(ms: number): string {
   const seconds = Math.max(0, Math.round(ms / 1000));
   const unit = DURATION_UNITS.find(([, size]) => seconds >= 2 * size);
-  return unit ? `${Math.round(seconds / unit[1])}${unit[0]}` : `${seconds}s`;
+  return unit ? `${Math.floor(seconds / unit[1])}${unit[0]}` : `${seconds}s`;
 }
 
 export function dissentOf(disagreement: TopologyDisagreement): string[] {
@@ -375,6 +375,7 @@ export class DivergenceTracker {
       ).length;
       const unseeable = !comparable || answeringSides < 2;
       if (!unseeable || round.at - entry.lastSeenAt > TOPOLOGY_DIVERGENCE_BLIND_MS) this.entries.delete(key);
+      else if (entry.gapStreaks) this.entries.set(key, { ...entry, gapStreaks: this.answeredStreaks(entry, round) });
     }
 
     for (const disagreement of joined) {
@@ -472,13 +473,24 @@ export class DivergenceTracker {
     unanswered: ReadonlySet<string>,
   ): Record<string, GapStreak> {
     const held = Object.entries(previous).filter(
-      ([observer, streak]) => unanswered.has(observer) && at - streak.lastSeenAt <= TOPOLOGY_DIVERGENCE_BLIND_MS,
+      ([observer, streak]) => unanswered.has(observer) && at - streak.lastAnsweredAt <= TOPOLOGY_DIVERGENCE_BLIND_MS,
     );
     const lacking = lackingObservers(disagreement).map(({ observer }): [string, GapStreak] => {
       const streak = previous[observer];
-      return [observer, { firstSeenAt: streak?.firstSeenAt ?? at, lastSeenAt: at, rounds: (streak?.rounds ?? 0) + 1 }];
+      const rounds = (streak?.rounds ?? 0) + 1;
+      return [observer, { firstSeenAt: streak?.firstSeenAt ?? at, lastAnsweredAt: at, rounds }];
     });
     return Object.fromEntries([...held, ...lacking]);
+  }
+
+  private answeredStreaks(entry: TrackedDisagreement, round: DivergenceRound): Record<string, GapStreak> {
+    const silent = new Set(round.unanswered);
+    return Object.fromEntries(
+      Object.entries(entry.gapStreaks ?? {}).map(([observer, streak]) => [
+        observer,
+        silent.has(observer) ? streak : { ...streak, lastAnsweredAt: round.at },
+      ]),
+    );
   }
 
   private slotStreaksAfter(previous: SlotStreak[], slots: number[][], at: number): SlotStreak[] {
