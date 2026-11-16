@@ -12623,6 +12623,86 @@ describe('AnomalyService', () => {
 
         expect(sent).not.toHaveProperty('node');
       });
+
+      const becomes = (role: 'master' | 'replica') => {
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({ ...clusterInfoResponse, server: { role } });
+        dbClient.getClusterNodes = jest
+          .fn()
+          .mockResolvedValue(
+            role === 'master'
+              ? viewOf('primA')
+              : [
+                  clusterNode('primA', '10.0.0.1:6379@16379', ['myself', 'slave'], 'repB'),
+                  clusterNode('repB', '10.0.0.2:6380@16380', ['master']),
+                ],
+          );
+      };
+
+      it('names the demoted node on failover.started', async () => {
+        await poll();
+        becomes('replica');
+        await poll();
+
+        expect(webhookEventsProService.dispatchFailoverStarted).toHaveBeenCalledWith(
+          expect.objectContaining({
+            node: expect.objectContaining({ nodeId: 'primA', role: 'replica', collected: true, connectionId: 'conn-1' }),
+          }),
+        );
+      });
+
+      it('names the promoted node on failover.completed', async () => {
+        becomes('replica');
+        await poll();
+        becomes('master');
+        await poll();
+
+        expect(webhookEventsProService.dispatchFailoverCompleted).toHaveBeenCalledWith(
+          expect.objectContaining({
+            node: expect.objectContaining({ nodeId: 'primA', role: 'primary', collected: true }),
+          }),
+        );
+      });
+
+      it('names the replica on replication.recovered', async () => {
+        const recovered = jest.fn().mockResolvedValue(undefined);
+        (webhookEventsProService as any).dispatchReplicationRecovered = recovered;
+        await poll();
+
+        await (service as any).resolveReplicationDivergence(
+          { replicas: new Map([['10.0.0.2:6380', { announced: true, windows: [] }]]) },
+          { kind: 'recovered', addr: '10.0.0.2:6380', gapBytes: 0 },
+          mockCtx,
+          Date.now(),
+        );
+
+        expect(recovered).toHaveBeenCalledWith(
+          expect.objectContaining({ replica: '10.0.0.2:6380', node: { ...REPLICA_NODE, collected: false } }),
+        );
+      });
+
+      it('sends replication.recovered without a node outside a cluster', async () => {
+        const recovered = jest.fn().mockResolvedValue(undefined);
+        (webhookEventsProService as any).dispatchReplicationRecovered = recovered;
+
+        await (service as any).resolveReplicationDivergence(
+          { replicas: new Map([['10.0.0.2:6380', { announced: true, windows: [] }]]) },
+          { kind: 'recovered', addr: '10.0.0.2:6380', gapBytes: 0 },
+          mockCtx,
+          Date.now(),
+        );
+
+        expect(recovered.mock.calls[0][0]).not.toHaveProperty('node');
+      });
+
+      it('gives a dedicated webhook the node of its event', async () => {
+        await poll();
+        const event = await raise();
+
+        expect((service as any).webhookNodeOf(event)).toEqual({
+          node: { ...PRIMARY_NODE, collected: true, connectionId: 'conn-1' },
+        });
+        expect((service as any).webhookNodeOf(raised())).toEqual({});
+      });
     });
   });
 

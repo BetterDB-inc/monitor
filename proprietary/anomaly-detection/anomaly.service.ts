@@ -248,7 +248,7 @@ import {
   parseSlotMigrationJobs,
 } from '@app/cluster/cluster-metrics.service';
 import { withConfiguredZones, withShardMetadata } from '@app/cluster/shard-metadata';
-import type { NodeDirectory } from '@app/cluster/node-ref';
+import { resolveNodeRef, type NodeDirectory } from '@app/cluster/node-ref';
 import { ClusterNodeViews, nodeOfEvent } from './event-node';
 import {
   type DivergenceGroup,
@@ -2013,6 +2013,7 @@ export class AnomalyService
                     timestamp: Date.now(),
                     instance: { host: ctx.host, port: ctx.port },
                     connectionId: ctx.connectionId,
+                    ...this.webhookNodeOf(failoverEvent),
                   })
                   .catch((err) => {
                     this.logger.error('Failed to dispatch failover.started webhook', err);
@@ -2049,6 +2050,7 @@ export class AnomalyService
                     timestamp: Date.now(),
                     instance: { host: ctx.host, port: ctx.port },
                     connectionId: ctx.connectionId,
+                    ...this.webhookNodeOf(promotionEvent),
                   })
                   .catch((err) => {
                     this.logger.error('Failed to dispatch failover.completed webhook', err);
@@ -2156,6 +2158,7 @@ export class AnomalyService
                   timestamp: Date.now(),
                   instance: { host: ctx.host, port: ctx.port },
                   connectionId: ctx.connectionId,
+                  ...this.webhookNodeOf(dataLossEvent),
                 })
                 .catch((err) => {
                   this.logger.error('Failed to dispatch data.loss.detected webhook', err);
@@ -4782,6 +4785,7 @@ export class AnomalyService
           timestamp: event.timestamp,
           instance: { host: ctx.host, port: ctx.port },
           connectionId: ctx.connectionId,
+          ...this.webhookNodeOf(event),
         })
         .catch((err) => {
           this.logger.error('Failed to dispatch retry_amplification.detected webhook', err);
@@ -10700,6 +10704,16 @@ export class AnomalyService
     return connectionId ? { ...node, collected: true, connectionId } : { ...node, collected: false };
   }
 
+  private webhookNodeOf(event: { node?: ClusterNodeRef }): { node?: ServedClusterNodeRef } {
+    return event.node ? { node: this.servedNode(event.node) } : {};
+  }
+
+  private webhookNodeAt(connectionId: string, address: string): { node?: ServedClusterNodeRef } {
+    const directory = this.nodeDirectoryOf(connectionId);
+    const node = directory ? resolveNodeRef(directory, { address }) : undefined;
+    return node ? { node: this.servedNode(node) } : {};
+  }
+
   private withServedNode<T extends { node?: ClusterNodeRef }>(
     item: T,
   ): Omit<T, 'node'> & { node?: ServedClusterNodeRef } {
@@ -12554,6 +12568,7 @@ export class AnomalyService
           timestamp,
           instance: { host: ctx.host, port: ctx.port },
           connectionId: ctx.connectionId,
+          ...this.webhookNodeOf(event),
         })
         .catch((err) => {
           this.logger.error('Failed to dispatch replication.divergence webhook', err);
@@ -12654,6 +12669,7 @@ export class AnomalyService
         ...data,
         instance: { host: ctx.host, port: ctx.port },
         connectionId: ctx.connectionId,
+        ...this.webhookNodeAt(ctx.connectionId, data.replica),
       })
       .catch((err) => {
         this.logger.error('Failed to dispatch replication.recovered webhook', err);
