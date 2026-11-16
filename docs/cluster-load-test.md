@@ -251,9 +251,11 @@ fake cluster in all three runs.
 | 100 (suspect) | 10,099 | 11,575 | 2,931 | 34.2 | 1,221 / 1,565 | 54 | 652 | 60 | 1,645 | 2,296 | 10,559 |
 
 - Sockets are nodes x nodes + nodes at every size.
-- From 50 nodes the limit of 512 node connections is reached all the time
-  ("Connection limit reached", "Closing oldest connection"), and it does not
-  hold: 2,549 sockets at 50 nodes.
+- From 50 nodes the limit of 512 pooled node connections is reached all the
+  time ("Connection limit reached", "Closing oldest connection"), and it does
+  not keep the socket count down: 2,549 open sockets at 50 nodes, about 50 of
+  them the registered connections' own. The test counts open sockets, not the
+  entries of the pool.
 - The replica slot check sends 92 to 97 % of the `CLUSTER NODES` reads: 399,
   980, 1,870 and 2,228 per second.
 - `connection.spike` events in the window: 15, 25, 40 and 50.
