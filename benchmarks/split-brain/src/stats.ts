@@ -46,12 +46,39 @@ export function bootstrapMean(values: number[], resamples = 10_000, seed = 697):
 }
 
 export function rateInterval(shares: number[]): Interval {
-  if (shares.length === 0) return { mean: 0, low: 0, high: 1 };
-  if (shares.every((share) => share === 0)) return { mean: 0, low: 0, high: wilson(0, shares.length).high };
-  if (shares.every((share) => share === 1)) {
-    return { mean: 1, low: wilson(shares.length, shares.length).low, high: 1 };
+  const trials = shares.length;
+  if (trials === 0) return { mean: 0, low: 0, high: 1 };
+  const boot = bootstrapMean(shares);
+  const hits = shares.filter((share) => share > 0);
+  const misses = shares.filter((share) => share < 1).map((share) => 1 - share);
+  const high = Math.max(boot.high, wilson(hits.length, trials).high * mean(hits));
+  const low = Math.min(boot.low, 1 - wilson(misses.length, trials).high * mean(misses));
+  return {
+    mean: boot.mean,
+    low: misses.length === 0 ? wilson(trials, trials).low : Math.max(0, low),
+    high: hits.length === 0 ? wilson(0, trials).high : Math.min(1, high),
+  };
+}
+
+export function countInterval(successes: number, trials: number): Interval {
+  return { mean: trials === 0 ? 0 : successes / trials, ...wilson(successes, trials) };
+}
+
+export function medianInterval(values: number[], resamples = 10_000, seed = 697): Interval {
+  if (values.length === 0) return { mean: 0, low: 0, high: 0 };
+  const random = mulberry32(seed);
+  const medians: number[] = [];
+  for (let i = 0; i < resamples; i++) {
+    const sample: number[] = [];
+    for (let j = 0; j < values.length; j++) sample.push(values[Math.floor(random() * values.length)]);
+    medians.push(quantile(sample, 0.5));
   }
-  return bootstrapMean(shares);
+  medians.sort((a, b) => a - b);
+  return {
+    mean: quantile(values, 0.5),
+    low: medians[Math.floor(0.025 * resamples)],
+    high: medians[Math.min(resamples - 1, Math.floor(0.975 * resamples))],
+  };
 }
 
 export interface PairedDifference extends Interval {

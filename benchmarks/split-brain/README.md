@@ -22,8 +22,9 @@ The detector modules are imported as they are. The small piece of
 `anomaly.service.ts` that turns a detector round into raised and closed events
 cannot be imported without the whole service, so it is restated in
 `src/judge.ts`. `test/judge.test.ts` replays the service's own test cases
-through it. `product-pin.json` holds the hashes of the imported files; replay
-and report refuse to run when they differ.
+through it. `product-pin.json` holds the hashes of the imported files and of
+the service files the glue was restated from; replay and report refuse to run
+when any of them differs.
 
 ## Scenarios
 
@@ -32,13 +33,13 @@ and report refuse to run when they differ.
 | zone-partition | fault | one zone is cut off from the other two for 60 s |
 | minority-partition | fault | two nodes from different zones are cut off for 60 s |
 | killed-primary | fault | a primary is killed and stays down |
-| paused-node | fault | a primary is frozen for 3 × node timeout |
+| paused-node | fault | a primary is frozen for 3 × node timeout, then resumed |
 | flapping-node | fault | a primary is cut off and reconnected 5 times, 1.5 × node timeout each way |
 | partial-join | fault | a new node meets the cluster but cannot reach half of it for 150 s |
 | idle | control | nothing happens |
 | manual-failover | control | `CLUSTER FAILOVER` on a replica |
-| slot-migration-atomic | control | `CLUSTER MIGRATESLOTS` of 500 slots from each primary |
-| slot-migration-legacy | control | `valkey-cli --cluster reshard` of 300 slots |
+| slot-migration-atomic | control | `CLUSTER MIGRATESLOTS` of 1000 slots (about 49k keys) from each primary in turn, with the primaries' links limited to 20 Mbit/s so a move takes 6–7 s |
+| slot-migration-legacy | control | `valkey-cli --cluster reshard` of 3000 slots (about 140k keys), about 9 s |
 | rolling-restart | control | every node restarted, one at a time |
 | slow-node | control | 800 ms ± 200 ms of network delay on one node for 60 s |
 | clean-join | control | a new node meets the cluster with nothing blocked |
@@ -70,14 +71,19 @@ pnpm test
   It checks again before every trial and waits up to `--max-wait-minutes`
   (default 30) for the host to calm down, then stops; run the same command
   again to continue. Both numbers are sampled every five seconds while a
-  trial records. A trial that crosses a limit is dropped and recorded again.
-  The kept trials carry the load, the free ports and the Docker VM load in
-  their first line, and the log prints them with the tick lateness, so a
-  noisy trial can still be thrown out later. `pnpm bench host` prints the
-  current numbers.
+  trial records. An attempt that crosses a limit, or fails for any other
+  reason, is dropped and the trial is recorded again, up to three times per
+  run. Dropped attempts are listed with their reason in `dropped.jsonl` next to
+  the traces. The kept trials carry the attempt number, the reasons of their
+  dropped attempts, the tick lateness with a flag for a p99 over 250 ms, the
+  load, the free ports and the Docker VM load in their first line, so a noisy
+  trial can still be thrown out later. The report counts them per scenario.
+  `pnpm bench host` prints the current numbers.
 - `pnpm bench inspect <trace>` prints one line per second of a recording.
-- After a detector change: run `pnpm test`, then `pnpm bench pin <commit>`,
-  then `replay` and `report` again. The recordings stay valid.
+- After a change to a pinned product file: check `src/judge.ts` against the
+  service, run `pnpm test`, then `pnpm bench pin <commit>` (it refuses when
+  the working tree differs from that commit in a pinned file), then `replay`
+  and `report` again. The recordings stay valid.
 
 ## Layout
 

@@ -11,6 +11,8 @@ import {
   replay,
   seedOnly,
 } from './replay';
+import { parseView } from './cluster';
+import { TICK_MS } from './config';
 import type { TrialMeta } from './scenarios';
 import type { Trace } from './trace';
 
@@ -71,9 +73,57 @@ export interface TrialOutput {
   windowMs: number;
   healed: boolean;
   late: { p50: number; p99: number; max: number };
+  lateOk: boolean;
+  attempt: number;
+  dropped: string[];
   host?: TrialMeta['host'];
+  shown: Shown;
   cells: Cell[];
   seedOnly: SeedOnlyCell[];
+}
+
+export interface Shown {
+  ticks: number;
+  flagged: number;
+  unanswered: number;
+  split: number;
+  longestSplitMs: number;
+}
+
+const FAILURE_FLAGS = ['fail', 'fail?'];
+
+function story(raw: string): { text: string; flagged: boolean } {
+  const lines = parseView(raw);
+  const text = lines
+    .map((line) => {
+      const flags = line.flags.filter((flag) => flag !== 'myself').sort().join(',');
+      const slots = line.slots.split(' ').filter((slot) => !slot.startsWith('[')).join(' ');
+      return `${line.id} ${flags} ${line.primaryId} ${line.configEpoch} ${slots}`;
+    })
+    .sort()
+    .join('\n');
+  return { text, flagged: lines.some((line) => line.flags.some((flag) => FAILURE_FLAGS.includes(flag))) };
+}
+
+export function shownInViews(trace: Trace, seeds: string[], from: number, to: number): Shown {
+  const shown: Shown = { ticks: 0, flagged: 0, unanswered: 0, split: 0, longestSplitMs: 0 };
+  let run = 0;
+  for (const tick of trace.ticks) {
+    if (tick.t < from || tick.t > to) continue;
+    shown.ticks += 1;
+    const stories = seeds.map((seed) => {
+      const sample = tick.nodes[seed];
+      return sample?.ok ? story(sample.nodes) : null;
+    });
+    const answered = stories.filter((entry): entry is { text: string; flagged: boolean } => entry !== null);
+    if (answered.length < stories.length) shown.unanswered += 1;
+    if (answered.some((entry) => entry.flagged)) shown.flagged += 1;
+    const split = new Set(answered.map((entry) => entry.text)).size > 1;
+    if (split) shown.split += 1;
+    run = split ? run + 1 : 0;
+    shown.longestSplitMs = Math.max(shown.longestSplitMs, run * TICK_MS);
+  }
+  return shown;
 }
 
 export function spread(values: number[]): Spread | null {
@@ -227,7 +277,11 @@ export async function collectTrial(trace: Trace): Promise<TrialOutput> {
     windowMs: window.to - window.from,
     healed: meta.windowEnd !== null,
     late: meta.late,
+    lateOk: meta.lateOk ?? true,
+    attempt: meta.attempt ?? 1,
+    dropped: meta.dropped ?? [],
     host: meta.host,
+    shown: shownInViews(trace, prepared.seeds, window.from, window.to),
     cells,
     seedOnly: seedCells,
   };

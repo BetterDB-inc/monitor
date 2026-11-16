@@ -3,7 +3,7 @@ import { gunzipSync } from 'node:zlib';
 import type { Cell, Side, TrialOutput } from './collect';
 import type { ProductPin } from './product';
 import { MIN_ROUNDS, PHASES, ROUND_INTERVAL_MS, STRATEGIES, type Vantage } from './replay';
-import { type Interval, mean, pairedDifference, quantile, rateInterval } from './stats';
+import { type Interval, countInterval, mean, medianInterval, pairedDifference, quantile, rateInterval } from './stats';
 
 const DEFAULT_STRATEGY = 'zone-1';
 const DEFAULT_ROUNDS = 3;
@@ -98,9 +98,78 @@ class Results {
 }
 
 function ttdCell(cells: Cell[]): string {
+  if (cells.length === 0) return '–';
   const medians = cells.filter((cell) => cell.ttd).map((cell) => (cell.ttd as { p50: number }).p50);
-  if (medians.length === 0) return '–';
-  return `${seconds(quantile(medians, 0.5))} (${seconds(quantile(medians, 0.9))})`;
+  const never = `never ${cells.length - medians.length}/${cells.length}`;
+  if (medians.length === 0) return never;
+  const interval = medianInterval(medians);
+  return `${seconds(interval.mean)} [${seconds(interval.low)}–${seconds(interval.high)}], p90 ${seconds(quantile(medians, 0.9))}, ${never}`;
+}
+
+function controlTables(results: Results, scenarios: string[]): string {
+  return MIN_ROUNDS.map((minRounds) => {
+    const rows = scenarios.map((scenario) => [
+      scenario,
+      ...STRATEGIES.map((strategy) => {
+        const shares = results.shares(scenario, { strategy: strategy.name, minRounds });
+        const raising = shares.filter((share) => share > 0).length;
+        const interval = countInterval(raising, shares.length);
+        return `${raising}/${shares.length} [${Math.round(interval.low * 100)}–${Math.round(interval.high * 100)}], ${percent(mean(shares))} of replays`;
+      }),
+    ]);
+    return `**N = ${minRounds}**\n\n${table(['scenario', ...STRATEGIES.map((s) => STRATEGY_LABELS[s.name])], rows)}`;
+  }).join('\n\n');
+}
+
+function shownTable(results: Results): string {
+  const rows = results.scenarios.map((scenario) => {
+    const trials = results.of(scenario);
+    const count = (test: (trial: TrialOutput) => boolean) => `${trials.filter(test).length}/${trials.length}`;
+    return [
+      scenario,
+      trials[0].kind,
+      count((trial) => trial.shown.flagged > 0 || trial.shown.unanswered > 0),
+      count((trial) => trial.shown.split > 0),
+      seconds(quantile(trials.map((trial) => trial.shown.longestSplitMs), 0.5)),
+      ...MIN_ROUNDS.map((minRounds) => count((trial) => trial.shown.longestSplitMs >= (minRounds - 1) * ROUND_INTERVAL_MS)),
+    ];
+  });
+  return table(
+    [
+      'scenario',
+      'kind',
+      'a failure flag or a silent node was seen',
+      'two nodes disagreed at some second',
+      'median longest disagreement',
+      ...MIN_ROUNDS.map((minRounds) => `disagreed for ${((minRounds - 1) * ROUND_INTERVAL_MS) / 1000} s or more (N = ${minRounds})`),
+    ],
+    rows,
+  );
+}
+
+function droppedTable(results: Results): string {
+  const rows = results.scenarios.map((scenario) => {
+    const trials = results.of(scenario);
+    const reasons = new Map<string, number>();
+    for (const trial of trials) {
+      for (const reason of trial.dropped) {
+        const short = reason.replace(/[0-9.]+/g, 'N').slice(0, 60);
+        reasons.set(short, (reasons.get(short) ?? 0) + 1);
+      }
+    }
+    return [
+      scenario,
+      String(trials.length),
+      String(trials.filter((trial) => trial.attempt > 1).length),
+      String(trials.reduce((sum, trial) => sum + trial.dropped.length, 0)),
+      String(trials.filter((trial) => !trial.lateOk).length),
+      [...reasons.entries()].map(([reason, count]) => `${count}× ${reason}`).join('; ') || '–',
+    ];
+  });
+  return table(
+    ['scenario', 'trials kept', 'kept after a dropped attempt', 'attempts dropped', 'kept with p99 lateness over 250 ms', 'why attempts were dropped'],
+    rows,
+  );
 }
 
 function rateTables(results: Results, scenarios: string[], key: Omit<CellKey, 'strategy' | 'minRounds'>): string {
@@ -293,8 +362,8 @@ function ttdDifference(a: Cell[], b: Cell[]): string {
     pairs.map((pair) => pair[0] / 1000),
     pairs.map((pair) => pair[1] / 1000),
   );
-  if (difference.identical) return 'same';
-  return `${signed(difference.mean)} s [${signed(difference.low)}, ${signed(difference.high)}]${difference.tie ? ' tie' : ''}`;
+  if (difference.identical) return `same (${pairs.length} trials)`;
+  return `${signed(difference.mean)} s [${signed(difference.low)}, ${signed(difference.high)}]${difference.tie ? ' tie' : ''} (${pairs.length} trials)`;
 }
 
 function comparisonTable(results: Results, scenarios: string[]): string {
@@ -387,10 +456,17 @@ export function buildReport(input: {
   const faults = results.kind('fault');
   const controls = results.kind('control');
   const text = (file: string) => (existsSync(file) ? readFileSync(file, 'utf8').trim() : '');
-  const early = results.trials.reduce(
-    (sum, trial) => sum + trial.cells.filter((cell) => cell.side === 'all').reduce((s, cell) => s + cell.early, 0),
-    0,
-  );
+  const early = results.trials.filter((trial) =>
+    trial.cells.some(
+      (cell) =>
+        cell.strategy === DEFAULT_STRATEGY &&
+        cell.minRounds === DEFAULT_ROUNDS &&
+        cell.variant === AS_SHIPPED &&
+        cell.vantage === 'outside' &&
+        cell.side === 'all' &&
+        cell.early > 0,
+    ),
+  ).length;
   const sections = [
     `# ${input.title}`,
     'Tables are generated by `pnpm bench report` from the recorded trials. The findings and limitations are written by hand from those tables.',
@@ -403,45 +479,51 @@ export function buildReport(input: {
       '- **zone 1, zone 2**: the product setting `nodesPerZone` with `randomNodes` 3 and zones known. **zone 1 with N = 3 is what ships today.**',
       '- **all**: every node is asked every round.',
       '- **N**: rounds a disagreement must last before an event is raised (`minRounds`).',
-      '- A cell such as `97% [91–100]` is the mean over trials of the share of replays that raised an event, with a 95% interval. The interval is a bootstrap over trials; when every trial gave the same answer it is the Wilson bound for that many trials.',
-      '- Times are the median over trials of the per-trial median, with the 90th percentile over trials in brackets, counted from the moment the fault was injected.',
+      '- A cell such as `97% [91–100]` is the mean over trials of the share of replays that raised an event, with a 95% interval. The interval is a bootstrap over trials, and it is never narrower than the Wilson interval for the number of trials that raised at all, so one raising trial of 30 gives an upper end near 17%, and none of 30 gives 11%.',
+      '- In the control tables a cell such as `1/30 [1–17], 0% of replays` is the number of trials in which at least one replay raised an event, with its Wilson interval, then the share of all replays that raised.',
+      '- A time such as `12 s [11 s–14 s], p90 16 s, never 3/30` is the median over trials of the per-trial median, with a bootstrap 95% interval of that median, the 90th percentile over trials, and the number of trials in which no replay raised an event. Trials that never raised are not in the time. Times are counted from the moment the fault was injected.',
       '- Fault windows run from the injection to the heal, or to the end of the recording when the fault is never healed. Control windows run from the start of the operation to the end of the recording.',
     ].join('\n'),
     '## 1. Faults: how often an event is raised',
-    'The monitor can reach every node.',
+    'The monitor can reach every node. Killed primary and paused node are listed as faults in the issue, but they end with every reachable node agreeing that the node failed. Agreement is the expected end state there, so a low rate in those two rows is not a missed split.',
     rateTables(results, faults, {}),
-    '## 2. Faults: time to the first event',
+    '## 2. Did the fault show in the nodes\' views',
+    'Read straight from the recordings, without the detector. Inside the window of each trial: whether any node showed a failure flag or stopped answering, whether the views of two answering nodes differed at the same second (flags, primary, config epoch or slots), and how long the longest unbroken disagreement lasted. An event at N needs the disagreement at N rounds in a row, which spans at least (N − 1) × 5 s, so the last columns bound what any coverage could raise. A miss in a trial that never disagreed that long is not a coverage miss.',
+    shownTable(results),
+    '## 3. Faults: time to the first event',
     ttdTables(results, faults),
-    '## 3. Faults: monitor on the seed node\'s side of the cut',
+    '## 4. Faults: monitor on the seed node\'s side of the cut',
     'Same recordings, but the monitor cannot read nodes that the seed node is cut off from. Only scenarios that cut the network are listed.',
     rateTables(results, faults, { vantage: 'inside' }),
-    '## 4. Faults: does it matter which node is the seed',
+    '## 5. Faults: does it matter which node is the seed',
     'N = 3.',
     sideTable(results, faults),
-    '## 5. Controls: false positives',
+    '## 6. Controls: false positives',
     'Any event raised between the start of the operation and the end of the recording.',
-    rateTables(results, controls, {}),
-    '## 6. What the first event says',
+    controlTables(results, controls),
+    '## 7. What the first event says',
     'N = 3. "Only after the window" counts replays whose first event came after the fault was healed.',
     firstEventTable(results, [...faults, ...controls]),
-    '## 7. Faults: time from the heal until the events close',
+    '## 8. Faults: time from the heal until the events close',
     'zone 1. Replays that raised an event.',
     closeTable(results, faults),
-    '## 8. Seed only: what today\'s single-view signals see',
+    '## 9. Seed only: what today\'s single-view signals see',
     'These are different signals from the ones above. They read only the seed node\'s own view: the duplicate-primary detector fires on the first poll that shows two live primaries claiming the same slot, and the cluster state signal fires when the seed\'s `cluster_state` goes from ok to fail. The last column is the share of seeds that stopped answering for 3 s or more, which the product reports as a connection problem, not as a split.',
     seedOnlyTable(results),
-    '## 9. Joining nodes: what is counted',
+    '## 10. Joining nodes: what is counted',
     '"as-shipped" counts every kind of disagreement with a 60 s wait on membership. "membership-only-90s" counts only membership disagreements after 90 s. "without-membership" ignores membership disagreements. Each cell is the raise rate and the time to the first event.',
     variantTable(results),
-    '## 10. Cost per round',
+    '## 11. Cost per round',
     'N = 3. A round runs every 5 s. The seed node\'s own view is already read by the normal poll and is not counted as an extra read.',
     costTable(results),
-    '## 11. Paired comparisons with what ships today',
-    'Each row compares one setting with zone 1, N = 3 on the same recordings. "tie" means the 95% interval of the difference includes zero.',
+    '## 12. Paired comparisons with what ships today',
+    'Each row compares one setting with zone 1, N = 3 on the same recordings. "tie" means the 95% interval of the difference includes zero. The time difference uses only the trials in which both settings raised an event; their number is in brackets.',
     comparisonTable(results, [...faults, ...controls]),
-    '## 12. Recorder timing',
-    `Tick lateness is how late the recorder started a one-second tick. Host load is the 1-minute load average of the machine, sampled every five seconds while a trial was recorded; free local ports are counted the same way. Docker VM load is the 1-minute load average inside the Docker VM at the start and end of a trial. A trial is dropped and recorded again when host load or free local ports cross the limits in the README. Replays that raised an event before the fault was injected: ${early}.`,
+    '## 13. Recording quality',
+    `Tick lateness is how late the recorder started a one-second tick; replay uses the planned tick times. Host load is the 1-minute load average of the machine, sampled every five seconds while a trial was recorded; free local ports are counted the same way. Docker VM load is the 1-minute load average inside the Docker VM at the start and end of a trial. Trials in which the shipped setting raised an event before the injection: ${early} of ${results.trials.length}.`,
     timingTable(results),
+    'An attempt is dropped and the trial recorded again when the cluster does not build, an injection fails, or host load or free local ports cross the limits in the README.',
+    droppedTable(results),
     text(input.limitationsFile),
   ];
   return `${sections.filter(Boolean).join('\n\n')}\n`;

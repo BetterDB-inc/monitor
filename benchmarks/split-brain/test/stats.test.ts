@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { bootstrapMean, pairedDifference, quantile, rateInterval, wilson } from '../src/stats';
+import { bootstrapMean, countInterval, medianInterval, pairedDifference, quantile, rateInterval, wilson } from '../src/stats';
 
 test('wilson bound for zero of thirty', () => {
   const { low, high } = wilson(0, 30);
@@ -28,6 +28,33 @@ test('rate interval falls back to the wilson bound when every trial agrees', () 
   const every = rateInterval(new Array(30).fill(1));
   assert.equal(every.high, 1);
   assert.ok(every.low > 0.88 && every.low < 0.89);
+});
+
+test('rate interval is no narrower than the wilson bound when few trials raised', () => {
+  const one = rateInterval([1, ...new Array(29).fill(0)]);
+  assert.ok(Math.abs(one.high - wilson(1, 30).high) < 1e-9, `high was ${one.high}`);
+  assert.equal(one.low, 0);
+  const allButOne = rateInterval([0, ...new Array(29).fill(1)]);
+  assert.ok(Math.abs(allButOne.low - (1 - wilson(1, 30).high)) < 1e-9, `low was ${allButOne.low}`);
+  assert.equal(allButOne.high, 1);
+  const half = rateInterval(new Array(30).fill(0.5));
+  assert.equal(half.low, 0.5);
+  assert.equal(half.high, 0.5);
+});
+
+test('count interval is the wilson interval of the count', () => {
+  const interval = countInterval(1, 30);
+  assert.ok(Math.abs(interval.mean - 1 / 30) < 1e-12);
+  assert.ok(interval.high > 0.16 && interval.high < 0.18);
+});
+
+test('median interval brackets the median and is repeatable', () => {
+  const values = [5, 6, 7, 8, 9, 10, 11, 12, 13, 40];
+  const interval = medianInterval(values);
+  assert.deepEqual(interval, medianInterval(values));
+  assert.equal(interval.mean, quantile(values, 0.5));
+  assert.ok(interval.low <= interval.mean && interval.mean <= interval.high);
+  assert.ok(interval.high < 40);
 });
 
 test('paired difference calls a tie only when zero is inside the interval', () => {
