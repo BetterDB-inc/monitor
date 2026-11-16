@@ -71,6 +71,31 @@ function nodeCommandTimeoutMs(): number {
     : DEFAULT_NODE_COMMAND_TIMEOUT_MS;
 }
 
+const UNRESPONSIVE_NODE_COOL_OFF_MS = 30_000;
+const COMMAND_TIMED_OUT = 'Command timed out';
+const CONNECTION_TIMED_OUT = 'Connection timeout';
+
+type NodeCommandOutcome = 'answered' | 'timedOut';
+
+class NodeClient extends Valkey {
+  private readonly report: (outcome: NodeCommandOutcome) => void;
+
+  constructor(options: ValkeyOptions, report: (outcome: NodeCommandOutcome) => void) {
+    super(options);
+    this.report = report;
+  }
+
+  sendCommand(...args: Parameters<Valkey['sendCommand']>): ReturnType<Valkey['sendCommand']> {
+    args[0].promise.then(
+      () => this.report('answered'),
+      (error: unknown) => {
+        if (error instanceof Error && error.message === COMMAND_TIMED_OUT) this.report('timedOut');
+      },
+    );
+    return super.sendCommand(...args);
+  }
+}
+
 @Injectable()
 export class ClusterDiscoveryService implements OnModuleDestroy {
   private readonly logger = new Logger(ClusterDiscoveryService.name);
@@ -88,6 +113,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   private readonly MAX_CONNECTIONS = 512; // Maximum number of concurrent connections
   private readonly OWN_NODE_IDLE_MS = 5 * 60_000;
   private pendingNodeClients = 0;
+  private unresponsiveUntil: Map<string, number> = new Map();
   private nodeClientSlotWaiters: Array<() => void> = [];
 
   constructor(
@@ -406,12 +432,13 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       this.discoveredNodes.delete(key);
       existing.client.disconnect();
     }
-    const reused = await this.reuseNodeClient(key);
-    if (reused) return reused;
 
     // Cluster node addresses include bus port: "host:port@busport", and an
     // IPv6 host has colons of its own, so the port is after the last one.
     const parsed = parseNodeAddress(node.address);
+    if (parsed) this.assertNodeAnswers(parsed.host, parsed.port);
+    const reused = await this.reuseNodeClient(key);
+    if (reused) return reused;
     if (!parsed) {
       throw new Error(`Invalid node address: ${node.address}`);
     }
@@ -442,6 +469,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       throw new Error(`Connection ${connectionId} has no data-node credentials for ${host}:${port}`);
     }
     const key = `addr:${connectionId}:${host}:${port}`;
+    this.assertNodeAnswers(host, port);
     const reused = await this.reuseNodeClient(key);
     if (reused) return reused;
     const node: DiscoveredNode = {
@@ -466,6 +494,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       throw new Error(`Connection ${connectionId} cannot dial its replica ${host}:${port} directly`);
     }
     const key = `replica:${connectionId}:${host}:${port}`;
+    this.assertNodeAnswers(host, port);
     const reused = await this.reuseNodeClient(key);
     if (reused) return reused;
     const { username, password } = this.connectionRegistry.get(connectionId).getClient().options;
@@ -483,6 +512,43 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       username: username || '',
       password: password || '',
     });
+  }
+
+  /**
+   * Fails fast for a node that let a command or a connect time out, so callers
+   * do not each wait out the same silent node. After the cool-off one caller is
+   * let through to try again while the rest keep failing fast; any reply from
+   * the node clears the mark.
+   */
+  private assertNodeAnswers(host: string, port: number): void {
+    const address = `${host}:${port}`;
+    const until = this.unresponsiveUntil.get(address);
+    if (until === undefined) return;
+    const now = Date.now();
+    if (now < until) {
+      throw new Error(`Node ${address} is not answering; next try in ${Math.ceil((until - now) / 1000)}s`);
+    }
+    this.unresponsiveUntil.set(address, now + UNRESPONSIVE_NODE_COOL_OFF_MS);
+  }
+
+  private markNodeUnresponsive(address: string, client?: Valkey): void {
+    const now = Date.now();
+    for (const [other, until] of this.unresponsiveUntil) {
+      if (until + UNRESPONSIVE_NODE_COOL_OFF_MS < now) this.unresponsiveUntil.delete(other);
+    }
+    if (!this.unresponsiveUntil.has(address)) {
+      this.logger.warn(
+        `Node ${address} is not answering; skipping it and trying again every ${UNRESPONSIVE_NODE_COOL_OFF_MS / 1000}s`,
+      );
+    }
+    this.unresponsiveUntil.set(address, now + UNRESPONSIVE_NODE_COOL_OFF_MS);
+    if (client) this.evictNodeClient(client);
+  }
+
+  private markNodeAnswering(address: string): void {
+    if (this.unresponsiveUntil.delete(address)) {
+      this.logger.log(`Node ${address} answers again`);
+    }
   }
 
   private async reuseNodeClient(key: string): Promise<Valkey | null> {
@@ -570,11 +636,18 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     ownerId: string | undefined,
     { username, password }: { username: string; password: string },
   ): Promise<Valkey> {
-    const client = new Valkey({
-      ...this.nodeClientOptions(ownerId, node, host, port, { username, password }),
-      connectTimeout: this.CONNECTION_TIMEOUT,
-      commandTimeout: nodeCommandTimeoutMs(),
-    });
+    const address = `${host}:${port}`;
+    const client: Valkey = new NodeClient(
+      {
+        ...this.nodeClientOptions(ownerId, node, host, port, { username, password }),
+        connectTimeout: this.CONNECTION_TIMEOUT,
+        commandTimeout: nodeCommandTimeoutMs(),
+      },
+      (outcome) => {
+        if (outcome === 'answered') this.markNodeAnswering(address);
+        else this.markNodeUnresponsive(address, client);
+      },
+    );
 
     // Node clients are long-lived, so pick up rotated client cert/key material
     // from the primary adapter before every reconnect.
@@ -612,11 +685,12 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       await Promise.race([
         client.connect(),
         new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('Connection timeout')), this.CONNECTION_TIMEOUT),
+          setTimeout(() => reject(new Error(CONNECTION_TIMED_OUT)), this.CONNECTION_TIMEOUT),
         ),
       ]);
       connecting = false;
       lastError = undefined;
+      this.markNodeAnswering(address);
 
       const connection: NodeConnection = {
         node,
@@ -673,6 +747,9 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       }
 
       await this.closeNodeClient(client);
+      if (connectError instanceof Error && connectError.message === CONNECTION_TIMED_OUT) {
+        this.markNodeUnresponsive(address);
+      }
 
       throw error;
     }
@@ -792,10 +869,10 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   }
 
   /**
-   * Drop and disconnect a node client a caller gave up waiting on. Node
-   * clients have no command timeout, so on a socket that went silent the
-   * queued commands would otherwise wait for TCP to give up; disconnecting
-   * rejects them now, and the next getNodeConnection opens a fresh client.
+   * Drop and disconnect a node client a caller gave up waiting on. On a
+   * socket that went silent the queued commands would otherwise each wait for
+   * their own command timeout; disconnecting rejects them now, and the next
+   * getNodeConnection opens a fresh client.
    */
   evictNodeClient(client: Valkey): void {
     for (const [key, connection] of this.discoveredNodes) {
