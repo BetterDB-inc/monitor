@@ -181,6 +181,21 @@ describe('ClusterNodeConnectService', () => {
     expect(registry.addNodeConnection).not.toHaveBeenCalled();
   });
 
+  it('refuses when the address belongs to a connection that reads another node of this cluster', async () => {
+    const moved = connection('moved', {
+      host: '10.0.0.2',
+      port: 7002,
+      membership: { seedId: 'cluster', nodeId: 'n1', origin: 'auto', source: 'cluster' },
+    });
+    const { service, registry } = build({ configs: [connection('cluster'), moved] });
+
+    const failure = service.connect('cluster', 'n2');
+
+    await expect(failure).rejects.toThrow(ConflictException);
+    await expect(failure).rejects.toThrow('which reads another node there');
+    expect(registry.addNodeConnection).not.toHaveBeenCalled();
+  });
+
   it('answers 400 with the address that was tried when the node cannot be reached', async () => {
     const { service, registry } = build();
     registry.addNodeConnection.mockRejectedValueOnce(new Error('Could not connect to 10.0.0.2:7002: ECONNREFUSED'));

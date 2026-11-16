@@ -182,7 +182,7 @@ nothing is added. The call is written to the activity log as
 |--------|------|
 | 400 | The cluster is read through an agent or OTLP push, the cluster view could not be read, or the node could not be reached. The message names the address that was tried |
 | 404 | The connection does not exist, or the node is not in its cluster view. The view is cached for up to 30 seconds, so a node that has just joined may not be in it yet |
-| 409 | A connection that belongs to another cluster already points at the address of the node |
+| 409 | A connection that reads another node, of this cluster or of another one, already points at the address of the node |
 
 ## Nodes leaving and rejoining
 

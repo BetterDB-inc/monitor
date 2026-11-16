@@ -4,7 +4,7 @@ import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { dialsDataNodes } from '../connections/data-node-reach';
 import { parseNodeAddress } from '../topology/membership-diff';
 import { ClusterDiscoveryService, type DiscoveredNode } from './cluster-discovery.service';
-import { collectionOf, withinCluster } from './node-collection';
+import { collectionOf } from './node-collection';
 
 export interface ConnectedClusterNode {
   id: string;
@@ -51,7 +51,12 @@ export class ClusterNodeConnectService {
     if (!address) {
       throw new BadRequestException(`Node '${nodeId}' has no address in the cluster view yet.`);
     }
-    const collection = collectionOf(node, connectionId, this.connectionsOfCluster(nodes));
+    const collection = collectionOf(
+      node,
+      connectionId,
+      (host, port) => this.connectionRegistry.findIdByHostPort(host, port),
+      (id) => this.connectionRegistry.getConfig(id)?.membership?.nodeId,
+    );
     if (collection.collected && collection.connectionId) {
       return { id: collection.connectionId, created: false };
     }
@@ -59,7 +64,7 @@ export class ClusterNodeConnectService {
     if (occupant) {
       const name = this.connectionRegistry.getConfig(occupant)?.name ?? occupant;
       throw new ConflictException(
-        `${address.host}:${address.port} is already registered as '${name}', which reads a node of another cluster. Remove that connection first.`,
+        `${address.host}:${address.port} is already registered as '${name}', which reads another node there. Remove that connection first.`,
       );
     }
     try {
@@ -76,13 +81,5 @@ export class ClusterNodeConnectService {
     } catch (error) {
       throw new BadRequestException(`Could not read the cluster nodes of this connection: ${messageOf(error)}`);
     }
-  }
-
-  private connectionsOfCluster(nodes: readonly DiscoveredNode[]): (host: string, port: number) => string | null {
-    return withinCluster(
-      new Set(nodes.map((node) => node.id)),
-      (host, port) => this.connectionRegistry.findIdByHostPort(host, port),
-      (id) => this.connectionRegistry.getConfig(id)?.membership?.nodeId,
-    );
   }
 }

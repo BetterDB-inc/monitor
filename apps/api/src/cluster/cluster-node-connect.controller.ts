@@ -20,7 +20,7 @@ export class ClusterNodeConnectController {
   @ApiResponse({ status: 200, description: 'The connection that reads the node', type: ConnectClusterNodeResponseDto })
   @ApiResponse({ status: 400, description: 'The node could not be reached, or this connection cannot dial cluster nodes' })
   @ApiResponse({ status: 404, description: 'Connection not found, or the cluster view does not list the node' })
-  @ApiResponse({ status: 409, description: 'The address is registered as a connection of another cluster' })
+  @ApiResponse({ status: 409, description: 'The address is registered as a connection that reads another node' })
   async connect(@Param('id') id: string, @Param('nodeId') nodeId: string): Promise<ConnectClusterNodeResponseDto> {
     return this.nodeConnect.connect(id, nodeId);
   }
