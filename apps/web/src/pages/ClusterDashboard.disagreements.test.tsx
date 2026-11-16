@@ -5,6 +5,7 @@ import type { TopologyDisagreementSummary } from '../types/anomaly';
 
 const state = vi.hoisted(() => ({
   licensed: true,
+  licenseLoading: false,
   summary: undefined as TopologyDisagreementSummary | undefined,
   asked: [] as Array<{ connectionId: string | undefined; enabled: boolean }>,
 }));
@@ -43,6 +44,7 @@ vi.mock('../hooks/useClusterDisagreements', () => ({
     state.asked.push({ connectionId, enabled });
     return {
       licensed: state.licensed,
+      licenseLoading: state.licenseLoading,
       summary: state.licensed ? state.summary : undefined,
       error: null,
     };
@@ -85,6 +87,8 @@ function summaryWith(lines: number): TopologyDisagreementSummary {
       eventType: null,
       since: 1_704_067_100_000,
       rounds: 1,
+      stale: false,
+      lastSeenAt: 1_704_067_200_000,
       subjects: [primary],
       subjectCount: 1,
       shardIds: [],
@@ -114,6 +118,7 @@ function open(url: string) {
 describe('ClusterDashboard disagreements tab', () => {
   beforeEach(() => {
     state.licensed = true;
+    state.licenseLoading = false;
     state.summary = summaryWith(2);
     state.asked = [];
   });
@@ -133,6 +138,38 @@ describe('ClusterDashboard disagreements tab', () => {
     open('/cluster');
 
     expect(screen.getByRole('tab', { name: 'Disagreements' })).toBeInTheDocument();
+  });
+
+  it('leaves a disagreement the last round could not check out of the count on the tab', () => {
+    const summary = summaryWith(2);
+    summary.disagreements[1] = { ...summary.disagreements[1], stale: true, positions: [] };
+    state.summary = summary;
+
+    open('/cluster');
+
+    expect(screen.getByRole('tab', { name: 'Disagreements, 1 open' })).toBeInTheDocument();
+  });
+
+  it('shows no count when nothing was confirmed in the last round', () => {
+    const summary = summaryWith(1);
+    summary.disagreements[0] = { ...summary.disagreements[0], stale: true, positions: [] };
+    state.summary = summary;
+
+    open('/cluster');
+
+    expect(screen.getByRole('tab', { name: 'Disagreements' })).toBeInTheDocument();
+  });
+
+  it('waits for the licence before saying the view needs Pro', () => {
+    state.licensed = false;
+    state.licenseLoading = true;
+
+    open('/cluster?tab=disagreements');
+
+    expect(screen.getByRole('status', { name: 'Loading disagreements' })).toBeInTheDocument();
+    expect(
+      screen.queryByText('Cluster view disagreements are available in Pro'),
+    ).not.toBeInTheDocument();
   });
 
   it('opens the disagreements when the URL asks for them', () => {

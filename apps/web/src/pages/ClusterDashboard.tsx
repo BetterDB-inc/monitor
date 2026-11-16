@@ -25,6 +25,7 @@ import { SlotMigrations } from '../components/cluster/SlotMigrations';
 import { RaftHealthPanel } from '../components/cluster/RaftHealthPanel';
 import {
   ClusterDisagreements,
+  ClusterDisagreementsLoading,
   ClusterDisagreementsLocked,
 } from '../components/cluster/ClusterDisagreements';
 import { buildSlotNodeMap } from '../types/cluster';
@@ -91,7 +92,9 @@ export function ClusterDashboard() {
 
   const [tab, setTab] = useClusterTab();
   const disagreements = useClusterDisagreements(currentConnection?.id, shouldPoll);
-  const openDisagreements = disagreements.summary?.disagreements ?? [];
+  const openDisagreements = (disagreements.summary?.disagreements ?? []).filter(
+    (line) => !line.stale,
+  );
 
   // Memoize slot-to-node mapping separately for reuse
   const slotNodeMap = useMemo(() => buildSlotNodeMap(nodes), [nodes]);
@@ -410,7 +413,9 @@ export function ClusterDashboard() {
         </TabsContent>
 
         <TabsContent value="disagreements" className="space-y-4">
-          {disagreements.licensed ? (
+          {disagreements.licenseLoading ? (
+            <ClusterDisagreementsLoading />
+          ) : disagreements.licensed ? (
             <ClusterDisagreements
               summary={disagreements.summary}
               error={disagreements.error}

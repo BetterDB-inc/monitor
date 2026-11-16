@@ -462,8 +462,11 @@ export const metricsApi = {
 
   getHotShards: () => fetchApi<HotShardDetail[]>('/anomaly/hot-shards'),
 
-  getTopologyDisagreements: (signal?: AbortSignal) =>
-    fetchApi<TopologyDisagreementSummary>('/anomaly/topology-disagreements', { signal }),
+  getTopologyDisagreements: (connectionId: string, signal?: AbortSignal) =>
+    fetchApi<TopologyDisagreementSummary>('/anomaly/topology-disagreements', {
+      signal,
+      headers: { 'x-connection-id': connectionId },
+    }),
 
   getReplicationDivergence: (params?: { startTime?: number; endTime?: number }) => {
     const query = new URLSearchParams();

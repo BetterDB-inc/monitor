@@ -122,13 +122,15 @@ function DisagreementCard({
     <article
       id={`disagreement-${line.id}`}
       aria-label={line.text}
-      className="space-y-2 rounded-md border p-3"
+      className={`space-y-2 rounded-md border p-3 ${line.stale ? 'border-dashed' : ''}`}
     >
       <div className="flex flex-wrap items-start gap-2">
         <Badge variant={badge.variant}>{badge.label}</Badge>
         <p className="min-w-0 flex-1 text-sm font-medium">{line.text}</p>
         <span className="text-xs text-muted-foreground">
-          since {new Date(line.since).toLocaleTimeString()}
+          {line.stale
+            ? `Last seen ${new Date(line.lastSeenAt).toLocaleTimeString()}, not confirmed this round`
+            : `since ${new Date(line.since).toLocaleTimeString()}`}
         </span>
         {line.confirmed && line.eventId ? (
           <Link to={EVENTS_PATH} className="text-xs underline">
@@ -283,6 +285,15 @@ function Shards({ shards, connectionId }: { shards: DisagreementShard[]; connect
   );
 }
 
+export function ClusterDisagreementsLoading() {
+  return (
+    <div role="status" aria-label="Loading disagreements" className="space-y-2">
+      <Skeleton className="h-24 w-full" />
+      <Skeleton className="h-48 w-full" />
+    </div>
+  );
+}
+
 export function ClusterDisagreementsLocked() {
   return (
     <Card>
@@ -314,12 +325,7 @@ export function ClusterDisagreements({
         </p>
       );
     }
-    return (
-      <div role="status" aria-label="Loading disagreements" className="space-y-2">
-        <Skeleton className="h-24 w-full" />
-        <Skeleton className="h-48 w-full" />
-      </div>
-    );
+    return <ClusterDisagreementsLoading />;
   }
 
   if (summary.status === 'not_sampled') {
@@ -331,8 +337,10 @@ export function ClusterDisagreements({
     );
   }
 
-  const { coverage, disagreements, shards } = summary;
+  const { coverage, shards } = summary;
   const compared = summary.status === 'ok';
+  const disagreements = summary.disagreements.filter((line) => !line.stale);
+  const unconfirmed = summary.disagreements.filter((line) => line.stale);
 
   return (
     <div className="space-y-4">
@@ -388,6 +396,18 @@ export function ClusterDisagreements({
           {disagreements.map((line) => (
             <DisagreementCard key={line.id} line={line} connectionId={connectionId} />
           ))}
+          {unconfirmed.length > 0 && (
+            <section aria-label="Not confirmed this round" className="space-y-3">
+              <p className="text-sm text-muted-foreground">
+                {unconfirmed.length === 1
+                  ? '1 disagreement from an earlier round could not be checked again in the last round. It is neither confirmed nor cleared.'
+                  : `${unconfirmed.length} disagreements from an earlier round could not be checked again in the last round. They are neither confirmed nor cleared.`}
+              </p>
+              {unconfirmed.map((line) => (
+                <DisagreementCard key={line.id} line={line} connectionId={connectionId} />
+              ))}
+            </section>
+          )}
         </CardContent>
       </Card>
       {shards.length > 0 && <Shards shards={shards} connectionId={connectionId} />}

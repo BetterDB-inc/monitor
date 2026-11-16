@@ -336,6 +336,8 @@ export interface DisagreementLine {
   eventType: string | null;
   since: number;
   rounds: number;
+  stale: boolean;
+  lastSeenAt: number;
   subjects: DivergenceNode[];
   subjectCount: number;
   slots?: number[][];
