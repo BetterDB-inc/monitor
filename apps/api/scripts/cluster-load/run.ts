@@ -243,7 +243,10 @@ function main(): void {
       };
       const problem = cli.force ? null : portProblem(nodes, mode);
       if (problem) {
-        process.stderr.write(`Skipping ${nodes} nodes, mode ${mode}: ${problem}. Pass --force to run it anyway.\n`);
+        process.stderr.write(
+          `Skipping ${nodes} nodes, mode ${mode}: ${problem}.\n` +
+            `To run it anyway: pnpm load:cluster --nodes ${nodes} --modes ${mode} --force\n`,
+        );
         invalid.push({ options: scenario, invalid: `skipped, ${problem}` });
         continue;
       }
