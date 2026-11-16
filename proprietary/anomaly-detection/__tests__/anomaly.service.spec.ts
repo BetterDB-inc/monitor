@@ -26478,7 +26478,7 @@ describe('AnomalyService', () => {
               node: { nodeId: 'n' },
               disagreements: [
                 { kind: 'membership', eventType: null },
-                { kind: 'slot_owner', eventType: null, slots: [[5461, 10922]] },
+                { kind: 'slot_owner', eventType: null, slots: [[5461, 10922]], rounds: 1, since: now },
               ],
             },
           ]);
@@ -26502,17 +26502,79 @@ describe('AnomalyService', () => {
           ]);
         });
 
-        it('raises the slot alert at once when the node learns the owner but still shows no owner', async () => {
-          await rounds(6);
-          expect(divergenceEvents()).toHaveLength(0);
+        describe('once it has learned the owner but still shows no owner for the slots', () => {
+          beforeEach(async () => {
+            await rounds(6);
+            knows.n = EVERYONE;
+            slotsBy = { n: { b: '' } };
+          });
 
+          it('raises nothing when it shows the owner within two rounds', async () => {
+            await rounds(2);
+            expect(report().partialMembership).toEqual([]);
+            expect(report().divergences).toMatchObject([
+              { confirmed: false, disagreements: [{ kind: 'slot_owner', rounds: 2, since: now - 5_000 }] },
+            ]);
+
+            slotsBy = {};
+            await rounds(4);
+            expect(divergenceEvents()).toHaveLength(0);
+            expect(report().divergences).toEqual([]);
+          });
+
+          it('raises the slot alert when it still shows none after three rounds', async () => {
+            await rounds(2);
+            expect(divergenceEvents()).toHaveLength(0);
+
+            await rounds(1);
+            expect(criticalEvents()).toHaveLength(1);
+            expect(criticalEvents()[0].message).toContain('the owner of slots 5461-10922');
+          });
+
+          it('does not count a round with too few views as one of the three', async () => {
+            await rounds(1);
+            for (const id of ['b', 'c', 'n']) silent.add(id);
+            await rounds(2);
+            expect(report().status).toBe('insufficient_views');
+            expect(divergenceEvents()).toHaveLength(0);
+
+            silent.clear();
+            await rounds(2);
+            expect(report()).toMatchObject({
+              status: 'ok',
+              divergences: [{ confirmed: false, disagreements: [{ kind: 'slot_owner', rounds: 2 }] }],
+            });
+            expect(divergenceEvents()).toHaveLength(0);
+
+            await rounds(1);
+            expect(criticalEvents()).toHaveLength(1);
+          });
+
+          it('counts three rounds again when the rounds seen so far are lost', async () => {
+            await rounds(1);
+            (service as any).topologyDivergence.forgetCluster((service as any).connectionClusterKeys.get('conn-1'));
+
+            await rounds(2);
+            expect(divergenceEvents()).toHaveLength(0);
+
+            await rounds(1);
+            expect(criticalEvents()).toHaveLength(1);
+          });
+        });
+
+        it('waits three rounds after a round with too few views ends the hold', async () => {
+          await rounds(6);
+          for (const id of ['b', 'c', 'n']) silent.add(id);
+          await rounds(1);
+          silent.clear();
           knows.n = EVERYONE;
           slotsBy = { n: { b: '' } };
-          await rounds(1);
 
+          await rounds(2);
+          expect(divergenceEvents()).toHaveLength(0);
+
+          await rounds(1);
           expect(criticalEvents()).toHaveLength(1);
-          expect(criticalEvents()[0].message).toContain('the owner of slots 5461-10922');
-          expect(report().partialMembership).toEqual([]);
         });
 
         it('raises the slot alert after three rounds when the node names another owner', async () => {

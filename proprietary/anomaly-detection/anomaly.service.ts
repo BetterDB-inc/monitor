@@ -7414,6 +7414,9 @@ export class AnomalyService
       () => new Map<string, string>(),
     );
     const partial = this.partiallyKnownNodesOf(round, eventIds);
+    for (const key of partial.flatMap((finding) => finding.slotDisputeKeys)) {
+      this.topologyDivergence.restart(clusterKey, key);
+    }
     const unclaimed = unclaimedByPartialMembership(round.disagreements, partial);
     const confirmed = comparable
       ? await this.withoutMigratingSlots(
