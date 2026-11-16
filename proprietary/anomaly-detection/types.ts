@@ -1,3 +1,4 @@
+import type { ClusterNodeRef } from '@betterdb/shared';
 import type { StoredAnomalyEvent } from '@app/common/interfaces/storage-port.interface';
 import type { RegressionKind } from '../latency-regression/types';
 import type { RetryAmplificationContributor } from './retry-amplification-attribution';
@@ -257,6 +258,8 @@ export interface AnomalyEvent {
   relatedMetrics?: MetricType[];
   replicaAddr?: string;
   nodeAddr?: string;
+  node?: ClusterNodeRef;
+  nodeSubject?: { nodeId: string; address?: string };
   dedupeKey?: string;
   commands?: string[];
   eventSequence?: number;

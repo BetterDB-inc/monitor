@@ -246,6 +246,8 @@ import {
   parseSlotMigrationJobs,
 } from '@app/cluster/cluster-metrics.service';
 import { withConfiguredZones, withShardMetadata } from '@app/cluster/shard-metadata';
+import type { NodeDirectory } from '@app/cluster/node-ref';
+import { ClusterNodeViews, nodeOfEvent } from './event-node';
 import {
   type DivergenceGroup,
   type OpenDivergence,
@@ -814,6 +816,7 @@ export class AnomalyService
   private readonly connectionClusterKeys = new Map<string, string>();
   private readonly clusterKeyByNode = new Map<string, string>();
   private readonly clusterViews = new Map<string, ReadonlySet<string>>();
+  private readonly clusterNodeViews = new ClusterNodeViews();
   private reshardSkewFirstSeen = new Map<string, Map<string, number>>();
   private activeReshardSkews = new Map<string, Set<string>>();
   private reshardSkewEventIds = new Map<string, Map<string, string>>();
@@ -1515,6 +1518,7 @@ export class AnomalyService
       this.reshardNodeSelves.delete(key);
     }
     this.forgetClusterKey(connectionId);
+    this.clusterNodeViews.forget(connectionId);
     this.forgetTopologyDivergence(connectionId);
     this.reshardSkewFirstSeen.delete(connectionId);
     this.activeReshardSkews.delete(connectionId);
@@ -2292,6 +2296,7 @@ export class AnomalyService
           );
         }
         const shards = await shardsPromise;
+        if (nodes) this.rememberClusterNodes(ctx.connectionId, nodes, shards, timestamp);
 
         // Gossip-race detectors only: under Raft, topology is consensus-managed.
         if (!isRaft && nodes) {
@@ -6400,6 +6405,7 @@ export class AnomalyService
             `${authoritative.address} (${authoritative.id.substring(0, 8)}, configEpoch ${authoritative.configEpoch}).`,
           resolved: false,
           connectionId: ctx.connectionId,
+          nodeSubject: { nodeId: phantom.id, address: phantom.address },
         };
 
         this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
@@ -7893,6 +7899,7 @@ export class AnomalyService
               `\`CLUSTER REPLICATE <new-primary-id>\` on ${this.clientAddress(s.replicaAddress)} to recover.`,
             resolved: false,
             connectionId: ctx.connectionId,
+            nodeSubject: { nodeId: s.replicaId, address: s.replicaAddress },
           };
         },
       });
@@ -8168,6 +8175,7 @@ export class AnomalyService
             message,
             resolved: false,
             connectionId: ctx.connectionId,
+            nodeSubject: { nodeId: f.nodeId, address: f.address },
           };
         },
       });
@@ -8226,6 +8234,7 @@ export class AnomalyService
             message,
             resolved: false,
             connectionId: ctx.connectionId,
+            nodeSubject: { nodeId: g.liveId, address: g.endpoint },
           };
         },
       });
@@ -8388,6 +8397,7 @@ export class AnomalyService
         `advisory: a re-add that reuses the same node-id is indistinguishable from a rejoin.`,
       resolved: false,
       connectionId: ctx.connectionId,
+      nodeSubject: { nodeId: rejoin.nodeId, address: rejoin.endpoint },
     };
   }
 
@@ -8872,6 +8882,7 @@ export class AnomalyService
       dedupeKey: finding.signature,
       resolved: false,
       connectionId,
+      nodeSubject: { nodeId: finding.sourceNodeId, address: finding.sourceAddress },
     };
   }
 
@@ -9004,6 +9015,7 @@ export class AnomalyService
         message: `${prefix}: ${finding.message}`,
         resolved: false,
         connectionId: ctx.connectionId,
+        nodeSubject: { nodeId: finding.ownerId },
       };
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
       await this.addAnomaly(event, ctx);
@@ -9302,6 +9314,7 @@ export class AnomalyService
       relatedMetrics: anomaly.relatedMetrics,
       replicaAddr: anomaly.replicaAddr,
       nodeAddr: anomaly.nodeAddr,
+      ...(anomaly.node ? { node: anomaly.node } : {}),
       dedupeKey: anomaly.dedupeKey,
       commands: anomaly.commands,
       eventSequence: anomaly.eventSequence,
@@ -9417,6 +9430,35 @@ export class AnomalyService
   private stamp(anomaly: AnomalyEvent, connectionId = anomaly.connectionId): void {
     anomaly.scopeId ??= this.correlationScopeOf(connectionId) || undefined;
     anomaly.eventSequence ??= this.nextEventSequence++;
+    this.stampNode(anomaly, connectionId);
+  }
+
+  private stampNode(anomaly: AnomalyEvent, connectionId: string | undefined): void {
+    const node = connectionId
+      ? nodeOfEvent(anomaly, this.nodeDirectoryOf(connectionId), this.clusterNodeViews.ownNodeId(connectionId))
+      : anomaly.node;
+    if (node) anomaly.node = node;
+    delete anomaly.nodeSubject;
+  }
+
+  private nodeDirectoryOf(connectionId: string): NodeDirectory | undefined {
+    const clusterKey = this.connectionClusterKeys.get(connectionId);
+    if (!clusterKey) return this.clusterNodeViews.freshest([connectionId]);
+    const members = [...this.connectionClusterKeys].filter(([, key]) => key === clusterKey).map(([peer]) => peer);
+    return this.clusterNodeViews.freshest([connectionId, ...members]);
+  }
+
+  private rememberClusterNodes(
+    connectionId: string,
+    nodes: ClusterNode[],
+    shards: ClusterShard[] | undefined,
+    readAt: number,
+  ): void {
+    const described = withConfiguredZones(
+      withShardMetadata(nodes, shards),
+      this.connectionRegistry.getNodeAvailabilityZones(connectionId),
+    );
+    this.clusterNodeViews.remember(connectionId, described, readAt);
   }
 
   private async addAnomaly(
@@ -10609,6 +10651,7 @@ export class AnomalyService
       relatedMetrics: s.relatedMetrics as MetricType[],
       replicaAddr: s.replicaAddr,
       nodeAddr: s.nodeAddr,
+      ...(s.node ? { node: s.node } : {}),
       dedupeKey: s.dedupeKey,
       commands: s.commands,
       eventSequence: s.eventSequence,

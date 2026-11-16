@@ -4529,6 +4529,20 @@ describe('AnomalyService', () => {
       expect(stuck()).toEqual([]);
     });
 
+    it('names the source node of a migration another node is reading', async () => {
+      see([
+        job({
+          sourceNodeId: B.id,
+          sourceAddress: B.address,
+          targetNodeId: A.id,
+          targetAddress: A.address,
+        }),
+      ]);
+      await after(0);
+
+      expect(running()[0].node).toEqual({ nodeId: B.id, address: B.address, role: 'primary' });
+    });
+
     it('opens an info entry for a running migration and closes it when the job ends', async () => {
       see([job()]);
       await after(0);
@@ -6499,6 +6513,19 @@ describe('AnomalyService', () => {
       expect(events[0].message).toContain('split-brain');
     });
 
+    it('names the stale primary on the event when another node reports the conflict', async () => {
+      const [stale, authoritative] = splitBrainNodes;
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue([
+        { ...stale, flags: ['master'] },
+        { ...authoritative, flags: ['myself', 'master'] },
+      ]);
+      await poll();
+
+      const [event] = service.getRecentEvents().filter((e) => e.metricType === MetricType.CLUSTER_TOPOLOGY);
+
+      expect(event.node).toEqual({ nodeId: 'nodeAAAAAAAA', address: '10.0.0.1:6379', role: 'primary' });
+    });
+
     it('emits no topology anomaly for a healthy cluster', async () => {
       dbClient.getClusterNodes = jest.fn().mockResolvedValue(healthyNodes);
       await poll();
@@ -6782,6 +6809,7 @@ describe('AnomalyService', () => {
       expect(events[0].message).toContain('2090');
       expect(events[0].message).toContain('CLUSTER REPLICATE');
       expect(events[0].message).toContain('repB'.substring(0, 8));
+      expect(events[0].node).toEqual({ nodeId: 'repB', address: '10.0.0.2:6380', role: 'replica' });
     });
 
     it('dedupes a persistent stuck replica to a single alert across polls', async () => {
@@ -11650,6 +11678,7 @@ describe('AnomalyService', () => {
       expect(events[0].severity).toBe(AnomalySeverity.WARNING);
       expect(events[0].message).toContain('valkey#3996');
       expect(events[0].message).toContain('single failover coordinator');
+      expect(events[0].node).toEqual({ nodeId: 'primB', address: '10.0.0.1:6379', role: 'primary' });
     });
 
     it('escalates to CRITICAL when churn continues into a second window', async () => {
@@ -12281,6 +12310,207 @@ describe('AnomalyService', () => {
   });
 
   // ─── Replication output-buffer pressure (valkey#3963) ──────────────────────
+
+  describe('failing node on events', () => {
+    const clusterInfoResponse = {
+      server: { role: 'master' },
+      clients: { connected_clients: '10', blocked_clients: '0' },
+      memory: { used_memory: '1000000', allocator_frag_ratio: '1.1' },
+      stats: {
+        instantaneous_ops_per_sec: '100',
+        instantaneous_input_kbps: '50',
+        instantaneous_output_kbps: '30',
+        evicted_keys: '0',
+        keyspace_misses: '5',
+        rejected_connections: '0',
+        acl_access_denied_auth: '0',
+        cluster_enabled: '1',
+      },
+    };
+
+    const clusterNode = (id: string, address: string, flags: string[], master = '-'): ClusterNode => ({
+      id,
+      address,
+      flags,
+      master,
+      pingSent: 0,
+      pongReceived: 0,
+      configEpoch: 1,
+      linkState: 'connected',
+      slots: flags.includes('master') ? [[0, 16383]] : [],
+    });
+
+    const viewOf = (self: string): ClusterNode[] =>
+      [
+        clusterNode('primA', '10.0.0.1:6379@16379', ['master']),
+        clusterNode('repB', '10.0.0.2:6380@16380', ['slave'], 'primA'),
+      ].map((node) => (node.id === self ? { ...node, flags: ['myself', ...node.flags] } : node));
+
+    const shards = [
+      {
+        shardId: 'shard-1',
+        slots: [[0, 16383]],
+        nodes: [
+          { id: 'primA', role: 'master', availabilityZone: 'eu-west-1a' },
+          { id: 'repB', role: 'replica', availabilityZone: 'eu-west-1b' },
+        ],
+      },
+    ];
+
+    const PRIMARY_NODE = {
+      nodeId: 'primA',
+      address: '10.0.0.1:6379',
+      role: 'primary',
+      shardId: 'shard-1',
+      availabilityZone: 'eu-west-1a',
+    };
+    const REPLICA_NODE = {
+      nodeId: 'repB',
+      address: '10.0.0.2:6380',
+      role: 'replica',
+      shardId: 'shard-1',
+      availabilityZone: 'eu-west-1b',
+    };
+
+    const raised = (overrides: Partial<AnomalyEvent> = {}): AnomalyEvent => ({
+      id: randomUUID(),
+      timestamp: Date.now(),
+      metricType: MetricType.MEMORY_USED,
+      anomalyType: AnomalyType.SPIKE,
+      severity: AnomalySeverity.WARNING,
+      value: 2,
+      baseline: 1,
+      zScore: 4,
+      stdDev: 1,
+      threshold: 3,
+      message: 'spike',
+      resolved: false,
+      connectionId: 'conn-1',
+      ...overrides,
+    });
+
+    const raise = async (overrides: Partial<AnomalyEvent> = {}, ctx: ConnectionContext = mockCtx) => {
+      const event = raised({ connectionId: ctx.connectionId, ...overrides });
+      await (service as any).addAnomaly(event, ctx);
+      return event;
+    };
+
+    beforeEach(() => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(clusterInfoResponse);
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue({ cluster_state: 'ok' });
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(viewOf('primA'));
+      dbClient.getClusterShards = jest.fn().mockResolvedValue(shards);
+    });
+
+    it('names the node that was read on an event about that node', async () => {
+      await poll();
+
+      const event = await raise();
+
+      expect(event.node).toEqual(PRIMARY_NODE);
+    });
+
+    it('stores the node with the event', async () => {
+      await poll();
+
+      const event = await raise();
+
+      expect(storage.saveAnomalyEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ id: event.id, node: PRIMARY_NODE }),
+        'conn-1',
+      );
+    });
+
+    it('names the node a detector points at and drops the pointer', async () => {
+      await poll();
+
+      const event = await raise({ metricType: MetricType.CLUSTER_TOPOLOGY, nodeSubject: { nodeId: 'repB' } });
+
+      expect(event.node).toEqual(REPLICA_NODE);
+      expect(event).not.toHaveProperty('nodeSubject');
+    });
+
+    it('names the replica on an event about a replica', async () => {
+      await poll();
+
+      const event = await raise({ metricType: MetricType.RESYNC_ESCALATION, replicaAddr: '10.0.0.2:6380' });
+
+      expect(event.node).toEqual(REPLICA_NODE);
+    });
+
+    it('names no node on a cluster-wide event', async () => {
+      await poll();
+
+      const event = await raise({ metricType: MetricType.CLUSTER_STATE });
+
+      expect(event.node).toBeUndefined();
+    });
+
+    it('names no node on a connection that is not a cluster', async () => {
+      const event = await raise();
+
+      expect(event.node).toBeUndefined();
+    });
+
+    it('takes the zone from the connection zone map when the server reports none', async () => {
+      dbClient.getClusterShards = jest.fn().mockResolvedValue([{ ...shards[0], nodes: [{ id: 'primA', role: 'master' }] }]);
+      (service as any).connectionRegistry.getNodeAvailabilityZones.mockReturnValue({ '10.0.0.1:6379': 'rack-7' });
+      await poll();
+
+      const event = await raise();
+
+      expect(event.node).toEqual({ ...PRIMARY_NODE, availabilityZone: 'rack-7' });
+    });
+
+    it('names the node without a shard when CLUSTER SHARDS is not available', async () => {
+      dbClient.getClusterShards = jest.fn().mockRejectedValue(new Error('ERR unknown subcommand'));
+      await poll();
+
+      const event = await raise();
+
+      expect(event.node).toEqual({ nodeId: 'primA', address: '10.0.0.1:6379', role: 'primary' });
+    });
+
+    it('uses the freshest view of the cluster, whichever member read it', async () => {
+      jest.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000);
+      await poll();
+      const replicaClient = {
+        ...dbClient,
+        getClusterNodes: jest
+          .fn()
+          .mockResolvedValue([
+            ...viewOf('repB'),
+            clusterNode('repC', '10.0.0.3:6381@16381', ['slave'], 'primA'),
+          ]),
+      };
+      (Date.now as jest.Mock).mockReturnValue(1_700_000_001_000);
+      await poll({ ...mockCtx, connectionId: 'conn-2', client: replicaClient as any, port: 6380 });
+
+      const event = await raise({ metricType: MetricType.CLUSTER_TOPOLOGY, nodeSubject: { nodeId: 'repC' } });
+      const own = await raise();
+
+      expect(event.node).toMatchObject({ nodeId: 'repC', address: '10.0.0.3:6381', role: 'replica' });
+      expect(own.node?.nodeId).toBe('primA');
+    });
+
+    it('names the node on an event another service raises through the sink', async () => {
+      await poll();
+      const event = raised({ metricType: MetricType.COMMAND_P99 });
+
+      service.stampExternalAnomaly(event);
+
+      expect(event.node).toEqual(PRIMARY_NODE);
+    });
+
+    it('forgets the view of a removed connection', async () => {
+      await poll();
+      (service as any).onConnectionRemoved('conn-1');
+
+      const event = await raise();
+
+      expect(event.node).toBeUndefined();
+    });
+  });
 
   describe('saved anomaly webhooks', () => {
     const anomaly = (): AnomalyEvent => ({
@@ -13149,6 +13379,7 @@ describe('AnomalyService', () => {
       expect(events[0].message).toContain('2768');
       expect(events[0].message).toContain('cluster-announce-ip');
       expect(events[0].message).toContain('flipped');
+      expect(events[0].node).toEqual({ nodeId: 'flippedAAAA', address: '127.0.0.1:6379', role: 'primary' });
     });
 
     it('emits WARNING for two live ids colliding on one routable endpoint', async () => {
@@ -13370,6 +13601,7 @@ describe('AnomalyService', () => {
       expect(events[0].severity).toBe(AnomalySeverity.WARNING);
       expect(events[0].message).toContain('2788');
       expect(events[0].message).toContain('CLUSTER FORGET removedCCCC');
+      expect(events[0].node).toEqual({ nodeId: 'removedCCCC', address: '10.0.0.3:6379', role: 'primary' });
       expect(events[0].message).toContain('EVERY remaining node');
     });
 
