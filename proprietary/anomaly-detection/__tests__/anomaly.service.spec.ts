@@ -12570,6 +12570,18 @@ describe('AnomalyService', () => {
         expect(event.node).toEqual({ ...PRIMARY_NODE, role: 'unknown' });
       });
 
+      it('keeps the role of an event up to 30 seconds older than the read', async () => {
+        const event = await raise({ timestamp: READ_AT - 30_000 });
+
+        expect(event.node).toEqual(PRIMARY_NODE);
+      });
+
+      it('names the node of an event older than that with an unknown role', async () => {
+        const event = await raise({ timestamp: READ_AT - 30_001 });
+
+        expect(event.node).toEqual({ ...PRIMARY_NODE, role: 'unknown' });
+      });
+
       it('waits three polls when those take longer than 30 seconds', async () => {
         jest.spyOn(service as any, 'getIntervalMs').mockReturnValue(20_000);
 

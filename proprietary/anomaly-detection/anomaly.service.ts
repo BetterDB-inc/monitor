@@ -9444,7 +9444,7 @@ export class AnomalyService
 
   private nodeInClusterView(anomaly: AnomalyEvent, connectionId: string): ClusterNodeRef | undefined {
     const view = this.clusterNodeViews.view(this.nodeViewKeyOf(connectionId));
-    const roleKnown = !view || anomaly.timestamp - view.readAt <= this.nodeViewStaleMs();
+    const roleKnown = !view || Math.abs(anomaly.timestamp - view.readAt) <= this.nodeViewStaleMs();
     return nodeOfEvent(anomaly, view?.directory, this.clusterNodeViews.ownNodeId(connectionId), roleKnown);
   }
 
