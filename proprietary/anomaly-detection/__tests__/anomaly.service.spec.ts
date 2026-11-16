@@ -4608,6 +4608,33 @@ describe('AnomalyService', () => {
             });
           });
 
+          it('clears the cancel request when two overlapping cancels are refused', async () => {
+            enable();
+            const { source } = await planned();
+            await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN);
+            report.jobViews = [listed()];
+            await service.followRebalanceRuns('conn-a');
+            let refuseFirst: (err: Error) => void = () => undefined;
+            let refuseSecond: (err: Error) => void = () => undefined;
+            source.call
+              .mockImplementationOnce(() => new Promise((_, reject) => (refuseFirst = reject)))
+              .mockImplementationOnce(() => new Promise((_, reject) => (refuseSecond = reject)));
+
+            const first = service.cancelRebalance('conn-a', 'a0000000');
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            clock += 1;
+            const second = service.cancelRebalance('conn-a', 'a0000000');
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            refuseFirst(new Error('NOPERM'));
+            expect(await first).toMatchObject({ status: 'refused' });
+            refuseSecond(new Error('NOPERM'));
+            expect(await second).toMatchObject({ status: 'refused' });
+
+            const run = (service as any).rebalanceRuns.get('conn-a').get('a0000000');
+            expect(run.cancelRequestedAt).toBeUndefined();
+            expect(run.cancelAcceptedAt).toBeUndefined();
+          });
+
           it('keeps a run running when the server refuses the cancel', async () => {
             enable();
             const { source } = await planned();

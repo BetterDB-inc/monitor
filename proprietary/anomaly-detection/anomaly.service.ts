@@ -877,6 +877,7 @@ export class AnomalyService
   private rebalanceRuns = new Map<string, Map<string, RebalanceRun>>();
   private rebalanceStarting = new Set<string>();
   private rebalanceFollowedAt = new Map<string, number>();
+  private cancelsInFlight = new Map<string, { count: number; requestedBefore?: number }>();
   private slotMigrationReadOnPoll = new Map<
     string,
     { timestamp: number; report: SlotMigrationReport }
@@ -10771,6 +10772,13 @@ export class AnomalyService
       failedBeforeCancel: report?.failed.map((entry) => entry.jobName) ?? run.failedBeforeCancel,
     };
     runs.set(sourceShardId, cancelling);
+    const key = `${connectionId}\n${sourceShardId}`;
+    const inFlight = this.cancelsInFlight.get(key) ?? {
+      count: 0,
+      requestedBefore: run.cancelRequestedAt,
+    };
+    inFlight.count += 1;
+    this.cancelsInFlight.set(key, inFlight);
     try {
       await this.readShard(
         connectionId,
@@ -10781,12 +10789,16 @@ export class AnomalyService
     } catch (err) {
       const now = runs.get(sourceShardId);
       if (
-        now?.cancelAcceptedAt === undefined &&
-        now?.cancelRequestedAt === cancelling.cancelRequestedAt
+        inFlight.count === 1 &&
+        now?.startedAt === run.startedAt &&
+        now.cancelAcceptedAt === undefined
       ) {
-        runs.set(sourceShardId, { ...now, cancelRequestedAt: run.cancelRequestedAt });
+        runs.set(sourceShardId, { ...now, cancelRequestedAt: inFlight.requestedBefore });
       }
       return { status: 'refused', message: errorText(err) };
+    } finally {
+      inFlight.count -= 1;
+      if (inFlight.count === 0) this.cancelsInFlight.delete(key);
     }
     const current = runs.get(sourceShardId);
     const accepted = {
