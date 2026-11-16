@@ -16,6 +16,7 @@ import {
   type TopologyView,
   type TrackedDisagreement,
   compareTopologyViews,
+  membersByObserver,
 } from '../topology-divergence';
 
 type NodePatch = Partial<ClusterNode> | null;
@@ -89,6 +90,7 @@ function judge(
       disagreements: compareTopologyViews(round.views),
       unanswered: round.unanswered ?? [],
       views: round.views.length,
+      members: membersByObserver(round.views),
     });
   }
   const last = rounds[rounds.length - 1];
@@ -365,6 +367,15 @@ describe('partiallyKnownNodes', () => {
       expect(finding.firstSeenAt).toBe(lacksP3);
       expect(partialMembershipMessage(finding, at)).toContain(`for ${(at - lacksP3) / 1000}s.`);
     });
+
+    it('keeps that age when the peer of the gone link then gives no view', () => {
+      const silent = { at: at + ROUND_MS, views: [view('n1', { p3: null }), view('p3')], unanswered: ['p1', 'p2'] };
+      const { found, tracked } = judge([...rounds, silent]);
+
+      expect(tracked).toMatchObject([{ key: 'membership:n1', lastSeenAt: heldAt }, { key: 'membership:p3' }, {}]);
+      expect(found[0]).toMatchObject({ nodeId: 'n1', confirmed: true, firstSeenAt: lacksP3 });
+      expect(found[0].notKnownBy).toEqual([]);
+    });
   });
 
   describe('when a dispute is held because one side gave no view', () => {
@@ -577,6 +588,18 @@ describe('partiallyKnownNodes', () => {
     const later = at + PARTIAL_MEMBERSHIP_MIN_AGE_MS;
     const { found: confirmed } = judge([...before, ...every(swapped, at, later)]);
     expect(confirmed[0]).toMatchObject({ nodeId: 'n1', confirmed: true, firstSeenAt: at });
+  });
+
+  it('starts a peer at zero when it listed the node while the disagreement was held and then loses it', () => {
+    const stuck = every(KNOWN_BY_P1_ONLY, 0, LONG_ENOUGH);
+    const learned = every([view('p2'), view('p3')], LONG_ENOUGH + ROUND_MS, LONG_ENOUGH + 2 * ROUND_MS, ['p1']);
+    const at = LONG_ENOUGH + 3 * ROUND_MS;
+    const forgot = { at, views: [view('p1'), view('p2', { n1: null }), view('p3')] };
+    const { found } = judge([...stuck, ...learned, forgot]);
+
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({ nodeId: 'n1', confirmed: false, firstSeenAt: at, rounds: 1 });
+    expect(ids(found[0].notKnownBy)).toEqual(['p2']);
   });
 
   it('does not count the time another node lacked the same peer', () => {

@@ -6,6 +6,7 @@ import {
   type TopologyView,
   type TrackedDisagreement,
   compareTopologyViews,
+  membersByObserver,
 } from './topology-divergence';
 import { selectObservers } from './topology-observers';
 import { type MembershipSighting, membershipSightings } from './partial-membership';
@@ -267,6 +268,7 @@ export class TopologyDivergenceMonitor {
       disagreements: compareTopologyViews(views),
       unanswered: [...new Set([...unanswered, ...unasked])],
       views: views.length,
+      members: membersByObserver(views),
     });
     state.accused = this.accusedBy(views);
 
