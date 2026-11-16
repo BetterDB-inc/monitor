@@ -4513,6 +4513,25 @@ describe('AnomalyService', () => {
             expect(calls).toEqual([]);
           });
 
+          it('sends nothing when a poll changes the plan during the re-check', async () => {
+            enable();
+            const { calls, discovery } = await planned();
+            const isolated = (discovery as any).discoverNodesIsolated as jest.Mock;
+            const answer = isolated.getMockImplementation()!;
+            isolated.mockImplementationOnce(async () => {
+              const [entry] = (service as any).hotShardRebalance.get('conn-a').values();
+              entry.verdict = { kind: 'no_plan', reason: 'settling' };
+              return answer();
+            });
+
+            expect(await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN)).toMatchObject({
+              status: 'changed',
+              reason: 'no_plan',
+            });
+            expect(calls).toEqual([]);
+            expect((service as any).rebalanceRuns.get('conn-a')).toBeUndefined();
+          });
+
           it('refuses and plans again when the source no longer owns the slots', async () => {
             enable();
             const { calls } = await planned();
@@ -4886,6 +4905,25 @@ describe('AnomalyService', () => {
             expect((service as any).rebalanceRuns.get('conn-a').get('a0000000').state).toBe(
               'succeeded',
             );
+          });
+
+          it('drops a poll read taken before the run started', async () => {
+            enable();
+            await planned();
+            (service as any).slotMigrationReadOnPoll.set('conn-a', {
+              timestamp: clock,
+              report: { jobViews: [], finishedJobs: [], failed: [], complete: true, migrations: [] },
+            });
+            await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN);
+            report.jobViews = [listed()];
+            await service.followRebalanceRuns('conn-a');
+
+            await (service as any).followRebalanceRunsOnPoll('conn-a', clock, pollNodes());
+
+            expect((service as any).rebalanceRuns.get('conn-a').get('a0000000')).toMatchObject({
+              state: 'running',
+              jobs: [{ jobName: 'job-1', state: 'running' }],
+            });
           });
 
           it('reads fresh nodes on the poll after an accepted cancel', async () => {

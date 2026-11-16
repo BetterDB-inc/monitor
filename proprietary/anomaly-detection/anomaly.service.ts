@@ -10695,6 +10695,14 @@ export class AnomalyService
           message: 'Could not confirm that no slot migration is running on every primary',
         };
       }
+      const latest = this.hotShardRebalance.get(connectionId)?.get(signature)?.verdict;
+      if (latest !== cached) {
+        return {
+          status: 'changed',
+          reason: latest?.kind === 'plan' ? 'plan_changed' : 'no_plan',
+          rebalance: this.hotShardDetails.get(connectionId)?.get(signature)?.rebalance,
+        };
+      }
       const failure = recheckFailure(plan, nodes);
       if (failure) {
         this.hotShardRebalance.get(connectionId)?.delete(signature);
@@ -10709,6 +10717,7 @@ export class AnomalyService
         runs.set(plan.sourceShardId, run);
         this.rebalanceRuns.set(connectionId, runs);
         this.slotMigrationCheckedAt.delete(connectionId);
+        this.slotMigrationReadOnPoll.delete(connectionId);
         this.rebalanceFollowedAt.delete(connectionId);
         this.holdRebalance(connectionId, 'migration_running');
         return run;

@@ -568,6 +568,21 @@ describe('slot rebalance run', () => {
       expect(run.jobs.map((job) => job.state)).toEqual(['running', 'running']);
     });
 
+    it('keeps a job running past the minute while the source lists it and its target is silent', () => {
+      const sourceOnly = report({
+        complete: false,
+        jobsReadNodeIds: ['src'],
+        jobViews: [view('job-a', 'tgt1', '0-99 200-200'), view('job-b', 'tgt2', '300-399')],
+      });
+      const first = followRun(started(), sourceOnly, nodes(), 2_000);
+      const run = followRun(first, sourceOnly, nodes(), 2_000 + REBALANCE_JOB_LISTING_GRACE_MS);
+      expect(run.jobs).toMatchObject([
+        { jobName: 'job-a', state: 'running', phase: 'snapshotting' },
+        { jobName: 'job-b', state: 'running', phase: 'snapshotting' },
+      ]);
+      expect(run.state).toBe('running');
+    });
+
     it('ends a job as cancelled on an accepted cancel once the source owns its slots, with its nodes silent', () => {
       const listed = followRun(
         started(),

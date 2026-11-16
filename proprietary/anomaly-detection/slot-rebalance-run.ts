@@ -282,6 +282,18 @@ const isRunJob = (run: RebalanceRun, job: RebalanceRunJob, entry: JobEntry) =>
 const findFailure = (run: RebalanceRun, job: RunJob, report: RunReport) =>
   report.failed.find((entry) => isRunJob(run, job, entry));
 
+function listedJob(run: RebalanceRun, job: RunJob, report: RunReport): RunJob | undefined {
+  const listed = report.jobViews.find(
+    (view) =>
+      view.jobName !== undefined &&
+      view.sourceNodeId === run.sourceShardId &&
+      view.targetNodeId === job.targetShardId &&
+      isRunJob(run, job, view),
+  );
+  if (listed?.jobName === undefined) return undefined;
+  return { ...job, state: 'running', jobName: listed.jobName, phase: listed.phase };
+}
+
 function followJob(
   run: RebalanceRun,
   job: RunJob,
@@ -290,16 +302,8 @@ function followJob(
   now: number,
 ): RunJob {
   if (job.state === 'succeeded' || job.state === 'failed' || job.state === 'cancelled') return job;
-  const listed = report.jobViews.find(
-    (view) =>
-      view.jobName !== undefined &&
-      view.sourceNodeId === run.sourceShardId &&
-      view.targetNodeId === job.targetShardId &&
-      isRunJob(run, job, view),
-  );
-  if (listed?.jobName !== undefined) {
-    return { ...job, state: 'running', jobName: listed.jobName, phase: listed.phase };
-  }
+  const listed = listedJob(run, job, report);
+  if (listed) return listed;
   const moved = owns(byId.get(job.targetShardId), job.ranges);
   const sourceOwns = owns(byId.get(run.sourceShardId), job.ranges);
   const failed = findFailure(run, job, report);
@@ -332,6 +336,9 @@ function followOwnership(
   now: number,
 ): RunJob {
   if (job.state === 'succeeded' || job.state === 'failed' || job.state === 'cancelled') return job;
+  const { unreadSince, ...seen } = job;
+  const listed = listedJob(run, seen, report);
+  if (listed) return listed;
   const failed = findFailure(run, job, report);
   if (failed && failedOnItsOwn(run, failed.jobName)) {
     return { ...job, state: 'failed', jobName: failed.jobName, message: failed.message };
@@ -340,9 +347,9 @@ function followOwnership(
   if (run.cancelAcceptedAt !== undefined && owns(byId.get(run.sourceShardId), job.ranges)) {
     return { ...job, state: 'cancelled' };
   }
-  const unreadSince = job.unreadSince ?? now;
-  if (now - unreadSince >= REBALANCE_JOB_LISTING_GRACE_MS) return { ...job, state: 'unknown' };
-  return { ...job, unreadSince };
+  const since = unreadSince ?? now;
+  if (now - since >= REBALANCE_JOB_LISTING_GRACE_MS) return { ...job, state: 'unknown' };
+  return { ...job, unreadSince: since };
 }
 
 function stateOf(jobs: readonly RebalanceRunJob[]): RebalanceRunState {
