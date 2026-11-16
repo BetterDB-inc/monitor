@@ -38,8 +38,20 @@ function slotLine(patch: Partial<DisagreementLine> = {}): DisagreementLine {
     slotCount: 10,
     shardIds: ['s000', 's001'],
     positions: [
-      { value: 's000p', owner: node('s000p'), count: 9, observers: [node('s000p')] },
-      { value: 's001p', owner: node('s001p'), count: 3, observers: [node('s001p')] },
+      {
+        value: 's000p',
+        owner: node('s000p'),
+        count: 9,
+        observerCount: 9,
+        observers: [node('s000p')],
+      },
+      {
+        value: 's001p',
+        owner: node('s001p'),
+        count: 3,
+        observerCount: 3,
+        observers: [node('s001p')],
+      },
     ],
     text: SAMPLED_TEXT,
     ...patch,
@@ -85,8 +97,20 @@ function doneCheck(finishedAt: number, patch: Partial<TopologyDisagreementSummar
   } = slotLine({
     tracked: false,
     positions: [
-      { value: 's000p', owner: node('s000p'), count: 497, observers: [node('s000p')] },
-      { value: 's001p', owner: node('s001p'), count: 3, observers: [node('s001p')] },
+      {
+        value: 's000p',
+        owner: node('s000p'),
+        count: 497,
+        observerCount: 497,
+        observers: [node('s000p')],
+      },
+      {
+        value: 's001p',
+        owner: node('s001p'),
+        count: 3,
+        observerCount: 3,
+        observers: [node('s001p')],
+      },
     ],
     text: FULL_TEXT,
   });

@@ -97,6 +97,7 @@ describe('summarizeDisagreements', () => {
         ownViews: 1,
         state: 'undisputed',
         disagreementIds: [],
+        staleDisagreementIds: [],
       },
       expect.objectContaining({ shardId: 's001', slots: [[5461, 10921]], ownViews: 2, state: 'undisputed' }),
       expect.objectContaining({ shardId: 's002', slots: [[10922, 16383]], ownViews: 0, state: 'undisputed' }),
@@ -218,13 +219,26 @@ describe('summarizeDisagreements', () => {
       expect(summary.shardTotals).toEqual({ total: 3, disputed: 1, undisputed: 0, notCompared: 2 });
     });
 
-    it('counts the views it is waiting for as asked and unanswered', () => {
+    it('names it on the shards it touches, apart from the lines of this round', () => {
       const summary = summarizeDisagreements(
         round(cluster(3), { observers: ['s000p', 's000r0', 's001p'], disagreements: [fresh, old] }),
         noEvent,
       );
 
-      expect(summary.coverage).toMatchObject({ asked: 4, answered: 3, complete: false, unansweredCount: 1 });
+      expect(summary.shards.map((shard) => [shard.shardId, shard.staleDisagreementIds])).toEqual([
+        ['s001', []],
+        ['s000', ['slot_owner:s000p|s002p']],
+        ['s002', ['slot_owner:s000p|s002p']],
+      ]);
+    });
+
+    it('lists the views it is waiting for as unanswered and counts only the views of this round as asked', () => {
+      const summary = summarizeDisagreements(
+        round(cluster(3), { observers: ['s000p', 's000r0', 's001p'], disagreements: [fresh, old] }),
+        noEvent,
+      );
+
+      expect(summary.coverage).toMatchObject({ asked: 3, answered: 3, complete: false, unansweredCount: 1 });
       expect(summary.coverage.unanswered.map((entry) => entry.nodeId)).toEqual(['s002p']);
     });
 
@@ -364,6 +378,7 @@ describe('summarizeDisagreements', () => {
             value: 's000p',
             owner: expect.objectContaining({ nodeId: 's000p', address: 's000p.internal:6379' }),
             count: 3,
+            observerCount: 3,
             observers: [
               expect.objectContaining({ nodeId: 's000p' }),
               expect.objectContaining({ nodeId: 's000r0' }),
@@ -374,6 +389,7 @@ describe('summarizeDisagreements', () => {
             value: 's001p',
             owner: expect.objectContaining({ nodeId: 's001p' }),
             count: 1,
+            observerCount: 1,
             observers: [expect.objectContaining({ nodeId: 's001p' })],
           },
         ],
@@ -534,16 +550,55 @@ describe('summarizeDisagreements', () => {
     const summary = summarizeDisagreements(round(cluster(3), { disagreements }), noEvent);
 
     expect(summary.disagreements).toHaveLength(1);
-    expect(summary.disagreements[0].positions.map((position) => [position.value, position.count])).toEqual([
-      ['failing', 3],
-      ['ok', 1],
+    expect(
+      summary.disagreements[0].positions.map((position) => [position.value, position.count, position.observerCount]),
+    ).toEqual([
+      ['failing', 3, 3],
+      ['ok', 1, 2],
     ]);
     expect(
       summary.disagreements[0].positions.map((position) => position.observers.map((observer) => observer.nodeId)),
-    ).toEqual([['s000p', 's000r0', 's001p'], []]);
+    ).toEqual([
+      ['s000p', 's000r0', 's001p'],
+      ['s002p', 's002r0'],
+    ]);
   });
 
-  it('lists on a merged line only the views that hold the side for every node of the line', () => {
+  it('never leaves a side that has views without a node to name', () => {
+    const cutOff = cluster(6)
+      .filter((entry) => entry.availabilityZone === 'b')
+      .map((entry) => entry.id);
+    const rest = cluster(6)
+      .map((entry) => entry.id)
+      .filter((id) => !cutOff.includes(id));
+    const disagreements = cutOff.map((subject) =>
+      tracked({
+        key: `failure_flags:${subject}`,
+        kind: 'failure_flags',
+        subjectIds: [subject],
+        positions: [
+          { value: 'failing', observers: rest },
+          { value: 'ok', observers: cutOff.filter((id) => id !== subject) },
+        ],
+      }),
+    );
+
+    const summary = summarizeDisagreements(round(cluster(6), { disagreements }), noEvent);
+
+    expect(summary.disagreements).toHaveLength(1);
+    for (const position of summary.disagreements[0].positions) {
+      expect(position.count).toBeGreaterThan(0);
+      expect(position.observers.length).toBeGreaterThan(0);
+      expect(position.observerCount).toBeGreaterThanOrEqual(position.observers.length);
+    }
+    expect(summary.disagreements[0].positions[1]).toMatchObject({
+      value: 'ok',
+      count: cutOff.length - 1,
+      observerCount: cutOff.length,
+    });
+  });
+
+  it('lists on a merged line every view that holds the side for one of its nodes, and how many they are', () => {
     const about = (subject: string, vouching: string) =>
       tracked({
         key: `failure_flags:${subject}`,
@@ -563,11 +618,12 @@ describe('summarizeDisagreements', () => {
       line.positions.map((position) => [
         position.value,
         position.count,
+        position.observerCount,
         position.observers.map((observer) => observer.nodeId),
       ]),
     ).toEqual([
-      ['ok', 2, ['s000r0']],
-      ['failing', 1, ['s000p']],
+      ['ok', 2, 3, ['s000r0', 's001p', 's001r0']],
+      ['failing', 1, 1, ['s000p']],
     ]);
   });
 
@@ -692,7 +748,12 @@ describe('summarizeDisagreements', () => {
       ['s001p', ['2', '9']],
       ['s002p', ['3', '5']],
     ]);
-    expect(merged.positions.map((position) => position.observers)).toEqual([[], []]);
+    expect(
+      merged.positions.map((position) => [position.count, position.observerCount, position.observers.map((n) => n.nodeId)]),
+    ).toEqual([
+      [1, 2, ['s001p', 's002p']],
+      [1, 2, ['s000p', 's001p']],
+    ]);
   });
 
   it('keeps each epoch of a merged line in the column of the view that reported it', () => {
@@ -907,9 +968,11 @@ describe('summarizeDisagreements', () => {
     expect(DISAGREEMENT_LIST_LIMIT).toBe(25);
     expect(line.subjectCount).toBe(30);
     expect(line.subjects).toHaveLength(25);
-    expect(line.positions.map((position) => [position.count, position.observers.length])).toEqual([
-      [30, 25],
-      [10, 10],
+    expect(
+      line.positions.map((position) => [position.count, position.observerCount, position.observers.length]),
+    ).toEqual([
+      [30, 30, 25],
+      [10, 10, 10],
     ]);
     expect(summary.coverage.unansweredCount).toBe(40);
     expect(summary.coverage.unanswered).toHaveLength(25);

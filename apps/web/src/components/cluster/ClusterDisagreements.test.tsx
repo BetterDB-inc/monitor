@@ -37,6 +37,7 @@ function shard(index: number, patch: Partial<DisagreementShard> = {}): Disagreem
     ownViews: 0,
     state: 'undisputed',
     disagreementIds: [],
+    staleDisagreementIds: [],
     ...patch,
   };
 }
@@ -63,12 +64,14 @@ function slotLine(patch: Partial<DisagreementLine> = {}): DisagreementLine {
         value: 's000p',
         owner: node('s000p'),
         count: 9,
+        observerCount: 9,
         observers: [node('s000p'), node('s000r'), node('s003p')],
       },
       {
         value: 's001p',
         owner: node('s001p'),
         count: 3,
+        observerCount: 3,
         observers: [node('s001p'), node('s001r'), node('s002p')],
       },
     ],
@@ -93,9 +96,14 @@ function flagsLine(patch: Partial<DisagreementLine> = {}): DisagreementLine {
     subjectCount: 1,
     shardIds: ['s002'],
     positions: [
-      { value: 'ok', count: 8, observers: [node('s000p')] },
-      { value: 'fail?', count: 3, observers: [node('s001p'), node('s001r'), node('s002p')] },
-      { value: 'fail', count: 1, observers: [node('s003p')] },
+      { value: 'ok', count: 8, observerCount: 8, observers: [node('s000p')] },
+      {
+        value: 'fail?',
+        count: 3,
+        observerCount: 3,
+        observers: [node('s001p'), node('s001r'), node('s002p')],
+      },
+      { value: 'fail', count: 1, observerCount: 1, observers: [node('s003p')] },
     ],
     text: 's002r.internal:6379: ok in 8 views, fail? in 3 views, fail in 1 view.',
     ...patch,
@@ -147,8 +155,8 @@ function largeCluster(): TopologyDisagreementSummary {
   const cutOff = [node('s001r'), node('s002p'), node('s004r')];
   const slots = slotLine({
     positions: [
-      { value: 's000p', owner: node('s000p'), count: 497, observers: everyone },
-      { value: 's001p', owner: node('s001p'), count: 3, observers: cutOff },
+      { value: 's000p', owner: node('s000p'), count: 497, observerCount: 497, observers: everyone },
+      { value: 's001p', owner: node('s001p'), count: 3, observerCount: 3, observers: cutOff },
     ],
     text: 'Slots 0-9: owned by s000p.internal:6379 in 497 views, by s001p.internal:6379 in 3 views.',
   });
@@ -158,8 +166,8 @@ function largeCluster(): TopologyDisagreementSummary {
     subjectCount: 4,
     shardIds: ['s010', 's011'],
     positions: [
-      { value: 'ok', count: 496, observers: everyone },
-      { value: 'fail?', count: 3, observers: cutOff },
+      { value: 'ok', count: 496, observerCount: 496, observers: everyone },
+      { value: 'fail?', count: 3, observerCount: 3, observers: cutOff },
     ],
     text: '4 nodes: ok in 496 views, fail? in 3 views.',
   });
@@ -302,8 +310,8 @@ describe('ClusterDisagreements', () => {
       subjects: [node('s001p'), node('s001r')],
       subjectCount: 2,
       positions: [
-        { value: null, count: 2, observers: [node('s000p'), node('s000r')] },
-        { value: null, count: 1, observers: [node('s002p')] },
+        { value: null, count: 2, observerCount: 2, observers: [node('s000p'), node('s000r')] },
+        { value: null, count: 1, observerCount: 1, observers: [node('s002p')] },
       ],
       epochs: [
         { node: node('s001p'), values: ['7', '4'] },
@@ -392,6 +400,9 @@ describe('ClusterDisagreements', () => {
 
   it('keeps a disagreement the last round could not check apart, without counts', () => {
     const stale = slotLine({
+      confirmed: false,
+      eventId: null,
+      eventType: null,
       stale: true,
       lastSeenAt: AT - 60_000,
       positions: [],
@@ -409,8 +420,49 @@ describe('ClusterDisagreements', () => {
       `Last seen ${new Date(AT - 60_000).toLocaleTimeString()}, not confirmed this round`,
     );
     expect(within(card).queryAllByRole('listitem')).toHaveLength(0);
-    expect(within(card).getByRole('link', { name: 'Open event' })).toBeInTheDocument();
+    expect(within(card).getByText('Not confirmed yet, seen in 6 rounds')).toBeInTheDocument();
     expect(within(held).queryByRole('article', { name: flagsLine().text })).not.toBeInTheDocument();
+  });
+
+  it('keeps counting a disagreement with an open event that the last round could not check', () => {
+    const stale = slotLine({
+      stale: true,
+      lastSeenAt: AT - 60_000,
+      positions: [],
+      text: 'Slots 0-9: views differed on the owner (s000p.internal:6379, s001p.internal:6379).',
+    });
+    show(summaryOf({ disagreements: [stale] }));
+
+    expect(screen.getByText('Disagreements (1)')).toBeInTheDocument();
+    expect(
+      screen.queryByRole('region', { name: 'Not confirmed this round' }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/^No disagreements among/)).not.toBeInTheDocument();
+    const card = lineOf(stale.text);
+    expect(card).toHaveTextContent(
+      `Last seen ${new Date(AT - 60_000).toLocaleTimeString()}, not confirmed this round`,
+    );
+    expect(within(card).getByRole('link', { name: 'Open event' })).toBeInTheDocument();
+  });
+
+  it('names the nodes of a merged side and counts the ones it does not list apart from the views', () => {
+    const line = flagsLine({
+      id: 'failure_flags:s001p+3',
+      subjects: [node('s001p'), node('s004p')],
+      subjectCount: 4,
+      positions: [
+        { value: 'fail?', count: 8, observerCount: 8, observers: [node('s000p')] },
+        { value: 'ok', count: 3, observerCount: 4, observers: [node('s001p'), node('s004p')] },
+      ],
+      text: '4 nodes: fail? in 8 views, ok in 3 views.',
+    });
+
+    show(summaryOf({ disagreements: [line] }));
+
+    const [, vouching] = sidesOf(lineOf(line.text));
+    expect(vouching).toHaveTextContent('3 views');
+    expect(within(vouching).getByRole('link', { name: 's004p.internal:6379' })).toBeInTheDocument();
+    expect(within(vouching).getByText('+2 more')).toBeInTheDocument();
   });
 
   it('shows what was seen before without counts when the views could not be compared', () => {
@@ -487,6 +539,48 @@ describe('ClusterDisagreements', () => {
       'href',
       '/cluster?connection=conn-1&tab=nodes&node=s002p',
     );
+  });
+
+  it('links a shard that only an unconfirmed disagreement touches to that disagreement', () => {
+    const stale = slotLine({
+      confirmed: false,
+      eventId: null,
+      eventType: null,
+      stale: true,
+      positions: [],
+      text: 'Slots 0-9: views differed on the owner (s000p.internal:6379, s001p.internal:6379).',
+    });
+    const fresh = flagsLine({ shardIds: ['s001'] });
+    show(
+      summaryOf({
+        disagreements: [fresh, stale],
+        shards: [
+          shard(1, {
+            state: 'disputed',
+            disagreementIds: [fresh.id],
+            staleDisagreementIds: [stale.id],
+          }),
+          shard(0, { state: 'not_compared', staleDisagreementIds: [stale.id] }),
+          shard(2),
+        ],
+      }),
+    );
+
+    const rows = shardRows();
+    expect(within(rows[0]).getByRole('link', { name: '1 disagreement' })).toHaveAttribute(
+      'href',
+      `#disagreement-${fresh.id}`,
+    );
+    expect(within(rows[0]).getByRole('link', { name: '1 unconfirmed' })).toHaveAttribute(
+      'href',
+      `#disagreement-${stale.id}`,
+    );
+    expect(within(rows[1]).getByText('Not compared')).toBeInTheDocument();
+    expect(within(rows[1]).getByRole('link', { name: '1 unconfirmed' })).toHaveAttribute(
+      'href',
+      `#disagreement-${stale.id}`,
+    );
+    expect(within(rows[2]).queryByRole('link', { name: /unconfirmed/ })).not.toBeInTheDocument();
   });
 
   it('hides the undisputed shards on request', () => {
