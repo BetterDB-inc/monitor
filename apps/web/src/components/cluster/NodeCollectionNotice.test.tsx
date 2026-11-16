@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type { ComponentProps } from 'react';
 
@@ -185,6 +185,26 @@ describe('NodeCollectionNotice', () => {
       rerender(notice({ collection: { collected: true, connectionId: 'conn-node' } }));
       expect(screen.getByRole('link', { name: 'Open node dashboard' })).toBeInTheDocument();
 
+      rerender(notice({ collection: { collected: false } }));
+
+      expect(screen.queryByRole('link', { name: 'Open node dashboard' })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: BUTTON })).toBeEnabled();
+    });
+
+    it('offers to connect again when the server named the connection before the request came back', async () => {
+      let finish: (value: { id: string; created: boolean }) => void = () => {};
+      mocks.connectClusterNode.mockReturnValue(
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+      );
+      const { rerender } = render(notice());
+      fireEvent.click(screen.getByRole('button', { name: BUTTON }));
+
+      rerender(notice({ collection: { collected: true, connectionId: 'conn-node' } }));
+      await act(async () => {
+        finish({ id: 'conn-node', created: true });
+      });
       rerender(notice({ collection: { collected: false } }));
 
       expect(screen.queryByRole('link', { name: 'Open node dashboard' })).not.toBeInTheDocument();

@@ -53,8 +53,8 @@ export function NodeCollectionNotice({
   const confirmed = collection?.collected === true;
 
   useEffect(() => {
-    if (confirmed) setConnectedFromHere(null);
-  }, [confirmed]);
+    if (confirmed && connectedFromHere) setConnectedFromHere(null);
+  }, [confirmed, connectedFromHere]);
 
   if (!collection || !clusterConnection) return null;
 
