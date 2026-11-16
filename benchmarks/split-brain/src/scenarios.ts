@@ -289,7 +289,7 @@ export function scenarios(nodeTimeoutMs: number): Scenario[] {
             '--cluster-to',
             ctx.ids[target.name],
             '--cluster-slots',
-            '300',
+            '4000',
             '--cluster-yes',
           ],
           300_000,
