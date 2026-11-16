@@ -16,6 +16,8 @@ export const FULL_CHECK_DEFAULTS = {
   keepMs: 10 * 60_000,
 };
 
+const MAX_FAILURE_REASON_LENGTH = 200;
+
 const KEPT_FLAGS = ['master', 'slave', 'fail', 'fail?', 'handshake', 'noaddr'];
 const FAILING_FLAGS = ['fail', 'fail?'];
 const UNREACHABLE_FLAGS = ['handshake', 'noaddr'];
@@ -49,19 +51,33 @@ export interface FullCheckOutcome {
   round: FullCheckRound;
 }
 
+export interface FullCheckFailure {
+  at: number;
+  reason: string;
+}
+
 export type FullCheckState =
-  | { state: 'none' }
+  | { state: 'none'; failure?: FullCheckFailure }
   | { state: 'running'; startedAt: number; asked: number; total: number }
-  | { state: 'done'; startedAt: number; finishedAt: number; asked: number; total: number; outcome: FullCheckOutcome };
+  | {
+      state: 'done';
+      startedAt: number;
+      finishedAt: number;
+      asked: number;
+      total: number;
+      outcome: FullCheckOutcome;
+      failure?: FullCheckFailure;
+    };
 
 export type FullCheckRefusal = { result: 'running' } | { result: 'too_soon'; retryAt: number };
 
 export type FullCheckStart = { result: 'started' } | FullCheckRefusal;
 
-export type FullCheckBlocker = 'no_direct_access' | 'raft_cluster' | 'no_cluster_view';
+export type FullCheckBlocker = 'no_direct_access' | 'ssh_tunnel' | 'raft_cluster' | 'no_cluster_view';
 
 export const FULL_CHECK_BLOCKER_TEXT: Record<FullCheckBlocker, string> = {
   no_direct_access: 'The monitor reaches this cluster through one node only, so it cannot ask every node.',
+  ssh_tunnel: 'This connection goes through an SSH tunnel, so the monitor cannot reach every node.',
   raft_cluster: 'The nodes of a Raft cluster share one agreed view, so there is nothing to compare.',
   no_cluster_view: 'No cluster view has been read on this connection yet.',
 };
@@ -74,6 +90,7 @@ export interface TopologyFullCheckView {
   asked: number;
   total: number;
   retryAt: number | null;
+  lastFailure: FullCheckFailure | null;
   summary?: TopologyDisagreementSummary;
 }
 
@@ -84,6 +101,7 @@ export interface TopologyDisagreementReport extends TopologyDisagreementSummary 
 export type TopologyFullCheckStart =
   | FullCheckStart
   | { result: 'unavailable'; reason: FullCheckBlocker; text: string }
+  | { result: 'unknown_connection' }
   | { result: 'view_unreadable' };
 
 export function fullCheckView(
@@ -94,7 +112,16 @@ export function fullCheckView(
 ): TopologyFullCheckView {
   const unavailable = blocker ? { reason: blocker, text: FULL_CHECK_BLOCKER_TEXT[blocker] } : null;
   if (check.state === 'none') {
-    return { state: 'none', unavailable, startedAt: null, finishedAt: null, asked: 0, total: 0, retryAt: null };
+    return {
+      state: 'none',
+      unavailable,
+      startedAt: null,
+      finishedAt: null,
+      asked: 0,
+      total: 0,
+      retryAt: null,
+      lastFailure: check.failure ?? null,
+    };
   }
   if (check.state === 'running') {
     return {
@@ -105,6 +132,7 @@ export function fullCheckView(
       asked: check.asked,
       total: check.total,
       retryAt: null,
+      lastFailure: null,
     };
   }
   return {
@@ -115,6 +143,7 @@ export function fullCheckView(
     asked: check.asked,
     total: check.total,
     retryAt: check.finishedAt + minIntervalMs,
+    lastFailure: check.failure ?? null,
     summary: summarizeDisagreements(check.outcome.round, eventOf),
   };
 }
@@ -302,13 +331,22 @@ interface ClusterCheck {
   token: number;
   running?: { startedAt: number; asked: number; total: number };
   done?: FullCheckOutcome;
+  failed?: FullCheckFailure;
+}
+
+function failureReason(error: unknown): string {
+  const text = error instanceof Error ? error.message : String(error);
+  return text.slice(0, MAX_FAILURE_REASON_LENGTH);
 }
 
 export class TopologyFullChecks {
   private readonly clusters = new Map<string, ClusterCheck>();
   private tokens = 0;
 
-  constructor(private readonly limits: { minIntervalMs: number; keepMs: number } = FULL_CHECK_DEFAULTS) {}
+  constructor(
+    private readonly limits: { minIntervalMs: number; keepMs: number } = FULL_CHECK_DEFAULTS,
+    private readonly now: () => number = Date.now,
+  ) {}
 
   start(
     clusterKey: string,
@@ -333,8 +371,10 @@ export class TopologyFullChecks {
         entry.running = undefined;
         entry.done = outcome;
       },
-      () => {
-        if (isCurrent()) entry.running = undefined;
+      (error) => {
+        if (!isCurrent()) return;
+        entry.running = undefined;
+        entry.failed = { at: this.now(), reason: failureReason(error) };
       },
     );
     return { result: 'started' };
@@ -351,10 +391,13 @@ export class TopologyFullChecks {
     const entry = this.clusters.get(clusterKey);
     if (!entry) return { state: 'none' };
     if (entry.running) return { state: 'running', ...entry.running };
+    if (entry.done && at - entry.done.finishedAt >= this.limits.keepMs) entry.done = undefined;
+    if (entry.failed && at - entry.failed.at >= this.limits.keepMs) entry.failed = undefined;
     const outcome = entry.done;
-    if (!outcome || at - outcome.finishedAt >= this.limits.keepMs) {
-      this.clusters.delete(clusterKey);
-      return { state: 'none' };
+    const failure = entry.failed ? { failure: entry.failed } : {};
+    if (!outcome) {
+      if (!entry.failed) this.clusters.delete(clusterKey);
+      return { state: 'none', ...failure };
     }
     return {
       state: 'done',
@@ -363,6 +406,7 @@ export class TopologyFullChecks {
       asked: outcome.asked,
       total: outcome.total,
       outcome,
+      ...failure,
     };
   }
 

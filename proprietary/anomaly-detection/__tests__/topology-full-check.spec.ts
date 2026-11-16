@@ -470,16 +470,81 @@ describe('TopologyFullChecks', () => {
     expect(checks.state('c1', AT + 600)).toEqual({ state: 'none' });
   });
 
-  it('goes back to nothing when a check breaks, and lets the next one start', async () => {
-    const checks = new TopologyFullChecks();
+  it('records that a check broke, and lets the next one start', async () => {
+    const checks = new TopologyFullChecks(FULL_CHECK_DEFAULTS, () => AT + 5);
     const run = deferred();
     checks.start('c1', AT, 4, () => run.promise);
 
     run.fail(new Error('boom'));
     await settled();
 
-    expect(checks.state('c1', AT + 10)).toEqual({ state: 'none' });
+    expect(checks.state('c1', AT + 10)).toEqual({ state: 'none', failure: { at: AT + 5, reason: 'boom' } });
     expect(checks.start('c1', AT + 20, 4, () => deferred().promise)).toEqual({ result: 'started' });
+  });
+
+  it('keeps the earlier result and says that the newer check broke', async () => {
+    let clock = AT;
+    const checks = new TopologyFullChecks(FULL_CHECK_DEFAULTS, () => clock);
+    const outcome = await outcomeAt(AT + 500);
+    checks.start('c1', AT, 4, () => Promise.resolve(outcome));
+    await settled();
+    const run = deferred();
+    checks.start('c1', AT + 40_000, 4, () => run.promise);
+
+    clock = AT + 40_100;
+    run.fail(new Error('boom'));
+    await settled();
+
+    expect(checks.state('c1', AT + 40_200)).toEqual({
+      state: 'done',
+      startedAt: outcome.startedAt,
+      finishedAt: AT + 500,
+      asked: outcome.asked,
+      total: outcome.total,
+      outcome,
+      failure: { at: AT + 40_100, reason: 'boom' },
+    });
+  });
+
+  it('forgets the failure when the next check starts', async () => {
+    const checks = new TopologyFullChecks(FULL_CHECK_DEFAULTS, () => AT + 5);
+    checks.start('c1', AT, 4, () => Promise.reject(new Error('boom')));
+    await settled();
+    const outcome = await outcomeAt(AT + 500);
+
+    checks.start('c1', AT + 100, 4, () => Promise.resolve(outcome));
+    expect(checks.state('c1', AT + 110)).toMatchObject({ state: 'running' });
+    await settled();
+
+    expect(checks.state('c1', AT + 600)).not.toHaveProperty('failure');
+  });
+
+  it('drops a failure after 10 minutes, apart from the result it sits beside', async () => {
+    let clock = AT;
+    const checks = new TopologyFullChecks(FULL_CHECK_DEFAULTS, () => clock);
+    const outcome = await outcomeAt(AT + 500);
+    checks.start('c1', AT, 4, () => Promise.resolve(outcome));
+    await settled();
+    clock = AT + 300_000;
+    checks.start('c1', AT + 299_000, 4, () => Promise.reject(new Error('boom')));
+    await settled();
+
+    expect(checks.state('c1', AT + 500 + 599_999)).toMatchObject({ state: 'done', failure: { at: AT + 300_000 } });
+    expect(checks.state('c1', AT + 500 + 600_000)).toEqual({
+      state: 'none',
+      failure: { at: AT + 300_000, reason: 'boom' },
+    });
+    expect(checks.state('c1', AT + 300_000 + 600_000)).toEqual({ state: 'none' });
+  });
+
+  it('keeps the reason of a failure short', async () => {
+    const checks = new TopologyFullChecks(FULL_CHECK_DEFAULTS, () => AT);
+    checks.start('c1', AT, 4, () => Promise.reject(new Error('x'.repeat(500))));
+    checks.start('c2', AT, 4, () => Promise.reject('plain text'));
+    await settled();
+
+    expect(checks.state('c1', AT + 10)).toMatchObject({ failure: { reason: 'x'.repeat(200) } });
+    expect(checks.state('c2', AT + 10)).toMatchObject({ failure: { reason: 'plain text' } });
   });
 
   it('says whether a check may start without starting one', async () => {
@@ -514,7 +579,34 @@ describe('fullCheckView', () => {
       asked: 0,
       total: 0,
       retryAt: null,
+      lastFailure: null,
     });
+  });
+
+  it('says that the last check failed, with or without an earlier result', async () => {
+    const failure = { at: AT + 40_100, reason: 'boom' };
+    const outcome = { ...(await check(cluster(2))), finishedAt: AT + 500 };
+
+    expect(fullCheckView({ state: 'none', failure }, null, noEvent)).toMatchObject({
+      state: 'none',
+      finishedAt: null,
+      lastFailure: failure,
+    });
+    expect(
+      fullCheckView(
+        {
+          state: 'done',
+          startedAt: outcome.startedAt,
+          finishedAt: outcome.finishedAt,
+          asked: outcome.asked,
+          total: outcome.total,
+          outcome,
+          failure,
+        },
+        null,
+        noEvent,
+      ),
+    ).toMatchObject({ state: 'done', finishedAt: AT + 500, retryAt: AT + 30_500, lastFailure: failure });
   });
 
   it('says why a check cannot be run', () => {
@@ -524,6 +616,10 @@ describe('fullCheckView', () => {
     });
     expect(fullCheckView({ state: 'none' }, 'no_direct_access', noEvent).unavailable?.reason).toBe('no_direct_access');
     expect(fullCheckView({ state: 'none' }, 'no_cluster_view', noEvent).unavailable?.reason).toBe('no_cluster_view');
+    expect(fullCheckView({ state: 'none' }, 'ssh_tunnel', noEvent).unavailable).toEqual({
+      reason: 'ssh_tunnel',
+      text: 'This connection goes through an SSH tunnel, so the monitor cannot reach every node.',
+    });
   });
 
   it('shows how far a running check is', () => {
@@ -535,6 +631,7 @@ describe('fullCheckView', () => {
       asked: 312,
       total: 500,
       retryAt: null,
+      lastFailure: null,
     });
   });
 

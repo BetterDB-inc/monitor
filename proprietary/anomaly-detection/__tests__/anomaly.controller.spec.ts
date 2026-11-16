@@ -2,6 +2,7 @@ import { BadRequestException, HttpException } from '@nestjs/common';
 import { AnomalyController } from '../anomaly.controller';
 import { AnomalyService } from '../anomaly.service';
 import { LicenseGuard } from '@proprietary/licenses';
+import { ALLOW_MEMBERS_KEY } from '@app/auth/guards/roles.decorator';
 
 jest.mock('@proprietary/licenses', () => ({
   LicenseGuard: class {},
@@ -258,6 +259,7 @@ describe('AnomalyController.startTopologyFullCheck', () => {
     asked: 0,
     total: 500,
     retryAt: null,
+    lastFailure: null,
   };
   const service = {
     startTopologyFullCheck: jest.fn(),
@@ -298,6 +300,33 @@ describe('AnomalyController.startTopologyFullCheck', () => {
       reason: 'raft_cluster',
       message: 'The nodes of a Raft cluster share one agreed view, so there is nothing to compare.',
     });
+  });
+
+  it('answers 409 for a connection that goes through an SSH tunnel', async () => {
+    service.startTopologyFullCheck.mockResolvedValue({
+      result: 'unavailable',
+      reason: 'ssh_tunnel',
+      text: 'This connection goes through an SSH tunnel, so the monitor cannot reach every node.',
+    });
+
+    const error = await refusal();
+
+    expect(error.getStatus()).toBe(409);
+    expect(error.getResponse()).toMatchObject({ reason: 'ssh_tunnel' });
+  });
+
+  it('answers 404 for a connection that is not registered', async () => {
+    service.startTopologyFullCheck.mockResolvedValue({ result: 'unknown_connection' });
+
+    const error = await refusal();
+
+    expect(error.getStatus()).toBe(404);
+    expect(error.getResponse()).toMatchObject({ message: 'Connection c1 not found' });
+    expect(service.getTopologyDisagreements).not.toHaveBeenCalled();
+  });
+
+  it('is closed to read-only members, who get 403 from the mutation guard', () => {
+    expect(Reflect.getMetadata(ALLOW_MEMBERS_KEY, AnomalyController.prototype.startTopologyFullCheck)).toBeUndefined();
   });
 
   it('answers 429 with the earliest next start when the last check is too recent', async () => {

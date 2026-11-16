@@ -26404,6 +26404,7 @@ describe('AnomalyService', () => {
         );
         (discovery as any).onNodeClientOnce = once;
         (service as any).connectionRegistry.get.mockReturnValue(dbClient);
+        (service as any).connectionRegistry.getConfig.mockImplementation((id: string) => ({ id, host: 'seed' }));
       });
 
       it('is not offered before a cluster view was read on the connection', async () => {
@@ -26415,6 +26416,7 @@ describe('AnomalyService', () => {
           asked: 0,
           total: 0,
           retryAt: null,
+          lastFailure: null,
         });
         expect(await service.startTopologyFullCheck('conn-1')).toMatchObject({
           result: 'unavailable',
@@ -26573,6 +26575,62 @@ describe('AnomalyService', () => {
         });
         expect(fullCheck().unavailable?.reason).toBe('no_direct_access');
         expect(once).not.toHaveBeenCalled();
+      });
+
+      it('is not offered on a connection that goes through an SSH tunnel', async () => {
+        await rounds(1);
+        (service as any).connectionRegistry.getConfig.mockReturnValue({
+          host: 'seed',
+          sshTunnel: { enabled: true, host: 'bastion' },
+        });
+
+        expect(await service.startTopologyFullCheck('conn-1')).toEqual({
+          result: 'unavailable',
+          reason: 'ssh_tunnel',
+          text: 'This connection goes through an SSH tunnel, so the monitor cannot reach every node.',
+        });
+        expect(fullCheck().unavailable?.reason).toBe('ssh_tunnel');
+        expect(once).not.toHaveBeenCalled();
+      });
+
+      it('is still offered when the SSH tunnel of the connection is switched off', async () => {
+        await rounds(1);
+        (service as any).connectionRegistry.getConfig.mockReturnValue({
+          host: 'seed',
+          sshTunnel: { enabled: false, host: 'bastion' },
+        });
+
+        expect(fullCheck().unavailable).toBeNull();
+        expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'started' });
+      });
+
+      it('does not know a connection that is not registered', async () => {
+        await rounds(1);
+        (service as any).connectionRegistry.getConfig.mockReturnValue(null);
+
+        expect(await service.startTopologyFullCheck('ghost')).toEqual({ result: 'unknown_connection' });
+        expect(once).not.toHaveBeenCalled();
+      });
+
+      it('says that the last check failed and keeps the result before it', async () => {
+        await rounds(1);
+        await service.startTopologyFullCheck('conn-1');
+        await finished();
+        const earlier = fullCheck();
+        const clusterKey = (service as any).connectionClusterKeys.get('conn-1');
+
+        (service as any).topologyFullChecks.start(clusterKey, Date.now() + 40_000, 3, () =>
+          Promise.reject(new Error('boom')),
+        );
+        await finished();
+
+        expect(fullCheck()).toMatchObject({
+          state: 'done',
+          finishedAt: earlier.finishedAt,
+          summary: { status: 'ok' },
+          lastFailure: { at: expect.any(Number), reason: 'boom' },
+        });
+        expect(earlier.lastFailure).toBeNull();
       });
 
       it('is not offered on a Raft cluster', async () => {

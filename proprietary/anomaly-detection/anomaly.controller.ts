@@ -216,12 +216,16 @@ export class AnomalyController {
     summary: 'Ask every node of the cluster for its view, once',
     description:
       'Starts the check and returns at once; progress and the result are in fullCheck of topology-disagreements. ' +
-      'A request made while a check runs joins it. Answers 409 when the check cannot be run on the connection, ' +
-      '429 within 30 seconds of the last check and 503 when the node list cannot be read.',
+      'A request made while a check runs joins it. Admins only: a read-only member gets 403. Answers 404 for a ' +
+      'connection that is not registered, 409 when the check cannot be run on the connection, 429 within 30 ' +
+      'seconds of the last check and 503 when the node list cannot be read.',
   })
   @ApiHeader({ name: CONNECTION_ID_HEADER, required: true, description: 'Connection ID of the cluster' })
   async startTopologyFullCheck(@ConnectionId({ required: true }) connectionId: string): Promise<TopologyFullCheckView> {
     const started = await this.anomalyService.startTopologyFullCheck(connectionId);
+    if (started.result === 'unknown_connection') {
+      throw new NotFoundException(`Connection ${connectionId} not found`);
+    }
     if (started.result === 'unavailable') {
       throw new ConflictException({ statusCode: HttpStatus.CONFLICT, message: started.text, reason: started.reason });
     }

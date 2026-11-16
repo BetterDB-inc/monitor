@@ -38,6 +38,7 @@ const NO_CHECK = {
   asked: 0,
   total: 0,
   retryAt: null,
+  lastFailure: null,
 };
 
 function reportOf(connectionId: string) {
@@ -81,7 +82,7 @@ function summaryOf(connectionId: string) {
 describe('topology disagreement routes', () => {
   let app: NestFastifyApplication;
   let licensed: boolean;
-  const service = { getTopologyDisagreements: jest.fn(reportOf) };
+  const service = { getTopologyDisagreements: jest.fn(reportOf), startTopologyFullCheck: jest.fn() };
   const registry = {
     get: jest.fn((id: string) => {
       if (id !== 'conn-1') throw new NotFoundException(`Connection ${id} not found`);
@@ -157,6 +158,41 @@ describe('topology disagreement routes', () => {
 
       expect(res.statusCode).toBe(402);
       expect(service.getTopologyDisagreements).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('POST /anomaly/topology-disagreements/full-check', () => {
+    const url = '/anomaly/topology-disagreements/full-check';
+
+    it('answers 202 with the state of the check that was started', async () => {
+      service.startTopologyFullCheck.mockResolvedValue({ result: 'started' });
+
+      const res = await app.inject({ method: 'POST', url, headers: { 'x-connection-id': 'conn-1' } });
+
+      expect(res.statusCode).toBe(202);
+      expect(res.json()).toMatchObject({ state: 'done', asked: 6, total: 6, lastFailure: null });
+    });
+
+    it('answers 404 for a connection that is not registered', async () => {
+      service.startTopologyFullCheck.mockResolvedValue({ result: 'unknown_connection' });
+
+      const res = await app.inject({ method: 'POST', url, headers: { 'x-connection-id': 'ghost' } });
+
+      expect(res.statusCode).toBe(404);
+      expect(res.json()).toMatchObject({ message: 'Connection ghost not found' });
+    });
+
+    it('answers 409 with the reason for a connection that goes through an SSH tunnel', async () => {
+      service.startTopologyFullCheck.mockResolvedValue({
+        result: 'unavailable',
+        reason: 'ssh_tunnel',
+        text: 'This connection goes through an SSH tunnel, so the monitor cannot reach every node.',
+      });
+
+      const res = await app.inject({ method: 'POST', url, headers: { 'x-connection-id': 'conn-1' } });
+
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toMatchObject({ reason: 'ssh_tunnel' });
     });
   });
 

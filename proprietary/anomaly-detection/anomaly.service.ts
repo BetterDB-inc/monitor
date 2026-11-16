@@ -10612,6 +10612,7 @@ export class AnomalyService
   }
 
   async startTopologyFullCheck(connectionId: string): Promise<TopologyFullCheckStart> {
+    if (!this.connectionRegistry.getConfig(connectionId)) return { result: 'unknown_connection' };
     const blocker = this.topologyFullCheckBlocker(connectionId);
     if (blocker) return { result: 'unavailable', reason: blocker, text: FULL_CHECK_BLOCKER_TEXT[blocker] };
     const clusterKey = this.connectionClusterKeys.get(connectionId) as string;
@@ -10657,6 +10658,7 @@ export class AnomalyService
 
   private topologyFullCheckBlocker(connectionId: string): FullCheckBlocker | null {
     if (!this.clusterDiscovery || !this.dialsDataNodes(connectionId)) return 'no_direct_access';
+    if (this.connectionRegistry.getConfig(connectionId)?.sshTunnel?.enabled) return 'ssh_tunnel';
     if (this.raftMode.get(connectionId)) return 'raft_cluster';
     return this.connectionClusterKeys.has(connectionId) ? null : 'no_cluster_view';
   }
