@@ -532,6 +532,8 @@ Events read from `GET /api/anomaly/events`, the events of each group of `GET /ap
 
 To see which nodes of a cluster are collected without waiting for an event, read `GET /api/metrics/cluster/nodes/discover` or the `get_cluster_nodes` MCP tool: every node carries `collected` and, when it is collected, `connectionId`. There a node also counts as collected when a connection points at its announced hostname. A connection at that address that is known to read a node of another cluster does not count. The node a connection reads is known for the connections auto-registration added or adopted, so a connection added by hand counts by its address alone.
 
+In the web UI the node shows up as a link on the event timeline of the Overview page, in the event lists of the Anomalies page, in the incident list and on each incident timeline entry. The link opens the Nodes tab of the Cluster page with that node's row open, and carries a **Not collected** badge when `collected` is `false`. From that row the node can be connected with one click (see [Connecting a single node](cluster-auto-registration.md#connecting-a-single-node)).
+
 Which node each event type names:
 
 | Event types | `node` |
