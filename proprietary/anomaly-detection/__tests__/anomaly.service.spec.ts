@@ -4571,6 +4571,7 @@ describe('AnomalyService', () => {
             }
             expect(source.call).not.toHaveBeenCalled();
             expect(await service.followRebalanceRuns('conn-a')).toEqual([]);
+            expect(execution()).toEqual({ available: true });
           });
 
           it('follows a start whose MIGRATESLOTS did not answer in time', async () => {
@@ -4736,6 +4737,29 @@ describe('AnomalyService', () => {
             expect((service as any).rebalanceRuns.get('conn-a').get('a0000000').state).toBe(
               'succeeded',
             );
+          });
+
+          it('reads fresh nodes on the poll after an accepted cancel', async () => {
+            enable();
+            await planned();
+            await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN);
+            report.jobViews = [listed()];
+            await service.followRebalanceRuns('conn-a');
+            expect(await service.cancelRebalance('conn-a', 'a0000000')).toMatchObject({
+              status: 'cancelling',
+            });
+            const stale = pollNodes();
+            report.jobViews = [];
+            report.finishedJobs = ['job-1'];
+            slotsOf.a0000000 = [[108, 119]];
+            slotsOf.b0000000 = [[10, 11], [100, 107]];
+
+            await (service as any).followRebalanceRunsOnPoll('conn-a', clock, stale);
+
+            expect((service as any).rebalanceRuns.get('conn-a').get('a0000000')).toMatchObject({
+              state: 'succeeded',
+              jobs: [{ state: 'succeeded' }],
+            });
           });
 
           it('follows a job that finished before it was ever listed', async () => {

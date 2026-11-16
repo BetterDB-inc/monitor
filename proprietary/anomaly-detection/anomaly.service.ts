@@ -10687,11 +10687,11 @@ export class AnomalyService
           return client.call('CLUSTER', ...migrateSlotsArgs(plan));
         });
       } catch (err) {
-        this.refusedRebalancePlans.set(plan, 'server_refused');
         const late = err instanceof Error && err.message === timedOut;
-        if (late && sent) record();
-        const message = late && !sent ? notConnected : errorText(err);
-        return { status: 'refused', message };
+        if (late && !sent) return { status: 'refused', message: notConnected };
+        this.refusedRebalancePlans.set(plan, 'server_refused');
+        if (late) record();
+        return { status: 'refused', message: errorText(err) };
       }
       return { status: 'started', run: runView(record()) };
     } finally {
@@ -10710,10 +10710,14 @@ export class AnomalyService
   ): Promise<void> {
     const read = this.slotMigrationReadOnPoll.get(connectionId);
     this.slotMigrationReadOnPoll.delete(connectionId);
-    if (!this.rebalanceRuns.has(connectionId)) return;
+    const runs = this.rebalanceRuns.get(connectionId);
+    if (!runs) return;
+    const settling = [...runs.values()].some(
+      (run) => run.state === 'running' && run.cancelAcceptedAt !== undefined,
+    );
     await this.advanceRebalanceRuns(connectionId, {
       report: read?.timestamp === timestamp ? read.report : undefined,
-      nodes: runNodesOf(nodes),
+      nodes: settling ? undefined : runNodesOf(nodes),
     });
   }
 
