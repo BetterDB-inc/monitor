@@ -6,6 +6,7 @@ import {
   compareTopologyViews,
 } from './topology-divergence';
 import { selectObservers } from './topology-observers';
+import { type MembershipSighting, membershipSightings } from './partial-membership';
 
 export const TOPOLOGY_DIVERGENCE_DEFAULTS = {
   nodesPerZone: 1,
@@ -47,6 +48,7 @@ export interface DivergenceRoundResult {
   disagreements: TrackedDisagreement[];
   nodes: Map<string, ClusterNode>;
   selves: Map<string, ClusterNode>;
+  sightings: Map<string, MembershipSighting[]>;
 }
 
 interface ReadBackoff {
@@ -176,6 +178,7 @@ export class TopologyDivergenceMonitor {
       disagreements: state.tracker.tracked(),
       nodes: new Map(input.nodes.map((node) => [node.id, node])),
       selves: new Map([[self.id, self]]),
+      sightings: new Map(),
     };
     return state.last;
   }
@@ -263,6 +266,7 @@ export class TopologyDivergenceMonitor {
       }
     }
 
+    const disagreements = state.tracker.tracked();
     return {
       clusterKey: input.clusterKey,
       anchorConnectionId: input.connectionId,
@@ -270,9 +274,10 @@ export class TopologyDivergenceMonitor {
       status: views.length >= 2 ? 'ok' : 'insufficient_views',
       observers: selection.observers,
       unanswered: [...unanswered].sort(),
-      disagreements: state.tracker.tracked(),
+      disagreements,
       nodes,
       selves,
+      sightings: membershipSightings(views, disagreements),
     };
   }
 

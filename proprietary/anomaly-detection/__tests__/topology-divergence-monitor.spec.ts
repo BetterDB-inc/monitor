@@ -105,6 +105,29 @@ describe('TopologyDivergenceMonitor', () => {
     ]);
   });
 
+  it('keeps how each view lists a node whose membership is in dispute', async () => {
+    const { poll, answers } = harness();
+    answers.set(
+      'b1',
+      viewOf(
+        'b1',
+        {},
+        IDS.filter((id) => id !== 'a2'),
+      ),
+    );
+
+    const round = await poll('conn-1', 'a1', 0);
+
+    expect([...(round?.sightings.keys() ?? [])]).toEqual(['a2']);
+    expect(round?.sightings.get('a2')?.map((sighting) => sighting.observerId)).toEqual(['a1', 'c1']);
+  });
+
+  it('keeps no sightings while every view lists the same nodes', async () => {
+    const { poll } = harness();
+    const round = await poll('conn-1', 'a1', 0);
+    expect(round?.sightings.size).toBe(0);
+  });
+
   it('runs the rounds of a cluster on one connection only', async () => {
     const { poll, asked } = harness();
 
