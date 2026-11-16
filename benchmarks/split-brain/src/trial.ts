@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { BASELINE_MS, LATE_GATE_MS, type LaneSpec, type NodeSpec, hashSeed, mulberry32, sleep } from './config';
@@ -119,6 +119,8 @@ export async function runTrial(request: TrialRequest): Promise<TrialMeta> {
   meta.lateOk = meta.late.p99 <= LATE_GATE_MS;
   const lines = [JSON.stringify(meta), ...recorder.ticks.map((tick) => JSON.stringify(tick))];
   mkdirSync(dirname(request.file), { recursive: true });
-  writeFileSync(request.file, gzipSync(lines.join('\n')));
+  const partial = `${request.file}.${process.pid}.tmp`;
+  writeFileSync(partial, gzipSync(lines.join('\n')));
+  renameSync(partial, request.file);
   return meta;
 }

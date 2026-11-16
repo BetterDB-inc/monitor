@@ -6,6 +6,7 @@ export const VALKEY_PORT = 6379;
 export const HOST_PORT_BASE = 7300;
 export const SUBNET_PREFIX = '172.30';
 export const SUBNET_BASE = 100;
+export const MAX_CLUSTER_SIZE = 200;
 
 export const TICK_MS = 1_000;
 export const PROBE_TIMEOUT_MS = 2_000;
@@ -34,8 +35,15 @@ export interface LaneSpec {
   joiner: NodeSpec;
 }
 
+export function lanePortStride(size: number): number {
+  return Math.ceil((size + 1) / 10) * 10;
+}
+
 export function laneSpec(lane: number, size = 6): LaneSpec {
-  if (size % 2 !== 0 || size < 6) throw new Error(`cluster size must be even and at least 6, got ${size}`);
+  if (size % 2 !== 0 || size < 6 || size > MAX_CLUSTER_SIZE) {
+    throw new Error(`cluster size must be even and between 6 and ${MAX_CLUSTER_SIZE}, got ${size}`);
+  }
+  const stride = lanePortStride(size);
   const shards = size / 2;
   const prefix = `${SUBNET_PREFIX}.${SUBNET_BASE + lane}`;
   const byZone: Array<Array<{ role: Role; shard: number }>> = ZONES.map(() => []);
@@ -52,7 +60,7 @@ export function laneSpec(lane: number, size = 6): LaneSpec {
     name: `n${index + 1}`,
     container: `sbb-l${lane}-n${index + 1}`,
     ip: `${prefix}.${11 + index}`,
-    hostPort: HOST_PORT_BASE + lane * 10 + index + 1,
+    hostPort: HOST_PORT_BASE + lane * stride + index + 1,
     zone,
     role,
     primary,

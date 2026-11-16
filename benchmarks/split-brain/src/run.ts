@@ -4,6 +4,7 @@ import { BASE_IMAGE, IMAGE, laneSpec, mulberry32, shuffled, sleep } from './conf
 import { docker, haltDocker, removeContainers, removeNetworks } from './docker';
 import { HostWatch } from './host';
 import { type Scenario, scenarios } from './scenarios';
+import { readMeta, recordedWith } from './trace';
 import { runTrial, trialName } from './trial';
 
 export interface RunOptions {
@@ -49,9 +50,18 @@ export async function run(options: RunOptions): Promise<{ done: number; failed: 
   for (let rep = 1; rep <= options.trials; rep++) {
     for (const scenario of wanted) all.push({ scenario, rep });
   }
-  const queue = shuffled(all, mulberry32(options.seed)).filter(
-    (item) => !existsSync(traceFile(options.outDir, item.scenario.name, item.rep)),
-  );
+  const recorded = (item: { scenario: Scenario; rep: number }) => {
+    const file = traceFile(options.outDir, item.scenario.name, item.rep);
+    if (!existsSync(file)) return false;
+    const mismatch = recordedWith(readMeta(file), options);
+    if (mismatch) {
+      throw new Error(
+        `refusing to resume: ${trialName(item.scenario.name, item.rep)} in ${options.outDir} was recorded with ${mismatch}`,
+      );
+    }
+    return true;
+  };
+  const queue = shuffled(all, mulberry32(options.seed)).filter((item) => !recorded(item));
   log(`queue: ${queue.length} trials (${all.length - queue.length} already recorded), lanes ${options.lanes.join(',')}`);
 
   const host = new HostWatch({ maxLoad: options.maxLoad, minFreePorts: options.minFreePorts });

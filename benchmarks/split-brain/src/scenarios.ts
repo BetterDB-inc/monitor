@@ -1,5 +1,5 @@
 import { type LaneSpec, type NodeSpec, VALKEY_PORT, ZONES, pick, shuffled, sleep } from './config';
-import { startNode, waitAgreed, waitAnswering } from './cluster';
+import { ownedSlots, startNode, waitAgreed, waitAnswering } from './cluster';
 import { docker, exec, rootExec } from './docker';
 import type { HostWindow } from './host';
 import type { Recorder } from './recorder';
@@ -66,6 +66,10 @@ const ATOMIC_SLOTS = 1_000;
 const ATOMIC_LINK_RATE = '20mbit';
 const LEGACY_SLOTS = 3_000;
 const FINISHED_MIGRATION_STATES = ['success', 'failed', 'cancelled'];
+
+async function slotsOwned(node: NodeSpec): Promise<number> {
+  return ownedSlots(String(await command(node.hostPort, ['CLUSTER', 'NODES'])));
+}
 
 const names = (nodes: NodeSpec[]) => nodes.map((node) => node.name);
 const primariesOf = (ctx: TrialContext) => ctx.nodes.filter((node) => node.role === 'primary');
@@ -373,6 +377,7 @@ export function scenarios(nodeTimeoutMs: number): Scenario[] {
         const source = pick(primariesOf(ctx), ctx.random);
         const target = nextPrimary(ctx, source.name);
         const before = Number(await command(source.hostPort, ['DBSIZE']));
+        const slotsBefore = await slotsOwned(source);
         inject(ctx, [source, target]);
         const out = await exec(
           source.container,
@@ -391,6 +396,12 @@ export function scenarios(nodeTimeoutMs: number): Scenario[] {
           ],
           300_000,
         );
+        const problem = out.split('\n').find((line) => /\[ERR\]|failed/.test(line));
+        if (problem) throw new Error(`the legacy reshard from ${source.name} reported: ${problem.trim().slice(0, 120)}`);
+        const moved = slotsBefore - (await slotsOwned(source));
+        if (moved < LEGACY_SLOTS) {
+          throw new Error(`the legacy reshard moved ${moved} of ${LEGACY_SLOTS} slots away from ${source.name}`);
+        }
         mark(ctx, 'reshard-done', {
           tookMs: ctx.recorder.now() - ctx.meta.t0,
           keys: before - Number(await command(source.hostPort, ['DBSIZE'])),
@@ -409,6 +420,7 @@ export function scenarios(nodeTimeoutMs: number): Scenario[] {
           await docker(['restart', '-t', '10', node.container]);
           const settled = await waitAgreed(ctx.nodes, ctx.nodes.length, 60_000);
           mark(ctx, 'restarted', { node: node.name, settled });
+          if (!settled) throw new Error(`the cluster did not agree again within 60 s of restarting ${node.name}`);
           await sleep(2_000);
         }
       },

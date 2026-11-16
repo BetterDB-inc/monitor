@@ -14,6 +14,20 @@ export function readTrace(file: string): Trace {
   return { meta: JSON.parse(head) as TrialMeta, ticks: rest.map((line) => JSON.parse(line) as Tick) };
 }
 
+export function readMeta(file: string): TrialMeta {
+  const text = gunzipSync(readFileSync(file)).toString('utf8');
+  const end = text.indexOf('\n');
+  return JSON.parse(end < 0 ? text : text.slice(0, end)) as TrialMeta;
+}
+
+export function recordedWith(meta: TrialMeta, wanted: { nodeTimeoutMs: number; clusterSize: number }): string | null {
+  if (meta.nodeTimeoutMs !== wanted.nodeTimeoutMs) {
+    return `a node timeout of ${meta.nodeTimeoutMs} ms, not ${wanted.nodeTimeoutMs} ms`;
+  }
+  if (meta.nodes.length !== wanted.clusterSize) return `${meta.nodes.length} nodes, not ${wanted.clusterSize}`;
+  return null;
+}
+
 export function traceFiles(dir: string): string[] {
   const found: string[] = [];
   for (const entry of readdirSync(dir)) {

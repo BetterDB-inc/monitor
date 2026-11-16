@@ -35,43 +35,41 @@ function infoFields(raw: string): ClusterInfoFields {
   };
 }
 
-class Probe {
-  private client: RespClient | null = null;
-  private connecting: Promise<RespClient> | null = null;
+export class Probe {
+  private idle: RespClient | null = null;
 
   constructor(private readonly node: NodeSpec) {}
 
-  private connection(): Promise<RespClient> {
-    if (this.client && !this.client.closed) return Promise.resolve(this.client);
-    this.connecting ??= RespClient.connect('127.0.0.1', this.node.hostPort, CONNECT_TIMEOUT_MS)
-      .then((client) => {
-        this.client = client;
-        return client;
-      })
-      .finally(() => {
-        this.connecting = null;
-      });
-    return this.connecting;
+  private take(): Promise<RespClient> {
+    const idle = this.idle;
+    this.idle = null;
+    if (idle && !idle.closed) return Promise.resolve(idle);
+    return RespClient.connect('127.0.0.1', this.node.hostPort, CONNECT_TIMEOUT_MS);
+  }
+
+  private give(client: RespClient): void {
+    if (this.idle && !this.idle.closed) client.close();
+    else this.idle = client;
   }
 
   async sample(): Promise<Sample> {
     const startedAt = performance.now();
     const elapsed = () => Math.round(performance.now() - startedAt);
     let deadline: NodeJS.Timeout | undefined;
-    let used: RespClient | null = null;
+    let own: RespClient | null = null;
     try {
-      const client = await this.connection();
-      used = client;
+      const client = await this.take();
+      own = client;
       deadline = setTimeout(() => client.close(new Error('timeout')), PROBE_TIMEOUT_MS - elapsed());
       const [nodes, info, migrations] = await Promise.all([
         client.send('CLUSTER', 'NODES'),
         client.send('CLUSTER', 'INFO'),
         client.send('CLUSTER', 'GETSLOTMIGRATIONS').catch((err: Error) => `ERR ${err.message}`),
       ]);
+      this.give(client);
       return { ok: true, lat: elapsed(), nodes: String(nodes), info: infoFields(String(info)), migrations };
     } catch (err) {
-      used?.close();
-      if (this.client === used) this.client = null;
+      own?.close();
       return { ok: false, lat: elapsed(), err: (err as Error).message.slice(0, 80) };
     } finally {
       clearTimeout(deadline);
@@ -79,7 +77,7 @@ class Probe {
   }
 
   close(): void {
-    this.client?.close();
+    this.idle?.close();
   }
 }
 

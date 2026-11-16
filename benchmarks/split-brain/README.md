@@ -39,8 +39,8 @@ when any of them differs.
 | idle | control | nothing happens |
 | manual-failover | control | `CLUSTER FAILOVER` on a replica |
 | slot-migration-atomic | control | `CLUSTER MIGRATESLOTS` of 1000 slots (about 49k keys) from each primary in turn, with the primaries' links limited to 20 Mbit/s so a move takes 6–7 s; a move that does not end as `success` drops the attempt |
-| slot-migration-legacy | control | `valkey-cli --cluster reshard` of 3000 slots (about 140k keys), about 9 s |
-| rolling-restart | control | every node restarted, one at a time |
+| slot-migration-legacy | control | `valkey-cli --cluster reshard` of 3000 slots (about 140k keys), about 9 s; a reshard that reports an error or moves fewer slots drops the attempt |
+| rolling-restart | control | every node restarted, one at a time; a restart after which the cluster does not agree again within 60 s drops the attempt |
 | slow-node | control | 800 ms ± 200 ms of network delay on one node for 60 s |
 | clean-join | control | a new node meets the cluster with nothing blocked |
 
@@ -58,9 +58,12 @@ pnpm bench report --results stage1
 pnpm test
 ```
 
-- `record` is resumable: trials that already have a trace are skipped. Each
-  lane is one cluster on its own Docker network (`sbb-l<lane>`, subnet
-  `172.30.<100+lane>.0/24`, host ports `73<lane>1`–`73<lane>7`). Options:
+- `record` is resumable: trials that already have a trace are skipped. It
+  refuses to resume into a folder whose traces were recorded with another
+  `--node-timeout` or `--size`. Each lane is one cluster on its own Docker
+  network (`sbb-l<lane>`, subnet `172.30.<100+lane>.0/24`). At 6 nodes a lane
+  uses host ports `73<lane>1`–`73<lane>7`; with a larger `--size` the step
+  between lanes grows so that lanes never share a port. Options:
   `--scenarios a,b`, `--node-timeout 5000`, `--size 6`, `--seed 697`.
 - Everything it creates is named `sbb-*` and labelled `sbb.bench=697`. It never
   touches other containers. `pnpm bench down` removes what is left after an

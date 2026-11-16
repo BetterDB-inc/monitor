@@ -31,6 +31,18 @@ export function parseView(raw: string): ViewLine[] {
     });
 }
 
+export function ownedSlots(raw: string): number {
+  const own = parseView(raw).find((line) => line.flags.includes('myself'));
+  if (!own) return 0;
+  return own.slots
+    .split(' ')
+    .filter((part) => part !== '' && !part.startsWith('['))
+    .reduce((total, part) => {
+      const [first, last = first] = part.split('-').map(Number);
+      return total + last - first + 1;
+    }, 0);
+}
+
 function storyOf(raw: string): string {
   return parseView(raw)
     .map((line) => {
