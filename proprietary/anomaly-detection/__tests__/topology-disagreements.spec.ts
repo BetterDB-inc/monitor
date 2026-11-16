@@ -179,7 +179,7 @@ describe('summarizeDisagreements', () => {
       ],
     });
     const eventOf = (key: string) =>
-      key === old.key ? { eventId: 'e3', eventType: MetricType.TOPOLOGY_DIVERGENCE, eventAt: AT } : undefined;
+      key === old.key ? { eventId: 'e3', eventType: MetricType.TOPOLOGY_DIVERGENCE, eventAt: AT, connectionId: 'c1' } : undefined;
 
     it('is kept without counts, after the lines of this round, and says when it was last seen', () => {
       const summary = summarizeDisagreements(
@@ -364,6 +364,7 @@ describe('summarizeDisagreements', () => {
         eventId: null,
         eventType: null,
         eventAt: null,
+        eventConnectionId: null,
         since: AT - 10_000,
         rounds: 3,
         stale: false,
@@ -660,7 +661,7 @@ describe('summarizeDisagreements', () => {
       });
     const disagreements = [about('s001p', ['s000p']), about('s001r0', ['s000r0']), about('s002p', ['s000p'])];
     const eventOf = (key: string) =>
-      key === 'failure_flags:s002p' ? { eventId: 'e1', eventType: MetricType.TOPOLOGY_DIVERGENCE, eventAt: AT } : undefined;
+      key === 'failure_flags:s002p' ? { eventId: 'e1', eventType: MetricType.TOPOLOGY_DIVERGENCE, eventAt: AT, connectionId: 'c1' } : undefined;
 
     const summary = summarizeDisagreements(round(cluster(3), { disagreements }), eventOf);
 
@@ -796,6 +797,7 @@ describe('summarizeDisagreements', () => {
       eventId: 'e7',
       eventType: MetricType.TOPOLOGY_DIVERGENCE,
       eventAt: AT - 40_000,
+      connectionId: 'c1',
     });
 
     const [line] = summarizeDisagreements(round(cluster(3), { disagreements: [membership] }), eventOf).disagreements;
@@ -806,6 +808,7 @@ describe('summarizeDisagreements', () => {
       eventId: 'e7',
       eventType: MetricType.TOPOLOGY_DIVERGENCE,
       eventAt: AT - 40_000,
+      eventConnectionId: 'c1',
     });
   });
 
@@ -833,7 +836,7 @@ describe('summarizeDisagreements', () => {
       ],
     });
     const eventOf = (key: string) =>
-      key === 'failure_flags:s002p' ? { eventId: 'e1', eventType: MetricType.TOPOLOGY_DIVERGENCE, eventAt: AT } : undefined;
+      key === 'failure_flags:s002p' ? { eventId: 'e1', eventType: MetricType.TOPOLOGY_DIVERGENCE, eventAt: AT, connectionId: 'c1' } : undefined;
 
     const summary = summarizeDisagreements(
       round(cluster(3), {

@@ -336,6 +336,7 @@ export interface DisagreementLine {
   eventId: string | null;
   eventType: string | null;
   eventAt: number | null;
+  eventConnectionId: string | null;
   since: number;
   rounds: number;
   stale: boolean;

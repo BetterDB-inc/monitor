@@ -26331,6 +26331,7 @@ describe('AnomalyService', () => {
             eventId: event.id,
             eventType: MetricType.TOPOLOGY_DIVERGENCE,
             eventAt: event.timestamp,
+            eventConnectionId: 'conn-1',
           },
         ]);
       });
@@ -26354,7 +26355,14 @@ describe('AnomalyService', () => {
         await service.resolveAnomaly(divergenceEvents()[0].id);
 
         expect(service.getTopologyDisagreements('conn-1').disagreements).toMatchObject([
-          { id: 'config_epoch:a', confirmed: false, eventId: null, eventType: null, eventAt: null },
+          {
+            id: 'config_epoch:a',
+            confirmed: false,
+            eventId: null,
+            eventType: null,
+            eventAt: null,
+            eventConnectionId: null,
+          },
         ]);
       });
 
@@ -26393,6 +26401,55 @@ describe('AnomalyService', () => {
         const [event] = divergenceEvents();
         expect(service.getTopologyDisagreements('conn-2').disagreements).toMatchObject([
           { id: 'config_epoch:a', confirmed: true, eventId: event.id },
+        ]);
+      });
+
+      it('keeps the link of a second connection on that connection when it can open the event', async () => {
+        views.c = { a: { epoch: 9 } };
+        const second: ConnectionContext = {
+          ...mockCtx,
+          connectionId: 'conn-2',
+          connectionName: 'Second',
+          client: clusterClient('b') as any,
+        };
+        for (let i = 0; i < 4; i++) {
+          now += 5_000;
+          await poll(mockCtx);
+          await poll(second);
+        }
+
+        const [event] = divergenceEvents();
+        expect(event.connectionId).toBe('conn-1');
+        await expect(service.findIncidentIdByEvent(event.id, event.timestamp, 'conn-2')).resolves.toEqual(
+          expect.any(String),
+        );
+        expect(service.getTopologyDisagreements('conn-2').disagreements).toMatchObject([
+          { eventId: event.id, eventConnectionId: 'conn-2' },
+        ]);
+      });
+
+      it('names the connection that holds the event when the asking one cannot open it', async () => {
+        views.c = { a: { epoch: 9 } };
+        const second: ConnectionContext = {
+          ...mockCtx,
+          connectionId: 'conn-2',
+          connectionName: 'Second',
+          client: clusterClient('b') as any,
+        };
+        (service as any).connectionRegistry.listMembers.mockImplementation((id: string) =>
+          id === 'conn-2' ? [{ id: 'conn-2-member', membership: { seedId: 'conn-2' } }] : [],
+        );
+        for (let i = 0; i < 4; i++) {
+          now += 5_000;
+          await poll(mockCtx);
+          await poll(second);
+        }
+
+        const [event] = divergenceEvents();
+        expect(event.connectionId).toBe('conn-1');
+        await expect(service.findIncidentIdByEvent(event.id, event.timestamp, 'conn-2')).resolves.toBeNull();
+        expect(service.getTopologyDisagreements('conn-2').disagreements).toMatchObject([
+          { eventId: event.id, eventConnectionId: 'conn-1' },
         ]);
       });
 

@@ -86,6 +86,7 @@ function summaryWith(lines: number): TopologyDisagreementSummary {
       eventId: null,
       eventType: null,
       eventAt: null,
+      eventConnectionId: null,
       since: 1_704_067_100_000,
       rounds: 1,
       stale: false,
@@ -170,6 +171,7 @@ describe('ClusterDashboard disagreements tab', () => {
       eventId: 'event-1',
       eventType: 'topology_divergence',
       eventAt: 1_704_067_150_000,
+      eventConnectionId: 'conn-1',
       stale: true,
       positions: [],
     };

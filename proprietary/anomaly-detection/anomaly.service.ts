@@ -37,6 +37,7 @@ import {
   ReplicationRecoveredData,
   WebhookEventType,
   clusterNodeState,
+  INCIDENT_LOOKBACK_MS,
 } from '@betterdb/shared';
 import { AnomalySavedBus, SavedAnomaly } from '@app/common/services/anomaly-saved-bus';
 import { ClientListCache } from '@app/common/services/client-list-cache';
@@ -692,7 +693,7 @@ const NEXT_FIRING_BUDGET_MS = 10_000;
 const NEXT_FIRING_BUDGET_EXHAUSTED = 'lookup budget exhausted';
 const NEXT_FIRING_MIN_REMAINING_MS = 250;
 const NEXT_FIRING_MAX_OUTSTANDING = 5;
-const MAX_INCIDENT_LOOKBACK_MS = 30 * 24 * 60 * 60_000;
+const MAX_INCIDENT_LOOKBACK_MS = INCIDENT_LOOKBACK_MS;
 const MAX_INCIDENT_EVENTS_PER_CONNECTION = 200;
 const RETRY_AMP_ATTRIBUTION_TIMEOUT_MS = 5_000;
 const CORRELATION_ID_CHUNK_SIZE = 500;
@@ -10598,6 +10599,7 @@ export class AnomalyService
     if (!clusterKey || !round) return summarizeDisagreements(undefined, () => undefined);
     const eventIds = this.topologyDivergenceEventIds.get(round.anchorConnectionId);
     const events = new Map<string, DisagreementEvent>();
+    const reachable = new Set(this.scopeConnectionIds(connectionId));
     for (const [signature, entry] of this.topologyDivergenceOpen.get(clusterKey) ?? []) {
       const eventId = eventIds?.get(signature);
       if (eventId === undefined) continue;
@@ -10605,7 +10607,14 @@ export class AnomalyService
       if (event?.resolved === true) continue;
       const eventType = event?.metricType ?? MetricType.TOPOLOGY_DIVERGENCE;
       const eventAt = this.topologyDivergenceEventAt.get(eventId) ?? event?.timestamp ?? null;
-      for (const { key } of entry.group?.disagreements ?? []) events.set(key, { eventId, eventType, eventAt });
+      const holder = this.topologyDivergenceEventOwners.get(eventId) ?? round.anchorConnectionId;
+      const disagreementEvent = {
+        eventId,
+        eventType,
+        eventAt,
+        connectionId: reachable.has(holder) ? connectionId : holder,
+      };
+      for (const { key } of entry.group?.disagreements ?? []) events.set(key, disagreementEvent);
     }
     return summarizeDisagreements(round, (key) => events.get(key));
   }

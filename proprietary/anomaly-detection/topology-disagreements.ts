@@ -27,6 +27,7 @@ export interface DisagreementEvent {
   eventId: string;
   eventType: MetricType;
   eventAt: number | null;
+  connectionId: string;
 }
 
 export interface DisagreementRound {
@@ -64,6 +65,7 @@ export interface DisagreementLine {
   eventId: string | null;
   eventType: MetricType | null;
   eventAt: number | null;
+  eventConnectionId: string | null;
   since: number;
   rounds: number;
   stale: boolean;
@@ -365,6 +367,7 @@ export function summarizeDisagreements(
       eventId: event?.eventId ?? null,
       eventType: event?.eventType ?? null,
       eventAt: event?.eventAt ?? null,
+      eventConnectionId: event?.connectionId ?? null,
       since: Math.min(...drafts.map((draft) => draft.disagreement.firstSeenAt)),
       rounds: Math.max(...drafts.map((draft) => draft.disagreement.rounds)),
       stale,

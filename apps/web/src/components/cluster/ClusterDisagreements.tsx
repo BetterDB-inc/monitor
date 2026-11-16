@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { incidentEventPath } from '@betterdb/shared';
+import { INCIDENT_LOOKBACK_MS, incidentEventPath } from '@betterdb/shared';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
@@ -107,9 +107,10 @@ function NodeChips({
   );
 }
 
-function eventHref(eventId: string, eventAt: number | null, connectionId?: string): string {
-  if (eventAt === null) return EVENTS_PATH;
-  return incidentEventPath(eventId, eventAt, connectionId);
+function eventHref(line: DisagreementLine, asOf: number | null, connectionId?: string): string {
+  if (line.eventId === null || line.eventAt === null) return EVENTS_PATH;
+  if ((asOf ?? line.lastSeenAt) - line.eventAt > INCIDENT_LOOKBACK_MS) return EVENTS_PATH;
+  return incidentEventPath(line.eventId, line.eventAt, line.eventConnectionId ?? connectionId);
 }
 
 function coverageText(coverage: DisagreementCoverage): string {
@@ -119,9 +120,11 @@ function coverageText(coverage: DisagreementCoverage): string {
 
 function DisagreementCard({
   line,
+  asOf,
   connectionId,
 }: {
   line: DisagreementLine;
+  asOf: number | null;
   connectionId?: string;
 }) {
   const badge = SEVERITY_BADGE[line.severity] ?? SEVERITY_BADGE.info;
@@ -140,10 +143,7 @@ function DisagreementCard({
             : `since ${new Date(line.since).toLocaleTimeString()}`}
         </span>
         {line.confirmed && line.eventId ? (
-          <Link
-            to={eventHref(line.eventId, line.eventAt, connectionId)}
-            className="text-xs underline"
-          >
+          <Link to={eventHref(line, asOf, connectionId)} className="text-xs underline">
             Open event
           </Link>
         ) : (
@@ -417,7 +417,12 @@ export function ClusterDisagreements({
             </p>
           )}
           {disagreements.map((line) => (
-            <DisagreementCard key={line.id} line={line} connectionId={connectionId} />
+            <DisagreementCard
+              key={line.id}
+              line={line}
+              asOf={summary.sampledAt}
+              connectionId={connectionId}
+            />
           ))}
           {unconfirmed.length > 0 && (
             <section aria-label="Not confirmed this round" className="space-y-3">
@@ -427,7 +432,12 @@ export function ClusterDisagreements({
                   : `${unconfirmed.length} disagreements from an earlier round could not be checked again in the last round. They are neither confirmed nor cleared.`}
               </p>
               {unconfirmed.map((line) => (
-                <DisagreementCard key={line.id} line={line} connectionId={connectionId} />
+                <DisagreementCard
+                  key={line.id}
+                  line={line}
+                  asOf={summary.sampledAt}
+                  connectionId={connectionId}
+                />
               ))}
             </section>
           )}
