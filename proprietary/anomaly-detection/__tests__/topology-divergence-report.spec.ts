@@ -239,6 +239,7 @@ describe('buildPartialMembershipDetail', () => {
     ],
     ownViewMissing: [{ nodeId: 'c', address: '10.0.3.2:6379', status: 'noaddr' }],
     disagreementKeys: ['membership:n0'],
+    slotDisputeKeys: [],
     firstSeenAt: 85000,
     rounds: 20,
     confirmed: true,

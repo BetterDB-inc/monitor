@@ -26217,12 +26217,14 @@ describe('AnomalyService', () => {
       let knows: Record<string, string[]>;
       let flagsBy: Record<string, Record<string, string>>;
       let extraLines: Record<string, string[]>;
+      let slotsBy: Record<string, Record<string, string>>;
 
       function memberView(myself: string): string {
         const lines = knows[myself].map((id) => {
           const node = MEMBERS[id];
           const flags = `${id === myself ? 'myself,' : ''}${flagsBy[myself]?.[id] ?? 'master'}`;
-          return `${id} ${node.host}:6379@16379 ${flags} - 0 0 ${node.epoch} connected ${node.slots}`.trim();
+          const slots = slotsBy[myself]?.[id] ?? node.slots;
+          return `${id} ${node.host}:6379@16379 ${flags} - 0 0 ${node.epoch} connected ${slots}`.trim();
         });
         return [...lines, ...(extraLines[myself] ?? [])].join('\n');
       }
@@ -26244,6 +26246,7 @@ describe('AnomalyService', () => {
         knows = { a: EVERYONE, b: ['a', 'b', 'c'], c: ['a', 'b', 'c'], n: EVERYONE };
         flagsBy = {};
         extraLines = {};
+        slotsBy = {};
         dbClient.getClusterNodes = jest.fn(async () => MetricsParser.parseClusterNodes(memberView('a')));
         discovery.getNodeConnection = jest.fn(async (nodeId: string) => ({
           disconnect: jest.fn(),
@@ -26457,30 +26460,85 @@ describe('AnomalyService', () => {
         expect(report().partialMembership).toEqual([]);
       });
 
-      it('still reports the slot dispute when the node itself lacks a slot owner', async () => {
-        knows = { a: EVERYONE, b: EVERYONE, c: EVERYONE, n: ['a', 'c', 'n'] };
+      describe('whose own view lacks a slot owner', () => {
+        const criticalEvents = () => divergenceEvents().filter((e) => e.severity === AnomalySeverity.CRITICAL);
 
-        await rounds(19);
+        beforeEach(() => {
+          knows = { a: EVERYONE, b: EVERYONE, c: EVERYONE, n: ['a', 'c', 'n'] };
+        });
 
-        expect(partialEvents()).toHaveLength(1);
-        expect(partialEvents()[0].message).toBe(
-          'Node 10.0.0.7:6379 has only partly joined the cluster for 90s. ' +
-            'Known by 10.0.0.1:6379, 10.0.0.2:6379, 10.0.0.3:6379. Its own view is missing 10.0.0.2:6379. ' +
-            'Run `CLUSTER MEET 10.0.0.7 6379` on 10.0.0.2:6379. ' +
-            MEET_ADVICE,
-        );
-        const critical = divergenceEvents().filter((e) => !e.resolved);
-        expect(critical).toMatchObject([{ severity: AnomalySeverity.CRITICAL }]);
+        it('holds the slot alert while the node is counted and after its warning is raised', async () => {
+          await rounds(6);
+          expect(divergenceEvents()).toHaveLength(0);
+          expect(partialEvents()).toHaveLength(0);
+          expect(report().divergences).toEqual([]);
+          expect(report().partialMembership).toMatchObject([
+            {
+              eventId: null,
+              node: { nodeId: 'n' },
+              disagreements: [
+                { kind: 'membership', eventType: null },
+                { kind: 'slot_owner', eventType: null, slots: [[5461, 10922]] },
+              ],
+            },
+          ]);
+
+          await rounds(13);
+          expect(partialEvents()).toHaveLength(1);
+          expect(partialEvents()[0].message).toBe(
+            'Node 10.0.0.7:6379 has only partly joined the cluster for 90s. ' +
+              'Known by 10.0.0.1:6379, 10.0.0.2:6379, 10.0.0.3:6379. Its own view is missing 10.0.0.2:6379. ' +
+              'Run `CLUSTER MEET 10.0.0.7 6379` on 10.0.0.2:6379. ' +
+              MEET_ADVICE,
+          );
+          expect(divergenceEvents()).toHaveLength(0);
+          expect(report().divergences).toEqual([]);
+          expect(report().partialMembership).toMatchObject([
+            {
+              eventId: partialEvents()[0].id,
+              ownViewMissing: [{ nodeId: 'b', status: 'missing' }],
+              disagreements: [{ kind: 'membership' }, { kind: 'slot_owner', eventType: 'partial_membership' }],
+            },
+          ]);
+        });
+
+        it('raises the slot alert at once when the node learns the owner but still shows no owner', async () => {
+          await rounds(6);
+          expect(divergenceEvents()).toHaveLength(0);
+
+          knows.n = EVERYONE;
+          slotsBy = { n: { b: '' } };
+          await rounds(1);
+
+          expect(criticalEvents()).toHaveLength(1);
+          expect(criticalEvents()[0].message).toContain('the owner of slots 5461-10922');
+          expect(report().partialMembership).toEqual([]);
+        });
+
+        it('raises the slot alert after three rounds when the node names another owner', async () => {
+          slotsBy = { n: { c: '5461-16383' } };
+
+          await rounds(2);
+          expect(criticalEvents()).toHaveLength(0);
+
+          await rounds(1);
+          expect(criticalEvents()).toHaveLength(1);
+          expect(criticalEvents()[0].message).toContain('the owner of slots 5461-10922');
+        });
+      });
+
+      it('raises the slot alert on time for a dispute between two primaries every node knows', async () => {
+        slotsBy = { c: { b: '' } };
+
+        await rounds(2);
+        expect(divergenceEvents()).toHaveLength(0);
+
+        await rounds(1);
+        const critical = divergenceEvents().filter((e) => e.severity === AnomalySeverity.CRITICAL);
+        expect(critical).toHaveLength(1);
         expect(critical[0].message).toContain('the owner of slots 5461-10922');
-        expect(report().divergences).toMatchObject([
-          { eventId: critical[0].id, disagreements: [{ kind: 'slot_owner', eventType: 'topology_divergence' }] },
-        ]);
         expect(report().partialMembership).toMatchObject([
-          {
-            eventId: partialEvents()[0].id,
-            ownViewMissing: [{ nodeId: 'b', status: 'missing' }],
-            disagreements: [{ kind: 'membership', eventType: 'partial_membership' }],
-          },
+          { node: { nodeId: 'n' }, disagreements: [{ kind: 'membership' }] },
         ]);
       });
 

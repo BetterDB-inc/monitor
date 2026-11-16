@@ -210,7 +210,7 @@ export function buildPartialMembershipDetail(
     const node = toDivergenceNode(peer.nodeId, nodes);
     return { ...node, address: peer.address || node.address };
   };
-  const keys = new Set(finding.disagreementKeys);
+  const keys = new Set([...finding.disagreementKeys, ...finding.slotDisputeKeys]);
   const held = { eventId: state.eventId, eventType: 'partial_membership' as const };
   return {
     eventId: state.eventId,
