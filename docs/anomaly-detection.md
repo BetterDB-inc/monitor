@@ -1367,7 +1367,7 @@ X-Connection-ID: <connection-id>
 
 The state of the last [`topology_divergence`](#topology_divergence) round, summarised for large clusters: one line per disagreement with the number of views on each side, and one line per shard. The connection header is required. Any connection that watches the cluster returns the same summary. It is built from the round kept in memory, so it is empty until the first round after a restart. The MCP tool `get_topology_disagreements` returns the same data.
 
-**The counts are over the views that answered, not over every node.** A round asks at most 12 nodes by default, so on a 500-node cluster a line reads "9 views against 3", not "497 against 3". `coverage` says how far the round reached: `nodes` is the number of members of the cluster, `asked` the nodes asked in the round, `answered` those that gave a view, and `complete` is `true` only when every member gave one. `unanswered` lists the nodes that were asked and gave no view, and the nodes a line is waiting for that gave none in this round. A node that one view lists without an address counts as a member when another view lists it as one, so `complete` is not `true` until it has given a view too. An empty `disagreements` list with `complete: false` means the nodes that were asked agree, not that the whole cluster does. `status` has the same meaning as in [Get Topology Divergence](#get-topology-divergence).
+**The counts are over the views that answered, not over every node.** A round asks at most 12 nodes by default, so on a 500-node cluster a line reads "9 views against 3", not "497 against 3". `coverage` says how far the round reached: `nodes` is the number of members of the cluster, `asked` the nodes asked in the round, `answered` those that gave a view, and `complete` is `true` only when every member gave one. `unanswered` lists the nodes that were asked and gave no view, and the nodes a line is waiting for that gave none in this round. The second kind is not counted in `asked`, so `unansweredCount` can be above `asked` minus `answered`. A node that one view lists without an address counts as a member when another view lists it as one, so `complete` is not `true` until it has given a view too. An empty `disagreements` list with `complete: false` means the nodes that were asked agree, not that the whole cluster does. `status` has the same meaning as in [Get Topology Divergence](#get-topology-divergence).
 
 Each entry of `disagreements` is one thing the views disagree about:
 
@@ -1381,17 +1381,17 @@ Each entry of `disagreements` is one thing the views disagree about:
 | `subjects`, `subjectCount` | The nodes the line is about. For `slot_owner` these are the nodes claimed as owner |
 | `slots`, `slotCount` | The disputed slot ranges, for `slot_owner` only |
 | `shardIds` | The shards the line touches: those of the subjects, and for `slot_owner` those that own the disputed slots |
-| `positions` | One entry per side, largest first: `value`, `count` (the number of views on that side) and `observers` (the nodes that hold it). For `slot_owner` the value is the node id of the owner, repeated as `owner` with its address, or `unassigned`. Empty on a stale line |
+| `positions` | One entry per side, largest first: `value`, `count` (the number of views on that side), `observers` (the nodes that hold it) and `observerCount` (how many nodes hold it, which is the same as `count` unless the line is merged). For `slot_owner` the value is the node id of the owner, repeated as `owner` with its address, or `unassigned`. Empty on a stale line |
 | `epochs` | On a merged `config_epoch` line only: the epoch each side has for each node, in the order of `positions`. The `value` of the positions is then `null` |
 | `text` | The line in words |
 
 For `failure_flags` the value is `ok`, `fail?` (the view suspects the node) or `fail` (the view has it as failed), so a node that part of the cluster only suspects is told apart from one that part of it has failed. What a node says of itself is not counted, so the views on such a line can add up to one less than `answered`. For `membership` the value is `known`, `handshake`, `noaddr` or `missing`.
 
-Lines of the same kind that have the same nodes on the same sides, with the same counts, and differ only in the node they are about are merged into one: `4 nodes: ok in 9 views, fail? in 3 views.` `subjectCount` is then above 1 and the `id` ends in `+N`. Slot owner lines are never merged. On a merged line `count` is the number of views on that side for each node of the line, and `observers` lists only the nodes that hold the side for every node of the line, so the list can be shorter than the count. The lines are ordered critical first, then confirmed before counting, then oldest first.
+Lines of the same kind that have the same nodes on the same sides, with the same counts, and differ only in the node they are about are merged into one: `4 nodes: ok in 9 views, fail? in 3 views.` `subjectCount` is then above 1 and the `id` ends in `+N`. Slot owner lines are never merged. On a merged line `count` is the number of views on that side for each node of the line, `observers` lists every node that holds the side for at least one node of the line, and `observerCount` is how many those are. When a zone is cut off, each of its nodes is vouched for by the others, so a side reads `ok in 3 views` with 4 observers. The lines are ordered critical first, then confirmed before counting, then oldest first.
 
 **A line that could not be checked again is kept, without counts.** When the nodes that hold one side of a disagreement do not answer, or the round could not compare views at all, the disagreement can be neither confirmed nor cleared. It is kept for up to 5 minutes with `stale: true`: `positions` is empty, `text` says what the views differed on without numbers (`Slots 0-99: views differed on the owner (10.0.0.1:6379, 10.0.0.3:6379).`), and `lastSeenAt` says when it was last seen. Stale lines come after the lines of the last round, do not make a shard `disputed`, and are only merged with lines last seen in the same round.
 
-Each entry of `shards` is one shard: its `primary`, the number of `replicas`, its `zones`, its `slots`, and `ownViews`, the number of its own nodes that gave a view. `state` is `disputed` when a line of the last round touches the shard (the lines are in `disagreementIds`), `undisputed` when none does, and `not_compared` when the round could not compare views or only a stale line touches the shard. Undisputed means no view that answered disagrees about the shard. Disputed shards come first, the rest follow in slot order. `shardTotals` counts the shards by state (`total`, `disputed`, `undisputed`, `notCompared`).
+Each entry of `shards` is one shard: its `primary`, the number of `replicas`, its `zones`, its `slots`, and `ownViews`, the number of its own nodes that gave a view. `state` is `disputed` when a line of the last round touches the shard (the lines are in `disagreementIds`), `undisputed` when none does, and `not_compared` when the round could not compare views or only a stale line touches the shard. The stale lines that touch a shard are in `staleDisagreementIds`, whatever its state. Undisputed means no view that answered disagrees about the shard. Disputed shards come first, the rest follow in slot order. `shardTotals` counts the shards by state (`total`, `disputed`, `undisputed`, `notCompared`).
 
 The MCP route and tool return only the disputed shards by default, with `shardsListed: "disputed"` and the same `shardTotals`; `shards=all` (tool argument `shards: "all"`) returns one line per shard.
 
@@ -1435,12 +1435,14 @@ Node lists (`subjects`, `observers`, `unanswered`, `epochs`) hold at most 25 ent
           "value": "3f2a9c1e",
           "owner": { "nodeId": "3f2a9c1e", "address": "10.0.0.1:6379", "role": "primary", "availabilityZone": "eu-west-1a" },
           "count": 9,
+          "observerCount": 9,
           "observers": [{ "nodeId": "3f2a9c1e", "address": "10.0.0.1:6379", "role": "primary" }]
         },
         {
           "value": "9c4e1b7a",
           "owner": { "nodeId": "9c4e1b7a", "address": "10.0.0.3:6379", "role": "primary", "availabilityZone": "eu-west-1b" },
           "count": 3,
+          "observerCount": 3,
           "observers": [{ "nodeId": "9c4e1b7a", "address": "10.0.0.3:6379", "role": "primary" }]
         }
       ],
@@ -1458,7 +1460,8 @@ Node lists (`subjects`, `observers`, `unanswered`, `epochs`) hold at most 25 ent
       "nodes": 2,
       "ownViews": 1,
       "state": "disputed",
-      "disagreementIds": ["slot_owner:3f2a9c1e|9c4e1b7a"]
+      "disagreementIds": ["slot_owner:3f2a9c1e|9c4e1b7a"],
+      "staleDisagreementIds": []
     }
   ],
   "shardTotals": { "total": 250, "disputed": 2, "undisputed": 248, "notCompared": 0 },
