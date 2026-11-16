@@ -1,0 +1,12 @@
+{
+  "commit": "bfbfa505",
+  "files": {
+    "proprietary/anomaly-detection/topology-divergence.ts": "9a7dab971f25c075a4546ed3a80e6ff54cb097fdf7fbb9fe222e9896e7b9475c",
+    "proprietary/anomaly-detection/topology-divergence-monitor.ts": "2e4d675e1d26b3d552af4922e17d68c8ba9098712554aa6718f47aa66866164a",
+    "proprietary/anomaly-detection/topology-observers.ts": "ef3ba042ef73c8fc14cb31d16aafd74bea1a301a65e687e69037359e0d5cef46",
+    "proprietary/anomaly-detection/topology-divergence-report.ts": "1fb6f6699d37d58a3d87b3b407bf19af89347c21b3ed0d664f27cb168a864129",
+    "proprietary/anomaly-detection/duplicate-primary-detector.ts": "cd2818f2baf9bc8e12760006cdbce351995e62778d5cd9163f7b8f9ea162f82b",
+    "proprietary/anomaly-detection/types.ts": "ca137dfb2283ea7bc57421e823c022c198d257fa36b5a0e0b566fe0e3f4a589d",
+    "apps/api/src/database/parsers/metrics.parser.ts": "3ba306d0cfe5c5124379ab23778f3af702f22d0b29f5c2b68e66568a1b0907dd"
+  }
+}
