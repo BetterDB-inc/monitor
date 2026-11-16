@@ -1,5 +1,5 @@
 import type { ClusterNode } from '@app/common/types/metrics.types';
-import { FAILING_FLAGS, compareText } from './topology-divergence';
+import { FAILING_FLAGS, UNREACHABLE_FLAGS, compareText } from './topology-divergence';
 
 export interface ObserverSelectionInput {
   nodes: ClusterNode[];
@@ -23,7 +23,6 @@ export interface ObserverSelection {
 }
 
 const UNKNOWN_ZONE = '';
-const UNREACHABLE_FLAGS = ['handshake', 'noaddr'];
 const RANK_UNREGISTERED = 1;
 const RANK_FAILING = 2;
 const RANK_SILENT = 4;

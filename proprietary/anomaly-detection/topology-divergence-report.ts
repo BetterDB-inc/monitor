@@ -1,5 +1,10 @@
 import type { ClusterNode } from '@app/common/types/metrics.types';
-import type { DivergenceGroup, DivergenceKind, TrackedDisagreement } from './topology-divergence';
+import {
+  type DivergenceGroup,
+  type DivergenceKind,
+  type TrackedDisagreement,
+  durationOf,
+} from './topology-divergence';
 import type { MembershipGap, MembershipPeer, PartialMembership } from './partial-membership';
 import { AnomalySeverity } from './types';
 
@@ -103,11 +108,6 @@ function listOf(nodeIds: string[], nodes: ReadonlyMap<string, ClusterNode>): str
   const listed = nodeIds.slice(0, MAX_LISTED_NODES).map((id) => nameOf(id, nodes)).join(', ');
   const extra = nodeIds.length - MAX_LISTED_NODES;
   return extra > 0 ? `${listed} +${extra} more` : listed;
-}
-
-function durationOf(ms: number): string {
-  const seconds = Math.max(0, Math.round(ms / 1000));
-  return seconds < 120 ? `${seconds}s` : `${Math.round(seconds / 60)}m`;
 }
 
 function slotsOf(disagreements: TrackedDisagreement[]): string {

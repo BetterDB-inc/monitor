@@ -287,6 +287,39 @@ describe('partiallyKnownNodes', () => {
     );
   });
 
+  describe('when a dispute is held with the positions of an earlier round', () => {
+    const at = LONG_ENOUGH + ROUND_MS;
+
+    it('leaves out the peers that have learned the node since', () => {
+      const stuck = every([view('p1'), view('p2', { n1: null }), view('p3', { n1: null })], 0, LONG_ENOUGH);
+      const { found, tracked } = judge([...stuck, { at, views: [view('p2'), view('p3')], unanswered: ['p1'] }]);
+
+      expect(tracked).toMatchObject([{ key: 'membership:n1', lastSeenAt: LONG_ENOUGH }]);
+      expect(found).toHaveLength(1);
+      expect(found[0]).toMatchObject({ nodeId: 'n1', confirmed: false });
+      expect(found[0].notKnownBy).toEqual([]);
+      expect(found[0].meet).toBeUndefined();
+    });
+
+    it('keeps the peers that answer and still lack the node', () => {
+      const lacking = [view('p2', { n1: null }), view('p3', { n1: null })];
+      const stuck = every([view('p1'), ...lacking], 0, LONG_ENOUGH);
+      const { found } = judge([...stuck, { at, views: lacking, unanswered: ['p1'] }], ['n1']);
+
+      expect(ids(found[0].notKnownBy)).toEqual(['p2', 'p3']);
+    });
+
+    it('leaves out the peers that no longer list the node', () => {
+      const stuck = every([view('p1'), view('p2', { n1: null }), view('p3')], 0, LONG_ENOUGH);
+      const forgotten = [view('p1', { n1: null }), view('p3', { n1: null })];
+      const { found } = judge([...stuck, { at, views: forgotten, unanswered: ['p2'] }], ['n1']);
+
+      expect(found).toHaveLength(1);
+      expect(found[0].knownBy).toEqual([]);
+      expect(found[0].notKnownBy).toEqual([]);
+    });
+  });
+
   describe('when a dispute is held because one side gave no view', () => {
     const p2 = BASE[1];
     const p3 = BASE[2];
@@ -482,6 +515,21 @@ describe('partiallyKnownNodes', () => {
       expect(after[1]).toMatchObject({ notKnownBy: [], ownViewMissing: [], disagreementKeys: ['membership:n2'] });
       expect(after[1].meet).toBeUndefined();
     });
+  });
+
+  it('counts a peer from the round it stopped listing the node, not from when another peer lacked it', () => {
+    const before = every([view('p1'), view('p2', { n1: null }), view('p3')], 0, LONG_ENOUGH);
+    const at = LONG_ENOUGH + ROUND_MS;
+    const swapped = [view('p1'), view('p2'), view('p3', { n1: null })];
+    const { found } = judge([...before, { at, views: swapped }]);
+
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({ nodeId: 'n1', confirmed: false, firstSeenAt: at, rounds: 1 });
+    expect(ids(found[0].notKnownBy)).toEqual(['p3']);
+
+    const later = at + PARTIAL_MEMBERSHIP_MIN_AGE_MS;
+    const { found: confirmed } = judge([...before, ...every(swapped, at, later)]);
+    expect(confirmed[0]).toMatchObject({ nodeId: 'n1', confirmed: true, firstSeenAt: at });
   });
 
   it('does not count the time another node lacked the same peer', () => {
@@ -884,6 +932,16 @@ describe('partialMembershipSignature', () => {
 });
 
 describe('partialMembershipMessage', () => {
+  it('gives a long time in hours and in days', () => {
+    const [finding] = judge(every(KNOWN_BY_P1_ONLY, 0, LONG_ENOUGH)).found;
+    const since = (ms: number) => partialMembershipMessage(finding, finding.firstSeenAt + ms);
+
+    expect(since(119 * 60_000)).toContain('for 119m.');
+    expect(since(6 * 3_600_000)).toContain('for 6h.');
+    expect(since(47 * 3_600_000)).toContain('for 47h.');
+    expect(since(3 * 86_400_000)).toContain('for 3d.');
+  });
+
   it('names the node, both sets, the command and where to run it', () => {
     const p2 = BASE[1];
     const p3 = BASE[2];
