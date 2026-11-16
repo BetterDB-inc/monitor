@@ -10713,7 +10713,10 @@ export class AnomalyService
   private connectionAtAddressOf(node: ClusterNodeRef, eventConnectionId: string | undefined): string | undefined {
     const address = splitHostPort(node.address);
     const found = address ? this.connectionRegistry.findIdByHostPort(address.host, address.port) : null;
-    if (!found || found === eventConnectionId) return found ?? undefined;
+    if (!found) return undefined;
+    const readsAnotherNode = (this.clusterNodeViews.ownNodeId(found) ?? node.nodeId) !== node.nodeId;
+    if (readsAnotherNode) return undefined;
+    if (found === eventConnectionId) return found;
     const clusterKey =
       this.clusterKeyByNode.get(node.nodeId) ??
       (eventConnectionId ? this.connectionClusterKeys.get(eventConnectionId) : undefined);

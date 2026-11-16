@@ -12634,6 +12634,31 @@ describe('AnomalyService', () => {
         expect(await nodeRead(event.id)).toEqual({ ...REPLICA_NODE, collected: true, connectionId: 'conn-r' });
       });
 
+      it('does not count the connection at the address when it reads another node there', async () => {
+        registeredAt('10.0.0.2:6380', 'conn-r');
+        await poll();
+        await poll({
+          ...mockCtx,
+          connectionId: 'conn-r',
+          port: 6380,
+          client: { ...dbClient, getClusterNodes: jest.fn().mockResolvedValue(viewOf('repB')) },
+        } as ConnectionContext);
+        const gone = { nodeId: 'oldB', address: '10.0.0.2:6380', role: 'unknown' as const };
+        const event = await raise({ node: gone });
+
+        expect(clusterKeys().get('conn-r')).toBe(clusterKeys().get('conn-1'));
+        expect(await nodeRead(event.id)).toEqual({ ...gone, collected: false });
+      });
+
+      it('does not count the event connection when it reads another node at the address', async () => {
+        registeredAt('10.0.0.1:6379', 'conn-1');
+        await poll();
+        const gone = { nodeId: 'oldA', address: '10.0.0.1:6379', role: 'unknown' as const };
+        const event = await raise({ node: gone });
+
+        expect(await nodeRead(event.id)).toEqual({ ...gone, collected: false });
+      });
+
       it('does not count a connection of another cluster that announces the same address', async () => {
         registeredAt('10.0.0.2:6380', 'conn-x');
         await poll();
