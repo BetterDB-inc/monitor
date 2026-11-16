@@ -12635,6 +12635,72 @@ describe('AnomalyService', () => {
       });
     });
 
+    describe('in a poll that reads the cluster at its start', () => {
+      const raisedDuring = async (step: string) => {
+        let event: AnomalyEvent | undefined;
+        jest.spyOn(service as any, step).mockImplementation(async () => {
+          event = await raise();
+        });
+        await poll();
+        return event;
+      };
+
+      it('names the node, without its shard, on an event raised before the shards are read', async () => {
+        const event = await raisedDuring('adoptOpenEvents');
+
+        expect(event?.node).toEqual({ nodeId: 'primA', address: '10.0.0.1:6379', role: 'primary' });
+      });
+
+      it('names the node with its shard on an event raised later in the same poll', async () => {
+        const event = await raisedDuring('detectOrphanedSlotKeys');
+
+        expect(event?.node).toEqual(PRIMARY_NODE);
+      });
+    });
+
+    describe('when the connection stops being a cluster', () => {
+      const standalone = {
+        ...clusterInfoResponse,
+        stats: { ...clusterInfoResponse.stats, cluster_enabled: '0' },
+      };
+
+      beforeEach(async () => {
+        await poll();
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(standalone);
+      });
+
+      it('names no node on its events any more', async () => {
+        await poll();
+
+        expect((await raise()).node).toBeUndefined();
+      });
+
+      it('names no node on an event raised early in the poll that finds out', async () => {
+        let event: AnomalyEvent | undefined;
+        jest.spyOn(service as any, 'adoptOpenEvents').mockImplementation(async () => {
+          event = await raise();
+        });
+
+        await poll();
+
+        expect(event?.node).toBeUndefined();
+      });
+
+      it('forgets which cluster the connection belonged to', async () => {
+        await poll();
+
+        expect((service as any).connectionClusterKeys.has('conn-1')).toBe(false);
+      });
+
+      it('keeps the node while the instance cannot be read', async () => {
+        (dbClient.getInfoParsed as jest.Mock).mockRejectedValue(new Error('down'));
+
+        await poll().catch(() => undefined);
+
+        expect((await raise()).node).toMatchObject({ nodeId: 'primA' });
+      });
+    });
+
     it('names the node on an event another service raises through the sink', async () => {
       await poll();
       const event = raised({ metricType: MetricType.COMMAND_P99 });
