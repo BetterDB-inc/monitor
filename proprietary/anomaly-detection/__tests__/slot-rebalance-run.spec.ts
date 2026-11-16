@@ -2,6 +2,8 @@ import type { RebalancePlan } from '../rebalance-planner';
 import {
   executionBlocker,
   followRun,
+  isCancelledJob,
+  runView,
   isRunKept,
   migrateSlotsArgs,
   parseConfirmedMoves,
@@ -431,6 +433,80 @@ describe('slot rebalance run', () => {
       );
       expect(run.jobsBefore).toEqual(['old-job']);
       expect(run.jobs[1].state).toBe('starting');
+    });
+
+    const cancelledReport = () =>
+      report({
+        finishedJobs: ['job-a', 'job-b'],
+        failed: [
+          {
+            jobName: 'job-a',
+            message: 'Connection lost to source',
+            sourceNodeId: 'src',
+            targetNodeId: 'tgt1',
+            slotRange: '0-99 200-200',
+          },
+        ],
+      });
+
+    it('ends a job it cancelled as cancelled although the import lists it as failed', () => {
+      const listed = followRun(
+        started(),
+        report({ jobViews: [view('job-a', 'tgt1', '0-99 200-200'), view('job-b', 'tgt2', '300-399')] }),
+        nodes(),
+        2_000,
+      );
+      const run = followRun({ ...listed, cancelRequestedAt: 2_500 }, cancelledReport(), nodes(), 3_000);
+      expect(run.jobs.map((job) => job.state)).toEqual(['cancelled', 'cancelled']);
+      expect(run.state).toBe('cancelled');
+    });
+
+    it('calls a job failed when no cancel was asked for', () => {
+      const listed = followRun(
+        started(),
+        report({ jobViews: [view('job-a', 'tgt1', '0-99 200-200'), view('job-b', 'tgt2', '300-399')] }),
+        nodes(),
+        2_000,
+      );
+      expect(followRun(listed, cancelledReport(), nodes(), 3_000).jobs[0]).toMatchObject({
+        state: 'failed',
+        message: 'Connection lost to source',
+      });
+    });
+
+    it('keeps a job that moved before the cancel as succeeded', () => {
+      const run = followRun({ ...started(), cancelRequestedAt: 1_500 }, report(), movedNodes(), 2_000);
+      expect(run.state).toBe('succeeded');
+    });
+
+    it('knows a failure as one of its own cancelled jobs', () => {
+      const named = {
+        ...started(),
+        cancelRequestedAt: 2_000,
+        jobs: started().jobs.map((job, index) => (index === 0 ? { ...job, jobName: 'job-a' } : job)),
+        jobsBefore: ['old-job'],
+      };
+      const failure = (jobName: string, targetNodeId: string, slots: string) => ({
+        jobName,
+        sourceNodeId: 'src',
+        targetNodeId,
+        slots,
+      });
+      expect(isCancelledJob(named, failure('job-a', 'tgt1', '0-99'))).toBe(true);
+      expect(isCancelledJob(named, failure('job-x', 'tgt1', '0-99'))).toBe(false);
+      expect(isCancelledJob(named, failure('job-b', 'tgt2', '300-399'))).toBe(true);
+      expect(isCancelledJob(named, failure('old-job', 'tgt2', '300-399'))).toBe(false);
+      expect(isCancelledJob(named, failure('job-b', 'tgt2', '300-400'))).toBe(false);
+      expect(isCancelledJob({ ...named, cancelRequestedAt: undefined }, failure('job-a', 'tgt1', '0-99'))).toBe(
+        false,
+      );
+    });
+
+    it('leaves the bookkeeping out of the view', () => {
+      const view = runView({ ...started(), cancelRequestedAt: 2_000, jobsBefore: ['old-job'] });
+      expect(view).not.toHaveProperty('jobsBefore');
+      expect(view).not.toHaveProperty('cancelRequestedAt');
+      expect(view.sourceShardId).toBe('src');
     });
 
     it('keeps an unlisted job starting for a minute, then unknown', () => {

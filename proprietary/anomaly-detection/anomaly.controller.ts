@@ -30,7 +30,7 @@ import {
 import { ReplicaDivergenceHistory } from './replication-divergence-detector';
 import { HotShardDetail } from './hot-shard-detector';
 import { TopologyDivergenceReport } from './topology-divergence-report';
-import { type RebalanceRun, parseConfirmedMoves } from './slot-rebalance-run';
+import { type RebalanceRunView, parseConfirmedMoves } from './slot-rebalance-run';
 import type { RequestWithActor } from '../../apps/api/src/auth/guards/actor.guard';
 import { LicenseGuard, RequiresFeature, Feature } from '@proprietary/licenses';
 import { ConnectionId, CONNECTION_ID_HEADER } from '../../apps/api/src/common/decorators';
@@ -192,7 +192,7 @@ export class AnomalyController {
     @Param('shardId') shardId: string,
     @Body() body: unknown,
     @Req() request: RequestWithActor,
-  ): Promise<RebalanceRun> {
+  ): Promise<RebalanceRunView> {
     const confirmed = parseConfirmedMoves(body);
     if (!confirmed) {
       throw new BadRequestException('moves must list each target shard with its slot ranges');
@@ -219,7 +219,7 @@ export class AnomalyController {
   @RequiresFeature(Feature.ANOMALY_DETECTION)
   @ApiOperation({ summary: 'Slot rebalances started from this monitor in the last hour' })
   @ApiHeader({ name: CONNECTION_ID_HEADER, required: true, description: 'Connection ID of the cluster' })
-  getRebalanceRuns(@ConnectionId({ required: true }) connectionId: string): Promise<RebalanceRun[]> {
+  getRebalanceRuns(@ConnectionId({ required: true }) connectionId: string): Promise<RebalanceRunView[]> {
     return this.anomalyService.followRebalanceRuns(connectionId);
   }
 
@@ -232,7 +232,7 @@ export class AnomalyController {
   async cancelRebalance(
     @ConnectionId({ required: true }) connectionId: string,
     @Body() body: unknown,
-  ): Promise<RebalanceRun> {
+  ): Promise<RebalanceRunView> {
     const sourceShardId = (body as { sourceShardId?: unknown } | null)?.sourceShardId;
     if (typeof sourceShardId !== 'string' || sourceShardId === '') {
       throw new BadRequestException('sourceShardId is required');

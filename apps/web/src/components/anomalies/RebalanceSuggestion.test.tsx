@@ -183,11 +183,32 @@ describe('RebalanceSuggestion', () => {
       fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
       const dialog = await screen.findByRole('dialog');
 
+      getHotShards.mockResolvedValue([
+        hotShard(plan({ execution: { available: false, blockedBy: 'server_refused' } })),
+      ]);
       fireEvent.click(within(dialog).getByRole('button', { name: 'Start the migration' }));
 
       expect(await within(dialog).findByRole('alert')).toHaveTextContent(
         'NOPERM this user has no permissions',
       );
+      await waitFor(() =>
+        expect(within(dialog).getByRole('button', { name: 'Start the migration' })).toBeDisabled(),
+      );
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Keep the plan' }));
+
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      const region = await panel();
+      expect(within(region).queryByRole('button', { name: 'Run this plan' })).toBeNull();
+      expect(region).toHaveTextContent('The server refused the last start of this plan.');
+    });
+
+    it('says a running migration holds the plan back', async () => {
+      await show([hotShard(plan({ execution: { available: false, blockedBy: 'migration_running' } }))]);
+
+      const region = await panel();
+      expect(within(region).queryByRole('button', { name: 'Run this plan' })).toBeNull();
+      expect(region).toHaveTextContent('A slot migration is running. A plan can run once it ends.');
     });
 
     it('offers no run to a read-only member', async () => {

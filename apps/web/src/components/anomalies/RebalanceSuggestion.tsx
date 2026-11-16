@@ -213,6 +213,9 @@ const BLOCKED: Partial<Record<RebalanceExecutionBlocker, string>> = {
     'Running a plan from BetterDB is off. An operator can turn it on with BETTERDB_SLOT_MIGRATION=true.',
   not_dialed: 'BetterDB does not connect to the cluster nodes directly, so it cannot run this plan.',
   migration_running: 'A slot migration is running. A plan can run once it ends.',
+  plan_outdated: 'The slots or the nodes changed since this suggestion was made. A new one follows.',
+  server_refused:
+    'The server refused the last start of this plan. It can run again once the suggestion is made again.',
 };
 
 const REFUSED: Record<
@@ -227,6 +230,8 @@ const REFUSED: Record<
   flag_off: BLOCKED.flag_off ?? '',
   not_dialed: BLOCKED.not_dialed ?? '',
   migration_running: BLOCKED.migration_running ?? '',
+  plan_outdated: BLOCKED.plan_outdated ?? '',
+  server_refused: BLOCKED.server_refused ?? '',
   provider_managed: 'Slot commands are not supported on this managed service.',
   unsupported_server: 'Running a plan needs Valkey 9.0 or later on every shard of the plan.',
 };
@@ -247,7 +252,7 @@ function RunPlan({ plan, connectionId }: { plan: RebalancePlan; connectionId: st
   const [error, setError] = useState<string | null>(null);
   const execution = plan.execution;
   if (!execution || !canMutate) return null;
-  if (!execution.available) {
+  if (!execution.available && !open) {
     const blocked = execution.blockedBy && BLOCKED[execution.blockedBy];
     const relevant = execution.blockedBy !== 'flag_off' || plan.support === 'valkey_atomic';
     return blocked && relevant ? <p className="text-muted-foreground">{blocked}</p> : null;
@@ -276,15 +281,17 @@ function RunPlan({ plan, connectionId }: { plan: RebalancePlan; connectionId: st
   };
   return (
     <>
-      <Button
-        size="sm"
-        onClick={() => {
-          setError(null);
-          setOpen(true);
-        }}
-      >
-        Run this plan
-      </Button>
+      {execution.available && (
+        <Button
+          size="sm"
+          onClick={() => {
+            setError(null);
+            setOpen(true);
+          }}
+        >
+          Run this plan
+        </Button>
+      )}
       <Dialog open={open} onOpenChange={(next) => !sending && setOpen(next)}>
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
@@ -321,7 +328,7 @@ function RunPlan({ plan, connectionId }: { plan: RebalancePlan; connectionId: st
             <Button variant="outline" disabled={sending} onClick={() => setOpen(false)}>
               Keep the plan
             </Button>
-            <Button disabled={sending} onClick={run}>
+            <Button disabled={sending || !execution.available} onClick={run}>
               {sending ? 'Starting…' : 'Start the migration'}
             </Button>
           </DialogFooter>

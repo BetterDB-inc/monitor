@@ -112,6 +112,7 @@ import {
   REBALANCE_REFRESH_MS,
   isTransientNoPlan,
   type RebalanceExecution,
+  type RebalanceExecutionBlocker,
   type RebalanceNoPlanReason,
   type RebalancePlan,
   type RebalanceShard,
@@ -132,11 +133,15 @@ import {
   type RebalanceRun,
   type RebalanceRunActor,
   type RebalanceRunResult,
+  type RebalanceRunView,
+  REBALANCE_FOLLOW_MS,
   executionBlocker,
   followRun,
+  isCancelledJob,
   isRunKept,
   migrateSlotsArgs,
   recheckFailure,
+  runView,
   sameMoves,
   startRun,
   withOutcome,
@@ -871,6 +876,8 @@ export class AnomalyService
   >();
   private rebalanceRuns = new Map<string, Map<string, RebalanceRun>>();
   private rebalanceStarting = new Set<string>();
+  private rebalanceFollowedAt = new Map<string, number>();
+  private refusedRebalancePlans = new WeakMap<RebalancePlan, RebalanceExecutionBlocker>();
   private hotShardKeys = new Map<
     string,
     Map<string, { detail: HotShardKeyDetail; checkedAt: number }>
@@ -1550,6 +1557,7 @@ export class AnomalyService
     this.hotShardKeys.delete(connectionId);
     this.hotShardRebalance.delete(connectionId);
     this.rebalanceRuns.delete(connectionId);
+    this.rebalanceFollowedAt.delete(connectionId);
     this.hotKeyNoteLogged.delete(connectionId);
     this.forgetNodeWriteP99(connectionId);
     this.reshardWriteP99.delete(connectionId);
@@ -2347,6 +2355,7 @@ export class AnomalyService
           await this.detectOrphanedSlotKeys(ctx, timestamp, nodes);
           await this.detectReshardPressure(info, ctx, timestamp, nodes, cpuUtilizationSample);
           await this.detectSlotMigrations(ctx, timestamp);
+          await this.followRebalanceRunsOnPoll(ctx.connectionId, timestamp);
           // A slot-owning primary with no synced replica (#714). Runs in both
           // topology modes, and is not held back during a rolling update: that
           // is when the shard is most often left with a single copy.
@@ -8851,7 +8860,9 @@ export class AnomalyService
         eventIdsByConn: this.stuckSlotMigrationEventIds,
         metricType: MetricType.SLOT_MIGRATION_STUCK,
       });
+      const runs = [...(this.rebalanceRuns.get(connectionId)?.values() ?? [])];
       for (const finding of judged.failed) {
+        if (runs.some((run) => isCancelledJob(run, finding))) continue;
         const event = this.buildSlotMigrationEvent(connectionId, timestamp, finding);
         this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
         await this.addAnomaly(event, ctx);
@@ -10643,6 +10654,7 @@ export class AnomalyService
       const failure = recheckFailure(plan, nodes);
       if (failure) {
         this.hotShardRebalance.get(connectionId)?.delete(signature);
+        this.refusedRebalancePlans.set(plan, 'plan_outdated');
         return { status: 'changed', reason: failure, rebalance: current };
       }
       try {
@@ -10653,6 +10665,7 @@ export class AnomalyService
           (client) => client.call('CLUSTER', ...migrateSlotsArgs(plan)),
         );
       } catch (err) {
+        this.refusedRebalancePlans.set(plan, 'server_refused');
         return { status: 'refused', message: errorText(err) };
       }
       const run = startRun(plan, startedBy, Date.now(), jobsBefore);
@@ -10661,13 +10674,26 @@ export class AnomalyService
       this.rebalanceRuns.set(connectionId, runs);
       this.slotMigrationCheckedAt.delete(connectionId);
       this.holdRebalance(connectionId, 'migration_running');
-      return { status: 'started', run };
+      return { status: 'started', run: runView(run) };
     } finally {
       this.rebalanceStarting.delete(connectionId);
     }
   }
 
-  async followRebalanceRuns(connectionId: string): Promise<RebalanceRun[]> {
+  async followRebalanceRuns(connectionId: string): Promise<RebalanceRunView[]> {
+    return (await this.advanceRebalanceRuns(connectionId)).map(runView);
+  }
+
+  private async followRebalanceRunsOnPoll(connectionId: string, timestamp: number): Promise<void> {
+    const runs = this.rebalanceRuns.get(connectionId);
+    if (!runs) return;
+    const followed = this.rebalanceFollowedAt.get(connectionId);
+    if (followed !== undefined && timestamp - followed < REBALANCE_FOLLOW_MS) return;
+    this.rebalanceFollowedAt.set(connectionId, timestamp);
+    await this.advanceRebalanceRuns(connectionId);
+  }
+
+  private async advanceRebalanceRuns(connectionId: string): Promise<RebalanceRun[]> {
     const runs = this.rebalanceRuns.get(connectionId);
     if (!runs) return [];
     for (const [sourceShardId, run] of runs) {
@@ -10686,7 +10712,9 @@ export class AnomalyService
         if (report.complete) {
           for (const run of running) {
             if (runs.get(run.sourceShardId) !== run) continue;
-            runs.set(run.sourceShardId, followRun(run, report, nodes, Date.now()));
+            const next = followRun(run, report, nodes, Date.now());
+            runs.set(run.sourceShardId, next);
+            if (next.state !== 'running') this.slotMigrationCheckedAt.delete(connectionId);
           }
         }
       } catch (err) {
@@ -10696,7 +10724,10 @@ export class AnomalyService
     const sample = this.shardLoad?.getLatest(connectionId) ?? null;
     for (const [sourceShardId, run] of runs) runs.set(sourceShardId, withOutcome(run, sample));
     if (runs.size === 0) {
-      if (this.rebalanceRuns.get(connectionId) === runs) this.rebalanceRuns.delete(connectionId);
+      if (this.rebalanceRuns.get(connectionId) === runs) {
+        this.rebalanceRuns.delete(connectionId);
+        this.rebalanceFollowedAt.delete(connectionId);
+      }
       return [];
     }
     return [...runs.values()].sort((a, b) => b.startedAt - a.startedAt);
@@ -10710,9 +10741,12 @@ export class AnomalyService
     if (!this.clusterDiscovery || !this.dialsDataNodes(connectionId)) {
       return { status: 'blocked', blockedBy: 'not_dialed' };
     }
-    await this.followRebalanceRuns(connectionId);
-    const run = this.rebalanceRuns.get(connectionId)?.get(sourceShardId);
-    if (run?.state !== 'running') return { status: 'not_running' };
+    await this.advanceRebalanceRuns(connectionId);
+    const runs = this.rebalanceRuns.get(connectionId);
+    const run = runs?.get(sourceShardId);
+    if (!runs || run?.state !== 'running') return { status: 'not_running' };
+    const cancelling = { ...run, cancelRequestedAt: Date.now() };
+    runs.set(sourceShardId, cancelling);
     try {
       await this.readShard(
         connectionId,
@@ -10721,10 +10755,14 @@ export class AnomalyService
         (client) => client.call('CLUSTER', 'CANCELSLOTMIGRATIONS'),
       );
     } catch (err) {
+      const now = runs.get(sourceShardId);
+      if (now?.cancelRequestedAt === cancelling.cancelRequestedAt) {
+        runs.set(sourceShardId, { ...now, cancelRequestedAt: run.cancelRequestedAt });
+      }
       return { status: 'refused', message: errorText(err) };
     }
     this.slotMigrationCheckedAt.delete(connectionId);
-    return { status: 'cancelling', run };
+    return { status: 'cancelling', run: runView(cancelling) };
   }
 
   private slotMigrationEnabled(): boolean {
@@ -10740,7 +10778,7 @@ export class AnomalyService
         this.rebalanceStarting.has(connectionId) ||
         [...runs].some((run) => run.state === 'running') ||
         this.slotMigrationsListed.has(connectionId),
-    });
+    }) ?? this.refusedRebalancePlans.get(plan);
     return blockedBy ? { available: false, blockedBy } : { available: true };
   }
 

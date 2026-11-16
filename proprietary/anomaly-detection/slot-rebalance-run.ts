@@ -11,6 +11,7 @@ import type {
 export const REBALANCE_JOB_LISTING_GRACE_MS = 60_000;
 export const REBALANCE_OUTCOME_SETTLE_MS = 60_000;
 export const REBALANCE_RUN_KEPT_MS = 60 * 60_000;
+export const REBALANCE_FOLLOW_MS = 5_000;
 
 export type RebalanceRecheckFailure = 'slots_moved' | 'source_unhealthy' | 'target_unhealthy';
 
@@ -69,21 +70,30 @@ export interface RebalanceRunActor {
   email: string | null;
 }
 
-export interface RebalanceRun {
+export interface RebalanceRunView {
   sourceShardId: string;
   sourceAddr: string;
   startedBy: RebalanceRunActor;
   startedAt: number;
   projectedRatio: number;
-  jobsBefore: string[];
   jobs: RebalanceRunJob[];
   state: RebalanceRunState;
   endedAt?: number;
   outcome?: { projectedRatio: number; actualRatio: number; measuredAt: number };
 }
 
+export interface RebalanceRun extends RebalanceRunView {
+  jobsBefore: string[];
+  cancelRequestedAt?: number;
+}
+
+export function runView(run: RebalanceRun): RebalanceRunView {
+  const { jobsBefore, cancelRequestedAt, ...view } = run;
+  return view;
+}
+
 export type RebalanceRunResult =
-  | { status: 'started'; run: RebalanceRun }
+  | { status: 'started'; run: RebalanceRunView }
   | { status: 'blocked'; blockedBy: RebalanceExecutionBlocker }
   | {
       status: 'changed';
@@ -93,7 +103,7 @@ export type RebalanceRunResult =
   | { status: 'refused'; message: string };
 
 export type RebalanceCancelResult =
-  | { status: 'cancelling'; run: RebalanceRun }
+  | { status: 'cancelling'; run: RebalanceRunView }
   | { status: 'blocked'; blockedBy: RebalanceExecutionBlocker }
   | { status: 'not_running' }
   | { status: 'refused'; message: string };
@@ -240,6 +250,11 @@ function followJob(
   if (listed) {
     return { ...job, state: 'running', jobName: listed.jobName, phase: listed.phase };
   }
+  const moved = owns(byId.get(job.targetShardId), job.ranges);
+  if (run.cancelRequestedAt !== undefined && !moved) {
+    if (owns(byId.get(run.sourceShardId), job.ranges)) return { ...job, state: 'cancelled' };
+    return { ...job, state: 'unknown' };
+  }
   const isNew = (jobName: string) => !run.jobsBefore.includes(jobName);
   const failed = report.failed.find((entry) =>
     job.jobName
@@ -250,7 +265,6 @@ function followJob(
         inside(slotsOf(entry.slotRange), job.ranges),
   );
   if (failed) return { ...job, state: 'failed', jobName: failed.jobName, message: failed.message };
-  const moved = owns(byId.get(job.targetShardId), job.ranges);
   if (!job.jobName && moved) return { ...job, state: 'succeeded' };
   if (job.jobName && report.finishedJobs.includes(job.jobName)) {
     if (moved) return { ...job, state: 'succeeded' };
@@ -298,6 +312,22 @@ export function withOutcome(run: RebalanceRun, sample: ShardLoadSample | null): 
       measuredAt: sample.timestamp,
     },
   };
+}
+
+export function isCancelledJob(
+  run: RebalanceRun,
+  failure: { jobName?: string; sourceNodeId: string; targetNodeId: string; slots: string },
+): boolean {
+  if (run.cancelRequestedAt === undefined) return false;
+  return run.jobs.some((job) =>
+    job.jobName !== undefined
+      ? job.jobName === failure.jobName
+      : failure.jobName !== undefined &&
+        !run.jobsBefore.includes(failure.jobName) &&
+        failure.sourceNodeId === run.sourceShardId &&
+        job.targetShardId === failure.targetNodeId &&
+        inside(slotsOf(failure.slots), job.ranges),
+  );
 }
 
 export function isRunKept(run: RebalanceRun, now: number): boolean {

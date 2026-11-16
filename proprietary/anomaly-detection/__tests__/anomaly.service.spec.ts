@@ -4519,6 +4519,7 @@ describe('AnomalyService', () => {
             expect((service as any).hotShardRebalance.get('conn-a')?.has('hot_shard:a0000000')).toBe(
               false,
             );
+            expect(execution()).toEqual({ available: false, blockedBy: 'plan_outdated' });
           });
 
           it('refuses while a slot migration runs on the cluster', async () => {
@@ -4543,7 +4544,29 @@ describe('AnomalyService', () => {
               message: "ERR I don't know about node b0000000",
             });
             expect(await service.followRebalanceRuns('conn-a')).toEqual([]);
-            expect(execution()).toEqual({ available: true });
+            expect(execution()).toEqual({ available: false, blockedBy: 'server_refused' });
+            expect(await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN)).toEqual({
+              status: 'blocked',
+              blockedBy: 'server_refused',
+            });
+          });
+
+          it('offers no run after MIGRATESLOTS did not answer in time', async () => {
+            enable();
+            const { source } = await planned();
+            source.call.mockImplementationOnce(() => new Promise(() => undefined));
+            const budget = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+            (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;
+            try {
+              expect(await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN)).toEqual({
+                status: 'refused',
+                message: 'CLUSTER MIGRATESLOTS did not answer within 20ms; the migration may still have started',
+              });
+            } finally {
+              (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = budget;
+            }
+            expect(await service.followRebalanceRuns('conn-a')).toEqual([]);
+            expect(execution()).toEqual({ available: false, blockedBy: 'server_refused' });
           });
 
           it('follows the job until the target owns the slots', async () => {
@@ -4587,7 +4610,10 @@ describe('AnomalyService', () => {
               },
             ];
             const started = await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN);
-            expect(started).toMatchObject({ status: 'started', run: { jobsBefore: ['old-job'] } });
+            expect(started).toMatchObject({ status: 'started' });
+            expect((service as any).rebalanceRuns.get('conn-a').get('a0000000').jobsBefore).toEqual([
+              'old-job',
+            ]);
 
             report.finishedJobs = ['old-job', 'job-1'];
             slotsOf.a0000000 = [[108, 119]];
@@ -4623,6 +4649,111 @@ describe('AnomalyService', () => {
             });
             expect(calls).toHaveLength(sent);
             expect((await service.followRebalanceRuns('conn-a'))[0].state).toBe('cancelled');
+          });
+
+          const failedImport = {
+            jobName: 'job-1',
+            slotRange: '100-107',
+            sourceNodeId: 'a0000000',
+            sourceAddress: ADDRS[0],
+            targetNodeId: 'b0000000',
+            targetAddress: ADDRS[1],
+            message: 'Connection lost to source',
+            listedByNodeIds: ['b0000000'],
+          };
+
+          async function failAfterRun(cancel: boolean) {
+            enable();
+            await planned();
+            await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN);
+            report.jobViews = [listed()];
+            await service.followRebalanceRuns('conn-a');
+            const running = {
+              ...report,
+              migrations: [{ ...listed(), slot: 100, state: 'migrating' }],
+              readNodeIds: IDS,
+              jobsReadNodeIds: IDS,
+              markersComplete: true,
+              ownNodeOnly: false,
+            };
+            (service as any).slotMigrationWatch.set(
+              'conn-a',
+              judgeSlotMigrations(undefined, running as any, clock - 5_000).watch,
+            );
+            if (cancel) await service.cancelRebalance('conn-a', 'a0000000');
+            report.jobViews = [];
+            report.finishedJobs = ['job-1'];
+            report.failed = [failedImport];
+            const metrics = (service as any).clusterMetrics;
+            metrics.coveredBySeed = () => false;
+            metrics.readSlotMigrations = jest.fn(async () => ({
+              ...running,
+              ...report,
+              migrations: [],
+            }));
+            const added = jest.spyOn(service as any, 'addAnomaly').mockResolvedValue(undefined);
+            (service as any).slotMigrationCheckedAt.delete('conn-a');
+            await (service as any).detectSlotMigrations(
+              { connectionId: 'conn-a', connectionName: 'conn-a' },
+              clock,
+            );
+            return added;
+          }
+
+          it('ends a run it cancelled as cancelled and raises no failure for it', async () => {
+            const added = await failAfterRun(true);
+
+            expect(added).not.toHaveBeenCalled();
+            expect((await service.followRebalanceRuns('conn-a'))[0]).toMatchObject({
+              state: 'cancelled',
+              jobs: [{ state: 'cancelled' }],
+            });
+          });
+
+          it('still reports a run that failed on its own', async () => {
+            const added = await failAfterRun(false);
+
+            expect(added).toHaveBeenCalledTimes(1);
+            expect((added.mock.calls[0][0] as { message: string }).message).toContain(
+              'Slot migration failed',
+            );
+            expect((await service.followRebalanceRuns('conn-a'))[0]).toMatchObject({
+              state: 'failed',
+              jobs: [{ state: 'failed', message: 'Connection lost to source' }],
+            });
+          });
+
+          it('follows a run from the poll without a reader, at most every 5 seconds', async () => {
+            enable();
+            await planned();
+            await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN);
+            const reads = (service as any).clusterMetrics.readSlotMigrations as jest.Mock;
+            reads.mockClear();
+            report.finishedJobs = ['job-1'];
+            slotsOf.a0000000 = [[108, 119]];
+            slotsOf.b0000000 = [[10, 11], [100, 107]];
+
+            await (service as any).followRebalanceRunsOnPoll('conn-a', clock);
+            await (service as any).followRebalanceRunsOnPoll('conn-a', clock + 4_999);
+
+            expect(reads).toHaveBeenCalledTimes(1);
+            const run = (service as any).rebalanceRuns.get('conn-a').get('a0000000');
+            expect(run).toMatchObject({ state: 'succeeded', jobs: [{ state: 'succeeded' }] });
+            expect(execution()).not.toEqual({ available: false, blockedBy: 'migration_running' });
+          });
+
+          it('keeps the internal job bookkeeping out of the run it returns', async () => {
+            enable();
+            await planned();
+            const started = await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN);
+            report.jobViews = [listed()];
+            const cancelling = await service.cancelRebalance('conn-a', 'a0000000');
+            const [listedRun] = await service.followRebalanceRuns('conn-a');
+
+            for (const run of [(started as any).run, (cancelling as any).run, listedRun]) {
+              expect(run).not.toHaveProperty('jobsBefore');
+              expect(run).not.toHaveProperty('cancelRequestedAt');
+            }
           });
 
           it('drops a run an hour after it ended', async () => {
