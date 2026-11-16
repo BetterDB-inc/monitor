@@ -12,6 +12,7 @@ import { useConnection } from '../hooks/useConnection';
 import { useConnectionDialog } from '../hooks/useConnectionDialog';
 import { useClusterTab } from '../hooks/useClusterTab';
 import { useClusterDisagreements } from '../hooks/useClusterDisagreements';
+import { isOpenDisagreement } from '../lib/clusterDisagreements';
 import { metricsApi } from '../api/metrics';
 import { ClusterHealthCard } from '../components/cluster/ClusterHealthCard';
 import { ClusterTopology } from '../components/cluster/ClusterTopology';
@@ -93,7 +94,7 @@ export function ClusterDashboard() {
   const [tab, setTab] = useClusterTab();
   const disagreements = useClusterDisagreements(currentConnection?.id, shouldPoll);
   const openDisagreements = (disagreements.summary?.disagreements ?? []).filter(
-    (line) => !line.stale,
+    isOpenDisagreement,
   );
 
   // Memoize slot-to-node mapping separately for reuse

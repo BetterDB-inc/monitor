@@ -13,6 +13,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { isOpenDisagreement } from '@/lib/clusterDisagreements';
 import { nodeHref } from '@/lib/clusterNodeHref';
 import { formatSlotRanges } from '@/types/cluster';
 import type {
@@ -161,7 +162,7 @@ function DisagreementCard({
             <span className="text-muted-foreground">from</span>
             <NodeChips
               nodes={position.observers}
-              count={position.count}
+              count={position.observerCount}
               connectionId={connectionId}
             />
           </li>
@@ -212,6 +213,7 @@ function viewsText(shard: DisagreementShard): string {
 function ShardRow({ shard, connectionId }: { shard: DisagreementShard; connectionId?: string }) {
   const badge = SHARD_BADGE[shard.state];
   const [firstId] = shard.disagreementIds;
+  const [firstStaleId] = shard.staleDisagreementIds;
   return (
     <TableRow>
       <TableCell>
@@ -227,13 +229,18 @@ function ShardRow({ shard, connectionId }: { shard: DisagreementShard; connectio
       <TableCell>{shard.zones.join(', ') || '—'}</TableCell>
       <TableCell className="font-mono text-xs">{slotsText(shard.slots)}</TableCell>
       <TableCell>
-        {firstId ? (
+        {firstId && (
           <a href={`#disagreement-${firstId}`} className="underline">
             {plural(shard.disagreementIds.length, 'disagreement')}
           </a>
-        ) : (
-          '—'
         )}
+        {firstId && firstStaleId && ', '}
+        {firstStaleId && (
+          <a href={`#disagreement-${firstStaleId}`} className="underline">
+            {shard.staleDisagreementIds.length} unconfirmed
+          </a>
+        )}
+        {!firstId && !firstStaleId && '—'}
       </TableCell>
       <TableCell className="text-muted-foreground">{viewsText(shard)}</TableCell>
     </TableRow>
@@ -339,8 +346,8 @@ export function ClusterDisagreements({
 
   const { coverage, shards } = summary;
   const compared = summary.status === 'ok';
-  const disagreements = summary.disagreements.filter((line) => !line.stale);
-  const unconfirmed = summary.disagreements.filter((line) => line.stale);
+  const disagreements = summary.disagreements.filter(isOpenDisagreement);
+  const unconfirmed = summary.disagreements.filter((line) => !isOpenDisagreement(line));
 
   return (
     <div className="space-y-4">

@@ -93,8 +93,8 @@ function summaryWith(lines: number): TopologyDisagreementSummary {
       subjectCount: 1,
       shardIds: [],
       positions: [
-        { value: 'ok', count: 2, observers: [primary] },
-        { value: 'fail?', count: 1, observers: [primary] },
+        { value: 'ok', count: 2, observerCount: 2, observers: [primary] },
+        { value: 'fail?', count: 1, observerCount: 1, observers: [primary] },
       ],
       text: `Line ${at}: ok in 2 views, fail? in 1 view.`,
     })),
@@ -158,6 +158,24 @@ describe('ClusterDashboard disagreements tab', () => {
     open('/cluster');
 
     expect(screen.getByRole('tab', { name: 'Disagreements' })).toBeInTheDocument();
+  });
+
+  it('keeps counting a disagreement with an open event that the last round could not check', () => {
+    const summary = summaryWith(1);
+    summary.disagreements[0] = {
+      ...summary.disagreements[0],
+      severity: 'critical',
+      confirmed: true,
+      eventId: 'event-1',
+      eventType: 'topology_divergence',
+      stale: true,
+      positions: [],
+    };
+    state.summary = summary;
+
+    open('/cluster');
+
+    expect(screen.getByRole('tab', { name: 'Disagreements, 1 open' })).toBeInTheDocument();
   });
 
   it('waits for the licence before saying the view needs Pro', () => {

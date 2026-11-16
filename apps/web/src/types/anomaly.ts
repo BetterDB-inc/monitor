@@ -324,6 +324,7 @@ export interface DisagreementPosition {
   value: string | null;
   owner?: DivergenceNode;
   count: number;
+  observerCount: number;
   observers: DivergenceNode[];
 }
 
@@ -361,6 +362,7 @@ export interface DisagreementShard {
   ownViews: number;
   state: DisagreementShardState;
   disagreementIds: string[];
+  staleDisagreementIds: string[];
 }
 
 export interface TopologyDisagreementSummary {
