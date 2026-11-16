@@ -219,8 +219,13 @@ export class AnomalyController {
   @RequiresFeature(Feature.ANOMALY_DETECTION)
   @ApiOperation({ summary: 'Slot rebalances started from this monitor in the last hour' })
   @ApiHeader({ name: CONNECTION_ID_HEADER, required: true, description: 'Connection ID of the cluster' })
-  getRebalanceRuns(@ConnectionId({ required: true }) connectionId: string): Promise<RebalanceRunView[]> {
-    return this.anomalyService.followRebalanceRuns(connectionId);
+  async getRebalanceRuns(
+    @ConnectionId({ required: true }) connectionId: string,
+    @Req() request: RequestWithActor,
+  ): Promise<RebalanceRunView[]> {
+    const runs = await this.anomalyService.followRebalanceRuns(connectionId);
+    if (request.actor?.role === 'admin') return runs;
+    return runs.map((run) => ({ ...run, startedBy: { ...run.startedBy, email: null } }));
   }
 
   @Post('slot-rebalance/cancel')

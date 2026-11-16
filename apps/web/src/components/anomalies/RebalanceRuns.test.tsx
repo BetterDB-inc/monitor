@@ -46,7 +46,7 @@ function run(overrides: Partial<RebalanceRun> = {}): RebalanceRun {
   };
 }
 
-async function show(runs: RebalanceRun[]): Promise<void> {
+async function show(runs: RebalanceRun[]): Promise<QueryClient> {
   getRebalanceRuns.mockResolvedValue(runs);
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
@@ -57,6 +57,7 @@ async function show(runs: RebalanceRun[]): Promise<void> {
   await act(async () => {
     await client.invalidateQueries();
   });
+  return client;
 }
 
 const panel = () => screen.findByRole('region', { name: /slot rebalance from shard 3f2a9c1e/i });
@@ -97,6 +98,21 @@ describe('RebalanceRuns', () => {
     await show([run({ state: 'succeeded', endedAt: 5_000, jobs: [{ ...run().jobs[0], state: 'succeeded' }] })]);
 
     expect(await panel()).toHaveTextContent('Measuring the load now that the slots have moved.');
+  });
+
+  it('keeps the last runs and their cancel when a refresh fails', async () => {
+    const client = await show([run()]);
+    await panel();
+
+    getRebalanceRuns.mockRejectedValue(new Error('Network error'));
+    await act(async () => {
+      await client.invalidateQueries();
+    });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Could not refresh the slot rebalance runs. The last state read is shown.',
+    );
+    expect(within(await panel()).getByRole('button', { name: /cancel/i })).toBeInTheDocument();
   });
 
   it('shows the server message of a failed job', async () => {

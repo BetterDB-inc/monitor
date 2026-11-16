@@ -10657,24 +10657,26 @@ export class AnomalyService
         this.refusedRebalancePlans.set(plan, 'plan_outdated');
         return { status: 'changed', reason: failure, rebalance: current };
       }
+      const timedOut = `CLUSTER MIGRATESLOTS did not answer within ${AnomalyService.FANOUT_COMMAND_TIMEOUT_MS}ms; the migration may still have started`;
+      const record = () => {
+        const run = startRun(plan, startedBy, Date.now(), jobsBefore);
+        const runs = this.rebalanceRuns.get(connectionId) ?? new Map<string, RebalanceRun>();
+        runs.set(plan.sourceShardId, run);
+        this.rebalanceRuns.set(connectionId, runs);
+        this.slotMigrationCheckedAt.delete(connectionId);
+        this.holdRebalance(connectionId, 'migration_running');
+        return run;
+      };
       try {
-        await this.readShard(
-          connectionId,
-          plan.sourceShardId,
-          `CLUSTER MIGRATESLOTS did not answer within ${AnomalyService.FANOUT_COMMAND_TIMEOUT_MS}ms; the migration may still have started`,
-          (client) => client.call('CLUSTER', ...migrateSlotsArgs(plan)),
+        await this.readShard(connectionId, plan.sourceShardId, timedOut, (client) =>
+          client.call('CLUSTER', ...migrateSlotsArgs(plan)),
         );
       } catch (err) {
         this.refusedRebalancePlans.set(plan, 'server_refused');
+        if (err instanceof Error && err.message === timedOut) record();
         return { status: 'refused', message: errorText(err) };
       }
-      const run = startRun(plan, startedBy, Date.now(), jobsBefore);
-      const runs = this.rebalanceRuns.get(connectionId) ?? new Map<string, RebalanceRun>();
-      runs.set(plan.sourceShardId, run);
-      this.rebalanceRuns.set(connectionId, runs);
-      this.slotMigrationCheckedAt.delete(connectionId);
-      this.holdRebalance(connectionId, 'migration_running');
-      return { status: 'started', run: runView(run) };
+      return { status: 'started', run: runView(record()) };
     } finally {
       this.rebalanceStarting.delete(connectionId);
     }
@@ -10761,8 +10763,10 @@ export class AnomalyService
       }
       return { status: 'refused', message: errorText(err) };
     }
+    const accepted = { ...cancelling, cancelAcceptedAt: Date.now() };
+    if (runs.get(sourceShardId) === cancelling) runs.set(sourceShardId, accepted);
     this.slotMigrationCheckedAt.delete(connectionId);
-    return { status: 'cancelling', run: runView(cancelling) };
+    return { status: 'cancelling', run: runView(accepted) };
   }
 
   private slotMigrationEnabled(): boolean {

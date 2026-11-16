@@ -82,15 +82,24 @@ export interface RebalanceRunView {
   outcome?: { projectedRatio: number; actualRatio: number; measuredAt: number };
 }
 
+export interface RunJob extends RebalanceRunJob {
+  finishedSeenAt?: number;
+}
+
 export interface RebalanceRun extends RebalanceRunView {
+  jobs: RunJob[];
   jobsBefore: string[];
   cancelRequestedAt?: number;
+  cancelAcceptedAt?: number;
 }
 
 export function runView(run: RebalanceRun): RebalanceRunView {
-  const { jobsBefore, cancelRequestedAt, ...view } = run;
-  return view;
+  const { jobsBefore, cancelRequestedAt, cancelAcceptedAt, jobs, ...view } = run;
+  return { ...view, jobs: jobs.map(({ finishedSeenAt, ...job }) => job) };
 }
+
+export const isCancelPending = (run: RebalanceRun) =>
+  run.cancelRequestedAt !== undefined && run.cancelAcceptedAt === undefined;
 
 export type RebalanceRunResult =
   | { status: 'started'; run: RebalanceRunView }
@@ -234,28 +243,30 @@ function inside(slots: readonly number[], ranges: ReadonlyArray<readonly [number
 
 function followJob(
   run: RebalanceRun,
-  job: RebalanceRunJob,
+  job: RunJob,
   report: RunReport,
   byId: ReadonlyMap<string, RunNode>,
   now: number,
-): RebalanceRunJob {
+): RunJob {
   if (job.state === 'succeeded' || job.state === 'failed' || job.state === 'cancelled') return job;
+  const isNew = (jobName: string) => !run.jobsBefore.includes(jobName);
   const listed = report.jobViews.find(
     (view) =>
       view.jobName !== undefined &&
       view.sourceNodeId === run.sourceShardId &&
       view.targetNodeId === job.targetShardId &&
-      (view.jobName === job.jobName || inside(slotsOf(view.slotRange), job.ranges)),
+      (job.jobName
+        ? view.jobName === job.jobName
+        : isNew(view.jobName) && inside(slotsOf(view.slotRange), job.ranges)),
   );
   if (listed) {
     return { ...job, state: 'running', jobName: listed.jobName, phase: listed.phase };
   }
   const moved = owns(byId.get(job.targetShardId), job.ranges);
-  if (run.cancelRequestedAt !== undefined && !moved) {
-    if (owns(byId.get(run.sourceShardId), job.ranges)) return { ...job, state: 'cancelled' };
-    return { ...job, state: 'unknown' };
+  const sourceOwns = owns(byId.get(run.sourceShardId), job.ranges);
+  if (run.cancelAcceptedAt !== undefined && !moved) {
+    return { ...job, state: sourceOwns ? 'cancelled' : 'unknown' };
   }
-  const isNew = (jobName: string) => !run.jobsBefore.includes(jobName);
   const failed = report.failed.find((entry) =>
     job.jobName
       ? entry.jobName === job.jobName
@@ -268,8 +279,9 @@ function followJob(
   if (!job.jobName && moved) return { ...job, state: 'succeeded' };
   if (job.jobName && report.finishedJobs.includes(job.jobName)) {
     if (moved) return { ...job, state: 'succeeded' };
-    if (owns(byId.get(run.sourceShardId), job.ranges)) return { ...job, state: 'cancelled' };
-    return { ...job, state: 'unknown' };
+    const finishedSeenAt = job.finishedSeenAt ?? now;
+    if (now - finishedSeenAt < REBALANCE_JOB_LISTING_GRACE_MS) return { ...job, finishedSeenAt };
+    return { ...job, state: sourceOwns ? 'cancelled' : 'unknown' };
   }
   if (!job.jobName && now - run.startedAt <= REBALANCE_JOB_LISTING_GRACE_MS) return job;
   return { ...job, state: 'unknown' };
@@ -290,7 +302,7 @@ export function followRun(
   nodes: readonly RunNode[],
   now: number,
 ): RebalanceRun {
-  if (run.state !== 'running') return run;
+  if (run.state !== 'running' || isCancelPending(run)) return run;
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const jobs = run.jobs.map((job) => followJob(run, job, report, byId, now));
   const state = stateOf(jobs);
@@ -319,17 +331,19 @@ export function isCancelledJob(
   failure: { jobName?: string; sourceNodeId: string; targetNodeId: string; slots: string },
 ): boolean {
   if (run.cancelRequestedAt === undefined) return false;
-  return run.jobs.some((job) =>
-    job.jobName !== undefined
-      ? job.jobName === failure.jobName
-      : failure.jobName !== undefined &&
-        !run.jobsBefore.includes(failure.jobName) &&
-        failure.sourceNodeId === run.sourceShardId &&
-        job.targetShardId === failure.targetNodeId &&
-        inside(slotsOf(failure.slots), job.ranges),
+  return run.jobs.some(
+    (job) =>
+      job.state !== 'failed' &&
+      (job.jobName !== undefined
+        ? job.jobName === failure.jobName
+        : failure.jobName !== undefined &&
+          !run.jobsBefore.includes(failure.jobName) &&
+          failure.sourceNodeId === run.sourceShardId &&
+          job.targetShardId === failure.targetNodeId &&
+          inside(slotsOf(failure.slots), job.ranges)),
   );
 }
 
 export function isRunKept(run: RebalanceRun, now: number): boolean {
-  return now - (run.endedAt ?? run.startedAt) < REBALANCE_RUN_KEPT_MS;
+  return run.endedAt === undefined || now - run.endedAt < REBALANCE_RUN_KEPT_MS;
 }

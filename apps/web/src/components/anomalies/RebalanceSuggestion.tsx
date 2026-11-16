@@ -247,9 +247,10 @@ function refusal(err: unknown): string {
 function RunPlan({ plan, connectionId }: { plan: RebalancePlan; connectionId: string | undefined }) {
   const canMutate = useCanMutate();
   const queryClient = useQueryClient();
-  const [open, setOpen] = useState(false);
+  const [confirmed, setConfirmed] = useState<RebalancePlan | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const open = confirmed !== null;
   const execution = plan.execution;
   if (!execution || !canMutate) return null;
   if (!execution.available && !open) {
@@ -257,7 +258,8 @@ function RunPlan({ plan, connectionId }: { plan: RebalancePlan; connectionId: st
     const relevant = execution.blockedBy !== 'flag_off' || plan.support === 'valkey_atomic';
     return blocked && relevant ? <p className="text-muted-foreground">{blocked}</p> : null;
   }
-  const source = plan.projection.find((row) => row.role === 'source');
+  const shown = confirmed ?? plan;
+  const source = shown.projection.find((row) => row.role === 'source');
   const refresh = () =>
     Promise.all([
       queryClient.invalidateQueries({ queryKey: ['open-hot-shards', connectionId] }),
@@ -268,10 +270,10 @@ function RunPlan({ plan, connectionId }: { plan: RebalancePlan; connectionId: st
     setError(null);
     try {
       await metricsApi.runRebalance(
-        plan.sourceShardId,
-        plan.moves.map(({ targetShardId, ranges }) => ({ targetShardId, ranges })),
+        shown.sourceShardId,
+        shown.moves.map(({ targetShardId, ranges }) => ({ targetShardId, ranges })),
       );
-      setOpen(false);
+      setConfirmed(null);
     } catch (err) {
       setError(refusal(err));
     } finally {
@@ -286,30 +288,30 @@ function RunPlan({ plan, connectionId }: { plan: RebalancePlan; connectionId: st
           size="sm"
           onClick={() => {
             setError(null);
-            setOpen(true);
+            setConfirmed(plan);
           }}
         >
           Run this plan
         </Button>
       )}
-      <Dialog open={open} onOpenChange={(next) => !sending && setOpen(next)}>
+      <Dialog open={open} onOpenChange={(next) => !sending && !next && setConfirmed(null)}>
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>Run this rebalance?</DialogTitle>
             <DialogDescription>
               BetterDB sends one CLUSTER MIGRATESLOTS to the hot shard
-              {source ? ` at ${source.nodeAddr}` : ''}. The server moves all of these slots or none.
+              {source ? ` at ${source.nodeAddr}` : ''}. The server starts all of these moves or none.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3 text-sm">
             <ul className="list-disc pl-5">
-              {plan.moves.map((move) => (
+              {shown.moves.map((move) => (
                 <li key={move.targetShardId}>{describeMove(move)}</li>
               ))}
             </ul>
-            {plan.warnings.length > 0 && (
+            {shown.warnings.length > 0 && (
               <ul className="list-disc pl-5 text-yellow-600 dark:text-yellow-500">
-                {plan.warnings.map((warning) => (
+                {shown.warnings.map((warning) => (
                   <li key={`${warning.code} ${warning.shardId}`}>{describeWarning(warning)}</li>
                 ))}
               </ul>
@@ -325,7 +327,7 @@ function RunPlan({ plan, connectionId }: { plan: RebalancePlan; connectionId: st
             )}
           </div>
           <DialogFooter>
-            <Button variant="outline" disabled={sending} onClick={() => setOpen(false)}>
+            <Button variant="outline" disabled={sending} onClick={() => setConfirmed(null)}>
               Keep the plan
             </Button>
             <Button disabled={sending || !execution.available} onClick={run}>

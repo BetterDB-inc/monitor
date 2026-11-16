@@ -87,6 +87,12 @@ const report = (overrides: Partial<RunReport> = {}): RunReport => ({
   ...overrides,
 });
 
+const cancelled = <T extends object>(run: T, at: number) => ({
+  ...run,
+  cancelRequestedAt: at,
+  cancelAcceptedAt: at,
+});
+
 const view = (jobName: string, target: string, slotRange: string, phase = 'snapshotting') => ({
   jobName,
   sourceNodeId: 'src',
@@ -260,15 +266,58 @@ describe('slot rebalance run', () => {
         [200, 200],
         [5461, 10922],
       ]);
-      const run = followRun(
-        listed,
-        report({ finishedJobs: ['job-a', 'job-b'] }),
-        after,
-        3_000,
-      );
+      const finished = report({ finishedJobs: ['job-a', 'job-b'] });
+      const waiting = followRun(listed, finished, after, 3_000);
+      expect(waiting.jobs.map((job) => job.state)).toEqual(['succeeded', 'running']);
+      expect(waiting.state).toBe('running');
+      expect(followRun(waiting, finished, after, 62_999).state).toBe('running');
+      const run = followRun(waiting, finished, after, 63_000);
       expect(run.jobs.map((job) => job.state)).toEqual(['succeeded', 'cancelled']);
       expect(run.state).toBe('cancelled');
-      expect(run.endedAt).toBe(3_000);
+      expect(run.endedAt).toBe(63_000);
+    });
+
+    it('waits for the slots to show on the target after a job is listed as finished', () => {
+      const listed = followRun(
+        started(),
+        report({ jobViews: [view('job-a', 'tgt1', '0-99 200-200'), view('job-b', 'tgt2', '300-399')] }),
+        nodes(),
+        2_000,
+      );
+      const finished = report({ finishedJobs: ['job-a', 'job-b'] });
+      const stale = followRun(listed, finished, nodes(), 3_000);
+      expect(stale.jobs.map((job) => job.state)).toEqual(['running', 'running']);
+      const run = followRun(stale, finished, movedNodes(), 8_000);
+      expect(run.jobs.map((job) => job.state)).toEqual(['succeeded', 'succeeded']);
+      expect(run.state).toBe('succeeded');
+    });
+
+    it('does not take a job listed before the run for one of its own', () => {
+      const before = startRun(plan(), { userId: 'u1', email: null }, 1_000, ['old-job']);
+      const run = followRun(
+        before,
+        report({ jobViews: [view('old-job', 'tgt2', '300-399', 'failing')] }),
+        nodes(),
+        2_000,
+      );
+      expect(run.jobs[1]).toMatchObject({ state: 'starting' });
+      expect(run.jobs[1].jobName).toBeUndefined();
+    });
+
+    it('follows a named job by its name only', () => {
+      const listed = followRun(
+        started(),
+        report({ jobViews: [view('job-a', 'tgt1', '0-99 200-200'), view('job-b', 'tgt2', '300-399')] }),
+        nodes(),
+        2_000,
+      );
+      const run = followRun(
+        listed,
+        report({ jobViews: [view('job-a', 'tgt1', '0-99 200-200'), view('job-z', 'tgt2', '300-399')] }),
+        movedNodes(),
+        3_000,
+      );
+      expect(run.jobs[1]).toMatchObject({ jobName: 'job-b', state: 'unknown' });
     });
 
     it('ends as succeeded when every job succeeded', () => {
@@ -352,6 +401,10 @@ describe('slot rebalance run', () => {
       expect(isRunKept(ended, 10_000 + 3_599_999)).toBe(true);
       expect(isRunKept(ended, 10_000 + 3_600_000)).toBe(false);
       expect(isRunKept(started(), 1_000 + 3_599_999)).toBe(true);
+    });
+
+    it('keeps a run that has not ended however long it runs', () => {
+      expect(isRunKept(started(), 1_000 + 2 * 3_600_000)).toBe(true);
     });
 
     const movedNodes = () => [
@@ -456,7 +509,7 @@ describe('slot rebalance run', () => {
         nodes(),
         2_000,
       );
-      const run = followRun({ ...listed, cancelRequestedAt: 2_500 }, cancelledReport(), nodes(), 3_000);
+      const run = followRun(cancelled(listed, 2_500), cancelledReport(), nodes(), 3_000);
       expect(run.jobs.map((job) => job.state)).toEqual(['cancelled', 'cancelled']);
       expect(run.state).toBe('cancelled');
     });
@@ -479,7 +532,7 @@ describe('slot rebalance run', () => {
         3_000,
       );
       const run = followRun(
-        { ...oneFailed, cancelRequestedAt: 3_500 },
+        cancelled(oneFailed, 3_500),
         report({
           finishedJobs: ['job-a', 'job-b'],
           failed: [
@@ -511,8 +564,19 @@ describe('slot rebalance run', () => {
     });
 
     it('keeps a job that moved before the cancel as succeeded', () => {
-      const run = followRun({ ...started(), cancelRequestedAt: 1_500 }, report(), movedNodes(), 2_000);
+      const run = followRun(cancelled(started(), 1_500), report(), movedNodes(), 2_000);
       expect(run.state).toBe('succeeded');
+    });
+
+    it('does not follow a run while its cancel has not answered', () => {
+      const listed = followRun(
+        started(),
+        report({ jobViews: [view('job-a', 'tgt1', '0-99 200-200'), view('job-b', 'tgt2', '300-399')] }),
+        nodes(),
+        2_000,
+      );
+      const pending = { ...listed, cancelRequestedAt: 2_500 };
+      expect(followRun(pending, cancelledReport(), nodes(), 3_000)).toBe(pending);
     });
 
     it('knows a failure as one of its own cancelled jobs', () => {
@@ -538,10 +602,30 @@ describe('slot rebalance run', () => {
       );
     });
 
+    it('does not take a job that failed on its own for a cancelled one', () => {
+      const failedFirst = {
+        ...started(),
+        cancelRequestedAt: 2_000,
+        jobs: started().jobs.map((job, index) =>
+          index === 0 ? { ...job, jobName: 'job-a', state: 'failed' as const, message: 'target refused' } : job,
+        ),
+      };
+      expect(
+        isCancelledJob(failedFirst, { jobName: 'job-a', sourceNodeId: 'src', targetNodeId: 'tgt1', slots: '0-99' }),
+      ).toBe(false);
+    });
+
     it('leaves the bookkeeping out of the view', () => {
-      const view = runView({ ...started(), cancelRequestedAt: 2_000, jobsBefore: ['old-job'] });
+      const run = started();
+      const view = runView({
+        ...cancelled(run, 2_000),
+        jobsBefore: ['old-job'],
+        jobs: run.jobs.map((job) => ({ ...job, finishedSeenAt: 1_500 })),
+      });
       expect(view).not.toHaveProperty('jobsBefore');
       expect(view).not.toHaveProperty('cancelRequestedAt');
+      expect(view).not.toHaveProperty('cancelAcceptedAt');
+      expect(view.jobs[0]).not.toHaveProperty('finishedSeenAt');
       expect(view.sourceShardId).toBe('src');
     });
 

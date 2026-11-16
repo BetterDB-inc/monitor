@@ -145,9 +145,14 @@ export function RebalanceRuns({ connectionId }: Props) {
     enabled: !!connectionId,
     queryKey: ['slot-rebalance-runs', connectionId],
   });
-  if (!connectionId || error || !runs) return null;
+  if (!connectionId || !runs) return null;
   return (
     <>
+      {error && runs.length > 0 && (
+        <p role="alert" className="text-sm text-destructive">
+          Could not refresh the slot rebalance runs. The last state read is shown.
+        </p>
+      )}
       {runs.map((run) => {
         const title = `Slot rebalance from shard ${short(run.sourceShardId)} at ${run.sourceAddr}`;
         const outcome = describeOutcome(run);

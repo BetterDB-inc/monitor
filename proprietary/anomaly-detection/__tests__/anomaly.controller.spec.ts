@@ -213,3 +213,23 @@ describe('AnomalyController.getTopologyDivergence', () => {
     expect(Object.values(args)).toEqual([expect.objectContaining({ data: { required: true } })]);
   });
 });
+
+describe('AnomalyController slot rebalance runs', () => {
+  const run = { sourceShardId: 'src', startedBy: { userId: 'u1', email: 'admin@example.com' } };
+  const service = { followRebalanceRuns: jest.fn().mockResolvedValue([run]) };
+  const controller = new AnomalyController(service as unknown as AnomalyService);
+  const asRole = (role: 'admin' | 'member' | null) =>
+    ({ actor: role ? { userId: 'u2', role } : null }) as never;
+
+  it('shows an admin who started each run', async () => {
+    const [listed] = await controller.getRebalanceRuns('c1', asRole('admin'));
+    expect(listed.startedBy).toEqual({ userId: 'u1', email: 'admin@example.com' });
+  });
+
+  it('hides the email of the admin from members', async () => {
+    for (const role of ['member', null] as const) {
+      const [listed] = await controller.getRebalanceRuns('c1', asRole(role));
+      expect(listed.startedBy).toEqual({ userId: 'u1', email: null });
+    }
+  });
+});

@@ -116,7 +116,7 @@ function hotShard(
 async function show(
   hotShards: HotShardDetail[] | Error,
   { events = [EVENT] as unknown[], connected = true } = {},
-): Promise<void> {
+): Promise<QueryClient> {
   getAnomalyEvents.mockResolvedValue(events);
   if (hotShards instanceof Error) getHotShards.mockRejectedValue(hotShards);
   else getHotShards.mockResolvedValue(hotShards);
@@ -129,6 +129,7 @@ async function show(
   await act(async () => {
     await client.invalidateQueries();
   });
+  return client;
 }
 
 const panel = () => screen.findByRole('region', { name: /hot shard 3f2a9c1e/i });
@@ -157,6 +158,32 @@ describe('RebalanceSuggestion', () => {
       fireEvent.click(within(dialog).getByRole('button', { name: 'Start the migration' }));
 
       await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      expect(runRebalance).toHaveBeenCalledWith(SOURCE, [
+        { targetShardId: TARGET, ranges: [[2000, 2410]] },
+      ]);
+    });
+
+    it('sends the moves the admin saw when the plan changes while the dialog is open', async () => {
+      runRebalance.mockRejectedValue(new ApiError('Conflict', 409, { reason: 'plan_changed' }));
+      const client = await show([hotShard(runnable())]);
+      fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+
+      const replaced = plan({
+        execution: { available: true },
+        moves: [{ ...plan().moves[0], ranges: [[5000, 6000]] }],
+      });
+      getHotShards.mockResolvedValue([hotShard(replaced)]);
+      await act(async () => {
+        await client.invalidateQueries();
+      });
+      expect(dialog).toHaveTextContent('2000');
+      expect(dialog).not.toHaveTextContent('5000');
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Start the migration' }));
+
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+        'The suggestion changed since you opened it. Review the new one.',
+      );
       expect(runRebalance).toHaveBeenCalledWith(SOURCE, [
         { targetShardId: TARGET, ranges: [[2000, 2410]] },
       ]);

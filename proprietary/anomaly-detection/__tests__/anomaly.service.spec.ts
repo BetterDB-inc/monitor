@@ -4551,7 +4551,7 @@ describe('AnomalyService', () => {
             });
           });
 
-          it('offers no run after MIGRATESLOTS did not answer in time', async () => {
+          it('follows a start whose MIGRATESLOTS did not answer in time', async () => {
             enable();
             const { source } = await planned();
             source.call.mockImplementationOnce(() => new Promise(() => undefined));
@@ -4565,8 +4565,35 @@ describe('AnomalyService', () => {
             } finally {
               (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = budget;
             }
-            expect(await service.followRebalanceRuns('conn-a')).toEqual([]);
-            expect(execution()).toEqual({ available: false, blockedBy: 'server_refused' });
+            expect((await service.followRebalanceRuns('conn-a'))[0]).toMatchObject({
+              state: 'running',
+              jobs: [{ state: 'starting' }],
+            });
+            expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'migration_running' });
+            expect(await service.cancelRebalance('conn-a', 'a0000000')).toMatchObject({
+              status: 'cancelling',
+            });
+          });
+
+          it('keeps a run running when the server refuses the cancel', async () => {
+            enable();
+            const { source } = await planned();
+            await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN);
+            report.jobViews = [listed()];
+            await service.followRebalanceRuns('conn-a');
+            source.call.mockRejectedValueOnce(new Error('NOPERM'));
+
+            expect(await service.cancelRebalance('conn-a', 'a0000000')).toEqual({
+              status: 'refused',
+              message: 'NOPERM',
+            });
+            report.jobViews = [];
+            report.finishedJobs = ['job-1'];
+
+            expect((await service.followRebalanceRuns('conn-a'))[0]).toMatchObject({
+              state: 'running',
+              jobs: [{ state: 'running' }],
+            });
           });
 
           it('follows the job until the target owns the slots', async () => {
@@ -4753,6 +4780,7 @@ describe('AnomalyService', () => {
             for (const run of [(started as any).run, (cancelling as any).run, listedRun]) {
               expect(run).not.toHaveProperty('jobsBefore');
               expect(run).not.toHaveProperty('cancelRequestedAt');
+              expect(run).not.toHaveProperty('cancelAcceptedAt');
             }
           });
 
