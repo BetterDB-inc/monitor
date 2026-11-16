@@ -28,10 +28,17 @@ export function toClusterNodeRef(node: ClusterNode): ClusterNodeRef {
 }
 
 const NOT_AT_ADDRESS_FLAGS = ['fail', 'noaddr', 'handshake'];
+const SUSPECTED_FLAG = 'fail?';
+const CLEAN_CLAIM = 4;
+const SUSPECTED_CLAIM = 2;
+
+function standingClaim(flags: readonly string[]): number {
+  if (flags.some((flag) => NOT_AT_ADDRESS_FLAGS.includes(flag))) return 0;
+  return flags.includes(SUSPECTED_FLAG) ? SUSPECTED_CLAIM : CLEAN_CLAIM;
+}
 
 function addressClaim(flags: readonly string[]): number {
-  const live = flags.some((flag) => NOT_AT_ADDRESS_FLAGS.includes(flag)) ? 0 : 2;
-  return live + (flags.includes('myself') ? 1 : 0);
+  return standingClaim(flags) + (flags.includes('myself') ? 1 : 0);
 }
 
 export function buildNodeDirectory(nodes: readonly ClusterNode[]): NodeDirectory {
