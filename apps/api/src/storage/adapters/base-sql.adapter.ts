@@ -16,8 +16,17 @@ import {
   StoredCommandLogEntry,
   CommandLogType,
 } from '../../common/interfaces/storage-port.interface';
-import { WebhookPayloadFormat } from '@betterdb/shared';
+import { WebhookPayloadFormat, type ClusterNodeRef } from '@betterdb/shared';
 import { normalizeDetectorConfigMap } from '../../anomaly/anomaly.types';
+
+function parseNodeRef(raw: unknown): ClusterNodeRef | undefined {
+  if (typeof raw !== 'string' || raw === '') return undefined;
+  try {
+    return JSON.parse(raw) as ClusterNodeRef;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * SQL dialect abstraction for database-specific operations.
@@ -204,6 +213,7 @@ export class RowMappers {
       relatedMetrics: this.dialect.fromArray(row.related_metrics),
       replicaAddr: row.replica_addr ?? undefined,
       nodeAddr: row.node_addr ?? undefined,
+      node: parseNodeRef(row.node),
       dedupeKey: row.dedupe_key ?? undefined,
       kind: row.kind ?? undefined,
       retryTrigger: row.retry_trigger ?? undefined,
