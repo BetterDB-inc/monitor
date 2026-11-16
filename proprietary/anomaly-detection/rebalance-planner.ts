@@ -94,7 +94,7 @@ export interface RebalanceProjection {
 }
 
 export interface RebalanceWarning {
-  code: 'source_fork' | 'fewer_replicas' | 'target_memory' | 'memory_unknown';
+  code: 'source_fork' | 'fewer_replicas' | 'target_memory' | 'memory_unknown' | 'memory_unlimited';
   shardId: string;
   memoryShare?: number;
 }
@@ -816,8 +816,11 @@ export function memoryWarnings(
             : undefined,
         );
     });
-    if (!target || target.maxBytes <= 0 || arriving.includes(undefined)) {
+    if (!target || arriving.includes(undefined)) {
       return [{ code: 'memory_unknown', shardId: move.targetShardId }];
+    }
+    if (target.maxBytes <= 0) {
+      return [{ code: 'memory_unlimited', shardId: move.targetShardId }];
     }
     const bytes = arriving.reduce<number>((total, each) => total + (each ?? 0), 0);
     const memoryShare = (target.usedBytes + bytes) / target.maxBytes;

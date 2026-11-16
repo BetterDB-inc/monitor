@@ -4216,13 +4216,13 @@ describe('AnomalyService', () => {
           ]);
         });
 
-        it('says the room is unknown when the target has no memory limit', async () => {
+        it('says the target has no memory limit when maxmemory is 0', async () => {
           spreadLoad();
           dialMemory({ a0000000: info(4 * GB, 8 * GB, 200), b0000000: info(GB, 0, 50) });
 
           await step(HOT, 6);
 
-          expect(warnings()).toContainEqual({ code: 'memory_unknown', shardId: 'b0000000' });
+          expect(warnings()).toContainEqual({ code: 'memory_unlimited', shardId: 'b0000000' });
         });
 
         describe('command', () => {

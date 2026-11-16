@@ -1250,11 +1250,16 @@ describe('memoryWarnings', () => {
     ]);
   });
 
+  it('says the target has no memory limit when maxmemory is 0', () => {
+    const memory = new Map([
+      ['a', source],
+      ['b', { usedBytes: GB, maxBytes: 0, keyCount: 9 }],
+    ]);
+
+    expect(memoryWarnings(plan(), memory)).toEqual([{ code: 'memory_unlimited', shardId: 'b' }]);
+  });
+
   it.each([
-    [
-      'the target has no memory limit',
-      { a: source, b: { usedBytes: GB, maxBytes: 0, keyCount: 9 } },
-    ],
     ['the target could not be read', { a: source }],
     ['the source could not be read', { b: { usedBytes: GB, maxBytes: 8 * GB, keyCount: 9 } }],
     [

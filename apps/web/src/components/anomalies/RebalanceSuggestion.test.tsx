@@ -232,6 +232,7 @@ describe('RebalanceSuggestion', () => {
             { code: 'fewer_replicas', shardId: TARGET },
             { code: 'target_memory', shardId: TARGET, memoryShare: 0.874 },
             { code: 'memory_unknown', shardId: TARGET },
+            { code: 'memory_unlimited', shardId: TARGET },
           ],
         }),
       ),
@@ -245,6 +246,7 @@ describe('RebalanceSuggestion', () => {
       'Shard 9c4e1b7a has fewer replicas than the hot shard.',
       'Shard 9c4e1b7a would be at about 87% of its memory limit after the move.',
       'The memory room of shard 9c4e1b7a is not known.',
+      'Shard 9c4e1b7a has no maxmemory limit, so BetterDB cannot check that the moved keys fit.',
     ]);
   });
 

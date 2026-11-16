@@ -166,7 +166,7 @@ export interface RebalanceProjection {
 }
 
 export interface RebalanceWarning {
-  code: 'source_fork' | 'fewer_replicas' | 'target_memory' | 'memory_unknown';
+  code: 'source_fork' | 'fewer_replicas' | 'target_memory' | 'memory_unknown' | 'memory_unlimited';
   shardId: string;
   memoryShare?: number;
 }
