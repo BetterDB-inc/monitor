@@ -248,7 +248,6 @@ import {
   parseSlotMigrationJobs,
 } from '@app/cluster/cluster-metrics.service';
 import { withConfiguredZones, withShardMetadata } from '@app/cluster/shard-metadata';
-import type { NodeDirectory } from '@app/cluster/node-ref';
 import { ClusterNodeViews, nodeOfEvent } from './event-node';
 import {
   type DivergenceGroup,
@@ -9437,15 +9436,19 @@ export class AnomalyService
   }
 
   private stampNode(anomaly: AnomalyEvent, connectionId: string | undefined): void {
-    const node = connectionId
-      ? nodeOfEvent(anomaly, this.nodeDirectoryOf(connectionId), this.clusterNodeViews.ownNodeId(connectionId))
-      : anomaly.node;
+    const node = connectionId ? this.nodeInClusterView(anomaly, connectionId) : anomaly.node;
     if (node) anomaly.node = node;
     delete anomaly.nodeSubject;
   }
 
-  private nodeDirectoryOf(connectionId: string): NodeDirectory | undefined {
-    return this.clusterNodeViews.view(this.nodeViewKeyOf(connectionId))?.directory;
+  private nodeInClusterView(anomaly: AnomalyEvent, connectionId: string): ClusterNodeRef | undefined {
+    const view = this.clusterNodeViews.view(this.nodeViewKeyOf(connectionId));
+    const roleKnown = !view || anomaly.timestamp - view.readAt <= this.nodeViewStaleMs();
+    return nodeOfEvent(anomaly, view?.directory, this.clusterNodeViews.ownNodeId(connectionId), roleKnown);
+  }
+
+  private nodeViewStaleMs(): number {
+    return Math.max(3 * this.getIntervalMs(), AnomalyService.NODE_VIEW_STALE_MS);
   }
 
   private nodeViewKeyOf(connectionId: string): string {
@@ -11536,6 +11539,7 @@ export class AnomalyService
   }
 
   private static readonly TOPOLOGY_CLAIM_STALE_MS = 30_000;
+  private static readonly NODE_VIEW_STALE_MS = 30_000;
   private static readonly TOPOLOGY_BACKOFF_MAX_POLLS = 8;
 
   /** A fan-out read the node refused for its credentials, not for reachability. */

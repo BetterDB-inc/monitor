@@ -12494,6 +12494,44 @@ describe('AnomalyService', () => {
       expect(own.node?.nodeId).toBe('primA');
     });
 
+    describe('when the view of the cluster is old', () => {
+      const READ_AT = 1_700_000_000_000;
+
+      beforeEach(async () => {
+        jest.spyOn(Date, 'now').mockReturnValue(READ_AT);
+        await poll();
+      });
+
+      it('keeps the role up to 30 seconds after the read', async () => {
+        const event = await raise({ timestamp: READ_AT + 30_000 });
+
+        expect(event.node).toEqual(PRIMARY_NODE);
+      });
+
+      it('names the node with an unknown role after that', async () => {
+        const event = await raise({ timestamp: READ_AT + 30_001 });
+
+        expect(event.node).toEqual({ ...PRIMARY_NODE, role: 'unknown' });
+      });
+
+      it('waits three polls when those take longer than 30 seconds', async () => {
+        jest.spyOn(service as any, 'getIntervalMs').mockReturnValue(20_000);
+
+        const event = await raise({ timestamp: READ_AT + 60_000 });
+
+        expect(event.node).toEqual(PRIMARY_NODE);
+      });
+
+      it('trusts the role again once any connection of the cluster reads it', async () => {
+        (Date.now as jest.Mock).mockReturnValue(READ_AT + 60_000);
+        await poll({ ...mockCtx, connectionId: 'conn-2', port: 6380 });
+
+        const event = await raise({ timestamp: READ_AT + 60_000 });
+
+        expect(event.node).toEqual(PRIMARY_NODE);
+      });
+    });
+
     it('names the node on an event another service raises through the sink', async () => {
       await poll();
       const event = raised({ metricType: MetricType.COMMAND_P99 });

@@ -141,6 +141,20 @@ describe('nodeOfEvent', () => {
     expect(resolve({ node })).toBe(node);
   });
 
+  it('gives the node an unknown role when the view is too old to say', () => {
+    expect(nodeOfEvent(event(), directory, ownNodeId, false)).toEqual({
+      nodeId: 'primary-a',
+      address: '10.0.0.1:6379',
+      role: 'unknown',
+      shardId: 'shard-a',
+    });
+  });
+
+  it('keeps the role of a node the event already carries when the view is old', () => {
+    const node = { nodeId: 'x', address: '1.1.1.1:1', role: 'primary' as const };
+    expect(nodeOfEvent(event({ node }), directory, ownNodeId, false)).toBe(node);
+  });
+
   it('names no node without a cluster view', () => {
     expect(nodeOfEvent(event(), undefined, undefined)).toBeUndefined();
   });

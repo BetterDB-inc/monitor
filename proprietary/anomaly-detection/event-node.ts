@@ -96,8 +96,18 @@ export function nodeOfEvent(
   event: AnomalyEvent,
   directory: NodeDirectory | undefined,
   ownNodeId: string | undefined,
+  roleKnown = true,
 ): ClusterNodeRef | undefined {
   if (event.node) return event.node;
+  const node = nodeInView(event, directory, ownNodeId);
+  return node && !roleKnown ? { ...node, role: 'unknown' } : node;
+}
+
+function nodeInView(
+  event: AnomalyEvent,
+  directory: NodeDirectory | undefined,
+  ownNodeId: string | undefined,
+): ClusterNodeRef | undefined {
   if (!directory || METRICS_WITHOUT_NODE.has(event.metricType)) return undefined;
   if (event.nodeSubject) return subjectOfDetector(event.nodeSubject, directory);
   if (event.replicaAddr && REPLICA_SUBJECT_METRICS.has(event.metricType)) {
