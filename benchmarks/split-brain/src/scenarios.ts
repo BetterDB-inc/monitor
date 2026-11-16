@@ -355,6 +355,9 @@ export function scenarios(nodeTimeoutMs: number): Scenario[] {
             tookMs,
             keys: before - Number(await command(source.hostPort, ['DBSIZE'])),
           });
+          if (state !== 'success') {
+            throw new Error(`the atomic move of slots ${start}-${end} from ${source.name} ended as ${state}`);
+          }
           await sleep(10_000 - tookMs);
         }
         await Promise.all(primaries.map((node) => rootExec(node.container, 'tc qdisc del dev eth0 root')));

@@ -38,7 +38,7 @@ when any of them differs.
 | partial-join | fault | a new node meets the cluster but cannot reach half of it for 150 s |
 | idle | control | nothing happens |
 | manual-failover | control | `CLUSTER FAILOVER` on a replica |
-| slot-migration-atomic | control | `CLUSTER MIGRATESLOTS` of 1000 slots (about 49k keys) from each primary in turn, with the primaries' links limited to 20 Mbit/s so a move takes 6–7 s |
+| slot-migration-atomic | control | `CLUSTER MIGRATESLOTS` of 1000 slots (about 49k keys) from each primary in turn, with the primaries' links limited to 20 Mbit/s so a move takes 6–7 s; a move that does not end as `success` drops the attempt |
 | slot-migration-legacy | control | `valkey-cli --cluster reshard` of 3000 slots (about 140k keys), about 9 s |
 | rolling-restart | control | every node restarted, one at a time |
 | slow-node | control | 800 ms ± 200 ms of network delay on one node for 60 s |
