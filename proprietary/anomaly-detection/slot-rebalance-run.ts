@@ -258,6 +258,17 @@ function inside(text: string | undefined, ranges: ReadonlyArray<readonly [number
 const failedOnItsOwn = (run: RebalanceRun, jobName: string) =>
   run.cancelAcceptedAt === undefined || (run.failedBeforeCancel ?? []).includes(jobName);
 
+function findFailure(run: RebalanceRun, job: RunJob, report: RunReport) {
+  return report.failed.find((entry) =>
+    job.jobName
+      ? entry.jobName === job.jobName
+      : !run.jobsBefore.includes(entry.jobName) &&
+        entry.sourceNodeId === run.sourceShardId &&
+        entry.targetNodeId === job.targetShardId &&
+        inside(entry.slotRange, job.ranges),
+  );
+}
+
 function followJob(
   run: RebalanceRun,
   job: RunJob,
@@ -281,14 +292,7 @@ function followJob(
   }
   const moved = owns(byId.get(job.targetShardId), job.ranges);
   const sourceOwns = owns(byId.get(run.sourceShardId), job.ranges);
-  const failed = report.failed.find((entry) =>
-    job.jobName
-      ? entry.jobName === job.jobName
-      : isNew(entry.jobName) &&
-        entry.sourceNodeId === run.sourceShardId &&
-        entry.targetNodeId === job.targetShardId &&
-        inside(entry.slotRange, job.ranges),
-  );
+  const failed = findFailure(run, job, report);
   const failedJob = failed && {
     ...job,
     state: 'failed' as const,
@@ -310,8 +314,17 @@ function followJob(
   return { ...job, state: 'unknown' };
 }
 
-function followOwnership(job: RunJob, byId: ReadonlyMap<string, RunNode>): RunJob {
+function followOwnership(
+  run: RebalanceRun,
+  job: RunJob,
+  report: RunReport,
+  byId: ReadonlyMap<string, RunNode>,
+): RunJob {
   if (job.state === 'succeeded' || job.state === 'failed' || job.state === 'cancelled') return job;
+  const failed = findFailure(run, job, report);
+  if (failed && failedOnItsOwn(run, failed.jobName)) {
+    return { ...job, state: 'failed', jobName: failed.jobName, message: failed.message };
+  }
   return owns(byId.get(job.targetShardId), job.ranges) ? { ...job, state: 'succeeded' } : job;
 }
 
@@ -332,13 +345,13 @@ export function followRun(
 ): RebalanceRun {
   if (run.state !== 'running' || isCancelPending(run, now)) return run;
   const byId = new Map(nodes.map((node) => [node.id, node]));
-  const jobsRead =
+  const jobsRead = (job: RunJob) =>
     report.complete !== false ||
-    [run.sourceShardId, ...run.jobs.map((job) => job.targetShardId)].every((id) =>
-      report.jobsReadNodeIds?.includes(id),
-    );
+    [run.sourceShardId, job.targetShardId].every((id) => report.jobsReadNodeIds?.includes(id));
   const jobs = run.jobs.map((job) =>
-    jobsRead ? followJob(run, job, report, byId, now) : followOwnership(job, byId),
+    jobsRead(job)
+      ? followJob(run, job, report, byId, now)
+      : followOwnership(run, job, report, byId),
   );
   const state = stateOf(jobs);
   return { ...run, jobs, state, ...(state === 'running' ? {} : { endedAt: now }) };

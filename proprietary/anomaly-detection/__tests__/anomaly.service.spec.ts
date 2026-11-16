@@ -4658,6 +4658,37 @@ describe('AnomalyService', () => {
             expect(run.cancelAcceptedAt).toBeUndefined();
           });
 
+          it('keeps the failures before the first cancel when a second one overlaps it', async () => {
+            enable();
+            const { source } = await planned();
+            await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN);
+            report.jobViews = [listed()];
+            await service.followRebalanceRuns('conn-a');
+            let answerFirst: (value: unknown) => void = () => undefined;
+            source.call.mockImplementationOnce(
+              () => new Promise((resolve) => (answerFirst = resolve)),
+            );
+
+            const first = service.cancelRebalance('conn-a', 'a0000000');
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            report.failed = [
+              {
+                jobName: 'job-1',
+                message: 'cancelled by the first request',
+                sourceNodeId: 'a0000000',
+                targetNodeId: 'b0000000',
+                slotRange: '100-107',
+              },
+            ];
+            const second = service.cancelRebalance('conn-a', 'a0000000');
+            answerFirst('OK');
+            expect(await first).toMatchObject({ status: 'cancelling' });
+            await second;
+
+            const run = (service as any).rebalanceRuns.get('conn-a').get('a0000000');
+            expect(run.failedBeforeCancel).toEqual([]);
+          });
+
           it('keeps a run running when the server refuses the cancel', async () => {
             enable();
             const { source } = await planned();
@@ -4901,8 +4932,8 @@ describe('AnomalyService', () => {
             report.finishedJobs = ['job-1'];
             report.failed = [{ ...failedImport, message: 'target refused' }];
 
-            expect(await service.cancelRebalance('conn-a', 'a0000000')).toMatchObject({
-              status: 'cancelling',
+            expect(await service.cancelRebalance('conn-a', 'a0000000')).toEqual({
+              status: 'not_running',
             });
             report.complete = true;
 

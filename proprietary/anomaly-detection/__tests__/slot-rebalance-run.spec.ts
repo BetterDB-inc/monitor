@@ -543,6 +543,55 @@ describe('slot rebalance run', () => {
       expect(run.state).toBe('running');
     });
 
+    it('follows a job whose source and target answered while another target did not', () => {
+      const listed = followRun(
+        started(),
+        report({ jobViews: [view('job-a', 'tgt1', '0-99 200-200'), view('job-b', 'tgt2', '300-399')] }),
+        nodes(),
+        2_000,
+      );
+      const run = followRun(
+        listed,
+        report({
+          complete: false,
+          jobsReadNodeIds: ['src', 'tgt1'],
+          failed: [
+            {
+              jobName: 'job-a',
+              message: 'target refused',
+              sourceNodeId: 'src',
+              targetNodeId: 'tgt1',
+              slotRange: '0-99 200-200',
+            },
+          ],
+        }),
+        nodes(),
+        3_000,
+      );
+      expect(run.jobs.map((job) => job.state)).toEqual(['failed', 'running']);
+      expect(run.jobs[0].message).toBe('target refused');
+    });
+
+    it('takes a listed failure of a job whose source did not answer', () => {
+      const listed = followRun(
+        started(),
+        report({ jobViews: [view('job-a', 'tgt1', '0-99 200-200')] }),
+        nodes(),
+        2_000,
+      );
+      const run = followRun(
+        listed,
+        report({
+          complete: false,
+          jobsReadNodeIds: ['tgt1'],
+          failed: [{ jobName: 'job-a', message: 'target refused' }],
+        }),
+        nodes(),
+        3_000,
+      );
+      expect(run.jobs[0]).toMatchObject({ state: 'failed', message: 'target refused' });
+    });
+
     it('calls a job that finished before it was listed a success once the target owns its slots', () => {
       const run = followRun(started(), report({ finishedJobs: ['job-a', 'job-b'] }), movedNodes(), 2_000);
       expect(run.jobs.map((job) => job.state)).toEqual(['succeeded', 'succeeded']);

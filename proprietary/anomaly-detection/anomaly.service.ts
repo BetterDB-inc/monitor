@@ -10785,13 +10785,16 @@ export class AnomalyService
     const runs = this.rebalanceRuns.get(connectionId);
     const run = runs?.get(sourceShardId);
     if (!runs || run?.state !== 'running') return { status: 'not_running' };
+    const key = `${connectionId}\n${sourceShardId}`;
+    const earlier = run.cancelAcceptedAt !== undefined || this.cancelsInFlight.has(key);
     const cancelling = {
       ...run,
       cancelRequestedAt: Date.now(),
-      failedBeforeCancel: report?.failed.map((entry) => entry.jobName) ?? run.failedBeforeCancel,
+      failedBeforeCancel: earlier
+        ? run.failedBeforeCancel
+        : (report?.failed.map((entry) => entry.jobName) ?? run.failedBeforeCancel),
     };
     runs.set(sourceShardId, cancelling);
-    const key = `${connectionId}\n${sourceShardId}`;
     const inFlight = this.cancelsInFlight.get(key) ?? {
       count: 0,
       requestedBefore: run.cancelRequestedAt,
