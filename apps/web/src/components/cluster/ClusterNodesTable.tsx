@@ -1,4 +1,4 @@
-import { useState, useMemo, Fragment } from 'react';
+import { useState, useMemo, useEffect, useRef, Fragment } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/card';
 import { EmptyState } from '../ui/empty-state';
 import { Badge } from '../ui/badge';
@@ -17,6 +17,7 @@ import { formatSlotRanges, countSlots } from '../../types/cluster';
 
 interface ClusterNodesTableProps {
   nodes: ClusterNode[];
+  focusNodeId?: string | null;
 }
 
 type SortColumn = 'address' | 'role' | 'slots' | 'state';
@@ -29,7 +30,7 @@ function stateSortKey(node: ClusterNode): string {
   return `${STATE_RANK[clusterNodeState(node.flags)]}:${node.linkState}`;
 }
 
-export function ClusterNodesTable({ nodes }: ClusterNodesTableProps) {
+export function ClusterNodesTable({ nodes, focusNodeId }: ClusterNodesTableProps) {
   const [sortColumn, setSortColumn] = useState<SortColumn>('address');
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
   const [filterTab, setFilterTab] = useState<FilterTab>('all');
@@ -41,6 +42,29 @@ export function ClusterNodesTable({ nodes }: ClusterNodesTableProps) {
     nodes.forEach((node) => map.set(node.id, node));
     return map;
   }, [nodes]);
+
+  const shownFocus = useRef<string | null>(null);
+  const rows = useRef(new Map<string, HTMLTableRowElement>());
+  const [scrollTo, setScrollTo] = useState<string | null>(null);
+  const focusKnown = focusNodeId ? nodeMap.has(focusNodeId) : false;
+
+  useEffect(() => {
+    if (!focusNodeId) {
+      shownFocus.current = null;
+      return;
+    }
+    if (!focusKnown || shownFocus.current === focusNodeId) return;
+    shownFocus.current = focusNodeId;
+    setFilterTab('all');
+    setExpandedNode(focusNodeId);
+    setScrollTo(focusNodeId);
+  }, [focusNodeId, focusKnown]);
+
+  useEffect(() => {
+    if (!scrollTo) return;
+    rows.current.get(scrollTo)?.scrollIntoView?.({ block: 'center' });
+    setScrollTo(null);
+  }, [scrollTo]);
 
   const showZone = useMemo(() => nodes.some((node) => node.availabilityZone), [nodes]);
 
@@ -172,6 +196,12 @@ export function ClusterNodesTable({ nodes }: ClusterNodesTableProps) {
         </div>
       </CardHeader>
       <CardContent>
+        {focusNodeId && nodes.length > 0 && !focusKnown && (
+          <p role="status" className="mb-3 text-sm text-muted-foreground">
+            Node {focusNodeId.substring(0, 8)} is not in the current view of this cluster. It may
+            have left the cluster.
+          </p>
+        )}
         <Table>
           <TableHeader>
             <TableRow>
@@ -213,6 +243,10 @@ export function ClusterNodesTable({ nodes }: ClusterNodesTableProps) {
               return (
                 <Fragment key={node.id}>
                   <TableRow
+                    ref={(element) => {
+                      if (element) rows.current.set(node.id, element);
+                      else rows.current.delete(node.id);
+                    }}
                     className="cursor-pointer"
                     onClick={() => toggleExpanded(node.id)}
                   >
