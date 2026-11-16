@@ -250,6 +250,36 @@ describe('FakeCluster', () => {
       expect(history[0]).toHaveLength(2);
     });
 
+    it('reports the same latency spikes on every read, with no new ones', async () => {
+      const client = clientFor(0);
+      const event = 'command';
+
+      const latest = await client.call('LATENCY', 'LATEST');
+      const history = await client.call('LATENCY', 'HISTORY', event);
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+
+      expect(await client.call('LATENCY', 'LATEST')).toEqual(latest);
+      expect(await client.call('LATENCY', 'HISTORY', event)).toEqual(history);
+    });
+
+    it('agrees with itself about the keys of a slot and the keys that expire', async () => {
+      const client = clientFor(0);
+      const slotStats = (await client.call('CLUSTER', 'SLOT-STATS', 'SLOTSRANGE', '0', '0')) as Array<[number, unknown[]]>;
+      const keysInSlot = Number(slotStats[0][1][slotStats[0][1].indexOf('key-count') + 1]);
+      const keyspace = (await client.info('keyspace')).split('\r\n').find((line) => line.startsWith('db0:')) ?? '';
+      const [, keys, expires] = /keys=(\d+),expires=(\d+)/.exec(keyspace) ?? [];
+
+      const listed = (await client.call('CLUSTER', 'GETKEYSINSLOT', '0', '1000')) as string[];
+
+      expect(await client.call('CLUSTER', 'COUNTKEYSINSLOT', '0')).toBe(keysInSlot);
+      expect(await client.call('CLUSTER', 'COUNTKEYSINSLOT', '16383')).toBe(0);
+      expect(listed).toHaveLength(keysInSlot);
+      expect(new Set(listed).size).toBe(keysInSlot);
+      expect(await client.call('CLUSTER', 'GETKEYSINSLOT', '0', '2')).toEqual(listed.slice(0, 2));
+      expect(await client.call('CLUSTER', 'GETKEYSINSLOT', '16383', '10')).toEqual([]);
+      expect(expires).toBe(keys);
+    });
+
     it('lists 200 application clients and 60 commands in the command stats', async () => {
       const client = clientFor(0);
 

@@ -496,6 +496,14 @@ export class FakeCluster {
     return `${KEY_PREFIXES[position % KEY_PREFIXES.length]}:${node.shard}:${position}`;
   }
 
+  private keysInSlot(node: FakeNode, slot: number): string[] {
+    const [start, end] = this.shardSlots[node.shard];
+    if (!this.profile.keys || !(slot >= start && slot <= end)) return [];
+    const perSlot = this.keysPerSlot(node);
+    const first = (slot - start) * perSlot;
+    return Array.from({ length: perSlot }, (_, position) => this.keyName(node, first + position));
+  }
+
   private scan(node: FakeNode, args: string[]): Reply {
     if (!this.profile.keys) return ['0', []];
     const option = (name: string): string | undefined => {
@@ -540,18 +548,23 @@ export class FakeCluster {
   }
 
   private latency(sub: string, args: string[]): Reply {
-    const now = Math.floor(Date.now() / 1000);
+    const startedAtSeconds = Math.floor(this.startedAt / 1000);
     switch (sub) {
       case 'DOCTOR':
         return 'Dave, no latency spike was observed during the lifetime of this instance.';
       case 'RESET':
         return 0;
       case 'LATEST':
-        return this.profile.latencyEvents.map((event, position) => [event, now - position, 12 + position, 80 + position]);
+        return this.profile.latencyEvents.map((event, position) => [
+          event,
+          startedAtSeconds - position,
+          12 + position,
+          80 + position,
+        ]);
       case 'HISTORY':
         if (!this.profile.latencyEvents.includes(args[2] ?? '')) return [];
         return Array.from({ length: LATENCY_HISTORY_SAMPLES }, (_, position) => [
-          now - (LATENCY_HISTORY_SAMPLES - position) * 60,
+          startedAtSeconds - (LATENCY_HISTORY_SAMPLES - position) * 60,
           5 + (position % 20),
         ]);
       default:
@@ -787,7 +800,10 @@ export class FakeCluster {
       case 'cluster':
         return ['cluster_enabled:1'];
       case 'keyspace':
-        return [`db0:keys=${this.keyCount(node)},expires=120,avg_ttl=3600000`];
+        return [
+          `db0:keys=${this.keyCount(node)},expires=${this.profile.keys ? this.keyCount(node) : 0},` +
+            `avg_ttl=${this.profile.keys ? 3_600_000 : 0}`,
+        ];
       case 'commandstats':
         return this.profile.commands.map((command, position) => {
           const calls = Math.floor(commandsProcessed / (position + 2));
@@ -947,9 +963,11 @@ export class FakeCluster {
         return [];
       case 'GETSLOTMIGRATIONS':
       case 'LINKS':
-      case 'GETKEYSINSLOT':
         return [];
+      case 'GETKEYSINSLOT':
+        return this.keysInSlot(node, Number(args[2])).slice(0, Math.max(0, Number(args[3]) || 0));
       case 'COUNTKEYSINSLOT':
+        return this.keysInSlot(node, Number(args[2])).length;
       case 'COUNT-FAILURE-REPORTS':
         return 0;
       case 'KEYSLOT':
