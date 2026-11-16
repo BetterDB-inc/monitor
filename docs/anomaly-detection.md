@@ -521,12 +521,12 @@ On a cluster connection, an event names the node it is about in a `node` object:
 | `nodeId` | The node's cluster id |
 | `address` | `host:port` as the cluster reports it, without the bus port |
 | `role` | `primary`, `replica`, or `unknown` for a node that is still joining or has left the cluster view, and when the cluster view is too old to say |
-| `shardId` | From `CLUSTER SHARDS`. Absent on servers without that command |
+| `shardId` | From `CLUSTER SHARDS`. Absent on servers without that command, and on an event raised in a connection's first poll before the shards were read |
 | `availabilityZone` | From the server, or from the connection's zone map. Absent when neither gives one |
 | `collected` | `true` when a registered connection reads this node |
 | `connectionId` | That connection. Absent when `collected` is `false` |
 
-`nodeId`, `address`, `role`, `shardId` and `availabilityZone` are taken from the cluster view when the event is raised and stored with it, so an old event keeps the role and shard the node had then. The connections of one cluster share one view, the latest any of them read. When the view was read more than 3 poll intervals (at least 30 seconds) before or after the time of the event, the node is still named but its `role` is `unknown`, since a failover may have changed it. A `replication_role` event always carries the role the node changed to, not the one it had before. `collected` and `connectionId` are not stored: they are worked out each time the event is read, from the connections registered at that moment. A node is collected when a registered connection reads it as its own node, or when a connection that belongs to the same cluster points at its address. A connection of another cluster that announces the same address does not count. Neither does a connection at that address that reads another node id there, which is the case for an event about a node that was replaced at the same address. With auto-registration off only the seed is collected.
+`nodeId`, `address`, `role`, `shardId` and `availabilityZone` are taken from the cluster view when the event is raised and stored with it, so an old event keeps the role and shard the node had then. The connections of one cluster share one view, the latest any of them read. When the view was read more than 3 poll intervals (at least 30 seconds) before or after the time of the event, the node is still named but its `role` is `unknown`, since a failover may have changed it. A `replication_role` event always carries the role the node changed to, not the one it had before. `collected` and `connectionId` are not stored: they are worked out each time the event is read, from the connections registered at that moment. A node is collected when a registered connection reads it as its own node, or when a connection that belongs to the same cluster points at its address. A connection of another cluster that announces the same address does not count. Neither does a connection at that address that reads another node id there, which is the case for an event about a node that was replaced at the same address. With auto-registration off only the seed is collected, plus any node that was registered as a connection by hand.
 
 Events read from `GET /api/anomaly/events`, the events of each group of `GET /api/anomaly/groups`, the entries of `GET /api/anomaly/incidents` and `GET /api/anomaly/incidents/:id`, and the same reads over MCP all carry `node`. Each hot shard of `GET /api/anomaly/hot-shards` carries the `node` of its primary. Webhooks carry it too (see [Failing node on cluster alerts](./webhooks.md#failing-node-on-cluster-alerts)). Existing fields (`nodeAddr`, `replicaAddr`, `sourceHost`, `sourcePort`) keep their meaning.
 
@@ -551,7 +551,7 @@ Which node each event type names:
 | `raft_health` | None. Elections and quorum are a state of the cluster's Raft group, not a fault of one node |
 | `sentinel_endpoint_drift`, `sentinel_loop_stall` | None. These are about a Sentinel process, which is not a cluster node |
 
-An event has no `node` in three more cases: the connection is not a cluster (a standalone or Sentinel-managed instance is its own node, named by `connectionId`); the event was raised before the first cluster view was read; or the node it is about was in no view and the detector gave no address for it. A node that has left the view is still named when the detector knows its id and address, with `role` set to `unknown`. Correlated groups carry no `node` of their own; each event in the group does.
+An event has no `node` in four more cases: the connection is not a cluster (a standalone or Sentinel-managed instance is its own node, named by `connectionId`); the event was raised before the first cluster view was read; the node it is about was in no view and the detector gave no address for it; or the event was stored by a version that did not have this field, since the node is not worked out again for an old event. A connection that stops being a cluster drops its view on the next poll that reads it, and its later events carry no `node`. A node that has left the view is still named when the detector knows its id and address, with `role` set to `unknown`. Correlated groups carry no `node` of their own; each event in the group does.
 
 ## Severity Levels
 
@@ -1137,7 +1137,7 @@ GET /api/anomaly/events?limit=100&severity=critical&metricType=connections
 }
 ```
 
-`node` is present on events of a cluster connection that are about one node. See [Failing node on cluster events](#failing-node-on-cluster-events).
+`node` is present on events of a cluster connection that are about one node. It can be absent, for example on an event stored before this field existed, so read it as optional. See [Failing node on cluster events](#failing-node-on-cluster-events).
 
 ### Get Correlated Anomaly Groups
 

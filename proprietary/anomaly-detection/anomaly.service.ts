@@ -1762,7 +1762,11 @@ export class AnomalyService
       const timestamp = Date.now();
       const clusterKeyUnknown = !this.connectionClusterKeys.has(ctx.connectionId);
       if (live && info['cluster_enabled'] === '1' && clusterKeyUnknown) {
-        await this.learnClusterKey(ctx);
+        await this.learnClusterKey(ctx, timestamp);
+      }
+      if (live && info['cluster_enabled'] !== '1') {
+        this.forgetClusterKey(ctx.connectionId);
+        this.clusterNodeViews.forget(ctx.connectionId);
       }
       await this.adoptOpenEvents(ctx, timestamp);
       replicationSample = this.replicationStream.observe(ctx.connectionId, info, timestamp);
@@ -9766,7 +9770,7 @@ export class AnomalyService
     }
   }
 
-  private async learnClusterKey(ctx: ConnectionContext): Promise<void> {
+  private async learnClusterKey(ctx: ConnectionContext, readAt: number): Promise<void> {
     try {
       const nodes = await withTimeout(
         ctx.client.getClusterNodes(),
@@ -9774,6 +9778,7 @@ export class AnomalyService
         'CLUSTER NODES timed out',
       );
       this.rememberClusterKey(ctx.connectionId, nodes);
+      this.rememberClusterNodes(ctx.connectionId, nodes, undefined, readAt);
     } catch (err) {
       this.logger.debug(
         `Failed to read cluster nodes for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
