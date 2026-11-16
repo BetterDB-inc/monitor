@@ -10731,7 +10731,14 @@ export class AnomalyService
         }
         this.refusedRebalancePlans.set(plan, 'server_refused');
         if (late) record();
-        return { status: 'refused', message: errorText(err) };
+        if (late || (err instanceof Error && err.name === 'ReplyError')) {
+          return { status: 'refused', message: errorText(err) };
+        }
+        record();
+        return {
+          status: 'refused',
+          message: `The connection to the hot shard closed after CLUSTER MIGRATESLOTS was sent (${errorText(err)}); the migration may still have started`,
+        };
       }
       return { status: 'started', run: runView(record()) };
     } finally {

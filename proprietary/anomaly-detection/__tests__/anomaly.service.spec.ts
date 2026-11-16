@@ -4543,7 +4543,9 @@ describe('AnomalyService', () => {
           it('records no run when the server refuses MIGRATESLOTS', async () => {
             enable();
             const { source } = await planned();
-            source.call.mockRejectedValueOnce(new Error("ERR I don't know about node b0000000"));
+            source.call.mockRejectedValueOnce(
+              Object.assign(new Error("ERR I don't know about node b0000000"), { name: 'ReplyError' }),
+            );
 
             expect(await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN)).toEqual({
               status: 'refused',
@@ -4626,6 +4628,26 @@ describe('AnomalyService', () => {
             } finally {
               (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = budget;
             }
+            expect((await service.followRebalanceRuns('conn-a'))[0]).toMatchObject({
+              state: 'running',
+              jobs: [{ state: 'starting' }],
+            });
+            expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'migration_running' });
+            expect(await service.cancelRebalance('conn-a', 'a0000000')).toMatchObject({
+              status: 'cancelling',
+            });
+          });
+
+          it('follows a start whose connection closed after MIGRATESLOTS was sent', async () => {
+            enable();
+            const { source } = await planned();
+            source.call.mockRejectedValueOnce(new Error('Connection is closed.'));
+
+            expect(await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN)).toEqual({
+              status: 'refused',
+              message:
+                'The connection to the hot shard closed after CLUSTER MIGRATESLOTS was sent (Connection is closed.); the migration may still have started',
+            });
             expect((await service.followRebalanceRuns('conn-a'))[0]).toMatchObject({
               state: 'running',
               jobs: [{ state: 'starting' }],
