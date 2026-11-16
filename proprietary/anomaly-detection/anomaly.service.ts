@@ -9445,10 +9445,11 @@ export class AnomalyService
   }
 
   private nodeDirectoryOf(connectionId: string): NodeDirectory | undefined {
-    const clusterKey = this.connectionClusterKeys.get(connectionId);
-    if (!clusterKey) return this.clusterNodeViews.freshest([connectionId]);
-    const members = [...this.connectionClusterKeys].filter(([, key]) => key === clusterKey).map(([peer]) => peer);
-    return this.clusterNodeViews.freshest([connectionId, ...members]);
+    return this.clusterNodeViews.view(this.nodeViewKeyOf(connectionId))?.directory;
+  }
+
+  private nodeViewKeyOf(connectionId: string): string {
+    return this.connectionClusterKeys.get(connectionId) ?? connectionId;
   }
 
   private rememberClusterNodes(
@@ -9457,11 +9458,10 @@ export class AnomalyService
     shards: ClusterShard[] | undefined,
     readAt: number,
   ): void {
-    const described = withConfiguredZones(
-      withShardMetadata(nodes, shards),
-      this.connectionRegistry.getNodeAvailabilityZones(connectionId),
+    const zones = this.connectionRegistry.getNodeAvailabilityZones(connectionId);
+    this.clusterNodeViews.remember(connectionId, this.nodeViewKeyOf(connectionId), nodes, readAt, () =>
+      withConfiguredZones(withShardMetadata(nodes, shards), zones),
     );
-    this.clusterNodeViews.remember(connectionId, described, readAt);
   }
 
   private async addAnomaly(

@@ -53,8 +53,8 @@ function seenFrom(self: ClusterNode): ClusterNode[] {
 
 describe('nodeOfEvent', () => {
   const views = new ClusterNodeViews();
-  views.remember('conn-a', seenFrom(PRIMARY_A), 1_000);
-  const directory = views.freshest(['conn-a']);
+  views.remember('conn-a', 'cluster-1', seenFrom(PRIMARY_A), 1_000);
+  const directory = views.view('cluster-1')?.directory;
   const ownNodeId = views.ownNodeId('conn-a');
   const resolve = (overrides: Partial<AnomalyEvent>) => nodeOfEvent(event(overrides), directory, ownNodeId);
 
@@ -147,48 +147,110 @@ describe('nodeOfEvent', () => {
 });
 
 describe('ClusterNodeViews', () => {
-  it('answers with the freshest view among the connections of a cluster', () => {
-    const views = new ClusterNodeViews();
-    views.remember('conn-a', seenFrom(PRIMARY_A), 1_000);
-    views.remember('conn-b', [...seenFrom(PRIMARY_B), node({ id: 'new', address: '10.0.0.4:6379@16379' })], 2_000);
+  const withNewNode = [...seenFrom(PRIMARY_B), node({ id: 'new', address: '10.0.0.4:6379@16379' })];
 
-    expect(views.freshest(['conn-a', 'conn-b'])?.byId.has('new')).toBe(true);
-    expect(views.freshest(['conn-a'])?.byId.has('new')).toBe(false);
+  it('keeps one view for the connections of a cluster', () => {
+    const views = new ClusterNodeViews();
+    views.remember('conn-a', 'cluster-1', seenFrom(PRIMARY_A), 1_000);
+    views.remember('conn-b', 'cluster-1', withNewNode, 2_000);
+
+    expect(views.view('cluster-1')).toMatchObject({ readAt: 2_000 });
+    expect(views.view('cluster-1')?.directory.byId.has('new')).toBe(true);
+  });
+
+  it('keeps the views of two clusters apart', () => {
+    const views = new ClusterNodeViews();
+    views.remember('conn-a', 'cluster-1', seenFrom(PRIMARY_A), 1_000);
+    views.remember('conn-b', 'cluster-2', withNewNode, 2_000);
+
+    expect(views.view('cluster-1')?.directory.byId.has('new')).toBe(false);
+  });
+
+  it('keeps the newer read when an older one arrives late', () => {
+    const views = new ClusterNodeViews();
+    views.remember('conn-b', 'cluster-1', withNewNode, 2_000);
+    views.remember('conn-a', 'cluster-1', seenFrom(PRIMARY_A), 1_000);
+
+    expect(views.view('cluster-1')).toMatchObject({ readAt: 2_000 });
+    expect(views.view('cluster-1')?.directory.byId.has('new')).toBe(true);
+  });
+
+  it('builds the directory only when it is asked for, once per read', () => {
+    const views = new ClusterNodeViews();
+    const describe = jest.fn(() => seenFrom(PRIMARY_B));
+    views.remember('conn-a', 'cluster-1', seenFrom(PRIMARY_A), 1_000, describe);
+    views.remember('conn-b', 'cluster-1', seenFrom(PRIMARY_B), 2_000, describe);
+
+    expect(describe).not.toHaveBeenCalled();
+
+    const first = views.view('cluster-1')?.directory;
+    const second = views.view('cluster-1')?.directory;
+
+    expect(describe).toHaveBeenCalledTimes(1);
+    expect(second).toBe(first);
+  });
+
+  it('builds the directory from the described nodes', () => {
+    const views = new ClusterNodeViews();
+    views.remember('conn-a', 'cluster-1', seenFrom(PRIMARY_A), 1_000, () =>
+      seenFrom(PRIMARY_A).map((n) => ({ ...n, availabilityZone: 'zone-x' })),
+    );
+
+    expect(views.view('cluster-1')?.directory.byId.get('primary-a')?.availabilityZone).toBe('zone-x');
   });
 
   it('keeps each connection own node apart from the shared view', () => {
     const views = new ClusterNodeViews();
-    views.remember('conn-a', seenFrom(PRIMARY_A), 1_000);
-    views.remember('conn-b', seenFrom(PRIMARY_B), 2_000);
+    views.remember('conn-a', 'cluster-1', seenFrom(PRIMARY_A), 1_000);
+    views.remember('conn-b', 'cluster-1', seenFrom(PRIMARY_B), 2_000);
 
-    const node = nodeOfEvent(event(), views.freshest(['conn-a', 'conn-b']), views.ownNodeId('conn-a'));
+    const node = nodeOfEvent(event(), views.view('cluster-1')?.directory, views.ownNodeId('conn-a'));
 
     expect(node?.nodeId).toBe('primary-a');
   });
 
   it('keeps the own node of a connection whose later read marks none', () => {
     const views = new ClusterNodeViews();
-    views.remember('conn-a', seenFrom(PRIMARY_A), 1_000);
-    views.remember('conn-a', [PRIMARY_A, REPLICA_A], 2_000);
+    views.remember('conn-a', 'cluster-1', seenFrom(PRIMARY_A), 1_000);
+    views.remember('conn-a', 'cluster-1', [PRIMARY_A, REPLICA_A], 2_000);
 
     expect(views.ownNodeId('conn-a')).toBe('primary-a');
   });
 
-  it('forgets a connection', () => {
+  it('moves a connection to the view of its cluster once the cluster is known', () => {
     const views = new ClusterNodeViews();
-    views.remember('conn-a', seenFrom(PRIMARY_A), 1_000);
+    views.remember('conn-a', 'conn-a', seenFrom(PRIMARY_A), 1_000);
+    views.remember('conn-a', 'cluster-1', seenFrom(PRIMARY_A), 2_000);
+
+    expect(views.view('conn-a')).toBeUndefined();
+    expect(views.view('cluster-1')).toMatchObject({ readAt: 2_000 });
+  });
+
+  it('keeps the view of a cluster while another connection still reads it', () => {
+    const views = new ClusterNodeViews();
+    views.remember('conn-a', 'cluster-1', seenFrom(PRIMARY_A), 1_000);
+    views.remember('conn-b', 'cluster-1', seenFrom(PRIMARY_B), 2_000);
+    views.forget('conn-b');
+
+    expect(views.view('cluster-1')).toBeDefined();
+    expect(views.ownNodeId('conn-b')).toBeUndefined();
+  });
+
+  it('forgets the view with the last connection of the cluster', () => {
+    const views = new ClusterNodeViews();
+    views.remember('conn-a', 'cluster-1', seenFrom(PRIMARY_A), 1_000);
     views.forget('conn-a');
 
-    expect(views.freshest(['conn-a'])).toBeUndefined();
+    expect(views.view('cluster-1')).toBeUndefined();
     expect(views.ownNodeId('conn-a')).toBeUndefined();
     expect(views.connectionsOfNode('primary-a')).toEqual([]);
   });
 
   it('answers with the connections that read a node as their own', () => {
     const views = new ClusterNodeViews();
-    views.remember('conn-a', seenFrom(PRIMARY_A), 1_000);
-    views.remember('conn-a2', seenFrom(PRIMARY_A), 1_000);
-    views.remember('conn-b', seenFrom(PRIMARY_B), 1_000);
+    views.remember('conn-a', 'cluster-1', seenFrom(PRIMARY_A), 1_000);
+    views.remember('conn-a2', 'cluster-1', seenFrom(PRIMARY_A), 1_000);
+    views.remember('conn-b', 'cluster-1', seenFrom(PRIMARY_B), 1_000);
 
     expect(views.connectionsOfNode('primary-a')).toEqual(['conn-a', 'conn-a2']);
     expect(views.connectionsOfNode('replica-a')).toEqual([]);
