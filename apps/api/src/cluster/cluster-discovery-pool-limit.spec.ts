@@ -27,6 +27,7 @@ const NODE_COUNT = 600;
 describe('ClusterDiscoveryService node client limit', () => {
   let service: ClusterDiscoveryService;
   let warn: jest.SpyInstance;
+  let debug: jest.SpyInstance;
 
   const nodes = Array.from({ length: NODE_COUNT }, (_, index) => ({
     id: `node-${String(index).padStart(4, '0')}`,
@@ -61,8 +62,9 @@ describe('ClusterDiscoveryService node client limit', () => {
       providers: [ClusterDiscoveryService, { provide: ConnectionRegistry, useValue: registry }],
     }).compile();
     service = module.get(ClusterDiscoveryService);
-    const logger = (service as unknown as { logger: { warn: () => void; log: () => void } }).logger;
+    const logger = (service as unknown as { logger: Record<'warn' | 'log' | 'debug', () => void> }).logger;
     warn = jest.spyOn(logger, 'warn').mockImplementation();
+    debug = jest.spyOn(logger, 'debug').mockImplementation();
     jest.spyOn(logger, 'log').mockImplementation();
   });
 
@@ -97,6 +99,27 @@ describe('ClusterDiscoveryService node client limit', () => {
     await Promise.all(nodes.slice(1, POOL_LIMIT + 1).map((node) => service.getNodeConnection(node.id, 'seed')));
 
     expect(service.getConnectionPoolSize()).toBe(POOL_LIMIT);
+    expect(debug).not.toHaveBeenCalledWith(expect.stringContaining('Closing oldest connection'));
+  });
+
+  it('warns about the limit once while callers keep hitting it', async () => {
+    for (const node of nodes) await service.getNodeConnection(node.id, 'seed');
+
+    const warnings = warn.mock.calls.filter(([message]) => String(message).includes('Connection limit reached'));
+    expect(warnings).toHaveLength(1);
     expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('Closing oldest connection'));
+  });
+
+  it('warns again a minute later and says how many connections it closed', async () => {
+    const now = jest.spyOn(Date, 'now');
+    const start = 1_000_000;
+    now.mockReturnValue(start);
+    for (const node of nodes) await service.getNodeConnection(node.id, 'seed');
+
+    now.mockReturnValue(start + 60_000);
+    await service.getNodeConnection(nodes[0].id, 'seed');
+    now.mockRestore();
+
+    expect(warn).toHaveBeenLastCalledWith(expect.stringContaining(`${NODE_COUNT - POOL_LIMIT} closed since the last warning`));
   });
 });

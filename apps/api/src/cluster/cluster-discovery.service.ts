@@ -112,7 +112,10 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   private readonly HEALTH_CHECK_INTERVAL = 30000; // 30 seconds
   private readonly MAX_CONNECTIONS = 512; // Maximum number of concurrent connections
   private readonly OWN_NODE_IDLE_MS = 5 * 60_000;
+  private readonly POOL_LIMIT_WARN_INTERVAL_MS = 60_000;
   private pendingNodeClients = 0;
+  private poolLimitWarnedAt = 0;
+  private poolLimitClosedSinceWarning = 0;
   private unresponsiveUntil: Map<string, number> = new Map();
   private nodeClientSlotWaiters: Array<() => void> = [];
 
@@ -588,16 +591,15 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     while (this.discoveredNodes.size + this.pendingNodeClients >= this.MAX_CONNECTIONS) {
       if (!cleanedUp) {
         cleanedUp = true;
-        this.logger.warn(
-          `Connection limit reached (${this.MAX_CONNECTIONS}). Cleaning up idle connections...`,
-        );
+        this.warnAboutPoolLimit();
         await this.cleanupIdleConnections(this.HEALTH_CHECK_INTERVAL);
         continue;
       }
       const oldestNodeId = this.findOldestConnection();
       const oldest = oldestNodeId ? this.discoveredNodes.get(oldestNodeId) : undefined;
       if (oldestNodeId && oldest) {
-        this.logger.warn(`Closing oldest connection to ${oldestNodeId} to make room for new connection`);
+        this.logger.debug(`Closing oldest connection to ${oldestNodeId} to make room for new connection`);
+        this.poolLimitClosedSinceWarning += 1;
         this.discoveredNodes.delete(oldestNodeId);
         void this.closeNodeClient(oldest.client).catch(() => undefined);
         continue;
@@ -605,6 +607,18 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       await new Promise<void>((resolve) => this.nodeClientSlotWaiters.push(resolve));
     }
     this.pendingNodeClients += 1;
+  }
+
+  private warnAboutPoolLimit(): void {
+    const now = Date.now();
+    if (now - this.poolLimitWarnedAt < this.POOL_LIMIT_WARN_INTERVAL_MS) return;
+    const closed = this.poolLimitClosedSinceWarning;
+    this.poolLimitWarnedAt = now;
+    this.poolLimitClosedSinceWarning = 0;
+    this.logger.warn(
+      `Connection limit reached (${this.MAX_CONNECTIONS}). Closing idle and oldest node connections to make room` +
+        (closed > 0 ? `; ${closed} closed since the last warning` : ''),
+    );
   }
 
   private releaseNodeClientSlot(): void {
