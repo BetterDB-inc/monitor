@@ -1,4 +1,5 @@
 import { FakeCluster, type FakeClusterOptions } from '../../test/load/fake-cluster';
+import { ProcessLoadMeter } from './process-load';
 
 interface Request {
   id: number;
@@ -7,6 +8,7 @@ interface Request {
 }
 
 let cluster: FakeCluster | null = null;
+const load = new ProcessLoadMeter();
 
 const required = (): FakeCluster => {
   if (!cluster) throw new Error('Cluster not started');
@@ -17,10 +19,12 @@ async function handle(request: Request): Promise<unknown> {
   switch (request.method) {
     case 'start':
       cluster = await FakeCluster.start(request.args[0] as FakeClusterOptions);
+      load.start();
       return cluster.nodes;
     case 'stats':
-      return required().stats();
+      return { ...required().stats(), load: load.read() };
     case 'resetStats':
+      load.start();
       return required().resetStats();
     case 'hang':
       return required().hang(request.args[0] as number);
