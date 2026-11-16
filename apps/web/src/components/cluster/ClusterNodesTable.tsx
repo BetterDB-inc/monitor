@@ -30,6 +30,8 @@ type SortDirection = 'asc' | 'desc';
 type FilterTab = 'all' | 'masters' | 'replicas';
 
 const STATE_RANK: Record<ClusterNodeState, number> = { healthy: 0, suspect: 1, failed: 2 };
+const FOCUS_FOLLOW_MS = 10_000;
+const READER_INPUTS = ['wheel', 'touchmove', 'keydown', 'pointerdown'] as const;
 
 function stateSortKey(node: ClusterNode): string {
   return `${STATE_RANK[clusterNodeState(node.flags)]}:${node.linkState}`;
@@ -68,7 +70,21 @@ export function ClusterNodesTable({
   }
 
   useEffect(() => {
-    if (shownFocus) rows.current.get(shownFocus)?.scrollIntoView?.({ block: 'center' });
+    const row = shownFocus ? rows.current.get(shownFocus) : undefined;
+    if (!row) return;
+    const show = () => row.scrollIntoView?.({ block: 'center' });
+    show();
+    if (typeof ResizeObserver === 'undefined') return;
+    const pageGrowth = new ResizeObserver(show);
+    const stop = () => {
+      pageGrowth.disconnect();
+      window.clearTimeout(timer);
+      READER_INPUTS.forEach((input) => window.removeEventListener(input, stop));
+    };
+    const timer = window.setTimeout(stop, FOCUS_FOLLOW_MS);
+    READER_INPUTS.forEach((input) => window.addEventListener(input, stop, { passive: true }));
+    pageGrowth.observe(document.body);
+    return stop;
   }, [shownFocus]);
 
   const showZone = useMemo(() => nodes.some((node) => node.availabilityZone), [nodes]);

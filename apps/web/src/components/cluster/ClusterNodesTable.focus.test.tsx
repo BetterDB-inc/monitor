@@ -116,3 +116,93 @@ describe('ClusterNodesTable picked node', () => {
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
 });
+
+describe('ClusterNodesTable picked node while the page settles', () => {
+  const scrollIntoView = vi.fn();
+  const original = Element.prototype.scrollIntoView;
+  const observers: Array<{ grow: () => void; watched: Element[]; stopped: boolean }> = [];
+
+  class PageGrowth {
+    private readonly entry: (typeof observers)[number];
+
+    constructor(onGrow: () => void) {
+      this.entry = { grow: onGrow, watched: [], stopped: false };
+      observers.push(this.entry);
+    }
+
+    observe(target: Element): void {
+      this.entry.watched.push(target);
+    }
+
+    unobserve(): void {}
+
+    disconnect(): void {
+      this.entry.stopped = true;
+    }
+  }
+
+  function growPage(): void {
+    for (const observer of observers) {
+      if (!observer.stopped) observer.grow();
+    }
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    observers.length = 0;
+    scrollIntoView.mockClear();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    vi.stubGlobal('ResizeObserver', PageGrowth);
+  });
+
+  afterEach(() => {
+    Element.prototype.scrollIntoView = original;
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it('brings the row back into view when the page grows above it', () => {
+    render(<ClusterNodesTable nodes={[primary, replica]} focusNodeId={replica.id} />);
+    expect(observers[0].watched).toEqual([document.body]);
+
+    growPage();
+
+    expect(scrollIntoView).toHaveBeenCalledTimes(2);
+    expect(scrollIntoView.mock.contexts[1]).toBe(row(replica.address));
+  });
+
+  it.each(['wheel', 'touchmove', 'keydown', 'pointerdown'])(
+    'leaves the page where the reader put it after a %s',
+    (input) => {
+      render(<ClusterNodesTable nodes={[primary, replica]} focusNodeId={replica.id} />);
+
+      fireEvent(window, new Event(input));
+      growPage();
+
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('stops following the row after ten seconds', () => {
+    render(<ClusterNodesTable nodes={[primary, replica]} focusNodeId={replica.id} />);
+
+    vi.advanceTimersByTime(10_000);
+    growPage();
+
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops following the row when the table goes away', () => {
+    const { unmount } = render(<ClusterNodesTable nodes={[primary, replica]} focusNodeId={replica.id} />);
+
+    unmount();
+
+    expect(observers.every((observer) => observer.stopped)).toBe(true);
+  });
+
+  it('follows no row when it was asked for none', () => {
+    render(<ClusterNodesTable nodes={[primary, replica]} />);
+
+    expect(observers).toHaveLength(0);
+  });
+});
