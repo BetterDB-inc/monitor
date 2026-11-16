@@ -12,6 +12,7 @@ export const REBALANCE_JOB_LISTING_GRACE_MS = 60_000;
 export const REBALANCE_OUTCOME_SETTLE_MS = 60_000;
 export const REBALANCE_RUN_KEPT_MS = 60 * 60_000;
 export const REBALANCE_FOLLOW_MS = 5_000;
+export const REBALANCE_CANCEL_PENDING_MS = 10_000;
 
 export type RebalanceRecheckFailure = 'slots_moved' | 'source_unhealthy' | 'target_unhealthy';
 
@@ -98,8 +99,10 @@ export function runView(run: RebalanceRun): RebalanceRunView {
   return { ...view, jobs: jobs.map(({ finishedSeenAt, ...job }) => job) };
 }
 
-export const isCancelPending = (run: RebalanceRun) =>
-  run.cancelRequestedAt !== undefined && run.cancelAcceptedAt === undefined;
+export const isCancelPending = (run: RebalanceRun, now: number) =>
+  run.cancelRequestedAt !== undefined &&
+  run.cancelAcceptedAt === undefined &&
+  now - run.cancelRequestedAt < REBALANCE_CANCEL_PENDING_MS;
 
 export type RebalanceRunResult =
   | { status: 'started'; run: RebalanceRunView }
@@ -264,7 +267,7 @@ function followJob(
   }
   const moved = owns(byId.get(job.targetShardId), job.ranges);
   const sourceOwns = owns(byId.get(run.sourceShardId), job.ranges);
-  if (run.cancelAcceptedAt !== undefined && !moved) {
+  if (run.cancelAcceptedAt !== undefined && !moved && job.finishedSeenAt === undefined) {
     return { ...job, state: sourceOwns ? 'cancelled' : 'unknown' };
   }
   const failed = report.failed.find((entry) =>
@@ -302,7 +305,7 @@ export function followRun(
   nodes: readonly RunNode[],
   now: number,
 ): RebalanceRun {
-  if (run.state !== 'running' || isCancelPending(run)) return run;
+  if (run.state !== 'running' || isCancelPending(run, now)) return run;
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const jobs = run.jobs.map((job) => followJob(run, job, report, byId, now));
   const state = stateOf(jobs);

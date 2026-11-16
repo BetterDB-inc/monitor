@@ -577,6 +577,39 @@ describe('slot rebalance run', () => {
       );
       const pending = { ...listed, cancelRequestedAt: 2_500 };
       expect(followRun(pending, cancelledReport(), nodes(), 3_000)).toBe(pending);
+      expect(followRun(pending, cancelledReport(), nodes(), 12_499)).toBe(pending);
+    });
+
+    it('follows a run again once a cancel that never answered is stale', () => {
+      const listed = followRun(
+        started(),
+        report({ jobViews: [view('job-a', 'tgt1', '0-99 200-200'), view('job-b', 'tgt2', '300-399')] }),
+        nodes(),
+        2_000,
+      );
+      const run = followRun(
+        { ...listed, cancelRequestedAt: 2_500 },
+        report({ finishedJobs: ['job-a', 'job-b'] }),
+        movedNodes(),
+        12_500,
+      );
+      expect(run.state).toBe('succeeded');
+    });
+
+    it('keeps waiting for a job that finished before the cancel was accepted', () => {
+      const listed = followRun(
+        started(),
+        report({ jobViews: [view('job-a', 'tgt1', '0-99 200-200'), view('job-b', 'tgt2', '300-399')] }),
+        nodes(),
+        2_000,
+      );
+      const finished = report({ finishedJobs: ['job-a', 'job-b'] });
+      const waiting = followRun(listed, finished, nodes(), 3_000);
+      const stale = followRun(cancelled(waiting, 3_500), finished, nodes(), 4_000);
+      expect(stale.jobs.map((job) => job.state)).toEqual(['running', 'running']);
+      const run = followRun(stale, finished, movedNodes(), 9_000);
+      expect(run.jobs.map((job) => job.state)).toEqual(['succeeded', 'succeeded']);
+      expect(run.state).toBe('succeeded');
     });
 
     it('knows a failure as one of its own cancelled jobs', () => {

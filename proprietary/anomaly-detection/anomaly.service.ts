@@ -10758,13 +10758,20 @@ export class AnomalyService
       );
     } catch (err) {
       const now = runs.get(sourceShardId);
-      if (now?.cancelRequestedAt === cancelling.cancelRequestedAt) {
+      if (
+        now?.cancelAcceptedAt === undefined &&
+        now?.cancelRequestedAt === cancelling.cancelRequestedAt
+      ) {
         runs.set(sourceShardId, { ...now, cancelRequestedAt: run.cancelRequestedAt });
       }
       return { status: 'refused', message: errorText(err) };
     }
-    const accepted = { ...cancelling, cancelAcceptedAt: Date.now() };
-    if (runs.get(sourceShardId) === cancelling) runs.set(sourceShardId, accepted);
+    const current = runs.get(sourceShardId);
+    const accepted = {
+      ...(current?.state === 'running' ? current : cancelling),
+      cancelAcceptedAt: Date.now(),
+    };
+    if (current?.state === 'running') runs.set(sourceShardId, accepted);
     this.slotMigrationCheckedAt.delete(connectionId);
     return { status: 'cancelling', run: runView(accepted) };
   }

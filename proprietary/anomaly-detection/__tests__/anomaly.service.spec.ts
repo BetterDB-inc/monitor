@@ -4575,6 +4575,39 @@ describe('AnomalyService', () => {
             });
           });
 
+          it('accepts a cancel that overlaps another that timed out', async () => {
+            enable();
+            const { source } = await planned();
+            await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN);
+            report.jobViews = [listed()];
+            await service.followRebalanceRuns('conn-a');
+            let answerFirst: (value: unknown) => void = () => undefined;
+            source.call
+              .mockImplementationOnce(() => new Promise((resolve) => (answerFirst = resolve)))
+              .mockImplementationOnce(() => new Promise(() => undefined));
+            const budget = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+            (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;
+            try {
+              const first = service.cancelRebalance('conn-a', 'a0000000');
+              await new Promise((resolve) => setTimeout(resolve, 0));
+              clock += 1;
+              const second = service.cancelRebalance('conn-a', 'a0000000');
+              await new Promise((resolve) => setTimeout(resolve, 0));
+              answerFirst('OK');
+              expect(await first).toMatchObject({ status: 'cancelling' });
+              expect(await second).toMatchObject({ status: 'refused' });
+            } finally {
+              (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = budget;
+            }
+            report.jobViews = [];
+            report.finishedJobs = ['job-1'];
+
+            expect((await service.followRebalanceRuns('conn-a'))[0]).toMatchObject({
+              state: 'cancelled',
+              jobs: [{ state: 'cancelled' }],
+            });
+          });
+
           it('keeps a run running when the server refuses the cancel', async () => {
             enable();
             const { source } = await planned();
