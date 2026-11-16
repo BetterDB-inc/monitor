@@ -8,6 +8,7 @@ function discoveryReporting(flags: string[], connectionAt: string | null = null)
   const registry = {
     getDefaultId: jest.fn().mockReturnValue('conn-1'),
     findIdByHostPort: jest.fn().mockReturnValue(connectionAt),
+    getConfig: jest.fn().mockReturnValue(undefined),
     getNodeAvailabilityZones: jest.fn().mockReturnValue(undefined),
     get: jest.fn().mockReturnValue({
       getClusterNodes: jest.fn().mockResolvedValue([

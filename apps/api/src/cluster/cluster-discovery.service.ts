@@ -7,7 +7,7 @@ import { ClusterNode } from '../common/types/metrics.types';
 import { MetricsParser } from '../database/parsers/metrics.parser';
 import { tlsIdentityOptions } from '../database/adapters/tls-servername';
 import { parseNodeAddress } from '../topology/membership-diff';
-import { collectionOf, type NodeCollection } from './node-collection';
+import { collectionOf, withinCluster, type NodeCollection } from './node-collection';
 import { readClusterShards, withConfiguredZones, withShardMetadata } from './shard-metadata';
 
 export interface DiscoveredNode {
@@ -125,10 +125,12 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   async discoverNodesWithCollection(connectionId?: string): Promise<Array<DiscoveredNode & NodeCollection>> {
     const nodes = await this.discoverNodes(connectionId);
     const viewerId = connectionId || this.connectionRegistry.getDefaultId();
-    return nodes.map((node) => ({
-      ...node,
-      ...collectionOf(node, viewerId, (host, port) => this.connectionRegistry.findIdByHostPort(host, port)),
-    }));
+    const findConnection = withinCluster(
+      new Set(nodes.map((node) => node.id)),
+      (host, port) => this.connectionRegistry.findIdByHostPort(host, port),
+      (id) => this.connectionRegistry.getConfig(id)?.membership?.nodeId,
+    );
+    return nodes.map((node) => ({ ...node, ...collectionOf(node, viewerId, findConnection) }));
   }
 
   /**

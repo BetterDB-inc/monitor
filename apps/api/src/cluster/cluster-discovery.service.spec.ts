@@ -94,6 +94,65 @@ describe('ClusterDiscoveryService', () => {
     await service.disconnectAll();
   });
 
+  describe('discoverNodesWithCollection', () => {
+    const configs: Record<string, any> = {
+      'test-connection': { id: 'test-connection', host: 'localhost', port: 6379 },
+      'same-cluster': {
+        id: 'same-cluster',
+        host: '192.168.1.11',
+        port: 6379,
+        membership: { nodeId: 'node2-id-def456' },
+      },
+      'other-cluster': {
+        id: 'other-cluster',
+        host: '192.168.1.11',
+        port: 6379,
+        membership: { nodeId: 'node-of-another-cluster' },
+      },
+      'hand-made': { id: 'hand-made', host: '192.168.1.11', port: 6379 },
+    };
+
+    const replicaCollectedBy = async (connectionId: string) => {
+      mockConnectionRegistry.getConfig.mockImplementation((id: string) => configs[id]);
+      mockConnectionRegistry.findIdByHostPort = jest.fn((host: string) =>
+        host === '192.168.1.11' ? connectionId : null,
+      );
+      const nodes = await service.discoverNodesWithCollection();
+      return nodes.find((node) => node.id === 'node2-id-def456');
+    };
+
+    it('counts a connection that reads a node of this cluster', async () => {
+      expect(await replicaCollectedBy('same-cluster')).toMatchObject({
+        collected: true,
+        connectionId: 'same-cluster',
+      });
+    });
+
+    it('does not count a connection that reads a node of another cluster', async () => {
+      const replica = await replicaCollectedBy('other-cluster');
+
+      expect(replica?.collected).toBe(false);
+      expect(replica?.connectionId).toBeUndefined();
+    });
+
+    it('counts a connection whose own node is not known', async () => {
+      expect(await replicaCollectedBy('hand-made')).toMatchObject({
+        collected: true,
+        connectionId: 'hand-made',
+      });
+    });
+
+    it('counts the node the viewing connection reads', async () => {
+      await replicaCollectedBy('same-cluster');
+      const nodes = await service.discoverNodesWithCollection();
+
+      expect(nodes.find((node) => node.id === 'node1-id-abc123')).toMatchObject({
+        collected: true,
+        connectionId: 'test-connection',
+      });
+    });
+  });
+
   describe('discoverNodes', () => {
     it('should discover and categorize nodes correctly', async () => {
       const nodes = await service.discoverNodes();
