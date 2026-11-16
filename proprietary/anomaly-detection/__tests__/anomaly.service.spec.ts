@@ -12439,6 +12439,24 @@ describe('AnomalyService', () => {
       expect(event.node).toEqual(REPLICA_NODE);
     });
 
+    it('names the node whose hostname is stale, not the node that was read', async () => {
+      let now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+      dbClient.getClusterNodes = jest
+        .fn()
+        .mockResolvedValue(
+          viewOf('primA').map((node) => (node.id === 'primA' ? { ...node, hostname: 'a.example' } : node)),
+        );
+      await poll();
+      now += 31_000;
+      await poll();
+
+      const [event] = service.getRecentEvents().filter((e) => e.metricType === MetricType.HOSTNAME_STALENESS);
+
+      expect(event.node).toEqual(REPLICA_NODE);
+      expect(event).not.toHaveProperty('nodeSubject');
+    });
+
     it('names no node on a cluster-wide event', async () => {
       await poll();
 
@@ -12565,6 +12583,25 @@ describe('AnomalyService', () => {
         const event = await raise();
 
         expect(await nodeRead(event.id)).toEqual({ ...PRIMARY_NODE, collected: true, connectionId: 'conn-1' });
+      });
+
+      it('names and marks collected the node an agent connection reads', async () => {
+        const agentCtx = {
+          ...mockCtx,
+          connectionId: 'conn-agent',
+          host: 'agent',
+          port: 0,
+          connectionType: 'agent',
+        } as ConnectionContext;
+        await poll(agentCtx);
+        const own = await raise({}, agentCtx);
+        const other = await raise(
+          { metricType: MetricType.CLUSTER_TOPOLOGY, nodeSubject: { nodeId: 'repB' } },
+          agentCtx,
+        );
+
+        expect(await nodeRead(own.id)).toEqual({ ...PRIMARY_NODE, collected: true, connectionId: 'conn-agent' });
+        expect(await nodeRead(other.id)).toEqual({ ...REPLICA_NODE, collected: false });
       });
 
       const registeredAt = (address: string, connectionId: string) =>
