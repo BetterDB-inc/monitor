@@ -5,6 +5,7 @@ import {
   MIN_ROUNDS,
   PHASES,
   PreparedTrace,
+  ROUND_INTERVAL_MS,
   type ReplayResult,
   STRATEGIES,
   type Vantage,
@@ -12,7 +13,6 @@ import {
   seedOnly,
 } from './replay';
 import { parseView } from './cluster';
-import { TICK_MS } from './config';
 import type { TrialMeta } from './scenarios';
 import type { Trace } from './trace';
 
@@ -87,8 +87,11 @@ export interface Shown {
   flagged: number;
   unanswered: number;
   split: number;
-  longestSplitMs: number;
+  longestSplitTicks: number;
+  splitRounds: number;
 }
+
+export const SILENT_TICKS = 3;
 
 const FAILURE_FLAGS = ['fail', 'fail?'];
 
@@ -105,10 +108,29 @@ function story(raw: string): { text: string; flagged: boolean } {
   return { text, flagged: lines.some((line) => line.flags.some((flag) => FAILURE_FLAGS.includes(flag))) };
 }
 
+function longestSplitRounds(trace: Trace, seeds: string[], splitAt: boolean[], from: number, to: number): number {
+  let longest = 0;
+  for (const seed of seeds) {
+    for (let phase = 0; phase < PHASES; phase++) {
+      let lastRoundAt = -Infinity;
+      let rounds = 0;
+      for (let index = phase; index < trace.ticks.length; index++) {
+        const tick = trace.ticks[index];
+        if (!tick.nodes[seed]?.ok || tick.t - lastRoundAt < ROUND_INTERVAL_MS) continue;
+        lastRoundAt = tick.t;
+        rounds = tick.t >= from && tick.t <= to && splitAt[index] ? rounds + 1 : 0;
+        longest = Math.max(longest, rounds);
+      }
+    }
+  }
+  return longest;
+}
+
 export function shownInViews(trace: Trace, seeds: string[], from: number, to: number): Shown {
-  const shown: Shown = { ticks: 0, flagged: 0, unanswered: 0, split: 0, longestSplitMs: 0 };
+  const shown: Shown = { ticks: 0, flagged: 0, unanswered: 0, split: 0, longestSplitTicks: 0, splitRounds: 0 };
+  const splitAt: boolean[] = trace.ticks.map(() => false);
   let run = 0;
-  for (const tick of trace.ticks) {
+  for (const [index, tick] of trace.ticks.entries()) {
     if (tick.t < from || tick.t > to) continue;
     shown.ticks += 1;
     const stories = seeds.map((seed) => {
@@ -120,9 +142,11 @@ export function shownInViews(trace: Trace, seeds: string[], from: number, to: nu
     if (answered.some((entry) => entry.flagged)) shown.flagged += 1;
     const split = new Set(answered.map((entry) => entry.text)).size > 1;
     if (split) shown.split += 1;
+    splitAt[index] = split;
     run = split ? run + 1 : 0;
-    shown.longestSplitMs = Math.max(shown.longestSplitMs, run * TICK_MS);
+    shown.longestSplitTicks = Math.max(shown.longestSplitTicks, run);
   }
+  shown.splitRounds = longestSplitRounds(trace, seeds, splitAt, from, to);
   return shown;
 }
 
@@ -260,7 +284,7 @@ export async function collectTrial(trace: Trace): Promise<TrialOutput> {
       duplicatePrimaryTtd: spread(duplicate),
       clusterStateFail: stateFail.length,
       clusterStateFailTtd: spread(stateFail),
-      silent: results.filter((result) => result.silentTicks >= 3).length,
+      silent: results.filter((result) => result.longestSilentTicks >= SILENT_TICKS).length,
     };
   });
 

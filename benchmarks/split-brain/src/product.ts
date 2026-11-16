@@ -22,6 +22,7 @@ export {
   type DivergenceRoundResult,
   TOPOLOGY_DIVERGENCE_DEFAULTS,
   TOPOLOGY_DIVERGENCE_MAX_MIGRATION_CHECKS,
+  TOPOLOGY_DIVERGENCE_MAX_OBSERVERS,
   TOPOLOGY_DIVERGENCE_MEMBERSHIP_MIN_AGE_MS,
   TopologyDivergenceMonitor,
 } from '../../../proprietary/anomaly-detection/topology-divergence-monitor';

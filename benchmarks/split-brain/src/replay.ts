@@ -260,20 +260,23 @@ export async function replay(
 export interface SeedOnlyResult {
   duplicatePrimaryAt: number | null;
   clusterStateFailAt: number | null;
-  silentTicks: number;
+  longestSilentTicks: number;
 }
 
 export function seedOnly(trace: PreparedTrace, seed: string, from: number, to: number): SeedOnlyResult {
-  const result: SeedOnlyResult = { duplicatePrimaryAt: null, clusterStateFailAt: null, silentTicks: 0 };
+  const result: SeedOnlyResult = { duplicatePrimaryAt: null, clusterStateFailAt: null, longestSilentTicks: 0 };
   let previousState: string | null = null;
+  let silentRun = 0;
   for (let index = 0; index < trace.length; index++) {
     const t = trace.timeOf(index);
     const sample = trace.sample(index, seed);
     const inWindow = t >= from && t <= to;
     if (!sample?.ok) {
-      if (inWindow) result.silentTicks += 1;
+      silentRun = inWindow ? silentRun + 1 : 0;
+      result.longestSilentTicks = Math.max(result.longestSilentTicks, silentRun);
       continue;
     }
+    silentRun = 0;
     if (inWindow) {
       const view = trace.view(index, seed) as ClusterNode[];
       if (result.duplicatePrimaryAt === null && detectDuplicatePrimaries(view).length > 0) {

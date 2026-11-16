@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { gunzipSync } from 'node:zlib';
-import type { Cell, Side, TrialOutput } from './collect';
-import type { ProductPin } from './product';
+import { type Cell, SILENT_TICKS, type Side, type TrialOutput } from './collect';
+import { type ProductPin, TOPOLOGY_DIVERGENCE_MAX_OBSERVERS } from './product';
 import { MIN_ROUNDS, PHASES, ROUND_INTERVAL_MS, STRATEGIES, type Vantage } from './replay';
 import { type Interval, countInterval, mean, medianInterval, pairedDifference, quantile, rateInterval } from './stats';
 
@@ -125,13 +125,14 @@ function shownTable(results: Results): string {
   const rows = results.scenarios.map((scenario) => {
     const trials = results.of(scenario);
     const count = (test: (trial: TrialOutput) => boolean) => `${trials.filter(test).length}/${trials.length}`;
+    const runs = trials.map((trial) => trial.shown.longestSplitTicks);
     return [
       scenario,
       trials[0].kind,
       count((trial) => trial.shown.flagged > 0 || trial.shown.unanswered > 0),
       count((trial) => trial.shown.split > 0),
-      seconds(quantile(trials.map((trial) => trial.shown.longestSplitMs), 0.5)),
-      ...MIN_ROUNDS.map((minRounds) => count((trial) => trial.shown.longestSplitMs >= (minRounds - 1) * ROUND_INTERVAL_MS)),
+      `${quantile(runs, 0.5)} / ${Math.max(...runs)}`,
+      ...MIN_ROUNDS.map((minRounds) => count((trial) => trial.shown.splitRounds >= minRounds)),
     ];
   });
   return table(
@@ -139,12 +140,32 @@ function shownTable(results: Results): string {
       'scenario',
       'kind',
       'a failure flag or a silent node was seen',
-      'two nodes disagreed at some second',
-      'median longest disagreement',
-      ...MIN_ROUNDS.map((minRounds) => `disagreed for ${((minRounds - 1) * ROUND_INTERVAL_MS) / 1000} s or more (N = ${minRounds})`),
+      'two nodes disagreed at some sample',
+      'most samples in a row that disagreed, median / max over trials',
+      ...MIN_ROUNDS.map((minRounds) => `disagreed at ${minRounds} rounds in a row`),
     ],
     rows,
   );
+}
+
+function raisedWithoutRounds(results: Results): string {
+  return MIN_ROUNDS.map((minRounds) => {
+    const trials = results.trials.filter(
+      (trial) =>
+        trial.shown.splitRounds < minRounds &&
+        trial.cells.some((cell) => cell.minRounds === minRounds && cell.raised > 0),
+    );
+    return `${trials.length} at N = ${minRounds}`;
+  }).join(', ');
+}
+
+export function assertOneConfiguration(trials: TrialOutput[]): void {
+  const found = new Set(
+    trials.map((trial) => `${trial.nodes} nodes, node timeout ${trial.nodeTimeoutMs} ms, Valkey ${trial.valkey}`),
+  );
+  if (found.size > 1) {
+    throw new Error(`the trials mix configurations (${[...found].sort().join('; ')}); report each one on its own`);
+  }
 }
 
 function controlViewsTable(results: Results, scenarios: string[]): string {
@@ -475,7 +496,10 @@ export function buildReport(input: {
   findingsFile: string;
   limitationsFile: string;
 }): string {
-  const results = new Results(readTrials(input.trialsFile));
+  const trials = readTrials(input.trialsFile);
+  assertOneConfiguration(trials);
+  const results = new Results(trials);
+  const observers = results.trials[0].nodes - 1;
   const faults = results.kind('fault');
   const controls = results.kind('control');
   const text = (file: string) => (existsSync(file) ? readFileSync(file, 'utf8').trim() : '');
@@ -500,7 +524,7 @@ export function buildReport(input: {
     [
       '- **k=1 … k=5**: the product setting `randomNodes` with zones hidden from the detector. It is the size of the sample including the seed node, so k=1 asks no extra node unless the seed itself accuses someone.',
       '- **zone 1, zone 2**: the product setting `nodesPerZone` with `randomNodes` 3 and zones known. **zone 1 with N = 3 is what ships today.**',
-      '- **all**: every node is asked every round.',
+      `- **all**: every node is asked every round, up to the detector's limit of ${TOPOLOGY_DIVERGENCE_MAX_OBSERVERS} observers per round. ${observers > TOPOLOGY_DIVERGENCE_MAX_OBSERVERS ? `With ${observers} other nodes the limit is reached, so "all" is a sample of ${TOPOLOGY_DIVERGENCE_MAX_OBSERVERS}.` : `With ${observers} other nodes the limit is not reached.`}`,
       '- **N**: rounds a disagreement must last before an event is raised (`minRounds`).',
       '- A cell such as `97% [91–100]` is the mean over trials of the share of replays that raised an event, with a 95% interval. The interval is a bootstrap over trials, widened for rare outcomes: the upper end is at least the Wilson upper bound for the number of trials in which any replay raised, multiplied by the mean share of replays that raised in those trials, and the lower end is the mirror image for the trials in which any replay missed. When no trial raised at all the interval is the plain Wilson interval for 0 of n, so none of 30 gives [0–11]; when every replay of every trial raised it is the plain Wilson interval for n of n, so 30 of 30 gives [89–100]. When every trial raised in part, as in a cell such as `57% [54–60]`, the bootstrap decides.',
       '- In the control tables a cell such as `1/30 [1–17], 0% of replays` is the number of trials in which at least one replay raised an event, with its Wilson interval, then the share of all replays that raised.',
@@ -511,7 +535,7 @@ export function buildReport(input: {
     'The monitor can reach every node. Killed primary and paused node are listed as faults in the issue, but they end with every reachable node agreeing that the node failed. Agreement is the expected end state there, so a low rate in those two rows is not a missed split.',
     rateTables(results, faults, {}),
     '## 2. Did the fault show in the nodes\' views',
-    'Read straight from the recordings, without the detector. Inside the window of each trial: whether any node showed a failure flag or stopped answering, whether the views of two answering nodes differed at the same second (flags, primary, config epoch or slots), and how long the longest unbroken disagreement lasted. An event at N needs the disagreement at N rounds in a row, which spans at least (N − 1) × 5 s, so the last columns bound what any coverage could raise. A miss in a trial that never disagreed that long is not a coverage miss.',
+    `Read straight from the recordings, without the detector. Inside the window of each trial: whether any node showed a failure flag or stopped answering, whether the views of two answering nodes differed at the same sample (flags, primary, config epoch or slots), and the most samples in a row that differed. Samples are 1 s apart, so n samples in a row mean the difference was seen over n − 1 s and lasted less than n + 1 s. That run does not decide an event: an event at N needs a disagreement at N detector rounds in a row, and rounds are ${ROUND_INTERVAL_MS / 1000} s apart, so two rounds can both land on a difference with agreement between them. The last columns therefore count rounds: the trials in which, for at least one seed node and round phase, the views of the answering nodes differed at N of that seed's rounds in a row, with the rounds placed as the replay places them. They describe the recordings and are not a limit on what a setting can raise; section 1 is the measurement. Trials in which some setting raised an event at N without N such rounds in a row: ${raisedWithoutRounds(results)}.`,
     shownTable(results),
     '## 3. Faults: time to the first event',
     ttdTables(results, faults),
@@ -533,7 +557,8 @@ export function buildReport(input: {
     'zone 1. Replays that raised an event.',
     closeTable(results, faults),
     '## 9. Seed only: what today\'s single-view signals see',
-    'These are different signals from the ones above. They read only the seed node\'s own view: the duplicate-primary detector fires on the first poll that shows two live primaries claiming the same slot, and the cluster state signal fires when the seed\'s `cluster_state` goes from ok to fail. The last column is the share of seeds that stopped answering for 3 s or more, which the product reports as a connection problem, not as a split.',
+    'These are different signals from the ones above. They read only the seed node\'s own view: the duplicate-primary detector fires on the first poll that shows two live primaries claiming the same slot, and the cluster state signal fires when the seed\'s `cluster_state` goes from ok to fail. The last column is the share of seeds that did not answer ' +
+      `${SILENT_TICKS} or more samples in a row, which the product reports as a connection problem, not as a split.`,
     seedOnlyTable(results),
     '## 10. Joining nodes: what is counted',
     '"as-shipped" counts every kind of disagreement with a 60 s wait on membership. "membership-only-90s" counts only membership disagreements after 90 s. "without-membership" ignores membership disagreements. Each cell is the raise rate and the time to the first event.',
