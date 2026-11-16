@@ -10631,7 +10631,7 @@ export class AnomalyService
     const started = this.topologyFullChecks.start(clusterKey, Date.now(), nodes.length, (onProgress) =>
       runFullCheck({
         nodes,
-        readView: (node) => this.readTopologyViewOnce(connectionId, node),
+        readView: (node, signal) => this.readTopologyViewOnce(connectionId, node, signal),
         now: () => Date.now(),
         onProgress,
       }),
@@ -10677,12 +10677,13 @@ export class AnomalyService
     ).filter((node) => !node.flags.some((flag) => AnomalyService.FULL_CHECK_UNASKABLE_FLAGS.includes(flag)));
   }
 
-  private readTopologyViewOnce(connectionId: string, node: ClusterNode): Promise<ClusterNode[]> {
+  private readTopologyViewOnce(connectionId: string, node: ClusterNode, signal: AbortSignal): Promise<ClusterNode[]> {
     return this.clusterDiscovery!.onNodeClientOnce(
       connectionId,
       node,
       AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
       async (client) => MetricsParser.parseClusterNodes((await client.call('CLUSTER', 'NODES')) as string),
+      signal,
     );
   }
 

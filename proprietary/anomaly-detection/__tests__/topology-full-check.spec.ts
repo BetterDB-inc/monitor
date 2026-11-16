@@ -244,6 +244,76 @@ describe('runFullCheck', () => {
     expect(outcome.round.disagreements).toEqual([]);
   });
 
+  describe('sockets', () => {
+    function tracked(nodes: ClusterNode[], hangs: (id: string) => boolean) {
+      const open = new Set<string>();
+      const opened: string[] = [];
+      let most = 0;
+      const readView: FullCheckRun['readView'] = (entry, signal) => {
+        open.add(entry.id);
+        opened.push(entry.id);
+        most = Math.max(most, open.size);
+        signal.addEventListener('abort', () => open.delete(entry.id), { once: true });
+        if (hangs(entry.id)) return new Promise(() => undefined);
+        return new Promise((resolve) =>
+          setImmediate(() => {
+            open.delete(entry.id);
+            resolve(viewOf(nodes, entry.id));
+          }),
+        );
+      };
+      return { readView, open, opened, most: () => most };
+    }
+
+    it('closes the socket of a node that hangs before it asks the next one', async () => {
+      const nodes = cluster(20);
+      const hung = new Set(['s000p', 's000r', 's001p', 's001r', 's007p', 's013r']);
+      const reads = tracked(nodes, (id) => hung.has(id));
+
+      const outcome = await check(nodes, { concurrency: 4, readTimeoutMs: 20, readView: reads.readView });
+
+      expect(reads.open.size).toBe(0);
+      expect(reads.most()).toBe(4);
+      expect(reads.opened).toHaveLength(40);
+      expect(outcome.round.unanswered).toEqual([...hung].sort());
+    });
+
+    it('closes every socket that is still open when the time limit hits, and opens no more', async () => {
+      const nodes = cluster(40);
+      const reads = tracked(nodes, () => true);
+
+      const outcome = await check(nodes, {
+        deadlineMs: 50,
+        readTimeoutMs: 60_000,
+        now: () => Date.now(),
+        readView: reads.readView,
+      });
+
+      expect(reads.open.size).toBe(0);
+      expect(reads.most()).toBe(16);
+      expect(reads.opened).toHaveLength(16);
+      expect(outcome.asked).toBe(16);
+      expect(outcome.round.unanswered).toHaveLength(80);
+      expect(outcome.finishedAt - outcome.startedAt).toBeLessThan(5_000);
+    });
+
+    it('closes the socket of a read that breaks', async () => {
+      const nodes = cluster(2);
+      const signals: AbortSignal[] = [];
+
+      await check(nodes, {
+        readView: async (entry, signal) => {
+          signals.push(signal);
+          if (entry.id === 's001p') throw new Error('ECONNRESET');
+          return viewOf(nodes, entry.id);
+        },
+      });
+
+      expect(signals).toHaveLength(4);
+      expect(signals.every((signal) => signal.aborted)).toBe(true);
+    });
+  });
+
   it('keeps one copy of the views that say the same thing', async () => {
     const nodes = cluster(250);
     const epochOf = (observerId: string) => (observerId < 's100' ? 1 : observerId < 's200' ? 2 : 3);

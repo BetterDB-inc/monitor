@@ -26452,6 +26452,17 @@ describe('AnomalyService', () => {
         });
       });
 
+      it('hands every read a signal, so its socket is closed when the check gives up on the node', async () => {
+        await rounds(1);
+
+        await service.startTopologyFullCheck('conn-1');
+        await finished();
+
+        const signals = once.mock.calls.map((call) => call[4]);
+        expect(signals).toHaveLength(3);
+        expect(signals.every((signal) => signal instanceof AbortSignal)).toBe(true);
+      });
+
       it('counts every node on each side and links the event that tracks the disagreement', async () => {
         views.b = { a: { epoch: 9 } };
         await rounds(4);

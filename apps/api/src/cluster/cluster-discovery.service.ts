@@ -154,6 +154,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     node: Pick<ClusterNode, 'id' | 'address' | 'hostname'>,
     timeoutMs: number,
     run: (client: Valkey) => Promise<T>,
+    signal?: AbortSignal,
   ): Promise<T> {
     this.assertDialsDataNodes(connectionId, node.id);
     const parsed = parseNodeAddress(node.address);
@@ -170,6 +171,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       },
       timeoutMs,
       run,
+      signal,
     );
   }
 
@@ -177,7 +179,10 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     target: Pick<Valkey['options'], 'host' | 'port' | 'username' | 'password' | 'tls' | 'connectionName'>,
     timeoutMs: number,
     run: (client: Valkey) => Promise<T>,
+    signal?: AbortSignal,
   ): Promise<T> {
+    const givenUp = () => new Error('The read was given up before the node answered');
+    if (signal?.aborted) throw givenUp();
     const client = new Valkey({
       ...target,
       lazyConnect: true,
@@ -189,10 +194,20 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       commandTimeout: timeoutMs,
     });
     client.on('error', () => undefined);
+    let onAbort: () => void = () => undefined;
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => reject(givenUp());
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
+    const work = client.connect().then(() => {
+      if (signal?.aborted) throw givenUp();
+      return run(client);
+    });
+    work.catch(() => undefined);
     try {
-      await client.connect();
-      return await run(client);
+      return await Promise.race([work, aborted]);
     } finally {
+      signal?.removeEventListener('abort', onAbort);
       client.disconnect();
     }
   }

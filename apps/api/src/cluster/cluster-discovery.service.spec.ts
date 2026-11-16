@@ -1143,6 +1143,61 @@ describe('ClusterDiscoveryService', () => {
       expect(client.disconnect).toHaveBeenCalledTimes(1);
     });
 
+    it('closes the socket when the caller gives up while the node does not answer', async () => {
+      const client = dedicatedClient();
+      client.call.mockReturnValue(new Promise(() => undefined));
+      const gaveUp = new AbortController();
+
+      const read = service.onNodeClientOnce('test-connection', node, 2_000, (own) => own.call('CLUSTER', 'NODES'), gaveUp.signal);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(client.disconnect).not.toHaveBeenCalled();
+      gaveUp.abort();
+
+      await expect(read).rejects.toThrow('given up');
+      expect(client.disconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it('closes the socket when the caller gives up while it is still dialling', async () => {
+      const client = dedicatedClient();
+      client.connect.mockReturnValue(new Promise(() => undefined));
+      const gaveUp = new AbortController();
+
+      const read = service.onNodeClientOnce('test-connection', node, 2_000, (own) => own.call('PING'), gaveUp.signal);
+      await new Promise((resolve) => setImmediate(resolve));
+      gaveUp.abort();
+
+      await expect(read).rejects.toThrow('given up');
+      expect(client.call).not.toHaveBeenCalled();
+      expect(client.disconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it('sends nothing on a socket whose dial ends after the caller gave up', async () => {
+      const client = dedicatedClient();
+      let dialled: () => void = () => undefined;
+      client.connect.mockReturnValue(new Promise<void>((resolve) => (dialled = resolve)));
+      const gaveUp = new AbortController();
+
+      const read = service.onNodeClientOnce('test-connection', node, 2_000, (own) => own.call('PING'), gaveUp.signal);
+      await new Promise((resolve) => setImmediate(resolve));
+      gaveUp.abort();
+      dialled();
+
+      await expect(read).rejects.toThrow('given up');
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(client.call).not.toHaveBeenCalled();
+    });
+
+    it('opens no socket for a caller that has already given up', async () => {
+      jest.mocked(Valkey).mockClear();
+      const gaveUp = new AbortController();
+      gaveUp.abort();
+
+      await expect(
+        service.onNodeClientOnce('test-connection', node, 2_000, (own) => own.call('PING'), gaveUp.signal),
+      ).rejects.toThrow('given up');
+      expect(jest.mocked(Valkey)).not.toHaveBeenCalled();
+    });
+
     it('leaves nothing in the shared pool', async () => {
       dedicatedClient();
       const before = service.getConnectionPoolSize();

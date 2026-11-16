@@ -22,7 +22,7 @@ const UNREACHABLE_FLAGS = ['handshake', 'noaddr'];
 
 export interface FullCheckRun {
   nodes: ClusterNode[];
-  readView: (node: ClusterNode) => Promise<ClusterNode[] | null>;
+  readView: (node: ClusterNode, signal: AbortSignal) => Promise<ClusterNode[] | null>;
   now: () => number;
   concurrency?: number;
   deadlineMs?: number;
@@ -166,16 +166,23 @@ function readWithin(
   readView: FullCheckRun['readView'],
   node: ClusterNode,
   timeoutMs: number,
+  inFlight: Set<AbortController>,
 ): Promise<ClusterNode[] | null> {
+  const socket = new AbortController();
+  inFlight.add(socket);
   return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(null), timeoutMs);
+    const timer = setTimeout(() => socket.abort(), timeoutMs);
+    const settle = (view: ClusterNode[] | null) => {
+      resolve(view);
+      clearTimeout(timer);
+      inFlight.delete(socket);
+      socket.abort();
+    };
+    socket.signal.addEventListener('abort', () => settle(null), { once: true });
     Promise.resolve()
-      .then(() => readView(node))
+      .then(() => readView(node, socket.signal))
       .catch(() => null)
-      .then((view) => {
-        clearTimeout(timer);
-        resolve(view);
-      });
+      .then(settle);
   });
 }
 
@@ -222,13 +229,15 @@ export async function runFullCheck(input: FullCheckRun): Promise<FullCheckOutcom
   const queue = [...input.nodes].sort((a, b) => compareText(a.id, b.id));
   const distinct = new Map<string, DistinctView>();
   const answered = new Set<string>();
+  const inFlight = new Set<AbortController>();
   let next = 0;
   let asked = 0;
+  let timeIsUp = false;
 
   const worker = async () => {
-    while (next < queue.length && input.now() - startedAt < deadlineMs) {
+    while (!timeIsUp && next < queue.length && input.now() - startedAt < deadlineMs) {
       const node = queue[next++];
-      const reply = await readWithin(input.readView, node, readTimeoutMs);
+      const reply = await readWithin(input.readView, node, readTimeoutMs, inFlight);
       asked += 1;
       if (reply?.find((entry) => entry.flags.includes('myself'))?.id === node.id) {
         const nodes = reply.map(reduced).sort((a, b) => compareText(a.id, b.id));
@@ -241,7 +250,16 @@ export async function runFullCheck(input: FullCheckRun): Promise<FullCheckOutcom
       input.onProgress?.(asked);
     }
   };
-  await Promise.all(Array.from({ length: Math.max(1, concurrency) }, worker));
+  const limit = setTimeout(() => {
+    timeIsUp = true;
+    for (const socket of [...inFlight]) socket.abort();
+  }, deadlineMs);
+  try {
+    await Promise.all(Array.from({ length: Math.max(1, concurrency) }, worker));
+  } finally {
+    clearTimeout(limit);
+    for (const socket of [...inFlight]) socket.abort();
+  }
 
   const groups = [...distinct.values()];
   const views: TopologyView[] = [];
