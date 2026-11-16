@@ -3,10 +3,10 @@ import { createServer, type Server, type Socket } from 'net';
 import { encodeReply, error, OK, RespRequestParser, simple, type Reply } from './resp';
 
 const TOTAL_SLOTS = 16384;
-const SYNTHETIC_CLIENTS = 20;
 const OPS_PER_SECOND = 1200;
 const REPL_BYTES_PER_SECOND = 48_000;
 const KEYS_PER_SLOT = 3;
+const REALISTIC_KEYS_PER_NODE = 20_000;
 
 const CONTAINER_COMMANDS = new Set([
   'ACL',
@@ -42,7 +42,47 @@ const DEFAULT_INFO_SECTIONS = [
 ];
 const ALL_INFO_SECTIONS = [...DEFAULT_INFO_SECTIONS, 'commandstats', 'latencystats'];
 
-const TRACKED_COMMANDS = ['get', 'set', 'del', 'hget', 'hset', 'expire', 'incr', 'mget', 'ping', 'info', 'cluster|nodes'];
+const FEW_COMMANDS = ['get', 'set', 'del', 'hget', 'hset', 'expire', 'incr', 'mget', 'ping', 'info', 'cluster|nodes'];
+const MANY_COMMANDS = [
+  ...FEW_COMMANDS,
+  'setex', 'setnx', 'getex', 'getdel', 'mset', 'append', 'strlen', 'incrby', 'decr', 'exists',
+  'pexpire', 'ttl', 'pttl', 'persist', 'type', 'unlink', 'scan', 'hgetall', 'hmget', 'hdel',
+  'hincrby', 'hlen', 'hexists', 'hscan', 'lpush', 'rpush', 'lpop', 'rpop', 'lrange', 'llen',
+  'ltrim', 'sadd', 'srem', 'smembers', 'sismember', 'scard', 'zadd', 'zrem', 'zrange', 'zrangebyscore',
+  'zscore', 'zcard', 'zincrby', 'xadd', 'xread', 'xack', 'publish', 'eval', 'evalsha',
+];
+const LATENCY_EVENTS = ['command', 'fast-command', 'fork', 'aof-fsync-always'];
+const LATENCY_HISTORY_SAMPLES = 60;
+const LOG_ENTRY_EVERY_SECONDS = 10;
+const SLOW_COMMANDS = [
+  ['HGETALL', 'user:profile:48213'],
+  ['SMEMBERS', 'session:index:eu-west'],
+  ['ZRANGE', 'leaderboard:weekly', '0', '-1', 'WITHSCORES'],
+  ['MGET', 'cache:page:1', 'cache:page:2', 'cache:page:3', 'cache:page:4'],
+  ['LRANGE', 'queue:emails', '0', '-1'],
+  ['EVALSHA', 'e0e1f9fabfc9d4800c877a703b823ac0578ff8db', '1', 'cart:9917'],
+];
+const KEY_PREFIXES = ['user', 'session', 'cache', 'cart'];
+const KEY_VALUE_BYTES = 64;
+const KEY_MEMORY_BYTES = 120;
+const LFU_NOT_SELECTED =
+  'ERR An LFU maxmemory policy is not selected, access frequency not tracked. Please note that when switching ' +
+  'between policies at runtime LRU and LFU data will take some time to adjust.';
+
+export type ReplyProfile = 'empty' | 'realistic';
+
+interface ProfileSizes {
+  clients: number;
+  logEntries: number;
+  latencyEvents: string[];
+  commands: string[];
+  keys: boolean;
+}
+
+const PROFILES: Record<ReplyProfile, ProfileSizes> = {
+  empty: { clients: 20, logEntries: 0, latencyEvents: [], commands: FEW_COMMANDS, keys: false },
+  realistic: { clients: 200, logEntries: 128, latencyEvents: LATENCY_EVENTS, commands: MANY_COMMANDS, keys: true },
+};
 
 export interface FakeClusterOptions {
   shards: number;
@@ -50,6 +90,8 @@ export interface FakeClusterOptions {
   zones?: string[];
   host?: string;
   version?: string;
+  profile?: ReplyProfile;
+  replyDelayMs?: number;
 }
 
 export interface FakeNode {
@@ -115,6 +157,9 @@ export class FakeCluster {
   readonly nodes: FakeNode[] = [];
   private readonly servers: Server[] = [];
   private readonly connections = new Set<ClientConnection>();
+  private readonly connectionsOf: Array<Set<ClientConnection>> = [];
+  private readonly profile: ProfileSizes;
+  private readonly replyDelayMs: number;
   private readonly shardSlots: Array<[number, number]> = [];
   private readonly startedAt = Date.now();
   private readonly version: string;
@@ -133,6 +178,8 @@ export class FakeCluster {
 
   private constructor(private readonly options: FakeClusterOptions) {
     this.version = options.version ?? '9.0.0';
+    this.profile = PROFILES[options.profile ?? 'empty'];
+    this.replyDelayMs = options.replyDelayMs ?? 0;
   }
 
   static async start(options: FakeClusterOptions): Promise<FakeCluster> {
@@ -152,8 +199,7 @@ export class FakeCluster {
   resume(index: number): void {
     const node = this.nodes[index];
     node.hung = false;
-    for (const connection of this.connections) {
-      if (connection.node !== node) continue;
+    for (const connection of this.connectionsOf[index]) {
       for (const chunk of connection.held.splice(0)) this.receive(connection, chunk);
     }
   }
@@ -177,8 +223,7 @@ export class FakeCluster {
   }
 
   stats(): FakeClusterStats {
-    const connectionsByNode = this.nodes.map(() => 0);
-    for (const connection of this.connections) connectionsByNode[connection.node.index] += 1;
+    const connectionsByNode = this.connectionsOf.map((connections) => connections.size);
     return {
       commands: Object.fromEntries([...this.commands].map(([key, value]) => [key, { ...value }])),
       unknownCommands: Object.fromEntries(this.unknownCommands),
@@ -206,6 +251,7 @@ export class FakeCluster {
   async stop(): Promise<void> {
     for (const connection of this.connections) connection.socket.destroy();
     this.connections.clear();
+    for (const connections of this.connectionsOf) connections.clear();
     await Promise.all(
       this.servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))),
     );
@@ -223,6 +269,7 @@ export class FakeCluster {
       this.shardSlots.push([start, end]);
       for (let member = 0; member < perShard; member++) {
         const index = this.nodes.length;
+        this.connectionsOf.push(new Set());
         this.nodes.push({
           index,
           id: hex40(`node-${index}`),
@@ -263,6 +310,7 @@ export class FakeCluster {
       bytesOut: 0,
     };
     this.connections.add(connection);
+    this.connectionsOf[node.index].add(connection);
     this.connectionsOpened += 1;
     this.peakConnections = Math.max(this.peakConnections, this.connections.size);
     socket.setNoDelay(true);
@@ -271,7 +319,10 @@ export class FakeCluster {
       else this.receive(connection, chunk);
     });
     socket.on('error', () => undefined);
-    socket.on('close', () => this.connections.delete(connection));
+    socket.on('close', () => {
+      this.connections.delete(connection);
+      this.connectionsOf[node.index].delete(connection);
+    });
   }
 
   private receive(connection: ClientConnection, chunk: Buffer): void {
@@ -286,11 +337,21 @@ export class FakeCluster {
       this.record(connection, key, command.bytes, bytesOut);
       output += reply;
       if (name === 'QUIT') {
-        connection.socket.end(output);
+        this.send(connection, output, true);
         return;
       }
     }
-    if (output) connection.socket.write(output);
+    if (output) this.send(connection, output, false);
+  }
+
+  private send(connection: ClientConnection, output: string, last: boolean): void {
+    const write = (): void => {
+      if (connection.socket.destroyed) return;
+      if (last) connection.socket.end(output);
+      else connection.socket.write(output);
+    };
+    if (this.replyDelayMs > 0) setTimeout(write, this.replyDelayMs);
+    else write();
   }
 
   private statsKey(name: string, args: string[]): string {
@@ -339,11 +400,13 @@ export class FakeCluster {
       case 'ACL':
         return this.acl(sub);
       case 'SLOWLOG':
+        if (sub === 'GET') return this.logEntries(node, Number(args[2] ?? 10));
+        return sub === 'LEN' ? this.profile.logEntries : sub === 'RESET' ? OK : this.unknown(name, args);
       case 'COMMANDLOG':
-        return sub === 'GET' ? [] : sub === 'LEN' ? 0 : sub === 'RESET' ? OK : this.unknown(name, args);
+        if (sub === 'GET') return this.logEntries(node, Number(args[2] ?? 10), args[3] ?? 'slow');
+        return sub === 'LEN' ? this.profile.logEntries : sub === 'RESET' ? OK : this.unknown(name, args);
       case 'LATENCY':
-        if (sub === 'DOCTOR') return 'Dave, no latency spike was observed during the lifetime of this instance.';
-        return sub === 'RESET' ? 0 : [];
+        return this.latency(sub, args);
       case 'MEMORY':
         return this.memory(node, sub);
       case 'COMMAND':
@@ -361,21 +424,27 @@ export class FakeCluster {
       case 'LASTSAVE':
         return Math.floor(this.startedAt / 1000);
       case 'WAIT':
-      case 'EXISTS':
       case 'DEL':
       case 'UNLINK':
         return 0;
+      case 'EXISTS':
+        return this.profile.keys ? 1 : 0;
       case 'TTL':
+        return this.profile.keys ? 3600 : -2;
       case 'PTTL':
-        return -2;
+        return this.profile.keys ? 3_600_000 : -2;
       case 'TYPE':
-        return simple('none');
+        return simple(this.profile.keys ? 'string' : 'none');
+      case 'STRLEN':
+        return this.profile.keys ? KEY_VALUE_BYTES : 0;
       case 'GET':
+        return this.profile.keys ? 'v'.repeat(KEY_VALUE_BYTES) : null;
       case 'RANDOMKEY':
+        return this.profile.keys ? this.keyName(node, 0) : null;
       case 'OBJECT':
-        return null;
+        return this.object(sub);
       case 'SCAN':
-        return ['0', []];
+        return this.scan(node, args);
       case 'KEYS':
       case 'HGETALL':
       case 'SMEMBERS':
@@ -406,7 +475,13 @@ export class FakeCluster {
 
   private keyCount(node: FakeNode): number {
     const [start, end] = this.shardSlots[node.shard];
-    return (end - start + 1) * KEYS_PER_SLOT;
+    return (end - start + 1) * this.keysPerSlot(node);
+  }
+
+  private keysPerSlot(node: FakeNode): number {
+    if (!this.profile.keys) return KEYS_PER_SLOT;
+    const [start, end] = this.shardSlots[node.shard];
+    return Math.max(KEYS_PER_SLOT, Math.ceil(REALISTIC_KEYS_PER_NODE / (end - start + 1)));
   }
 
   private primaryOf(node: FakeNode): FakeNode {
@@ -417,8 +492,75 @@ export class FakeCluster {
     return this.nodes.filter((candidate) => candidate.shard === node.shard && candidate.role === 'slave');
   }
 
-  private nodeConnections(node: FakeNode): ClientConnection[] {
-    return [...this.connections].filter((connection) => connection.node === node);
+  private keyName(node: FakeNode, position: number): string {
+    return `${KEY_PREFIXES[position % KEY_PREFIXES.length]}:${node.shard}:${position}`;
+  }
+
+  private scan(node: FakeNode, args: string[]): Reply {
+    if (!this.profile.keys) return ['0', []];
+    const option = (name: string): string | undefined => {
+      const at = args.findIndex((arg, position) => position > 1 && arg.toUpperCase() === name);
+      return at === -1 ? undefined : args[at + 1];
+    };
+    const total = this.keyCount(node);
+    const start = Math.min(total, Math.max(0, Number(args[1]) || 0));
+    const end = Math.min(total, start + Math.max(1, Number(option('COUNT') ?? 10)));
+    const pattern = option('MATCH');
+    const page: string[] = [];
+    for (let position = start; position < end; position++) {
+      const key = this.keyName(node, position);
+      if (!pattern || matchesPattern(pattern, key)) page.push(key);
+    }
+    return [end < total ? String(end) : '0', page];
+  }
+
+  private object(sub: string): Reply {
+    if (!this.profile.keys) return null;
+    if (sub === 'FREQ') return error(LFU_NOT_SELECTED);
+    return sub === 'ENCODING' ? 'embstr' : 12;
+  }
+
+  private logEntries(node: FakeNode, requested: number, type?: string): Reply {
+    const available = this.profile.logEntries;
+    const count = requested < 0 || Number.isNaN(requested) ? available : Math.min(available, requested);
+    const newest = 1000 + Math.floor(this.elapsedSeconds() / LOG_ENTRY_EVERY_SECONDS);
+    const startedAtSeconds = Math.floor(this.startedAt / 1000);
+    return Array.from({ length: count }, (_, position) => {
+      const id = newest - position;
+      const entry: Reply[] = [
+        id,
+        startedAtSeconds + (id - 1000) * LOG_ENTRY_EVERY_SECONDS,
+        10_000 + (id % 50) * 1000,
+        SLOW_COMMANDS[id % SLOW_COMMANDS.length],
+        `10.0.${node.shard % 250}.${10 + (id % 20)}:${40_000 + (id % 20)}`,
+        `app-${id % 4}`,
+      ];
+      return type ? [...entry, type] : entry;
+    });
+  }
+
+  private latency(sub: string, args: string[]): Reply {
+    const now = Math.floor(Date.now() / 1000);
+    switch (sub) {
+      case 'DOCTOR':
+        return 'Dave, no latency spike was observed during the lifetime of this instance.';
+      case 'RESET':
+        return 0;
+      case 'LATEST':
+        return this.profile.latencyEvents.map((event, position) => [event, now - position, 12 + position, 80 + position]);
+      case 'HISTORY':
+        if (!this.profile.latencyEvents.includes(args[2] ?? '')) return [];
+        return Array.from({ length: LATENCY_HISTORY_SAMPLES }, (_, position) => [
+          now - (LATENCY_HISTORY_SAMPLES - position) * 60,
+          5 + (position % 20),
+        ]);
+      default:
+        return [];
+    }
+  }
+
+  private nodeConnections(node: FakeNode): Set<ClientConnection> {
+    return this.connectionsOf[node.index];
   }
 
   private info(node: FakeNode, requested: string[]): Reply {
@@ -483,7 +625,7 @@ export class FakeCluster {
         ];
       case 'clients':
         return [
-          `connected_clients:${SYNTHETIC_CLIENTS + this.nodeConnections(node).length}`,
+          `connected_clients:${this.profile.clients + this.nodeConnections(node).size}`,
           `cluster_connections:${(this.nodes.length - 1) * 2}`,
           'maxclients:10000',
           'client_recent_max_input_buffer:20480',
@@ -647,12 +789,12 @@ export class FakeCluster {
       case 'keyspace':
         return [`db0:keys=${this.keyCount(node)},expires=120,avg_ttl=3600000`];
       case 'commandstats':
-        return TRACKED_COMMANDS.map((command, position) => {
+        return this.profile.commands.map((command, position) => {
           const calls = Math.floor(commandsProcessed / (position + 2));
           return `cmdstat_${command}:calls=${calls},usec=${calls * 3},usec_per_call=3.00,rejected_calls=0,failed_calls=0`;
         });
       case 'latencystats':
-        return TRACKED_COMMANDS.map(
+        return this.profile.commands.map(
           (command) => `latency_percentiles_usec_${command}:p50=1.003,p99=8.031,p99.9=24.063`,
         );
       default:
@@ -830,11 +972,12 @@ export class FakeCluster {
     const limitAt = upper.indexOf('LIMIT');
     if (limitAt !== -1) end = Math.min(end, start + Number(args[limitAt + 1]) - 1);
     const usec = Math.floor(this.elapsedSeconds() * 1000);
+    const keysPerSlot = this.keysPerSlot(node);
     const reply: Reply[] = [];
     for (let slot = start; slot <= end; slot++) {
       reply.push([
         slot,
-        ['key-count', KEYS_PER_SLOT, 'cpu-usec', usec, 'network-bytes-in', usec * 8, 'network-bytes-out', usec * 12],
+        ['key-count', keysPerSlot, 'cpu-usec', usec, 'network-bytes-in', usec * 8, 'network-bytes-out', usec * 12],
       ]);
     }
     return reply;
@@ -904,10 +1047,10 @@ export class FakeCluster {
 
   private clientList(node: FakeNode): string {
     const age = Math.floor(this.elapsedSeconds()) + 600;
-    const synthetic = Array.from({ length: SYNTHETIC_CLIENTS }, (_, position) =>
+    const synthetic = Array.from({ length: this.profile.clients }, (_, position) =>
       this.formatClient({
-        id: 1_000_000 + node.index * 100 + position,
-        addr: `10.0.${node.shard % 250}.${10 + position}:${40_000 + position}`,
+        id: 1_000_000 + node.index * 1000 + position,
+        addr: `10.0.${node.shard % 250}.${10 + (position % 200)}:${40_000 + position}`,
         laddr: `${node.host}:${node.port}`,
         name: `app-${position % 4}`,
         age,
@@ -918,7 +1061,7 @@ export class FakeCluster {
         commands: age * 60,
       }),
     );
-    const real = this.nodeConnections(node).map((connection) => this.clientLine(connection));
+    const real = Array.from(this.nodeConnections(node), (connection) => this.clientLine(connection));
     return `${[...synthetic, ...real].join('\n')}\n`;
   }
 
@@ -996,7 +1139,7 @@ export class FakeCluster {
 
   private memory(node: FakeNode, sub: string): Reply {
     if (sub === 'DOCTOR') return "Hi Sam, I can't find any memory issue in your instance.";
-    if (sub === 'USAGE') return null;
+    if (sub === 'USAGE') return this.profile.keys ? KEY_MEMORY_BYTES : null;
     if (sub !== 'STATS') return [];
     return [
       'peak.allocated',

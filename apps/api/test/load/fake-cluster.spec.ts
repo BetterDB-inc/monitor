@@ -187,6 +187,127 @@ describe('FakeCluster', () => {
     expect(clusterInfo).toContain(`cluster_current_epoch:${epochBefore + 1}`);
   });
 
+  it('counts the connections of each node on its own', async () => {
+    await clientFor(0).ping();
+    await clientFor(0).ping();
+    await clientFor(1).ping();
+
+    const clients = InfoParser.parse(await clientFor(2).info('clients')).clients as Record<string, string>;
+
+    expect(cluster.stats().connectionsByNode.slice(0, 3)).toEqual([2, 1, 1]);
+    expect(clients.connected_clients).toBe('21');
+  });
+
+  it('keeps the logs, the keyspace scan and the client list small in the empty profile', async () => {
+    const client = clientFor(0);
+
+    expect(await client.call('SLOWLOG', 'GET', '128')).toEqual([]);
+    expect(await client.call('COMMANDLOG', 'GET', '128', 'slow')).toEqual([]);
+    expect(await client.call('LATENCY', 'LATEST')).toEqual([]);
+    expect(await client.scan('0', 'COUNT', 1000)).toEqual(['0', []]);
+    expect(((await client.call('CLIENT', 'LIST')) as string).trim().split('\n')).toHaveLength(21);
+  });
+
+  describe('with the realistic profile', () => {
+    beforeEach(async () => {
+      await cluster.stop();
+      cluster = await FakeCluster.start({ shards: 3, replicasPerShard: 1, profile: 'realistic' });
+    });
+
+    it('returns slow log entries the API can parse, no more than asked for', async () => {
+      const client = clientFor(0);
+
+      const all = MetricsParser.parseSlowLog((await client.call('SLOWLOG', 'GET', '128')) as unknown[]);
+      const few = (await client.call('SLOWLOG', 'GET', '10')) as unknown[];
+
+      expect(all).toHaveLength(128);
+      expect(few).toHaveLength(10);
+      expect(all[0].id).toBeGreaterThan(all[1].id);
+      expect(all[0].duration).toBeGreaterThan(0);
+      expect(all[0].command.length).toBeGreaterThan(0);
+      expect(all[0].clientAddress).toMatch(/^\d+\.\d+\.\d+\.\d+:\d+$/);
+      expect(await client.call('SLOWLOG', 'LEN')).toBe(128);
+    });
+
+    it('returns command log entries of the type asked for', async () => {
+      const entries = MetricsParser.parseCommandLog(
+        (await clientFor(0).call('COMMANDLOG', 'GET', '50', 'large-reply')) as unknown[],
+      );
+
+      expect(entries).toHaveLength(50);
+      expect(new Set(entries.map((entry) => entry.type))).toEqual(new Set(['large-reply']));
+    });
+
+    it('returns latency events and their history', async () => {
+      const client = clientFor(0);
+
+      const latest = (await client.call('LATENCY', 'LATEST')) as unknown[][];
+      const history = (await client.call('LATENCY', 'HISTORY', String(latest[0][0]))) as unknown[][];
+
+      expect(latest).toHaveLength(4);
+      expect(latest[0]).toHaveLength(4);
+      expect(history.length).toBeGreaterThan(10);
+      expect(history[0]).toHaveLength(2);
+    });
+
+    it('lists 200 application clients and 60 commands in the command stats', async () => {
+      const client = clientFor(0);
+
+      const clients = MetricsParser.parseClientList((await client.call('CLIENT', 'LIST')) as string);
+      const stats = await client.info('commandstats');
+
+      expect(clients).toHaveLength(201);
+      expect(stats.split('\r\n').filter((line) => line.startsWith('cmdstat_'))).toHaveLength(60);
+    });
+
+    it('pages through the keys of the node with SCAN and answers the per-key probes', async () => {
+      const client = clientFor(0);
+      const total = await client.dbsize();
+      const keys: string[] = [];
+      let cursor = '0';
+      do {
+        const [next, page] = await client.scan(cursor, 'COUNT', 1000);
+        cursor = next;
+        keys.push(...page);
+      } while (cursor !== '0');
+
+      expect(keys).toHaveLength(total);
+      expect(new Set(keys).size).toBe(total);
+      expect(await client.type(keys[0])).toBe('string');
+      expect(await client.call('MEMORY', 'USAGE', keys[0])).toBeGreaterThan(0);
+      expect(await client.call('OBJECT', 'IDLETIME', keys[0])).toBeGreaterThanOrEqual(0);
+      await expect(client.call('OBJECT', 'FREQ', keys[0])).rejects.toThrow('LFU maxmemory policy');
+      expect(await client.ttl(keys[0])).toBeGreaterThan(0);
+      expect(await client.strlen(keys[0])).toBeGreaterThan(0);
+    });
+  });
+
+  it('gives every node of a large realistic cluster more keys than one key sample reads', async () => {
+    await cluster.stop();
+    cluster = await FakeCluster.start({ shards: 40, replicasPerShard: 0, profile: 'realistic' });
+    const client = clientFor(39);
+
+    const total = await client.dbsize();
+    const slotStats = (await client.call('CLUSTER', 'SLOT-STATS', 'SLOTSRANGE', '0', '16383')) as Array<[number, unknown[]]>;
+    const keysInSlots = slotStats.reduce((sum, [, fields]) => sum + Number(fields[fields.indexOf('key-count') + 1]), 0);
+
+    expect(total).toBeGreaterThanOrEqual(20_000);
+    expect(keysInSlots).toBe(total);
+  });
+
+  it('holds every reply back by the reply delay', async () => {
+    await cluster.stop();
+    cluster = await FakeCluster.start({ shards: 1, replicasPerShard: 0, replyDelayMs: 40 });
+    const client = clientFor(0);
+    await client.ping();
+
+    const started = performance.now();
+    const replies = await Promise.all([client.ping(), client.echo('second')]);
+
+    expect(replies).toEqual(['PONG', 'second']);
+    expect(performance.now() - started).toBeGreaterThanOrEqual(35);
+  });
+
   it('refuses connections after stop', async () => {
     const { host, port } = cluster.nodes[0];
     await cluster.stop();
