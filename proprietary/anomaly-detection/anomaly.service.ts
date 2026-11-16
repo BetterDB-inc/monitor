@@ -9450,7 +9450,7 @@ export class AnomalyService
 
   private nodeInClusterView(anomaly: AnomalyEvent, connectionId: string): ClusterNodeRef | undefined {
     const view = this.clusterNodeViews.view(this.nodeViewKeyOf(connectionId));
-    const roleKnown = !view || anomaly.timestamp - view.readAt <= this.nodeViewStaleMs();
+    const roleKnown = !view || Math.abs(anomaly.timestamp - view.readAt) <= this.nodeViewStaleMs();
     return nodeOfEvent(anomaly, view?.directory, this.clusterNodeViews.ownNodeId(connectionId), roleKnown);
   }
 
@@ -9459,7 +9459,9 @@ export class AnomalyService
   }
 
   private nodeViewKeyOf(connectionId: string): string {
-    return this.connectionClusterKeys.get(connectionId) ?? connectionId;
+    return (
+      this.clusterNodeViews.keyOf(connectionId) ?? this.connectionClusterKeys.get(connectionId) ?? connectionId
+    );
   }
 
   private rememberClusterNodes(
@@ -9469,7 +9471,8 @@ export class AnomalyService
     readAt: number,
   ): void {
     const zones = this.connectionRegistry.getNodeAvailabilityZones(connectionId);
-    this.clusterNodeViews.remember(connectionId, this.nodeViewKeyOf(connectionId), nodes, readAt, () =>
+    const viewKey = this.clusterKeyOfNodes(nodes) ?? connectionId;
+    this.clusterNodeViews.remember(connectionId, viewKey, nodes, readAt, () =>
       withConfiguredZones(withShardMetadata(nodes, shards), zones),
     );
   }
@@ -9737,19 +9740,23 @@ export class AnomalyService
   }
 
   private rememberClusterKey(connectionId: string, nodes: ClusterNode[]): void {
-    const liveKey = clusterKeyFromNodes(nodes);
-    if (!liveKey) {
+    const clusterKey = this.clusterKeyOfNodes(nodes);
+    if (!clusterKey) {
       this.forgetClusterKey(connectionId);
       return;
     }
     const nodeIds = nodes.map((node) => node.id);
-    const known = nodeIds.map((id) => this.clusterKeyByNode.get(id)).find(Boolean);
-    const clusterKey = known ?? liveKey;
     const previousView = this.clusterViews.get(connectionId);
     this.clusterViews.set(connectionId, new Set(nodeIds));
     nodeIds.forEach((id) => this.clusterKeyByNode.set(id, clusterKey));
     this.connectionClusterKeys.set(connectionId, clusterKey);
     if (previousView) this.releaseClusterNodes(previousView);
+  }
+
+  private clusterKeyOfNodes(nodes: readonly ClusterNode[]): string | undefined {
+    const liveKey = clusterKeyFromNodes(nodes);
+    if (!liveKey) return undefined;
+    return nodes.map((node) => this.clusterKeyByNode.get(node.id)).find(Boolean) ?? liveKey;
   }
 
   private releaseClusterNodes(nodeIds: ReadonlySet<string>): void {
@@ -10730,7 +10737,10 @@ export class AnomalyService
   private connectionAtAddressOf(node: ClusterNodeRef, eventConnectionId: string | undefined): string | undefined {
     const address = splitHostPort(node.address);
     const found = address ? this.connectionRegistry.findIdByHostPort(address.host, address.port) : null;
-    if (!found || found === eventConnectionId) return found ?? undefined;
+    if (!found) return undefined;
+    const readsAnotherNode = (this.clusterNodeViews.ownNodeId(found) ?? node.nodeId) !== node.nodeId;
+    if (readsAnotherNode) return undefined;
+    if (found === eventConnectionId) return found;
     const clusterKey =
       this.clusterKeyByNode.get(node.nodeId) ??
       (eventConnectionId ? this.connectionClusterKeys.get(eventConnectionId) : undefined);

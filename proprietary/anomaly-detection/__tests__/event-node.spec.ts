@@ -254,6 +254,14 @@ describe('ClusterNodeViews', () => {
     expect(views.view('cluster-1')).toMatchObject({ readAt: 2_000 });
   });
 
+  it('says under which key a connection last stored its view', () => {
+    const views = new ClusterNodeViews();
+    views.remember('conn-a', 'cluster-1', seenFrom(PRIMARY_A), 1_000);
+
+    expect(views.keyOf('conn-a')).toBe('cluster-1');
+    expect(views.keyOf('conn-b')).toBeUndefined();
+  });
+
   it('keeps the view of a cluster while another connection still reads it', () => {
     const views = new ClusterNodeViews();
     views.remember('conn-a', 'cluster-1', seenFrom(PRIMARY_A), 1_000);

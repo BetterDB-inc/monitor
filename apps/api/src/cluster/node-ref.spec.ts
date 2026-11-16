@@ -107,6 +107,27 @@ describe('buildNodeDirectory with two ids at one address', () => {
     expect(atAddress([stale, live])).toBe('live-1');
   });
 
+  it('prefers the live node over one the peers only suspect', () => {
+    const suspect = node({ id: 'suspect-1', address: '10.0.0.9:6379@16379', flags: ['master', 'fail?'] });
+
+    expect(atAddress([live, suspect])).toBe('live-1');
+    expect(atAddress([suspect, live])).toBe('live-1');
+  });
+
+  it.each([['fail'], ['noaddr'], ['handshake']])('prefers a suspected node over one flagged %s', (flag) => {
+    const suspect = node({ id: 'suspect-1', address: '10.0.0.9:6379@16379', flags: ['master', 'fail?'] });
+    const stale = node({ id: 'stale-1', address: '10.0.0.9:6379@16379', flags: ['master', flag] });
+
+    expect(atAddress([suspect, stale])).toBe('suspect-1');
+    expect(atAddress([stale, suspect])).toBe('suspect-1');
+  });
+
+  it('still finds a suspected node that is alone at its address', () => {
+    const suspect = node({ id: 'suspect-1', address: '10.0.0.9:6379@16379', flags: ['master', 'fail?'] });
+
+    expect(atAddress([suspect])).toBe('suspect-1');
+  });
+
   it('prefers the node that answered the read among live nodes', () => {
     const own = node({ id: 'own-1', address: '10.0.0.9:6379@16379', flags: ['myself', 'master'] });
 
