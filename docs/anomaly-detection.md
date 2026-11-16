@@ -540,10 +540,10 @@ Which node each event type names:
 | `replication_divergence`, `resync_escalation`, `replica_slot_state` | The replica in `replicaAddr`, not the primary the event was read on |
 | `cluster_topology` | Duplicate primary: the primary with the stale claim. Replica stuck on a primary that is gone: the replica |
 | `hostname_staleness` | The node whose announced hostname is stale |
-| `ghost_membership` | The ghost node, or the node that rejoined after `CLUSTER FORGET` |
+| `ghost_membership` | Ghost entry: the live node at the endpoint the ghost entries point to. A ghost id is not a node, so the ghost ids stay in the message. Forget and rejoin: the node that rejoined after `CLUSTER FORGET` |
 | `failover_churn` | The primary that owns the shard now |
 | `slot_migration`, `slot_migration_stuck` | The source node of the migration |
-| `config_drift`, `acl_drift` | The first node that differs from the rest |
+| `config_drift`, `acl_drift` | A drift between nodes: the first node the event lists, which is the connection the event is filed under. The event compares the nodes and does not say which one is wrong, so this node may hold the value the others share; the message lists every node with its value. An ACL reload: the node whose ruleset changed |
 | `topology_divergence` | The node whose view differs when one node disagrees with the others. None when several nodes stand on each side: `GET /api/anomaly/topology-divergence` lists every node of both sides |
 | `cluster_state` | None. `cluster_state:fail` is a state of the whole cluster, not of one node |
 | `raft_health` | None. Elections and quorum are a state of the cluster's Raft group, not a fault of one node |
