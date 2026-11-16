@@ -12647,6 +12647,17 @@ describe('AnomalyService', () => {
         expect(incident.entries[0].node).toEqual({ ...REPLICA_NODE, collected: false });
         expect(detail?.entries[0].node).toEqual({ ...REPLICA_NODE, collected: false });
       });
+
+      it('does not work out collection for the incident gauges', async () => {
+        const rows = [storedRow({ id: 'in-1', node: REPLICA_NODE as any })];
+        storage.getAnomalyEvents.mockImplementation(async ({ order }: any) => (order === 'asc' ? [] : rows));
+        const served = jest.spyOn(service as any, 'servedNode');
+
+        await (service as any).updateIncidentGauges(0);
+
+        expect(prometheusService.updateActiveIncidents).toHaveBeenCalled();
+        expect(served).not.toHaveBeenCalled();
+      });
     });
   });
 
@@ -15639,7 +15650,7 @@ describe('AnomalyService', () => {
         matchedPatterns: AnomalyPattern[],
         status: string,
       ) => ({ connectionIds, matchedPatterns, recovery: { status } });
-      const timelines = jest.spyOn(service, 'getIncidentTimelines').mockResolvedValue([
+      const timelines = jest.spyOn(service as any, 'readIncidentTimelines').mockResolvedValue([
         timeline(['conn-1', 'conn-2'], [AnomalyPattern.RETRY_STORM, AnomalyPattern.MEMORY_PRESSURE], 'active'),
         timeline(['conn-1'], [], 'recovering'),
         timeline([], [], 'degraded'),
@@ -15664,7 +15675,7 @@ describe('AnomalyService', () => {
     it('still publishes the summary when incidents cannot be read', async () => {
       polled('conn-1');
       recent(anomaly('conn-1', AnomalySeverity.CRITICAL));
-      jest.spyOn(service, 'getIncidentTimelines').mockRejectedValue(new Error('storage down'));
+      jest.spyOn(service as any, 'readIncidentTimelines').mockRejectedValue(new Error('storage down'));
 
       await expect((service as any).updatePrometheusSummary()).resolves.toBeUndefined();
 
@@ -15673,7 +15684,7 @@ describe('AnomalyService', () => {
     });
 
     it('clears incident gauges only after three failed refreshes in a row', async () => {
-      const read = jest.spyOn(service, 'getIncidentTimelines').mockRejectedValue(new Error('storage down'));
+      const read = jest.spyOn(service as any, 'readIncidentTimelines').mockRejectedValue(new Error('storage down'));
 
       await (service as any).updatePrometheusSummary();
       await (service as any).updatePrometheusSummary();
@@ -15693,7 +15704,7 @@ describe('AnomalyService', () => {
     it('keeps reading back to the oldest open incident', async () => {
       const now = Date.now();
       const oldEvent = now - 3 * 3600_000;
-      const read = jest.spyOn(service, 'getIncidentTimelines').mockResolvedValue([
+      const read = jest.spyOn(service as any, 'readIncidentTimelines').mockResolvedValue([
         {
           lastEventAt: oldEvent,
           recovery: { status: 'degraded' },
@@ -23476,7 +23487,7 @@ describe('AnomalyService', () => {
         it('skips an incident gauge refresh while one is still running', async () => {
           let release!: (value: unknown[]) => void;
           const timelines = jest
-            .spyOn(service, 'getIncidentTimelines')
+            .spyOn(service as any, 'readIncidentTimelines')
             .mockReturnValue(new Promise((resolve) => (release = resolve)) as never);
 
           const first = (service as any).updateIncidentGauges(0);

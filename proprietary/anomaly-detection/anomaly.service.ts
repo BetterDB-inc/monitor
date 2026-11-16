@@ -10096,6 +10096,16 @@ export class AnomalyService
     endTime?: number,
     limit = 50,
   ): Promise<IncidentTimeline[]> {
+    const incidents = await this.readIncidentTimelines(connectionId, startTime, endTime, limit);
+    return incidents.map((incident) => this.withServedNodes(incident));
+  }
+
+  private async readIncidentTimelines(
+    connectionId: string | undefined,
+    startTime: number | undefined,
+    endTime: number | undefined,
+    limit: number,
+  ): Promise<IncidentTimeline[]> {
     const now = Date.now();
     const { maxSpanMs } = DEFAULT_INCIDENT_TIMELINE_OPTIONS;
     const from = Math.max(
@@ -10103,13 +10113,12 @@ export class AnomalyService
       now - MAX_INCIDENT_LOOKBACK_MS,
     );
     const window = await this.loadIncidentWindow(connectionId, from - 2 * maxSpanMs, endTime);
-    const incidents = await this.incidentsOf(window, (all) =>
+    return this.incidentsOf(window, (all) =>
       all
         .filter((t) => t.lastEventAt >= from && (endTime === undefined || t.startedAt <= endTime))
         .reverse()
         .slice(0, limit),
     );
-    return incidents.map((incident) => this.withServedNodes(incident));
   }
 
   private async incidentsOf(
@@ -10248,13 +10257,14 @@ export class AnomalyService
   ): Promise<IncidentTimeline | null> {
     const startedAt = incidentStartOf(incidentId);
     if (startedAt === null) {
-      const timelines = await this.getIncidentTimelines(
+      const timelines = await this.readIncidentTimelines(
         connectionId,
         startTime,
         undefined,
         Number.MAX_SAFE_INTEGER,
       );
-      return timelines.find((t) => t.incidentId === incidentId) ?? null;
+      const found = timelines.find((t) => t.incidentId === incidentId);
+      return found ? this.withServedNodes(found) : null;
     }
     const window = await this.loadIncidentWindow(connectionId, startedAt, startedAt);
     const [incident] = await this.incidentsOf(window, (all) =>
@@ -13038,7 +13048,7 @@ export class AnomalyService
     this.incidentGaugesInFlight = true;
     try {
       const from = Math.min(since, this.openIncidentSince ?? Date.now() - MAX_INCIDENT_LOOKBACK_MS);
-      const timelines = await this.getIncidentTimelines(undefined, from, undefined, Number.MAX_SAFE_INTEGER);
+      const timelines = await this.readIncidentTimelines(undefined, from, undefined, Number.MAX_SAFE_INTEGER);
       const open: Array<{ connectionIds: string[]; patterns: string[]; status: string }> = [];
       let oldestOpen: number | null = null;
       for (const timeline of timelines) {
