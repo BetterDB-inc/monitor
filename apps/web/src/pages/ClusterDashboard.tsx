@@ -4,11 +4,14 @@ import { Button } from '../components/ui/button';
 import { EmptyState } from '../components/ui/empty-state';
 import { Skeleton } from '../components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
+import { Badge } from '../components/ui/badge';
 import { RefreshCw, Server, Info, MapPin } from 'lucide-react';
 import { useCluster } from '../hooks/useCluster';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
 import { useConnectionDialog } from '../hooks/useConnectionDialog';
+import { useClusterTab } from '../hooks/useClusterTab';
+import { useClusterDisagreements } from '../hooks/useClusterDisagreements';
 import { metricsApi } from '../api/metrics';
 import { ClusterHealthCard } from '../components/cluster/ClusterHealthCard';
 import { ClusterTopology } from '../components/cluster/ClusterTopology';
@@ -20,6 +23,10 @@ import { ClusterSlowlog } from '../components/cluster/ClusterSlowlog';
 import { ReplicationLag } from '../components/cluster/ReplicationLag';
 import { SlotMigrations } from '../components/cluster/SlotMigrations';
 import { RaftHealthPanel } from '../components/cluster/RaftHealthPanel';
+import {
+  ClusterDisagreements,
+  ClusterDisagreementsLocked,
+} from '../components/cluster/ClusterDisagreements';
 import { buildSlotNodeMap } from '../types/cluster';
 import { formatBytes, formatDurationUs } from '../lib/utils';
 
@@ -81,6 +88,10 @@ export function ClusterDashboard() {
     refetchKey: currentConnection?.id,
   });
   const raftOutageActive = (raftHealthEvents ?? []).some((e) => e.severity === 'critical');
+
+  const [tab, setTab] = useClusterTab();
+  const disagreements = useClusterDisagreements(currentConnection?.id, shouldPoll);
+  const openDisagreements = disagreements.summary?.disagreements ?? [];
 
   // Memoize slot-to-node mapping separately for reuse
   const slotNodeMap = useMemo(() => buildSlotNodeMap(nodes), [nodes]);
@@ -232,12 +243,34 @@ export function ClusterDashboard() {
       )}
 
       {/* Tabs */}
-      <Tabs defaultValue="overview" className="space-y-4">
+      <Tabs value={tab} onValueChange={setTab} className="space-y-4">
         <TabsList>
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="nodes">Nodes</TabsTrigger>
           <TabsTrigger value="replication">Replication</TabsTrigger>
           <TabsTrigger value="slowlog">Slowlog</TabsTrigger>
+          <TabsTrigger
+            value="disagreements"
+            className="gap-2"
+            aria-label={
+              openDisagreements.length > 0
+                ? `Disagreements, ${openDisagreements.length} open`
+                : 'Disagreements'
+            }
+          >
+            Disagreements
+            {openDisagreements.length > 0 && (
+              <Badge
+                variant={
+                  openDisagreements.some((line) => line.severity === 'critical')
+                    ? 'destructive'
+                    : 'warning'
+                }
+              >
+                {openDisagreements.length}
+              </Badge>
+            )}
+          </TabsTrigger>
         </TabsList>
 
         {/* Overview Tab */}
@@ -374,6 +407,18 @@ export function ClusterDashboard() {
         {/* Slowlog Tab */}
         <TabsContent value="slowlog" className="space-y-4">
           <ClusterSlowlog />
+        </TabsContent>
+
+        <TabsContent value="disagreements" className="space-y-4">
+          {disagreements.licensed ? (
+            <ClusterDisagreements
+              summary={disagreements.summary}
+              error={disagreements.error}
+              connectionId={currentConnection?.id}
+            />
+          ) : (
+            <ClusterDisagreementsLocked />
+          )}
         </TabsContent>
       </Tabs>
     </div>

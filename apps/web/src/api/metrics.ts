@@ -54,6 +54,7 @@ import type {
   HotShardDetail,
   ReplicaDivergenceHistory,
   IncidentTimeline,
+  TopologyDisagreementSummary,
 } from '../types/anomaly';
 import type {
   DiscoveredNode,
@@ -460,6 +461,9 @@ export const metricsApi = {
   getAnomalyCoverage: () => fetchApi<FanoutCoverage[]>('/anomaly/coverage'),
 
   getHotShards: () => fetchApi<HotShardDetail[]>('/anomaly/hot-shards'),
+
+  getTopologyDisagreements: (signal?: AbortSignal) =>
+    fetchApi<TopologyDisagreementSummary>('/anomaly/topology-disagreements', { signal }),
 
   getReplicationDivergence: (params?: { startTime?: number; endTime?: number }) => {
     const query = new URLSearchParams();

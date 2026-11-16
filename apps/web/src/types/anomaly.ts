@@ -300,3 +300,71 @@ export interface IncidentTimeline {
     recoveredAt: number | null;
   };
 }
+
+export type DivergenceKind = 'slot_owner' | 'config_epoch' | 'failure_flags' | 'membership';
+
+export interface DivergenceNode {
+  nodeId: string;
+  address: string;
+  role: 'primary' | 'replica' | 'unknown';
+  shardId?: string;
+  availabilityZone?: string;
+}
+
+export interface DisagreementCoverage {
+  nodes: number;
+  asked: number;
+  answered: number;
+  complete: boolean;
+  unanswered: DivergenceNode[];
+  unansweredCount: number;
+}
+
+export interface DisagreementPosition {
+  value: string | null;
+  owner?: DivergenceNode;
+  count: number;
+  observers: DivergenceNode[];
+}
+
+export interface DisagreementLine {
+  id: string;
+  kind: DivergenceKind;
+  severity: AnomalySeverity;
+  confirmed: boolean;
+  eventId: string | null;
+  eventType: string | null;
+  since: number;
+  rounds: number;
+  subjects: DivergenceNode[];
+  subjectCount: number;
+  slots?: number[][];
+  slotCount?: number;
+  shardIds: string[];
+  positions: DisagreementPosition[];
+  epochs?: Array<{ node: DivergenceNode; values: string[] }>;
+  text: string;
+}
+
+export type DisagreementShardState = 'disputed' | 'undisputed' | 'not_compared';
+
+export interface DisagreementShard {
+  shardId: string;
+  primary: DivergenceNode | null;
+  replicas: number;
+  zones: string[];
+  slots: number[][];
+  slotCount: number;
+  nodes: number;
+  ownViews: number;
+  state: DisagreementShardState;
+  disagreementIds: string[];
+}
+
+export interface TopologyDisagreementSummary {
+  status: 'ok' | 'insufficient_views' | 'not_sampled';
+  sampledAt: number | null;
+  coverage: DisagreementCoverage;
+  disagreements: DisagreementLine[];
+  shards: DisagreementShard[];
+}
