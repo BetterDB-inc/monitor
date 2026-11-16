@@ -2187,9 +2187,27 @@ describe('AnomalyService', () => {
               { slot: 1, shareOfShard: 0.25 },
             ],
           },
+          node: {
+            nodeId: IDS[0],
+            address: ADDRS[0],
+            role: 'primary',
+            collected: true,
+            connectionId: 'conn-a',
+          },
         },
       ]);
       expect(service.getHotShards('conn-other')).toEqual([]);
+    });
+
+    it('says a hot primary the monitor does not connect to is not collected', async () => {
+      await step([100_000, 900_000, 100_000], 6);
+
+      expect(service.getHotShards('conn-a')[0].node).toEqual({
+        nodeId: IDS[1],
+        address: ADDRS[1],
+        role: 'primary',
+        collected: false,
+      });
     });
 
     it('keeps the event open between the release and the raise factor, then resolves it', async () => {

@@ -23,7 +23,7 @@ import {
   AnomalyPattern,
 } from './types';
 import { ReplicaDivergenceHistory } from './replication-divergence-detector';
-import { HotShardDetail } from './hot-shard-detector';
+import { ServedHotShardDetail } from './hot-shard-detector';
 import { TopologyDivergenceReport } from './topology-divergence-report';
 import { LicenseGuard, RequiresFeature, Feature } from '@proprietary/licenses';
 import { ConnectionId, CONNECTION_ID_HEADER } from '../../apps/api/src/common/decorators';
@@ -171,7 +171,7 @@ export class AnomalyController {
   @UseGuards(LicenseGuard)
   @RequiresFeature(Feature.ANOMALY_DETECTION)
   @ApiHeader({ name: CONNECTION_ID_HEADER, required: true, description: 'Connection ID of the cluster' })
-  getHotShards(@ConnectionId({ required: true }) connectionId: string): HotShardDetail[] {
+  getHotShards(@ConnectionId({ required: true }) connectionId: string): ServedHotShardDetail[] {
     return this.anomalyService.getHotShards(connectionId);
   }
 

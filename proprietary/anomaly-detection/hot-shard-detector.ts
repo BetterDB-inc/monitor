@@ -1,3 +1,4 @@
+import type { ServedClusterNodeRef } from '@betterdb/shared';
 import type { ShardLoad, ShardLoadSample, SlotLoadRate } from '@app/cluster/shard-load';
 import { median } from '../latency-regression/regression-detector';
 import { type HotShardKey, type HotShardKeyDetail, describeHotKeys } from './hot-shard-keys';
@@ -52,6 +53,8 @@ export interface HotShardDetail extends HotShardKeyDetail {
   topSlots: HotShardSlot[];
   rebalance?: RebalanceVerdict;
 }
+
+export type ServedHotShardDetail = HotShardDetail & { node?: ServedClusterNodeRef };
 
 function networkOf(shard: ShardLoad): number {
   return shard.networkBytesInPerSecond + shard.networkBytesOutPerSecond;

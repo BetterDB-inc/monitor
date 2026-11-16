@@ -93,6 +93,7 @@ import {
   HOT_SHARD_RAISE_FACTOR,
   HOT_SHARD_TOP_SLOTS,
   HotShardDetail,
+  ServedHotShardDetail,
   HotShardFinding,
   HotShardSlot,
   describeHotShard,
@@ -10595,7 +10596,7 @@ export class AnomalyService
 
   // Public API methods
 
-  getHotShards(connectionId: string): HotShardDetail[] {
+  getHotShards(connectionId: string): ServedHotShardDetail[] {
     const eventIds = this.hotShardEventIds.get(connectionId);
     const resolvedByHand = (signature: string) => {
       const eventId = eventIds?.get(signature);
@@ -10603,7 +10604,7 @@ export class AnomalyService
     };
     return [...(this.hotShardDetails.get(connectionId) ?? [])]
       .filter(([signature]) => !resolvedByHand(signature))
-      .map(([, detail]) => detail)
+      .map(([, detail]) => ({ ...detail, ...this.servedNodeAt(connectionId, detail.nodeAddr) }))
       .sort((a, b) => b.cpu.ratio - a.cpu.ratio);
   }
 
@@ -10708,7 +10709,7 @@ export class AnomalyService
     return event.node ? { node: this.servedNode(event.node) } : {};
   }
 
-  private webhookNodeAt(connectionId: string, address: string): { node?: ServedClusterNodeRef } {
+  private servedNodeAt(connectionId: string, address: string): { node?: ServedClusterNodeRef } {
     const directory = this.nodeDirectoryOf(connectionId);
     const node = directory ? resolveNodeRef(directory, { address }) : undefined;
     return node ? { node: this.servedNode(node) } : {};
@@ -12669,7 +12670,7 @@ export class AnomalyService
         ...data,
         instance: { host: ctx.host, port: ctx.port },
         connectionId: ctx.connectionId,
-        ...this.webhookNodeAt(ctx.connectionId, data.replica),
+        ...this.servedNodeAt(ctx.connectionId, data.replica),
       })
       .catch((err) => {
         this.logger.error('Failed to dispatch replication.recovered webhook', err);
