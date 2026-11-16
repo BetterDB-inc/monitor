@@ -27,12 +27,24 @@ export function toClusterNodeRef(node: ClusterNode): ClusterNodeRef {
   };
 }
 
+const NOT_AT_ADDRESS_FLAGS = ['fail', 'noaddr', 'handshake'];
+
+function addressClaim(flags: readonly string[]): number {
+  const live = flags.some((flag) => NOT_AT_ADDRESS_FLAGS.includes(flag)) ? 0 : 2;
+  return live + (flags.includes('myself') ? 1 : 0);
+}
+
 export function buildNodeDirectory(nodes: readonly ClusterNode[]): NodeDirectory {
   const directory: NodeDirectory = { byId: new Map(), byAddress: new Map() };
+  const claims = new Map<string, number>();
   for (const node of nodes) {
     const ref = toClusterNodeRef(node);
+    const claim = addressClaim(node.flags);
     directory.byId.set(node.id, ref);
     for (const key of nodeAddressKeys(node)) {
+      const held = claims.get(key);
+      if (held !== undefined && held >= claim) continue;
+      claims.set(key, claim);
       directory.byAddress.set(key, ref);
     }
     if (node.flags.includes('myself')) {
