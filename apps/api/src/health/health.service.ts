@@ -25,6 +25,10 @@ import {
   ConnectionContext,
 } from '../common/services/multi-connection-poller';
 import { withTimeout } from '../common/utils/with-timeout';
+import { dialsDataNodes } from '../connections/data-node-reach';
+import { DatabasePort } from '../common/interfaces/database-port.interface';
+
+type PingOutcome = 'answered' | 'refused' | 'missed';
 
 @Injectable()
 export class HealthService extends MultiConnectionPoller implements OnModuleInit, OnModuleDestroy {
@@ -35,6 +39,11 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
   private readonly startTime = Date.now();
   private readonly HEALTH_POLL_INTERVAL_MS = 10000; // Check every 10 seconds
   private readonly RECONNECT_TIMEOUT_MS = 3000;
+  private readonly PING_TIMEOUT_MS = 5000;
+  private readonly MISSED_PINGS_BEFORE_DOWN = 2;
+  private readonly PING_TIMED_OUT = 'Database ping timed out';
+  private missedPings = new Map<string, number>();
+  private pingsInFlight = new Map<string, Promise<PingOutcome>>();
   private startupTimeout: NodeJS.Timeout | null = null;
 
   constructor(
@@ -84,6 +93,8 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
   protected onConnectionRemoved(connectionId: string): void {
     this.instanceUpStates.delete(connectionId);
     this.reconnectLocks.delete(connectionId);
+    this.missedPings.delete(connectionId);
+    this.pingsInFlight.delete(connectionId);
     this.logger.debug(`Cleaned up health state for removed connection: ${connectionId}`);
   }
 
@@ -111,6 +122,57 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
       })
       .catch(() => {});
     return withTimeout(raw, this.RECONNECT_TIMEOUT_MS).catch(() => {});
+  }
+
+  private ping(connectionId: string, client: DatabasePort, dropWhenHung: boolean): Promise<PingOutcome> {
+    const existing = this.pingsInFlight.get(connectionId);
+    if (existing) {
+      return existing;
+    }
+    const run = this.pingWithinDeadline(connectionId, client, dropWhenHung).finally(() => {
+      if (this.pingsInFlight.get(connectionId) === run) {
+        this.pingsInFlight.delete(connectionId);
+      }
+    });
+    this.pingsInFlight.set(connectionId, run);
+    return run;
+  }
+
+  private async pingWithinDeadline(
+    connectionId: string,
+    client: DatabasePort,
+    dropWhenHung: boolean,
+  ): Promise<PingOutcome> {
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<'missed'>((resolve) => {
+      timer = setTimeout(() => resolve('missed'), this.PING_TIMEOUT_MS);
+      timer.unref?.();
+    });
+    let outcome: PingOutcome;
+    try {
+      outcome = await Promise.race([
+        client.ping().then((answered): PingOutcome => (answered ? 'answered' : 'refused')),
+        deadline,
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+    if (outcome === 'answered') {
+      this.missedPings.delete(connectionId);
+      return outcome;
+    }
+    if (outcome === 'refused') {
+      return outcome;
+    }
+    const missed = (this.missedPings.get(connectionId) ?? 0) + 1;
+    this.missedPings.set(connectionId, missed);
+    if (missed >= this.MISSED_PINGS_BEFORE_DOWN && dropWhenHung) {
+      this.logger.warn(
+        `No ping answer from ${connectionId} for ${missed} checks in a row; closing its client`,
+      );
+      await withTimeout(client.disconnect(), this.RECONNECT_TIMEOUT_MS).catch(() => undefined);
+    }
+    return outcome;
   }
 
   onModuleInit(): void {
@@ -211,9 +273,27 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
         };
       }
 
-      const canPing = await client.ping();
+      const ping = await this.ping(targetId, client, dialsDataNodes(config));
 
-      if (!canPing) {
+      if (ping === 'missed') {
+        if ((this.missedPings.get(targetId) ?? 0) >= this.MISSED_PINGS_BEFORE_DOWN) {
+          await this.handleInstanceDown(targetId, config.host, config.port, this.PING_TIMED_OUT);
+        }
+        return {
+          status: 'error',
+          database: {
+            type: 'unknown',
+            version: null,
+            host: config.host,
+            port: config.port,
+          },
+          capabilities: null,
+          runtimeCapabilities: null,
+          error: this.PING_TIMED_OUT,
+        };
+      }
+
+      if (ping === 'refused') {
         await this.handleInstanceDown(targetId, config.host, config.port, 'Database ping failed');
         return {
           status: 'error',

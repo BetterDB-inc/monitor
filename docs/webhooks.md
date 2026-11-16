@@ -286,6 +286,14 @@ The Slack and Discord formats add a **Node** field: `10.0.1.12:6379 (primary, sh
 }
 ```
 
+BetterDB checks each connection every 10 seconds. A refused or dropped
+connection raises `instance.down` on the first failed check. A database that
+keeps the connection open but does not answer a ping within 5 seconds counts
+as one missed check; two missed checks in a row raise `instance.down` with the
+reason `Database ping timed out`, so one slow answer does not page anyone.
+BetterDB then closes its own connection to that database and reconnects, and
+`instance.up` follows the first ping that answers.
+
 #### memory.critical
 
 ```json

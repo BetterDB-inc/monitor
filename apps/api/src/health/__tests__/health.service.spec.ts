@@ -279,3 +279,158 @@ describe('HealthService getAllConnectionsHealth', () => {
     expect(await statusesToOverall(['connected', 'error', 'waiting'])).toBe('degraded');
   });
 });
+
+describe('HealthService ping deadline', () => {
+  const PING_TIMEOUT_MS = 5000;
+  let client: {
+    isConnected: jest.Mock;
+    ping: jest.Mock;
+    getCapabilities: jest.Mock;
+    connect: jest.Mock;
+    disconnect: jest.Mock;
+  };
+  let webhooks: { dispatchHealthChange: jest.Mock };
+  let config: { host: string; port: number; connectionType?: string };
+
+  const build = (): HealthService =>
+    new HealthService(
+      {
+        list: jest.fn().mockReturnValue([]),
+        get: jest.fn().mockReturnValue(client),
+        getConfig: jest.fn().mockImplementation(() => config),
+        getDefaultId: jest.fn().mockReturnValue('conn-1'),
+      } as unknown as ConnectionRegistry,
+      {
+        getCapabilities: jest.fn().mockReturnValue(null),
+        getDisabledReasons: jest.fn().mockReturnValue(null),
+      } as unknown as RuntimeCapabilityTracker,
+      webhooks as unknown as WebhookDispatcherService,
+    );
+
+  const hang = () => new Promise<boolean>(() => {});
+
+  const checkAfterDeadline = async (service: HealthService) => {
+    const pending = service.getHealth('conn-1');
+    await jest.advanceTimersByTimeAsync(PING_TIMEOUT_MS);
+    return pending;
+  };
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    client = {
+      isConnected: jest.fn().mockReturnValue(true),
+      ping: jest.fn().mockResolvedValue(true),
+      getCapabilities: jest.fn().mockReturnValue({ dbType: 'valkey', version: '8.1.0' }),
+      connect: jest.fn().mockResolvedValue(undefined),
+      disconnect: jest.fn().mockResolvedValue(undefined),
+    };
+    webhooks = { dispatchHealthChange: jest.fn().mockResolvedValue(undefined) };
+    config = { host: 'localhost', port: 6379 };
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('gives up on a ping that does not answer within the deadline', async () => {
+    client.ping.mockImplementation(hang);
+    const service = build();
+    const pending = service.getHealth('conn-1');
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    await jest.advanceTimersByTimeAsync(PING_TIMEOUT_MS - 1);
+    expect(settled).toBe(false);
+    await jest.advanceTimersByTimeAsync(1);
+    const health = await pending;
+    expect(health.status).toBe('error');
+    expect(health.error).toBe('Database ping timed out');
+  });
+
+  it('does not report the instance down after one missed ping', async () => {
+    client.ping.mockImplementation(hang);
+    const service = build();
+    await checkAfterDeadline(service);
+    expect(webhooks.dispatchHealthChange).not.toHaveBeenCalled();
+    expect(client.disconnect).not.toHaveBeenCalled();
+  });
+
+  it('reports the instance down and drops the client after two missed pings in a row', async () => {
+    client.ping.mockImplementation(hang);
+    const service = build();
+    await checkAfterDeadline(service);
+    const health = await checkAfterDeadline(service);
+    expect(health.status).toBe('error');
+    expect(webhooks.dispatchHealthChange).toHaveBeenCalledTimes(1);
+    expect(webhooks.dispatchHealthChange.mock.calls[0][1]).toMatchObject({
+      reason: 'Database ping timed out',
+    });
+    expect(client.disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('starts counting again after a ping that answers', async () => {
+    const service = build();
+    client.ping.mockImplementationOnce(hang);
+    await checkAfterDeadline(service);
+    expect((await service.getHealth('conn-1')).status).toBe('connected');
+    client.ping.mockImplementationOnce(hang);
+    await checkAfterDeadline(service);
+    expect(webhooks.dispatchHealthChange).not.toHaveBeenCalled();
+    expect(client.disconnect).not.toHaveBeenCalled();
+  });
+
+  it('counts one miss when several callers wait on the same stalled ping', async () => {
+    client.ping.mockImplementation(hang);
+    const service = build();
+    const callers = [service.getHealth('conn-1'), service.getHealth('conn-1'), service.getHealth('conn-1')];
+    await jest.advanceTimersByTimeAsync(PING_TIMEOUT_MS);
+    const results = await Promise.all(callers);
+    expect(results.map((health) => health.error)).toEqual([
+      'Database ping timed out',
+      'Database ping timed out',
+      'Database ping timed out',
+    ]);
+    expect(client.ping).toHaveBeenCalledTimes(1);
+    expect(webhooks.dispatchHealthChange).not.toHaveBeenCalled();
+    expect(client.disconnect).not.toHaveBeenCalled();
+  });
+
+  it('reports the instance down at once when the ping is refused', async () => {
+    client.ping.mockResolvedValue(false);
+    const service = build();
+    const health = await service.getHealth('conn-1');
+    expect(health.error).toBe('Database ping failed');
+    expect(webhooks.dispatchHealthChange).toHaveBeenCalledTimes(1);
+    expect(client.disconnect).not.toHaveBeenCalled();
+  });
+
+  it('keeps the client of an agent connection after two missed pings', async () => {
+    config = { host: 'agent', port: 0 };
+    client.ping.mockImplementation(hang);
+    const service = build();
+    await checkAfterDeadline(service);
+    await checkAfterDeadline(service);
+    expect(webhooks.dispatchHealthChange).toHaveBeenCalledTimes(1);
+    expect(client.disconnect).not.toHaveBeenCalled();
+  });
+
+  it('still reports down when dropping the client fails', async () => {
+    client.ping.mockImplementation(hang);
+    client.disconnect.mockRejectedValue(new Error('socket already closed'));
+    const service = build();
+    await checkAfterDeadline(service);
+    const health = await checkAfterDeadline(service);
+    expect(health.error).toBe('Database ping timed out');
+    expect(webhooks.dispatchHealthChange).toHaveBeenCalledTimes(1);
+  });
+
+  it('forgets missed pings when the connection is removed', async () => {
+    client.ping.mockImplementation(hang);
+    const service = build();
+    await checkAfterDeadline(service);
+    (service as unknown as { onConnectionRemoved(id: string): void }).onConnectionRemoved('conn-1');
+    await checkAfterDeadline(service);
+    expect(webhooks.dispatchHealthChange).not.toHaveBeenCalled();
+  });
+});
