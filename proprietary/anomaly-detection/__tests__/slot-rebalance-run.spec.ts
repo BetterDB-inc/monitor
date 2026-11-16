@@ -461,6 +461,42 @@ describe('slot rebalance run', () => {
       expect(run.state).toBe('cancelled');
     });
 
+    it('keeps a job that failed before the cancel as failed', () => {
+      const listed = followRun(
+        started(),
+        report({ jobViews: [view('job-a', 'tgt1', '0-99 200-200'), view('job-b', 'tgt2', '300-399')] }),
+        nodes(),
+        2_000,
+      );
+      const oneFailed = followRun(
+        listed,
+        report({
+          jobViews: [view('job-b', 'tgt2', '300-399')],
+          finishedJobs: ['job-a'],
+          failed: [{ jobName: 'job-a', message: 'target refused' }],
+        }),
+        nodes(),
+        3_000,
+      );
+      const run = followRun(
+        { ...oneFailed, cancelRequestedAt: 3_500 },
+        report({
+          finishedJobs: ['job-a', 'job-b'],
+          failed: [
+            { jobName: 'job-a', message: 'target refused' },
+            { jobName: 'job-b', message: 'Connection lost to source' },
+          ],
+        }),
+        nodes(),
+        4_000,
+      );
+      expect(run.jobs.map((job) => [job.state, job.message])).toEqual([
+        ['failed', 'target refused'],
+        ['cancelled', undefined],
+      ]);
+      expect(run.state).toBe('failed');
+    });
+
     it('calls a job failed when no cancel was asked for', () => {
       const listed = followRun(
         started(),
