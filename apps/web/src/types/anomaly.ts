@@ -2,6 +2,8 @@
 // cannot import from the optional proprietary module, so the response shapes
 // are duplicated here. metricType/pattern stay open strings: the server-side
 // enums grow without lockstep frontend releases.
+import type { ServedClusterNodeRef } from '@betterdb/shared';
+
 export type AnomalySeverity = 'info' | 'warning' | 'critical';
 export type AnomalyType = 'spike' | 'drop';
 
@@ -22,6 +24,7 @@ export interface AnomalyEvent {
   resolved: boolean;
   connectionId?: string;
   persisted?: boolean;
+  node?: ServedClusterNodeRef;
 }
 
 export interface CorrelatedAnomalyGroup {
@@ -251,6 +254,7 @@ export interface IncidentTimelineEntry {
   anomalyId: string;
   connectionId: string;
   nodeAddr?: string;
+  node?: ServedClusterNodeRef;
   timestamp: number;
   metricType: string;
   severity: AnomalySeverity;
