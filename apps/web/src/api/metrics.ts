@@ -54,7 +54,8 @@ import type {
   HotShardDetail,
   ReplicaDivergenceHistory,
   IncidentTimeline,
-  TopologyDisagreementSummary,
+  TopologyDisagreementReport,
+  TopologyFullCheck,
 } from '../types/anomaly';
 import type {
   DiscoveredNode,
@@ -463,8 +464,14 @@ export const metricsApi = {
   getHotShards: () => fetchApi<HotShardDetail[]>('/anomaly/hot-shards'),
 
   getTopologyDisagreements: (connectionId: string, signal?: AbortSignal) =>
-    fetchApi<TopologyDisagreementSummary>('/anomaly/topology-disagreements', {
+    fetchApi<TopologyDisagreementReport>('/anomaly/topology-disagreements', {
       signal,
+      headers: { 'x-connection-id': connectionId },
+    }),
+
+  startTopologyFullCheck: (connectionId: string) =>
+    fetchApi<TopologyFullCheck>('/anomaly/topology-disagreements/full-check', {
+      method: 'POST',
       headers: { 'x-connection-id': connectionId },
     }),
 

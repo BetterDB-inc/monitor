@@ -34,4 +34,13 @@ describe('metricsApi topology disagreements', () => {
       headers: { 'x-connection-id': 'conn-7' },
     });
   });
+
+  it('names the connection whose nodes a full check asks', async () => {
+    await metricsApi.startTopologyFullCheck('conn-7');
+
+    expect(fetchApi).toHaveBeenCalledWith('/anomaly/topology-disagreements/full-check', {
+      method: 'POST',
+      headers: { 'x-connection-id': 'conn-7' },
+    });
+  });
 });
