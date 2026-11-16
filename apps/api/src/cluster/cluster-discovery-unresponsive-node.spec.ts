@@ -180,38 +180,62 @@ describe('ClusterDiscoveryService unresponsive node', () => {
     expect(client).toBe(created[1]);
   });
 
-  it('lets one caller try again after the cool-off and keeps refusing the rest', async () => {
+  it('refuses a node whose connect ran into the socket connect timeout', async () => {
+    nextConnect = () => Promise.reject(new Error('connect ETIMEDOUT'));
+    await expect(service.getNodeConnection(silent.id, 'seed')).rejects.toThrow('ETIMEDOUT');
+
+    await expect(service.getNodeConnection(silent.id, 'seed')).rejects.toThrow('is not answering');
+    expect(created).toHaveLength(1);
+  });
+
+  it('tries the node again in the background after the cool-off without making a caller wait', async () => {
     await silence();
     await jest.advanceTimersByTimeAsync(COOL_OFF_MS);
     nextConnect = () => new Promise<void>(() => undefined);
 
-    const probe = service.getNodeConnection(silent.id, 'seed');
-    const probeFailed = expect(probe).rejects.toThrow('Connection timeout');
-
     await expect(service.getNodeConnection(silent.id, 'seed')).rejects.toThrow('is not answering');
+    await expect(service.getNodeConnection(silent.id, 'seed')).rejects.toThrow('is not answering');
+
     expect(created).toHaveLength(2);
-    await jest.advanceTimersByTimeAsync(CONNECT_TIMEOUT_MS);
-    await probeFailed;
   });
 
   it('serves the node again once the retry connects', async () => {
     await silence();
     await jest.advanceTimersByTimeAsync(COOL_OFF_MS);
+    await expect(service.getNodeConnection(silent.id, 'seed')).rejects.toThrow('is not answering');
+    await jest.advanceTimersByTimeAsync(0);
 
-    const probe = await service.getNodeConnection(silent.id, 'seed');
+    const client = await service.getNodeConnection(silent.id, 'seed');
 
-    await expect(service.getNodeConnection(silent.id, 'seed')).resolves.toBe(probe);
+    expect(client).toBe(created[1]);
   });
 
-  it('refuses for another cool-off when a command on the retry times out too', async () => {
+  it('waits another cool-off before the next retry when the retry timed out', async () => {
     await silence();
     await jest.advanceTimersByTimeAsync(COOL_OFF_MS);
-    const probe = await service.getNodeConnection(silent.id, 'seed');
-
-    await send(probe, timedOut());
-    await jest.advanceTimersByTimeAsync(COOL_OFF_MS - 1);
-
+    nextConnect = () => new Promise<void>(() => undefined);
     await expect(service.getNodeConnection(silent.id, 'seed')).rejects.toThrow('is not answering');
+    await jest.advanceTimersByTimeAsync(CONNECT_TIMEOUT_MS);
+
+    await jest.advanceTimersByTimeAsync(COOL_OFF_MS - 1);
+    await expect(service.getNodeConnection(silent.id, 'seed')).rejects.toThrow('is not answering');
+    expect(created).toHaveLength(2);
+
+    await jest.advanceTimersByTimeAsync(1);
+    await expect(service.getNodeConnection(silent.id, 'seed')).rejects.toThrow('is not answering');
+    await jest.advanceTimersByTimeAsync(0);
+    expect(created).toHaveLength(3);
+  });
+
+  it('shows callers the real error again when the retry is refused', async () => {
+    await silence();
+    await jest.advanceTimersByTimeAsync(COOL_OFF_MS);
+    nextConnect = () => Promise.reject(new Error('connect ECONNREFUSED 10.0.0.1:6379'));
+    await expect(service.getNodeConnection(silent.id, 'seed')).rejects.toThrow('is not answering');
+    await jest.advanceTimersByTimeAsync(0);
+
+    nextConnect = () => Promise.reject(new Error('connect ECONNREFUSED 10.0.0.1:6379'));
+    await expect(service.getNodeConnection(silent.id, 'seed')).rejects.toThrow('ECONNREFUSED');
   });
 
   it('serves the node again once a held client gets a reply', async () => {

@@ -75,6 +75,10 @@ const UNRESPONSIVE_NODE_COOL_OFF_MS = 30_000;
 const COMMAND_TIMED_OUT = 'Command timed out';
 const CONNECTION_TIMED_OUT = 'Connection timeout';
 
+function isConnectTimeout(error: unknown): boolean {
+  return error instanceof Error && (error.message === CONNECTION_TIMED_OUT || error.message.includes('ETIMEDOUT'));
+}
+
 type NodeCommandOutcome = 'answered' | 'timedOut';
 
 class NodeClient extends Valkey {
@@ -439,19 +443,20 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     // Cluster node addresses include bus port: "host:port@busport", and an
     // IPv6 host has colons of its own, so the port is after the last one.
     const parsed = parseNodeAddress(node.address);
-    if (parsed) this.assertNodeAnswers(parsed.host, parsed.port);
+    const open = (): Promise<Valkey> => {
+      if (!parsed) {
+        throw new Error(`Invalid node address: ${node.address}`);
+      }
+      const primaryClient = this.connectionRegistry.get(ownerId).getClient();
+      return this.openNodeClient(key, node, parsed.host, parsed.port, ownerId, {
+        username: primaryClient.options.username || '',
+        password: primaryClient.options.password || '',
+      });
+    };
+    if (parsed) this.assertNodeAnswers(parsed.host, parsed.port, open);
     const reused = await this.reuseNodeClient(key);
     if (reused) return reused;
-    if (!parsed) {
-      throw new Error(`Invalid node address: ${node.address}`);
-    }
-    const { host, port } = parsed;
-
-    const primaryClient = this.connectionRegistry.get(ownerId).getClient();
-    return this.openNodeClient(key, node, host, port, ownerId, {
-      username: primaryClient.options.username || '',
-      password: primaryClient.options.password || '',
-    });
+    return open();
   }
 
   /**
@@ -472,9 +477,6 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       throw new Error(`Connection ${connectionId} has no data-node credentials for ${host}:${port}`);
     }
     const key = `addr:${connectionId}:${host}:${port}`;
-    this.assertNodeAnswers(host, port);
-    const reused = await this.reuseNodeClient(key);
-    if (reused) return reused;
     const node: DiscoveredNode = {
       id: key,
       address: `${host}:${port}`,
@@ -484,10 +486,15 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       state: 'healthy',
       flags: [],
     };
-    return this.openNodeClient(key, node, host, port, connectionId, {
-      username: credentials.username ?? '',
-      password: credentials.password ?? '',
-    });
+    const open = (): Promise<Valkey> =>
+      this.openNodeClient(key, node, host, port, connectionId, {
+        username: credentials.username ?? '',
+        password: credentials.password ?? '',
+      });
+    this.assertNodeAnswers(host, port, open);
+    const reused = await this.reuseNodeClient(key);
+    if (reused) return reused;
+    return open();
   }
 
   async getReplicaConnection(host: string, port: number, connectionId: string, hostname?: string): Promise<Valkey> {
@@ -497,10 +504,6 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       throw new Error(`Connection ${connectionId} cannot dial its replica ${host}:${port} directly`);
     }
     const key = `replica:${connectionId}:${host}:${port}`;
-    this.assertNodeAnswers(host, port);
-    const reused = await this.reuseNodeClient(key);
-    if (reused) return reused;
-    const { username, password } = this.connectionRegistry.get(connectionId).getClient().options;
     const node: DiscoveredNode = {
       id: key,
       address: `${host}:${port}`,
@@ -511,27 +514,43 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       flags: [],
       hostname,
     };
-    return this.openNodeClient(key, node, host, port, connectionId, {
-      username: username || '',
-      password: password || '',
-    });
+    const open = (): Promise<Valkey> => {
+      const { username, password } = this.connectionRegistry.get(connectionId).getClient().options;
+      return this.openNodeClient(key, node, host, port, connectionId, {
+        username: username || '',
+        password: password || '',
+      });
+    };
+    this.assertNodeAnswers(host, port, open);
+    const reused = await this.reuseNodeClient(key);
+    if (reused) return reused;
+    return open();
   }
 
   /**
-   * Fails fast for a node that let a command or a connect time out, so callers
-   * do not each wait out the same silent node. After the cool-off one caller is
-   * let through to try again while the rest keep failing fast; any reply from
-   * the node clears the mark.
+   * Fails fast for a node that let a command or a connect time out, so no
+   * caller waits out the same silent node again. After the cool-off the node
+   * is tried again in the background with `open`, while callers keep failing
+   * fast; a connect that succeeds or any reply from the node clears the mark,
+   * and a connect that fails for another reason hands the node back to the
+   * callers so they see that error.
    */
-  private assertNodeAnswers(host: string, port: number): void {
+  private assertNodeAnswers(host: string, port: number, open: () => Promise<Valkey>): void {
     const address = `${host}:${port}`;
-    const until = this.unresponsiveUntil.get(address);
+    let until = this.unresponsiveUntil.get(address);
     if (until === undefined) return;
     const now = Date.now();
-    if (now < until) {
-      throw new Error(`Node ${address} is not answering; next try in ${Math.ceil((until - now) / 1000)}s`);
+    if (now >= until) {
+      const retryAt = now + UNRESPONSIVE_NODE_COOL_OFF_MS;
+      until = retryAt;
+      this.unresponsiveUntil.set(address, retryAt);
+      void Promise.resolve()
+        .then(open)
+        .catch(() => {
+          if (this.unresponsiveUntil.get(address) === retryAt) this.unresponsiveUntil.delete(address);
+        });
     }
-    this.unresponsiveUntil.set(address, now + UNRESPONSIVE_NODE_COOL_OFF_MS);
+    throw new Error(`Node ${address} is not answering; next try in ${Math.ceil((until - now) / 1000)}s`);
   }
 
   private markNodeUnresponsive(address: string, client?: Valkey): void {
@@ -761,9 +780,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       }
 
       await this.closeNodeClient(client);
-      if (connectError instanceof Error && connectError.message === CONNECTION_TIMED_OUT) {
-        this.markNodeUnresponsive(address);
-      }
+      if ([connectError, lastError].some(isConnectTimeout)) this.markNodeUnresponsive(address);
 
       throw error;
     }
