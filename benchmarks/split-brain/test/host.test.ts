@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { HostWatch, countFreePorts } from '../src/host';
+import { HostWatch, countFreePorts, parseLocalPorts } from '../src/host';
+
+test('local ports are read from the socket list and an empty list is an error', () => {
+  const macos = 'Active Internet connections\ntcp4  0  0  127.0.0.1.49200  127.0.0.1.7001  ESTABLISHED\ntcp46 0 0 *.6379 *.* LISTEN\n';
+  assert.deepEqual(parseLocalPorts(macos, true), [49200, 6379]);
+  assert.deepEqual(parseLocalPorts('LISTEN 0 128 0.0.0.0:22 0.0.0.0:*\nESTAB 0 0 [::1]:50000 [::1]:6379\n', false), [22, 50000]);
+  assert.throws(() => parseLocalPorts('', true), /socket list was empty/);
+});
 
 test('free ports count distinct local ports inside the range only', () => {
   assert.equal(countFreePorts([80, 49152, 49152, 49153, 65535, 70000], [49152, 65535]), 16384 - 3);

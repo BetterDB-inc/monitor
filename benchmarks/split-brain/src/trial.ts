@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { gzipSync } from 'node:zlib';
-import { BASELINE_MS, type LaneSpec, type NodeSpec, hashSeed, mulberry32, sleep } from './config';
+import { BASELINE_MS, LATE_GATE_MS, type LaneSpec, type NodeSpec, hashSeed, mulberry32, sleep } from './config';
 import { createCluster, detectIptables } from './cluster';
 import { exec } from './docker';
 import type { HostWatch } from './host';
@@ -17,6 +17,8 @@ export interface TrialRequest {
   nodeTimeoutMs: number;
   file: string;
   host: HostWatch;
+  attempt: number;
+  dropped: string[];
 }
 
 function quantile(sorted: number[], q: number): number {
@@ -73,6 +75,9 @@ export async function runTrial(request: TrialRequest): Promise<TrialMeta> {
     events: [],
     buildMs: built.buildMs,
     late: { p50: 0, p99: 0, max: 0 },
+    lateOk: true,
+    attempt: request.attempt,
+    dropped: request.dropped,
     host: { load: { start: 0, max: 0, end: 0 }, freePorts: { start: 0, min: 0, end: 0 }, vmLoad: { start: 0, end: 0 } },
   };
   const ctx: TrialContext = {
@@ -111,6 +116,7 @@ export async function runTrial(request: TrialRequest): Promise<TrialMeta> {
   if (noisy) throw new Error(`the host was outside the limits while recording: ${noisy}`);
   const late = recorder.ticks.map((tick) => tick.late).sort((a, b) => a - b);
   meta.late = { p50: quantile(late, 0.5), p99: quantile(late, 0.99), max: late[late.length - 1] ?? 0 };
+  meta.lateOk = meta.late.p99 <= LATE_GATE_MS;
   const lines = [JSON.stringify(meta), ...recorder.ticks.map((tick) => JSON.stringify(tick))];
   mkdirSync(dirname(request.file), { recursive: true });
   writeFileSync(request.file, gzipSync(lines.join('\n')));

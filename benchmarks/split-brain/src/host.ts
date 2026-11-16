@@ -43,14 +43,19 @@ async function ephemeralRange(): Promise<[number, number]> {
 async function localPorts(): Promise<number[]> {
   const darwin = platform() === 'darwin';
   const out = darwin ? await output('netstat', ['-anp', 'tcp']) : await output('ss', ['-Htan']);
+  return parseLocalPorts(out, darwin);
+}
+
+export function parseLocalPorts(out: string, darwin: boolean): number[] {
   const ports: number[] = [];
   for (const line of out.split('\n')) {
     const columns = line.trim().split(/\s+/);
     if (darwin && !columns[0].startsWith('tcp')) continue;
     const local = columns[3] ?? '';
     const port = Number(local.slice(local.lastIndexOf(darwin ? '.' : ':') + 1));
-    if (Number.isInteger(port)) ports.push(port);
+    if (local !== '' && Number.isInteger(port)) ports.push(port);
   }
+  if (ports.length === 0) throw new Error('the socket list was empty, so free local ports cannot be counted');
   return ports;
 }
 

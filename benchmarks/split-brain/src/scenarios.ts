@@ -3,7 +3,7 @@ import { startNode, waitAgreed, waitAnswering } from './cluster';
 import { docker, exec, rootExec } from './docker';
 import type { HostWindow } from './host';
 import type { Recorder } from './recorder';
-import { command } from './resp';
+import { type Reply, command } from './resp';
 
 export type ScenarioKind = 'fault' | 'control';
 
@@ -34,6 +34,9 @@ export interface TrialMeta {
   events: Array<{ t: number; type: string; detail?: unknown }>;
   buildMs: number;
   late: { p50: number; p99: number; max: number };
+  lateOk: boolean;
+  attempt: number;
+  dropped: string[];
   host: HostWindow & { vmLoad: { start: number; end: number } };
 }
 
@@ -57,6 +60,12 @@ export interface Scenario {
   prepare?: (ctx: TrialContext) => Promise<void>;
   run: (ctx: TrialContext) => Promise<void>;
 }
+
+const PRELOAD_KEYS = 800_000;
+const ATOMIC_SLOTS = 1_000;
+const ATOMIC_LINK_RATE = '20mbit';
+const LEGACY_SLOTS = 3_000;
+const FINISHED_MIGRATION_STATES = ['success', 'failed', 'cancelled'];
 
 const names = (nodes: NodeSpec[]) => nodes.map((node) => node.name);
 const primariesOf = (ctx: TrialContext) => ctx.nodes.filter((node) => node.role === 'primary');
@@ -122,14 +131,80 @@ async function startJoiner(ctx: TrialContext): Promise<void> {
   ctx.recorder.addNode(joiner);
 }
 
+async function keyCounts(ctx: TrialContext): Promise<Record<string, number>> {
+  const counts: Record<string, number> = {};
+  for (const node of primariesOf(ctx)) counts[node.name] = Number(await command(node.hostPort, ['DBSIZE']));
+  return counts;
+}
+
+async function replicasSynced(ctx: TrialContext, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const ready = await Promise.all(
+      replicasOf(ctx).map((node) =>
+        command(node.hostPort, ['INFO']).then(
+          (info) => /master_link_status:up/.test(String(info)) && /\bloading:0/.test(String(info)),
+          () => false,
+        ),
+      ),
+    );
+    if (ready.every(Boolean)) return true;
+    if (Date.now() > deadline) return false;
+    await sleep(250);
+  }
+}
+
 async function preloadKeys(ctx: TrialContext): Promise<void> {
   const seed = ctx.nodes[0];
   const out = await exec(
     seed.container,
-    ['valkey-benchmark', '-h', seed.ip, '-p', String(VALKEY_PORT), '--cluster', '-t', 'set', '-n', '100000', '-r', '1000000', '-d', '256', '-P', '32', '-q'],
-    120_000,
+    [
+      'valkey-benchmark',
+      '-h',
+      seed.ip,
+      '-p',
+      String(VALKEY_PORT),
+      '--cluster',
+      '-t',
+      'set',
+      '-n',
+      String(PRELOAD_KEYS),
+      '-r',
+      '100000000',
+      '-d',
+      '256',
+      '-P',
+      '32',
+      '-q',
+    ],
+    180_000,
   );
-  ctx.meta.events.push({ t: -1, type: 'preload', detail: out.split(/[\r\n]+/).filter((line) => line.trim()).pop()?.trim() });
+  const synced = await replicasSynced(ctx, 120_000);
+  const settled = synced && (await waitAgreed(ctx.nodes, ctx.nodes.length, 60_000));
+  if (!settled) throw new Error('replicas did not catch up after the preload');
+  ctx.meta.events.push({
+    t: -1,
+    type: 'preload',
+    detail: {
+      benchmark: out.split(/[\r\n]+/).filter((line) => line.trim()).pop()?.trim(),
+      keys: await keyCounts(ctx),
+      settled,
+    },
+  });
+}
+
+async function migrationDone(source: NodeSpec, range: string, timeoutMs: number): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const jobs = (await command(source.hostPort, ['CLUSTER', 'GETSLOTMIGRATIONS'])) as Reply[];
+    for (const job of jobs) {
+      const fields = job as Reply[];
+      const value = (name: string) => String(fields[fields.indexOf(name) + 1]);
+      if (value('slot_ranges') === range && FINISHED_MIGRATION_STATES.includes(value('state'))) return value('state');
+    }
+    if (Date.now() > deadline) return 'unfinished';
+    await sleep(50);
+  }
 }
 
 function nextPrimary(ctx: TrialContext, name: string): NodeSpec {
@@ -185,7 +260,7 @@ export function scenarios(nodeTimeoutMs: number): Scenario[] {
         await docker(['pause', target.container]);
         await sleep(3 * nodeTimeoutMs);
         await docker(['unpause', target.container]);
-        mark(ctx, 'unpause');
+        heal(ctx);
       },
     },
     {
@@ -254,18 +329,36 @@ export function scenarios(nodeTimeoutMs: number): Scenario[] {
       prepare: preloadKeys,
       run: async (ctx) => {
         const primaries = primariesOf(ctx);
-        inject(ctx, primaries);
+        await Promise.all(
+          primaries.map((node) =>
+            rootExec(node.container, `tc qdisc add dev eth0 root tbf rate ${ATOMIC_LINK_RATE} burst 64kb latency 50ms`),
+          ),
+        );
+        inject(ctx, primaries, { linkRate: ATOMIC_LINK_RATE });
         for (const source of primaries) {
           const target = nextPrimary(ctx, source.name);
           const [start] = ctx.slots[source.name];
+          const end = start + ATOMIC_SLOTS - 1;
+          const before = Number(await command(source.hostPort, ['DBSIZE']));
+          const startedAt = ctx.recorder.now();
           const reply = await command(
             source.hostPort,
-            ['CLUSTER', 'MIGRATESLOTS', 'SLOTSRANGE', String(start), String(start + 499), 'NODE', ctx.ids[target.name]],
+            ['CLUSTER', 'MIGRATESLOTS', 'SLOTSRANGE', String(start), String(end), 'NODE', ctx.ids[target.name]],
             10_000,
           );
-          mark(ctx, 'migrate', { from: source.name, to: target.name, slots: [start, start + 499], reply });
-          await sleep(10_000);
+          mark(ctx, 'migrate', { from: source.name, to: target.name, slots: [start, end], reply });
+          const state = await migrationDone(source, `${start}-${end}`, 60_000);
+          const tookMs = ctx.recorder.now() - startedAt;
+          mark(ctx, 'migrated', {
+            from: source.name,
+            state,
+            tookMs,
+            keys: before - Number(await command(source.hostPort, ['DBSIZE'])),
+          });
+          await sleep(10_000 - tookMs);
         }
+        await Promise.all(primaries.map((node) => rootExec(node.container, 'tc qdisc del dev eth0 root')));
+        mark(ctx, 'link-rate-removed');
       },
     },
     {
@@ -276,6 +369,7 @@ export function scenarios(nodeTimeoutMs: number): Scenario[] {
       run: async (ctx) => {
         const source = pick(primariesOf(ctx), ctx.random);
         const target = nextPrimary(ctx, source.name);
+        const before = Number(await command(source.hostPort, ['DBSIZE']));
         inject(ctx, [source, target]);
         const out = await exec(
           source.container,
@@ -289,12 +383,16 @@ export function scenarios(nodeTimeoutMs: number): Scenario[] {
             '--cluster-to',
             ctx.ids[target.name],
             '--cluster-slots',
-            '4000',
+            String(LEGACY_SLOTS),
             '--cluster-yes',
           ],
           300_000,
         );
-        mark(ctx, 'reshard-done', out.split('\n').slice(-2).join(' ').slice(0, 200));
+        mark(ctx, 'reshard-done', {
+          tookMs: ctx.recorder.now() - ctx.meta.t0,
+          keys: before - Number(await command(source.hostPort, ['DBSIZE'])),
+          tail: out.split('\n').slice(-2).join(' ').slice(0, 120),
+        });
       },
     },
     {

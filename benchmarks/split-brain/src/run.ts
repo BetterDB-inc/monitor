@@ -1,7 +1,7 @@
-import { appendFileSync, existsSync, mkdirSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { BASE_IMAGE, IMAGE, laneSpec, mulberry32, shuffled, sleep } from './config';
-import { docker, removeContainers, removeNetworks } from './docker';
+import { docker, haltDocker, removeContainers, removeNetworks } from './docker';
 import { HostWatch } from './host';
 import { type Scenario, scenarios } from './scenarios';
 import { runTrial, trialName } from './trial';
@@ -73,7 +73,9 @@ export async function run(options: RunOptions): Promise<{ done: number; failed: 
     if (stopping) return;
     stopping = true;
     log(`${signal}: removing bench containers and networks`);
-    void down().finally(() => process.exit(130));
+    void haltDocker()
+      .then(down)
+      .finally(() => process.exit(130));
   };
   process.on('SIGINT', () => stop('SIGINT'));
   process.on('SIGTERM', () => stop('SIGTERM'));
@@ -96,6 +98,17 @@ export async function run(options: RunOptions): Promise<{ done: number; failed: 
     return false;
   };
 
+  const droppedFile = join(options.outDir, 'dropped.jsonl');
+  const droppedBefore = (name: string): string[] =>
+    existsSync(droppedFile)
+      ? readFileSync(droppedFile, 'utf8')
+          .split('\n')
+          .filter(Boolean)
+          .map((line) => JSON.parse(line) as { trial: string; reason: string })
+          .filter((entry) => entry.trial === name)
+          .map((entry) => entry.reason)
+      : [];
+
   let done = 0;
   const failed: string[] = [];
   const total = queue.length;
@@ -109,6 +122,7 @@ export async function run(options: RunOptions): Promise<{ done: number; failed: 
       for (let attempt = 1; attempt <= 3 && !stopping; attempt++) {
         if (!(await quiet(laneNumber))) return;
         const startedAt = Date.now();
+        const dropped = droppedBefore(name);
         try {
           const meta = await runTrial({
             lane,
@@ -118,6 +132,8 @@ export async function run(options: RunOptions): Promise<{ done: number; failed: 
             nodeTimeoutMs: options.nodeTimeoutMs,
             file: traceFile(options.outDir, item.scenario.name, item.rep),
             host,
+            attempt: dropped.length + 1,
+            dropped,
           });
           done += 1;
           log(
@@ -125,20 +141,34 @@ export async function run(options: RunOptions): Promise<{ done: number; failed: 
               `build=${meta.buildMs}ms late p50=${meta.late.p50} p99=${meta.late.p99} max=${meta.late.max} ` +
               `load=${meta.host.load.start.toFixed(1)}/${meta.host.load.max.toFixed(1)} ` +
               `ports=${meta.host.freePorts.min} vm=${meta.host.vmLoad.start.toFixed(1)}/${meta.host.vmLoad.end.toFixed(1)} ` +
-              `(${done}/${total})`,
+              `attempt=${meta.attempt}${meta.lateOk ? '' : ' LATE'} (${done}/${total})`,
           );
           break;
         } catch (err) {
-          log(`[lane ${laneNumber}] ${name} attempt ${attempt} failed: ${(err as Error).message}`);
+          if (stopping) return;
+          const reason = (err as Error).message.slice(0, 200);
+          appendFileSync(
+            droppedFile,
+            `${JSON.stringify({ trial: name, scenario: item.scenario.name, at: new Date().toISOString(), reason })}\n`,
+          );
+          log(`[lane ${laneNumber}] ${name} attempt ${dropped.length + 1} dropped: ${reason}`);
           if (attempt === 3) failed.push(name);
         }
       }
     }
   };
-  await Promise.all(options.lanes.map((lane) => worker(lane)));
-  host.stop();
+  const guarded = (laneNumber: number) =>
+    worker(laneNumber).catch((err: Error) => {
+      halted ??= err.message;
+      log(`[lane ${laneNumber}] stopped: ${err.message}`);
+    });
+  try {
+    await Promise.all(options.lanes.map(guarded));
+  } finally {
+    host.stop();
+    if (!stopping) await down();
+  }
   if (!stopping) {
-    await down();
     log(`finished: ${done} recorded, ${failed.length} failed${failed.length ? `: ${failed.join(', ')}` : ''}`);
   }
   if (halted) throw new Error(`stopped the run: ${halted}`);

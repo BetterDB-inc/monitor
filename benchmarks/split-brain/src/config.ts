@@ -11,6 +11,7 @@ export const TICK_MS = 1_000;
 export const PROBE_TIMEOUT_MS = 2_000;
 export const CONNECT_TIMEOUT_MS = 1_000;
 export const BASELINE_MS = 15_000;
+export const LATE_GATE_MS = 250;
 export const TAIL_MS = 60_000;
 
 export type Role = 'primary' | 'replica' | 'joiner';
