@@ -594,6 +594,78 @@ describe('DivergenceTracker', () => {
     expect(tracker.tracked()).toEqual([]);
   });
 
+  describe('for a node only some views know', () => {
+    const membership = (subject: string, knownBy: string[], missingBy: string[]): TopologyDisagreement => ({
+      key: `membership:${subject}`,
+      kind: 'membership',
+      subjectIds: [subject],
+      positions: [
+        { value: 'known', observers: knownBy },
+        { value: 'missing', observers: missingBy },
+      ],
+    });
+
+    it('counts how long each observer has lacked the node', () => {
+      const tracker = new DivergenceTracker();
+
+      tracker.observe(round(1000, [membership('p2', ['a'], ['b'])]));
+      tracker.observe(round(6000, [membership('p2', ['a'], ['b', 'c'])]));
+
+      expect(tracker.tracked()[0].gapStreaks).toEqual({
+        b: { firstSeenAt: 1000, rounds: 2 },
+        c: { firstSeenAt: 6000, rounds: 1 },
+      });
+    });
+
+    it('starts the count of an observer over once it has listed the node', () => {
+      const tracker = new DivergenceTracker();
+
+      tracker.observe(round(1000, [membership('p2', ['a'], ['b', 'c'])]));
+      tracker.observe(round(6000, [membership('p2', ['a', 'b'], ['c'])]));
+      tracker.observe(round(11000, [membership('p2', ['a'], ['b', 'c'])]));
+
+      expect(tracker.tracked()[0].gapStreaks).toEqual({
+        b: { firstSeenAt: 11000, rounds: 1 },
+        c: { firstSeenAt: 1000, rounds: 3 },
+      });
+    });
+
+    it('holds the count of an observer through a round it gave no view', () => {
+      const tracker = new DivergenceTracker();
+
+      tracker.observe(round(1000, [membership('p2', ['a'], ['b', 'c'])]));
+      tracker.observe(round(6000, [membership('p2', ['a'], ['c'])], ['b']));
+      tracker.observe(round(11000, [membership('p2', ['a'], ['b', 'c'])]));
+
+      expect(tracker.tracked()[0].gapStreaks).toEqual({
+        b: { firstSeenAt: 1000, rounds: 2 },
+        c: { firstSeenAt: 1000, rounds: 3 },
+      });
+    });
+
+    it('keeps the count through a change between missing and handshake', () => {
+      const tracker = new DivergenceTracker();
+      const stuck: TopologyDisagreement = {
+        ...membership('p2', ['a'], []),
+        positions: [
+          { value: 'handshake', observers: ['b'] },
+          { value: 'known', observers: ['a'] },
+        ],
+      };
+
+      tracker.observe(round(1000, [membership('p2', ['a'], ['b'])]));
+      tracker.observe(round(6000, [stuck]));
+
+      expect(tracker.tracked()[0].gapStreaks).toEqual({ b: { firstSeenAt: 1000, rounds: 2 } });
+    });
+
+    it('keeps no such count for another kind of disagreement', () => {
+      const tracker = new DivergenceTracker();
+      tracker.observe(round(1000, [flags('p3', ['a'], ['b'])]));
+      expect(tracker.tracked()[0].gapStreaks).toBeUndefined();
+    });
+  });
+
   it('starts a count over on request', () => {
     const tracker = new DivergenceTracker();
 

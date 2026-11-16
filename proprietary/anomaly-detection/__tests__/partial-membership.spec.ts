@@ -272,6 +272,19 @@ describe('partiallyKnownNodes', () => {
     expect(found[0].notKnownBy).toEqual([]);
   });
 
+  it('gives no command while no node that showed the gap gives a view', () => {
+    const seen = every([view('p1'), view('p2', { n1: null }), view('p3')], 0, ROUND_MS);
+    const unread = every([view('p1'), view('p3')], 2 * ROUND_MS, LONG_ENOUGH, ['p2']);
+    const { found } = judge([...seen, ...unread]);
+
+    expect(found[0].meet).toBeUndefined();
+    expect(partialMembershipMessage(found[0], LONG_ENOUGH)).toBe(
+      'Node 10.0.0.7:6379 has only partly joined the cluster for 95s. ' +
+        'Known by 10.0.0.1:6379, 10.0.0.3:6379. ' +
+        'No node that showed the gap gave a view this round, so no CLUSTER MEET command can be given.',
+    );
+  });
+
   describe('when a dispute is held because one side gave no view', () => {
     const p2 = BASE[1];
     const p3 = BASE[2];
@@ -400,6 +413,107 @@ describe('partiallyKnownNodes', () => {
     const views = [view('p1', {}, [NEW_REPLICA]), view('p2', { n1: null }), view('p3', {}, [NEW_REPLICA])];
     const { found } = judge(every(views, 0, LONG_ENOUGH), ['p2']);
     expect(found.map((finding) => finding.nodeId)).toEqual(['n1', 'r1']);
+  });
+
+  it('names two new nodes a slot owner lacks apart from that slot owner, which a peer lacks', () => {
+    const other = primary('n2', 8, [], 0);
+    const views = [
+      view('p1', {}, [other]),
+      view('p2', { p3: null }, [other]),
+      view('p3', { n1: null }),
+    ];
+    const { found, tracked } = judge(every(views, 0, LONG_ENOUGH));
+
+    expect(found.map((finding) => finding.nodeId)).toEqual(['n1', 'n2', 'p3']);
+    expect(found.map((finding) => finding.disagreementKeys)).toEqual([
+      ['membership:n1'],
+      ['membership:n2'],
+      ['membership:p3'],
+    ]);
+    expect(ids(found[0].notKnownBy)).toEqual(['p3']);
+    expect(ids(found[1].notKnownBy)).toEqual(['p3']);
+    expect(ids(found[2].notKnownBy)).toEqual(['p2']);
+    expect(found[2].ownViewMissing).toEqual([]);
+    expect(unclaimedMemberships(tracked, found)).toEqual([]);
+  });
+
+  it('names a new replica a slot owner lacks apart from that slot owner, which a peer lacks', () => {
+    const views = [view('p1', {}, [NEW_REPLICA]), view('p2'), view('p3', { p2: null }, [NEW_REPLICA])];
+    const { found } = judge(every(views, 0, LONG_ENOUGH));
+
+    expect(found.map((finding) => finding.nodeId)).toEqual(['p2', 'r1']);
+    expect(ids(found[0].notKnownBy)).toEqual(['p3']);
+    expect(found[0].ownViewMissing).toEqual([]);
+    expect(found[0].disagreementKeys).toEqual(['membership:p2']);
+    expect(ids(found[1].notKnownBy)).toEqual(['p2']);
+    expect(found[1].disagreementKeys).toEqual(['membership:r1']);
+  });
+
+  describe('when two new nodes do not know each other', () => {
+    const other = primary('n2', 8, [], 0);
+    const strangers = [
+      view('p1', {}, [other]),
+      view('p2', {}, [other]),
+      view('n1'),
+      { observerId: 'n2', nodes: [...BASE.slice(0, 3), { ...other, flags: ['myself', 'master'] }] },
+    ];
+
+    it('names the smaller id', () => {
+      const { found } = judge(every(strangers, 0, LONG_ENOUGH));
+
+      expect(found.map((finding) => finding.nodeId)).toEqual(['n1']);
+      expect(ids(found[0].notKnownBy)).toEqual(['n2']);
+      expect(ids(found[0].ownViewMissing)).toEqual(['n2']);
+    });
+
+    it('names the same nodes after the views that showed part of the gap stop coming', () => {
+      const [p1, p2, , second] = strangers;
+      const all = every([...strangers, view('p3', {}, [])], 0, ROUND_MS);
+      const silent = every([p1, p2, second], 2 * ROUND_MS, LONG_ENOUGH, ['n1', 'p3']);
+      const before = judge(all).found;
+      const after = judge([...all, ...silent]).found;
+
+      expect(before.map((finding) => finding.nodeId)).toEqual(['n1', 'n2']);
+      expect(after.map((finding) => finding.nodeId)).toEqual(['n1', 'n2']);
+      expect(after[0].disagreementKeys).toEqual(['membership:n1', 'membership:n2']);
+      expect(ids(after[0].notKnownBy)).toEqual(['n2']);
+      expect(after[1]).toMatchObject({ notKnownBy: [], ownViewMissing: [], disagreementKeys: ['membership:n2'] });
+      expect(after[1].meet).toBeUndefined();
+    });
+  });
+
+  it('does not count the time another node lacked the same peer', () => {
+    const other = primary('n2', 8, [], 0);
+    const stuck = [view('p1'), view('p2'), view('p3'), view('n1', { p2: null })];
+    const joining = {
+      observerId: 'n2',
+      nodes: [BASE[0], BASE[2], NEW_NODE, { ...other, flags: ['myself', 'master'] }],
+    };
+    const at = LONG_ENOUGH + ROUND_MS;
+    const all = [...['p1', 'p2', 'p3'].map((id) => view(id, {}, [other])), view('n1', { p2: null }, [other]), joining];
+    const { found } = judge([...every(stuck, 0, LONG_ENOUGH), { at, views: all }]);
+
+    expect(found.map((finding) => finding.nodeId)).toEqual(['n1', 'n2']);
+    expect(found[0]).toMatchObject({ confirmed: true, firstSeenAt: 0 });
+    expect(found[1]).toMatchObject({ confirmed: false, firstSeenAt: at, rounds: 1 });
+    expect(ids(found[1].ownViewMissing)).toEqual(['p2']);
+  });
+
+  it('keeps the time a node lacked a peer through rounds it gave no view', () => {
+    const other = primary('n2', 8, [], 0);
+    const peers = ['p1', 'p2', 'p3'].map((id) => view(id, {}, [other]));
+    const blind = (id: string, self: ClusterNode): TopologyView => ({
+      observerId: id,
+      nodes: [BASE[0], BASE[2], ...[NEW_NODE, other].map((node) => (node.id === id ? self : node))],
+    });
+    const first = blind('n1', { ...NEW_NODE, flags: ['myself', 'master'] });
+    const second = blind('n2', { ...other, flags: ['myself', 'master'] });
+    const both = every([...peers, first, second], 0, LONG_ENOUGH - 2 * ROUND_MS);
+    const oneSilent = { at: LONG_ENOUGH - ROUND_MS, views: [...peers, second], unanswered: ['n1'] };
+    const { found } = judge([...both, oneSilent, { at: LONG_ENOUGH, views: [...peers, first, second] }]);
+
+    expect(found.map((finding) => finding.nodeId)).toEqual(['n1', 'n2']);
+    expect(found[0]).toMatchObject({ confirmed: true, firstSeenAt: 0 });
   });
 
   it('names a new replica one slot owner has not learned, not the slot owner', () => {
@@ -634,6 +748,59 @@ describe('partiallyKnownNodes', () => {
     expect(found[0].address).toBe('10.0.0.7:6379');
   });
 
+  it('takes the address a peer reaches the node at over the one it gives for itself', () => {
+    const inner = { address: '10.0.0.200:6379@16379' };
+    const views = [view('p1'), view('p2', { n1: null }), view('n1', { n1: inner })];
+    const { found } = judge(every(views, 0, LONG_ENOUGH));
+
+    expect(found[0].address).toBe('10.0.0.7:6379');
+    expect(found[0].meet?.command).toBe('CLUSTER MEET 10.0.0.7 6379');
+  });
+
+  it('takes the address its peers reach a node at when only its own view lacks a peer', () => {
+    const inner = { address: '10.0.0.200:6379@16379' };
+    const views = [view('p1'), view('p2'), view('p3'), view('n1', { n1: inner, p2: null })];
+    const { found } = judge(every(views, 0, LONG_ENOUGH));
+
+    expect(found[0]).toMatchObject({ nodeId: 'n1', address: '10.0.0.7:6379' });
+    expect(found[0].meet?.command).toBe('CLUSTER MEET 10.0.0.7 6379');
+  });
+
+  it('falls back on the address the node gives for itself when no peer lists it', () => {
+    const views = [view('p1', { n1: null }), view('p2', { n1: null }), view('n1')];
+    const { found } = judge(every(views, 0, LONG_ENOUGH));
+
+    expect(found[0].address).toBe('10.0.0.7:6379');
+    expect(found[0].meet?.command).toBe('CLUSTER MEET 10.0.0.7 6379');
+  });
+
+  it('counts an IPv4 address and its IPv6 mapped form as the same address', () => {
+    const mapped = { address: '::ffff:10.0.0.7:6379@16379' };
+    const inner = { address: '10.0.0.200:6379@16379' };
+    const plain = [view('p1', { n1: mapped }), view('p2', { n1: null }), view('p3'), view('n1', { n1: inner })];
+    const both = [view('p1', { n1: mapped }), view('p2', { n1: null }), view('p3', { n1: mapped })];
+
+    expect(judge(every(plain, 0, LONG_ENOUGH)).found[0].address).toBe('10.0.0.7:6379');
+    expect(judge(every(both, 0, LONG_ENOUGH)).found[0].meet).toMatchObject({
+      ip: '10.0.0.7',
+      command: 'CLUSTER MEET 10.0.0.7 6379',
+    });
+  });
+
+  it('takes the bus port most peers give, whichever view comes first', () => {
+    const odd = { address: '10.0.0.7:6379@7000' };
+    const usual = { address: '10.0.0.7:6379@7001' };
+    const views = [
+      view('p1', { n1: odd }),
+      view('p2', { n1: null }),
+      view('p3', { n1: usual }),
+      view('n1', { n1: usual }),
+    ];
+    const { found } = judge(every(views, 0, LONG_ENOUGH));
+
+    expect(found[0].meet).toMatchObject({ busPort: 7001, command: 'CLUSTER MEET 10.0.0.7 6379 7001' });
+  });
+
   it('gives no command when no view has an address for the node', () => {
     const views = [view('p1', { n1: null }), view('p2', { n1: null }), view('n1', { n1: { address: ':6379@16379' } })];
     const { found } = judge(every(views, 0, LONG_ENOUGH));
@@ -684,8 +851,15 @@ describe('membershipSightings', () => {
     ];
     const sightings = membershipSightings(views, compareTopologyViews(views));
 
-    expect([...sightings.keys()]).toEqual(['n1']);
+    expect([...sightings.keys()].sort()).toEqual(['n1', 'p2', 'p3']);
     expect(sightings.get('n1')?.map((sighting) => sighting.observerId)).toEqual(['p1']);
+  });
+
+  it('keeps how each view lists a node whose own view lacks a peer', () => {
+    const views = [view('p1'), view('p2'), view('n1', { p2: null })];
+    const sightings = membershipSightings(views, compareTopologyViews(views));
+
+    expect(sightings.get('n1')?.map((sighting) => sighting.observerId)).toEqual(['p1', 'p2', 'n1']);
   });
 
   it('is empty without a membership disagreement', () => {

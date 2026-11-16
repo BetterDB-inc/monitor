@@ -1,4 +1,5 @@
 import type { ClusterNode } from '@app/common/types/metrics.types';
+import { FAILING_FLAGS, compareText } from './topology-divergence';
 
 export interface ObserverSelectionInput {
   nodes: ClusterNode[];
@@ -23,7 +24,6 @@ export interface ObserverSelection {
 
 const UNKNOWN_ZONE = '';
 const UNREACHABLE_FLAGS = ['handshake', 'noaddr'];
-const FAILING_FLAGS = ['fail', 'fail?'];
 const RANK_UNREGISTERED = 1;
 const RANK_FAILING = 2;
 const RANK_SILENT = 4;
@@ -35,11 +35,6 @@ function isPrimary(node: ClusterNode): boolean {
 
 function zoneOf(node: ClusterNode): string {
   return node.availabilityZone || UNKNOWN_ZONE;
-}
-
-function compareText(a: string, b: string): number {
-  if (a < b) return -1;
-  return a > b ? 1 : 0;
 }
 
 export function selectObservers(input: ObserverSelectionInput): ObserverSelection {
