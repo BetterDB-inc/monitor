@@ -420,6 +420,14 @@ export class ConnectionIdResponseDto {
   id: string;
 }
 
+export class ConnectClusterNodeResponseDto {
+  @ApiProperty({ description: 'The connection that reads the node', example: '550e8400-e29b-41d4-a716-446655440000' })
+  id: string;
+
+  @ApiProperty({ description: 'False when a connection already read the node and nothing was added' })
+  created: boolean;
+}
+
 export class SetAutoRegisterDto {
   @ApiProperty({
     description: 'Auto-register discovered nodes (cluster or Sentinel); undefined/null follows CLUSTER_AUTO_REGISTER_NODES or SENTINEL_AUTO_REGISTER_NODES',
