@@ -3,11 +3,13 @@ import type { DivergenceGroup, DivergenceKind, TrackedDisagreement } from '../to
 import {
   DIVERGENCE_SEVERITY_BY_KIND,
   buildDivergenceDetail,
+  buildPartialMembershipDetail,
   divergenceMessage,
   divergenceSeverity,
   outranksSeverity,
   toDivergenceNode,
 } from '../topology-divergence-report';
+import type { PartialMembership } from '../partial-membership';
 import { AnomalySeverity } from '../types';
 
 function clusterNode(id: string, host: string, zone?: string, patch: Partial<ClusterNode> = {}): ClusterNode {
@@ -188,6 +190,8 @@ describe('buildDivergenceDetail', () => {
         ],
         rounds: 3,
         since: 90000,
+        eventId: 'evt-1',
+        eventType: 'topology_divergence',
       },
       {
         kind: 'slot_owner',
@@ -199,7 +203,110 @@ describe('buildDivergenceDetail', () => {
         ],
         rounds: 5,
         since: 85000,
+        eventId: 'evt-1',
+        eventType: 'topology_divergence',
       },
     ]);
+  });
+
+  it('names no event on a disagreement that is still being counted', () => {
+    const detail = buildDivergenceDetail(group([tracked('config_epoch', 'b')]), NODES, {
+      eventId: null,
+      confirmed: false,
+    });
+
+    expect(detail.disagreements).toMatchObject([{ kind: 'config_epoch', eventId: null, eventType: null }]);
+  });
+});
+
+describe('buildPartialMembershipDetail', () => {
+  const membership = tracked('membership', 'n0', {
+    positions: [
+      { value: 'known', observers: ['a'] },
+      { value: 'handshake', observers: ['b'] },
+      { value: 'missing', observers: ['c'] },
+    ],
+    rounds: 20,
+  });
+  const finding: PartialMembership = {
+    signature: 'partial_membership:n0',
+    nodeId: 'n0',
+    address: '10.9.9.9:7000',
+    knownBy: [{ nodeId: 'a', address: '10.0.1.5:6379' }],
+    notKnownBy: [
+      { nodeId: 'b', address: '10.0.2.7:6379', status: 'handshake' },
+      { nodeId: 'c', address: '10.0.3.2:6379', status: 'missing' },
+    ],
+    ownViewMissing: [{ nodeId: 'c', address: '10.0.3.2:6379', status: 'noaddr' }],
+    disagreementKeys: ['membership:n0'],
+    firstSeenAt: 85000,
+    rounds: 20,
+    confirmed: true,
+    meet: {
+      ip: '10.9.9.9',
+      port: 7000,
+      busPort: 17000,
+      command: 'CLUSTER MEET 10.9.9.9 7000',
+      runOn: [
+        { nodeId: 'b', address: '10.0.2.7:6379' },
+        { nodeId: 'c', address: '10.0.3.2:6379' },
+      ],
+    },
+  };
+
+  it('lays out the node, both sets of peers and the command', () => {
+    const detail = buildPartialMembershipDetail(finding, [tracked('config_epoch', 'b'), membership], NODES, {
+      eventId: 'evt-2',
+      confirmed: true,
+    });
+
+    expect(detail).toEqual({
+      eventId: 'evt-2',
+      confirmed: true,
+      since: 85000,
+      node: { nodeId: 'n0', address: '10.9.9.9:7000', role: 'primary' },
+      knownBy: [toDivergenceNode('a', NODES)],
+      notKnownBy: [
+        { ...toDivergenceNode('b', NODES), status: 'handshake' },
+        { ...toDivergenceNode('c', NODES), status: 'missing' },
+      ],
+      ownViewMissing: [{ ...toDivergenceNode('c', NODES), status: 'noaddr' }],
+      command: 'CLUSTER MEET 10.9.9.9 7000',
+      runOn: [toDivergenceNode('b', NODES), toDivergenceNode('c', NODES)],
+      disagreements: [
+        {
+          kind: 'membership',
+          subject: [toDivergenceNode('n0', NODES)],
+          positions: [
+            { value: 'known', observers: [toDivergenceNode('a', NODES)] },
+            { value: 'handshake', observers: [toDivergenceNode('b', NODES)] },
+            { value: 'missing', observers: [toDivergenceNode('c', NODES)] },
+          ],
+          rounds: 20,
+          since: 85000,
+          eventId: 'evt-2',
+          eventType: 'partial_membership',
+        },
+      ],
+    });
+  });
+
+  it('gives no command when the node has no address, and no event while it is still counted', () => {
+    const { meet: _meet, ...unreachable } = finding;
+    const detail = buildPartialMembershipDetail(
+      { ...unreachable, nodeId: 'zz', address: '', confirmed: false },
+      [membership],
+      NODES,
+      { eventId: null, confirmed: false },
+    );
+
+    expect(detail).toMatchObject({
+      eventId: null,
+      confirmed: false,
+      node: { nodeId: 'zz', address: '', role: 'unknown' },
+      command: null,
+      runOn: [],
+      disagreements: [{ kind: 'membership', eventId: null, eventType: null }],
+    });
   });
 });

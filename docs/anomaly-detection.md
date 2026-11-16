@@ -862,7 +862,7 @@ BetterDB never cancels or restarts a migration.
 - slot owner: two views name different owners for the same slots. Slots that the same nodes disagree about in the same way are one disagreement. A slot that joins such a disagreement later is added to the event's slot list in the report once it has disagreed for 3 rounds itself; the message of the event keeps the slots it was raised with. When two nodes claim a slot at the same config epoch, every view is read as giving it to the node with the smaller id, so the order of `CLUSTER NODES` alone never makes a disagreement
 - membership: one view knows the node, another does not or still has it in handshake
 
-**When an event is raised.** A disagreement has to be seen in 3 rounds in a row, about 10 seconds. A disagreement about failure flags also has to last one `cluster-node-timeout` (read from the cluster, 15 seconds when it cannot be read), because nodes legitimately disagree for that long while a failure is being detected. A membership disagreement has to last 60 seconds, so a node that is joining or was just forgotten is not reported. A slot owner disagreement is held back while one of the two owners is still migrating those slots (`MIGRATING`/`IMPORTING` markers, or an unfinished job in `CLUSTER GETSLOTMIGRATIONS` on Valkey 9.0+); when the owners cannot be asked, it is reported.
+**When an event is raised.** A disagreement has to be seen in 3 rounds in a row, about 10 seconds. A disagreement about failure flags also has to last one `cluster-node-timeout` (read from the cluster, 15 seconds when it cannot be read), because nodes legitimately disagree for that long while a failure is being detected. A membership disagreement has to last 60 seconds, so a node that is joining or was just forgotten is not reported. A membership disagreement about a node that is alive and has only partly joined is not part of this event: it raises [`partial_membership`](#partial_membership), with the command that repairs it. A slot owner disagreement is held back while one of the two owners is still migrating those slots (`MIGRATING`/`IMPORTING` markers, or an unfinished job in `CLUSTER GETSLOTMIGRATIONS` on Valkey 9.0+); when the owners cannot be asked, it is reported.
 
 All disagreements that put the same nodes against the rest are one event. The event names the smaller side first:
 
@@ -883,6 +883,37 @@ It is CRITICAL when slot owners are in dispute, because clients can then be sent
 - A partition the monitor is on one side of. The nodes it cannot reach give no view, so there is nothing to compare them with, and no event is raised. They are listed as `unanswered` in the report, whose `status` stays `ok` as long as two views could be compared; when no other node answers at all it says `insufficient_views`. The views it does get then agree that the other nodes are failing. `cluster_state` and the fan-out coverage report that case.
 - The two sides are in the `message` as text only. The webhook payload has no separate field for them; the full lists are in the report.
 
+### partial_membership
+**What it measures**: Whether a node has joined the cluster on every node or only on some. It looks for a node that some sampled views list and others do not have, or still hold in `handshake` or without an address (`noaddr`)
+**Why anomalies matter**: A `CLUSTER MEET` that reached only part of the cluster, or a cluster bus port that is blocked between two nodes, leaves a node that some peers talk to and others never learn. Each node's own view looks fine, and the cluster does not repair it while the handshake keeps failing
+**Typical baseline**: Every sampled view lists the same nodes
+**Source**: The views of the [`topology_divergence`](#topology_divergence) round. No extra command is sent
+**Detection method**: State-based detector (not z-score based). It runs on gossip clusters only, and not at all when `ANOMALY_TOPOLOGY_DIVERGENCE_ENABLED` is off.
+
+**What counts.** A broken link is a peer that answered and lacks a node another view lists: the node is missing from its view, or is there in `handshake` or `noaddr`. A peer that gave no view is never counted as lacking a node. A stuck join usually shows in both directions: two peers lack the new node, and the new node's own view lacks those two peers. All links that share a node are one finding, filed under the node that takes part in most of them. On a tie it is the node that already has an open event, then the one that holds no slots and is no replica, then the smaller id.
+
+A node whose own view could not be read is only counted when a peer lists it without `fail` or `fail?`. When every peer that lists it flags it as failing, it is half removed, not half joined, and `CLUSTER MEET` is the wrong advice: that case stays a membership disagreement of `topology_divergence`.
+
+**When an event is raised.** The finding has to be seen in 3 rounds in a row and to last 90 seconds. `CLUSTER FORGET` bans a node for 60 seconds and a forgotten node that is still alive comes back through gossip right after, so a shorter wait would report it. A node that joins normally is known everywhere well inside that time and raises nothing. There is one WARNING per node, with the node's address as `nodeAddr`:
+
+```
+Node 10.0.0.7:6379 has only partly joined the cluster for 95s. Known by 10.0.0.1:6379. Not known by 10.0.0.2:6379 (missing), 10.0.0.3:6379 (stuck in handshake). Its own view is missing 10.0.0.2:6379, 10.0.0.3:6379. Run `CLUSTER MEET 10.0.0.7 6379` on 10.0.0.2:6379 and 10.0.0.3:6379. If it still does not join, check that cluster bus port 16379 is reachable between them. BetterDB does not run this command.
+```
+
+The text is written when the event is raised; [`GET /api/anomaly/topology-divergence`](#get-topology-divergence) returns the current lists in `partialMembership`.
+
+**The command.** `CLUSTER MEET` run on one node for another repairs that pair in both directions, so the event gives one command, naming the half-joined node, and the peers to run it on: every peer that lacks the node and every peer the node's own view is missing. Running it on a third node that knows both fixes neither. The address is the one most views that list the node agree on. The bus port is added as a third argument when it is not the port plus 10000. When no view has an address for the node, the message says so and gives no command. BetterDB never sends the command. If the cause is a blocked bus port the `MEET` does not hold, which is why the message names the port to check.
+
+**When it closes.** The event closes after 3 compared rounds in a row without the finding: every view that answers lists the node and the node lists them, or no view lists it any more. A round in which the peers on one side of its links gave no view, or fewer than two views could be read, is neither: the event stays open, for at most 5 minutes. An event that is resolved by hand is raised again while the node is still half known. The event of a connection that is removed is closed. After a restart the open event is picked up instead of raised a second time. When the node a finding is filed under changes, the old event closes and a new one opens.
+
+**How it relates to `topology_divergence`.** A membership disagreement that belongs to a finding here does not count toward a `topology_divergence` event. Everything else is left as it is. When the half-joined node's own view lacks a primary, that view names no owner for the primary's slots either, and `topology_divergence` raises its CRITICAL slot owner event next to this one.
+
+**What it cannot see.**
+
+- Nodes that were not sampled. Both lists name sampled peers only, and a node all sampled views agree on is not reported. No round asks more than 12 nodes.
+- A cluster watched only through agent connections, which is not sampled (see [`topology_divergence`](#topology_divergence)).
+- Why the join is stuck. The event shows which pairs do not know each other, not whether a firewall, a wrong address or a missed `MEET` caused it.
+
 ## Configuration
 
 ### Environment Variables
@@ -902,7 +933,7 @@ ANOMALY_CACHE_TTL_MS=3600000
 # Prometheus metrics update interval (default: 30000 = 30 seconds)
 ANOMALY_PROMETHEUS_INTERVAL_MS=30000
 
-# Cluster view divergence (topology_divergence), gossip clusters only
+# Cluster view divergence (topology_divergence, partial_membership), gossip clusters only
 # Compare the cluster views of several nodes (default: true)
 ANOMALY_TOPOLOGY_DIVERGENCE_ENABLED=true
 # Nodes asked per availability zone (default: 1)
@@ -1312,9 +1343,11 @@ GET /api/anomaly/topology-divergence
 X-Connection-ID: <connection-id>
 ```
 
-What the last [`topology_divergence`](#topology_divergence) round of the connection's cluster saw. The connection header is required. Any connection that watches the cluster returns the same report. It is kept in memory and rebuilt by the first round after a restart.
+What the last [`topology_divergence`](#topology_divergence) round of the connection's cluster saw, with the [`partial_membership`](#partial_membership) findings of the same round. The connection header is required. Any connection that watches the cluster returns the same report. It is kept in memory and rebuilt by the first round after a restart.
 
-`status` is `ok` when at least two views were compared. It means the views that answered were compared, not that the whole cluster agrees: a node listed in `unanswered` gave no view, and a node that was not asked is not in the report at all. `status` is `insufficient_views` when only the connection's own view could be read, and `not_sampled` when no round has run: the connection is not a gossip cluster, the check is off, or the first round is still to come. `observers` are the nodes asked in the round and `unanswered` those that gave no view. Each entry of `divergences` is one group of nodes against the rest: `sides[0]` is the smaller side. `confirmed` is `false` while the disagreement is still being counted and no event is open; `eventId` is then `null`. `positions` lists, for each disagreement, what was claimed and which nodes claimed it. For `failure_flags` the value is `ok` or `failing` (the view flags the node `fail?` or `fail`), for `config_epoch` the epoch, for `slot_owner` the node id of the owner or `unassigned`, and for `membership` one of `known`, `handshake`, `noaddr` or `missing`. `rounds` is the number of rounds in a row the disagreement was seen and `since` when it was first seen.
+`status` is `ok` when at least two views were compared. It means the views that answered were compared, not that the whole cluster agrees: a node listed in `unanswered` gave no view, and a node that was not asked is not in the report at all. `status` is `insufficient_views` when only the connection's own view could be read, and `not_sampled` when no round has run: the connection is not a gossip cluster, the check is off, or the first round is still to come. `observers` are the nodes asked in the round and `unanswered` those that gave no view. Each entry of `divergences` is one group of nodes against the rest: `sides[0]` is the smaller side. `confirmed` is `false` while the disagreement is still being counted and no event is open; `eventId` is then `null`. `positions` lists, for each disagreement, what was claimed and which nodes claimed it. For `failure_flags` the value is `ok` or `failing` (the view flags the node `fail?` or `fail`), for `config_epoch` the epoch, for `slot_owner` the node id of the owner or `unassigned`, and for `membership` one of `known`, `handshake`, `noaddr` or `missing`. `rounds` is the number of rounds in a row the disagreement was seen and `since` when it was first seen. Each disagreement also carries the `eventId` and `eventType` (`topology_divergence` or `partial_membership`) of the open event that holds it; both are `null` while it is still being counted.
+
+Each entry of `partialMembership` is one node only part of the cluster knows: `node`, the peers that list it (`knownBy`), the peers that do not (`notKnownBy`, each with `status` `missing`, `handshake` or `noaddr`), the peers its own view lacks (`ownViewMissing`, same `status`), the `command` to run (`null` when no view has an address for the node) and the peers to run it on (`runOn`). `eventId`, `confirmed` and `since` read as in `divergences`. Its `disagreements` are the membership disagreements behind it; a disagreement listed here is not repeated under `divergences`.
 
 **Response**:
 ```json
@@ -1348,7 +1381,36 @@ What the last [`topology_divergence`](#topology_divergence) round of the connect
             { "value": "ok", "observers": [{ "nodeId": "9e3f1a2b44cc7b2e9d3a6b8c0e4f2a3b5c7d9e1f", "address": "10.0.3.2:6379", "role": "primary", "availabilityZone": "eu-west-1c" }] }
           ],
           "rounds": 4,
-          "since": 1704067185000
+          "since": 1704067185000,
+          "eventId": "0b9d2c1e-6f3a-4c57-9a41-2d8e7b5f1c30",
+          "eventType": "topology_divergence"
+        }
+      ]
+    }
+  ],
+  "partialMembership": [
+    {
+      "eventId": "5a7c1f0e-2b6d-4e8a-b3c9-7d1e4f6a8b20",
+      "confirmed": true,
+      "since": 1704067095000,
+      "node": { "nodeId": "b1e4f6a8c2d0e1f3a5b7c9d3f2a9c1e77aa5d0c9", "address": "10.0.4.9:6379", "role": "primary" },
+      "knownBy": [{ "nodeId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d", "address": "10.0.1.5:6379", "role": "primary", "availabilityZone": "eu-west-1a" }],
+      "notKnownBy": [{ "nodeId": "7c1d0e2f55bb6a1d8c2f5a7b9d3e1f2a4b6c8d0e", "address": "10.0.2.7:6379", "role": "primary", "availabilityZone": "eu-west-1b", "status": "handshake" }],
+      "ownViewMissing": [],
+      "command": "CLUSTER MEET 10.0.4.9 6379",
+      "runOn": [{ "nodeId": "7c1d0e2f55bb6a1d8c2f5a7b9d3e1f2a4b6c8d0e", "address": "10.0.2.7:6379", "role": "primary", "availabilityZone": "eu-west-1b" }],
+      "disagreements": [
+        {
+          "kind": "membership",
+          "subject": [{ "nodeId": "b1e4f6a8c2d0e1f3a5b7c9d3f2a9c1e77aa5d0c9", "address": "10.0.4.9:6379", "role": "primary" }],
+          "positions": [
+            { "value": "handshake", "observers": [{ "nodeId": "7c1d0e2f55bb6a1d8c2f5a7b9d3e1f2a4b6c8d0e", "address": "10.0.2.7:6379", "role": "primary", "availabilityZone": "eu-west-1b" }] },
+            { "value": "known", "observers": [{ "nodeId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d", "address": "10.0.1.5:6379", "role": "primary", "availabilityZone": "eu-west-1a" }] }
+          ],
+          "rounds": 22,
+          "since": 1704067095000,
+          "eventId": "5a7c1f0e-2b6d-4e8a-b3c9-7d1e4f6a8b20",
+          "eventType": "partial_membership"
         }
       ]
     }

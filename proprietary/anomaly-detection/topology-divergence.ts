@@ -474,16 +474,16 @@ export function groupDivergences(tracked: TrackedDisagreement[]): DivergenceGrou
     .sort((a, b) => compareText(a.signature, b.signature));
 }
 
-export interface OpenDivergence {
-  group?: DivergenceGroup;
+export interface OpenDivergence<G = DivergenceGroup> {
+  group?: G;
   lastCountedAt: number;
   clean: number;
 }
 
-export function settleOpenDivergences(input: {
-  open: Map<string, OpenDivergence>;
+export function settleOpenDivergences<G extends { signature: string } = DivergenceGroup>(input: {
+  open: Map<string, OpenDivergence<G>>;
   openSignatures: Iterable<string>;
-  confirmed: DivergenceGroup[];
+  confirmed: G[];
   pendingSignatures: ReadonlySet<string>;
   comparable: boolean;
   at: number;

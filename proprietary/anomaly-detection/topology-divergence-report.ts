@@ -1,5 +1,6 @@
 import type { ClusterNode } from '@app/common/types/metrics.types';
 import type { DivergenceGroup, DivergenceKind, TrackedDisagreement } from './topology-divergence';
+import type { MembershipGap, MembershipPeer, PartialMembership } from './partial-membership';
 import { AnomalySeverity } from './types';
 
 export interface DivergenceNode {
@@ -22,6 +23,32 @@ export interface DivergenceDetailDisagreement {
   positions: DivergenceDetailPosition[];
   rounds: number;
   since: number;
+  eventId: string | null;
+  eventType: DivergenceEventType | null;
+}
+
+export type DivergenceEventType = 'topology_divergence' | 'partial_membership';
+
+export interface DivergenceEventState {
+  eventId: string | null;
+  confirmed: boolean;
+}
+
+export interface PartialMembershipGapNode extends DivergenceNode {
+  status: MembershipGap;
+}
+
+export interface PartialMembershipDetail {
+  eventId: string | null;
+  confirmed: boolean;
+  since: number;
+  node: DivergenceNode;
+  knownBy: DivergenceNode[];
+  notKnownBy: PartialMembershipGapNode[];
+  ownViewMissing: PartialMembershipGapNode[];
+  command: string | null;
+  runOn: DivergenceNode[];
+  disagreements: DivergenceDetailDisagreement[];
 }
 
 export interface TopologyDivergenceDetail {
@@ -38,6 +65,7 @@ export interface TopologyDivergenceReport {
   observers: DivergenceNode[];
   unanswered: DivergenceNode[];
   divergences: TopologyDivergenceDetail[];
+  partialMembership: PartialMembershipDetail[];
 }
 
 export const DIVERGENCE_SEVERITY_BY_KIND: Record<DivergenceKind, AnomalySeverity> = {
@@ -135,24 +163,67 @@ export function divergenceSeverity(group: DivergenceGroup): AnomalySeverity {
   return SEVERITY_ORDER[Math.max(...ranks)];
 }
 
+function toDetailDisagreement(
+  disagreement: TrackedDisagreement,
+  nodes: ReadonlyMap<string, ClusterNode>,
+  held: { eventId: string | null; eventType: DivergenceEventType },
+): DivergenceDetailDisagreement {
+  const named = (ids: string[]) => ids.map((id) => toDivergenceNode(id, nodes));
+  return {
+    kind: disagreement.kind,
+    subject: named(disagreement.subjectIds),
+    ...(disagreement.slots ? { slots: disagreement.slots } : {}),
+    positions: disagreement.positions.map((position) => ({
+      value: position.value,
+      observers: named(position.observers),
+    })),
+    rounds: disagreement.rounds,
+    since: disagreement.firstSeenAt,
+    eventId: held.eventId,
+    eventType: held.eventId === null ? null : held.eventType,
+  };
+}
+
 export function buildDivergenceDetail(
   group: DivergenceGroup,
   nodes: ReadonlyMap<string, ClusterNode>,
-  state: { eventId: string | null; confirmed: boolean },
+  state: DivergenceEventState,
 ): TopologyDivergenceDetail {
   const named = (ids: string[]) => ids.map((id) => toDivergenceNode(id, nodes));
+  const held = { eventId: state.eventId, eventType: 'topology_divergence' as const };
   return {
     eventId: state.eventId,
     confirmed: state.confirmed,
     since: divergenceSince(group),
     sides: [{ nodes: named(group.dissent) }, { nodes: named(group.others) }],
-    disagreements: group.disagreements.map((d) => ({
-      kind: d.kind,
-      subject: named(d.subjectIds),
-      ...(d.slots ? { slots: d.slots } : {}),
-      positions: d.positions.map((position) => ({ value: position.value, observers: named(position.observers) })),
-      rounds: d.rounds,
-      since: d.firstSeenAt,
-    })),
+    disagreements: group.disagreements.map((disagreement) => toDetailDisagreement(disagreement, nodes, held)),
+  };
+}
+
+export function buildPartialMembershipDetail(
+  finding: PartialMembership,
+  disagreements: TrackedDisagreement[],
+  nodes: ReadonlyMap<string, ClusterNode>,
+  state: DivergenceEventState,
+): PartialMembershipDetail {
+  const named = (peer: MembershipPeer): DivergenceNode => {
+    const node = toDivergenceNode(peer.nodeId, nodes);
+    return { ...node, address: peer.address || node.address };
+  };
+  const keys = new Set(finding.disagreementKeys);
+  const held = { eventId: state.eventId, eventType: 'partial_membership' as const };
+  return {
+    eventId: state.eventId,
+    confirmed: state.confirmed,
+    since: finding.firstSeenAt,
+    node: named(finding),
+    knownBy: finding.knownBy.map(named),
+    notKnownBy: finding.notKnownBy.map((gap) => ({ ...named(gap), status: gap.status })),
+    ownViewMissing: finding.ownViewMissing.map((gap) => ({ ...named(gap), status: gap.status })),
+    command: finding.meet?.command ?? null,
+    runOn: (finding.meet?.runOn ?? []).map(named),
+    disagreements: disagreements
+      .filter((disagreement) => keys.has(disagreement.key))
+      .map((disagreement) => toDetailDisagreement(disagreement, nodes, held)),
   };
 }

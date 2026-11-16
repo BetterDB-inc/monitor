@@ -265,8 +265,16 @@ import {
   TopologyDivergenceMonitor,
 } from './topology-divergence-monitor';
 import {
+  type PartialMembership,
+  partialMembershipMessage,
+  partialMembershipNodeId,
+  partiallyKnownNodes,
+  unclaimedByPartialMembership,
+} from './partial-membership';
+import {
   type TopologyDivergenceReport,
   buildDivergenceDetail,
+  buildPartialMembershipDetail,
   divergenceMessage,
   divergenceSeverity,
   outranksSeverity,
@@ -598,6 +606,7 @@ const ADOPTED_METRICS: MetricType[] = [
   MetricType.RESHARD_SHARD_SKEW,
   MetricType.HOT_SHARD,
   MetricType.TOPOLOGY_DIVERGENCE,
+  MetricType.PARTIAL_MEMBERSHIP,
   MetricType.REPLICA_SLOT_STATE,
   MetricType.RAFT_HEALTH,
   MetricType.SLOT_MIGRATION,
@@ -836,6 +845,7 @@ export class AnomalyService
   private topologyDivergenceEventOwners = new Map<string, string>();
   private topologyDivergenceEventSeverity = new Map<string, AnomalySeverity>();
   private topologyDivergenceOpen = new Map<string, Map<string, OpenDivergence>>();
+  private partialMembershipOpen = new Map<string, Map<string, OpenDivergence<PartialMembership>>>();
   private topologyDivergenceAnchors = new Map<string, string>();
   private topologyDivergenceNodeTimeouts = new Map<string, { ms: number; readAt: number }>();
   private topologyDivergenceSettledSlots = new Map<string, Set<string>>();
@@ -2699,6 +2709,7 @@ export class AnomalyService
       this.adoptReshardEvents(connectionId, rows(MetricType.RESHARD_SHARD_SKEW));
       this.adoptHotShardEvents(connectionId, rows(MetricType.HOT_SHARD));
       this.adoptTopologyDivergenceEvents(connectionId, rows(MetricType.TOPOLOGY_DIVERGENCE));
+      this.adoptTopologyDivergenceEvents(connectionId, rows(MetricType.PARTIAL_MEMBERSHIP));
       this.adoptReplicaSlotEvents(connectionId, rows(MetricType.REPLICA_SLOT_STATE));
       this.adoptSlotMigrationEvents(
         connectionId,
@@ -7397,30 +7408,48 @@ export class AnomalyService
         membership: TOPOLOGY_DIVERGENCE_MEMBERSHIP_MIN_AGE_MS,
       },
     };
-    const confirmed = comparable
-      ? await this.withoutMigratingSlots(
-          ctx,
-          round,
-          confirmedDisagreements(round.disagreements, round.at, rule),
-          canDial,
-        )
-      : [];
-    const groups = groupDivergences(confirmed);
-    const open = this.connectionClaims(
-      this.topologyDivergenceOpen,
-      clusterKey,
-      () => new Map<string, OpenDivergence>(),
-    );
     const eventIds = this.connectionClaims(
       this.topologyDivergenceEventIds,
       ctx.connectionId,
       () => new Map<string, string>(),
     );
+    const partial = this.partiallyKnownNodesOf(round, eventIds);
+    const unclaimed = unclaimedByPartialMembership(round.disagreements, partial);
+    const confirmed = comparable
+      ? await this.withoutMigratingSlots(
+          ctx,
+          round,
+          confirmedDisagreements(unclaimed, round.at, rule),
+          canDial,
+        )
+      : [];
+    const groups = groupDivergences(confirmed);
+    const confirmedPartial = comparable ? partial.filter((finding) => finding.confirmed) : [];
+    const open = this.connectionClaims(
+      this.topologyDivergenceOpen,
+      clusterKey,
+      () => new Map<string, OpenDivergence>(),
+    );
+    const openPartial = this.connectionClaims(
+      this.partialMembershipOpen,
+      clusterKey,
+      () => new Map<string, OpenDivergence<PartialMembership>>(),
+    );
+    const isPartial = (signature: string) => partialMembershipNodeId(signature) !== null;
     const kept = settleOpenDivergences({
       open,
-      openSignatures: [...eventIds.keys()],
+      openSignatures: [...eventIds.keys()].filter((signature) => !isPartial(signature)),
       confirmed: groups,
-      pendingSignatures: new Set(groupDivergences(round.disagreements).map((group) => group.signature)),
+      pendingSignatures: new Set(groupDivergences(unclaimed).map((group) => group.signature)),
+      comparable,
+      at: round.at,
+      minRounds,
+    });
+    const keptPartial = settleOpenDivergences({
+      open: openPartial,
+      openSignatures: [...eventIds.keys()].filter(isPartial),
+      confirmed: confirmedPartial,
+      pendingSignatures: new Set(partial.map((finding) => finding.signature)),
       comparable,
       at: round.at,
       minRounds,
@@ -7439,8 +7468,23 @@ export class AnomalyService
       buildEvent: (group) => this.buildTopologyDivergenceEvent(ctx, timestamp, round, group),
       eventIdsByConn: this.topologyDivergenceEventIds,
       metricType: MetricType.TOPOLOGY_DIVERGENCE,
-      preserveSignature: (signature) => kept.has(signature),
+      preserveSignature: (signature) => isPartial(signature) || kept.has(signature),
       contextOf: (group) => this.nodeContext(ctx, this.topologyDivergenceNodeAddr(round, group)),
+      ownerOf: (eventId) => this.topologyDivergenceEventOwners.get(eventId),
+    });
+    await this.applyTopologyPersistenceGate({
+      ctx,
+      timestamp,
+      findings: confirmedPartial,
+      signatureOf: (finding) => finding.signature,
+      firstSeenByConn: this.topologyDivergenceFirstSeen,
+      activeByConn: this.activeTopologyDivergences,
+      minPersistMs: 0,
+      buildEvent: (finding) => this.buildPartialMembershipEvent(ctx, timestamp, round, finding),
+      eventIdsByConn: this.topologyDivergenceEventIds,
+      metricType: MetricType.PARTIAL_MEMBERSHIP,
+      preserveSignature: (signature) => !isPartial(signature) || keptPartial.has(signature),
+      contextOf: (finding) => this.nodeContext(ctx, finding.address || undefined),
       ownerOf: (eventId) => this.topologyDivergenceEventOwners.get(eventId),
     });
 
@@ -7449,12 +7493,35 @@ export class AnomalyService
         open.set(group.signature, { group, lastCountedAt: round.at, clean: 0 });
       }
     }
+    for (const finding of confirmedPartial) {
+      if (eventIds.has(finding.signature) && !openPartial.get(finding.signature)?.group) {
+        openPartial.set(finding.signature, { group: finding, lastCountedAt: round.at, clean: 0 });
+      }
+    }
     const tracked = new Set([...this.topologyDivergenceEventIds.values()].flatMap((ids) => [...ids.values()]));
     for (const eventId of [...this.topologyDivergenceEventOwners.keys()]) {
       if (tracked.has(eventId)) continue;
       this.topologyDivergenceEventOwners.delete(eventId);
       this.topologyDivergenceEventSeverity.delete(eventId);
     }
+  }
+
+  private partiallyKnownNodesOf(
+    round: DivergenceRoundResult,
+    eventIds: ReadonlyMap<string, string> | undefined,
+  ): PartialMembership[] {
+    const openNodeIds = [...(eventIds?.keys() ?? [])]
+      .map(partialMembershipNodeId)
+      .filter((nodeId): nodeId is string => nodeId !== null);
+    return partiallyKnownNodes({
+      disagreements: round.disagreements,
+      sightings: round.sightings,
+      nodes: round.nodes,
+      selves: round.selves,
+      at: round.at,
+      minRounds: this.topologyDivergenceSettings.minRounds,
+      openNodeIds: new Set(openNodeIds),
+    });
   }
 
   private async closeOutrankedTopologyDivergences(
@@ -7653,6 +7720,33 @@ export class AnomalyService
     };
   }
 
+  private buildPartialMembershipEvent(
+    ctx: ConnectionContext,
+    timestamp: number,
+    round: DivergenceRoundResult,
+    finding: PartialMembership,
+  ): AnomalyEvent {
+    const id = randomUUID();
+    this.topologyDivergenceEventOwners.set(id, ctx.connectionId);
+    return {
+      id,
+      timestamp,
+      metricType: MetricType.PARTIAL_MEMBERSHIP,
+      anomalyType: AnomalyType.SPIKE,
+      severity: AnomalySeverity.WARNING,
+      value: finding.notKnownBy.length + finding.ownViewMissing.length,
+      baseline: 0,
+      zScore: 0,
+      stdDev: 0,
+      threshold: this.topologyDivergenceSettings.minRounds,
+      message: partialMembershipMessage(finding, round.at),
+      resolved: false,
+      connectionId: ctx.connectionId,
+      ...(finding.address ? { nodeAddr: finding.address } : {}),
+      dedupeKey: finding.signature,
+    };
+  }
+
   private adoptTopologyDivergenceEvents(connectionId: string, open: StoredAnomalyEvent[]): void {
     const eventIds = this.topologyDivergenceEventIds.get(connectionId) ?? new Map<string, string>();
     const tracked = new Set(eventIds.values());
@@ -7686,6 +7780,7 @@ export class AnomalyService
       if (watched.has(clusterKey)) continue;
       this.topologyDivergenceAnchors.delete(clusterKey);
       this.topologyDivergenceOpen.delete(clusterKey);
+      this.partialMembershipOpen.delete(clusterKey);
       this.topologyDivergenceNodeTimeouts.delete(clusterKey);
       this.topologyDivergenceSettledSlots.delete(clusterKey);
       this.topologyDivergence.forgetCluster(clusterKey);
@@ -10560,7 +10655,14 @@ export class AnomalyService
     const clusterKey = this.connectionClusterKeys.get(connectionId);
     const round = clusterKey ? this.topologyDivergence.lastRound(clusterKey) : undefined;
     if (!clusterKey || !round) {
-      return { status: 'not_sampled', sampledAt: null, observers: [], unanswered: [], divergences: [] };
+      return {
+        status: 'not_sampled',
+        sampledAt: null,
+        observers: [],
+        unanswered: [],
+        divergences: [],
+        partialMembership: [],
+      };
     }
     const eventIds = this.topologyDivergenceEventIds.get(round.anchorConnectionId);
     const open = this.topologyDivergenceOpen.get(clusterKey);
@@ -10570,15 +10672,31 @@ export class AnomalyService
       if (this.eventInMemory(eventId)?.resolved === true) return [];
       return [buildDivergenceDetail(entry.group, round.nodes, { eventId, confirmed: true })];
     });
-    const counting = groupDivergences(round.disagreements)
+    const partial = this.partiallyKnownNodesOf(round, eventIds);
+    const counting = groupDivergences(unclaimedByPartialMembership(round.disagreements, partial))
       .filter((group) => !open?.has(group.signature))
       .map((group) => buildDivergenceDetail(group, round.nodes, { eventId: null, confirmed: false }));
+    const seen = new Map(partial.map((finding) => [finding.signature, finding]));
+    const openPartial = this.partialMembershipOpen.get(clusterKey);
+    const raisedPartial = [...(openPartial ?? [])].flatMap(([signature, entry]) => {
+      const eventId = eventIds?.get(signature);
+      const finding = seen.get(signature) ?? entry.group;
+      if (!finding || eventId === undefined) return [];
+      if (this.eventInMemory(eventId)?.resolved === true) return [];
+      return [buildPartialMembershipDetail(finding, round.disagreements, round.nodes, { eventId, confirmed: true })];
+    });
+    const countingPartial = partial
+      .filter((finding) => !openPartial?.has(finding.signature))
+      .map((finding) =>
+        buildPartialMembershipDetail(finding, round.disagreements, round.nodes, { eventId: null, confirmed: false }),
+      );
     return {
       status: round.status,
       sampledAt: round.at,
       observers: round.observers.map((id) => toDivergenceNode(id, round.nodes)),
       unanswered: round.unanswered.map((id) => toDivergenceNode(id, round.nodes)),
       divergences: [...raised, ...counting],
+      partialMembership: [...raisedPartial, ...countingPartial],
     };
   }
 
