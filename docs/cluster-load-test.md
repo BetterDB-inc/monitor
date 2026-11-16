@@ -100,6 +100,8 @@ measured for small clusters.
 - **KB/s received** is dominated by `CLUSTER NODES` on large clusters. Its
   reply grows with the number of nodes, and so does the number of nodes it is
   read from.
+- **CLUSTER NODES sent by** names the poller and the function that sent each
+  read, so the cost of the cluster map can be traced to its callers.
 - **Events** lists what would have been sent to webhooks. `cluster.failover`
   is counted before the license check, so it shows up without a license.
 - Run it on a quiet machine. The API and the fake cluster each use one CPU

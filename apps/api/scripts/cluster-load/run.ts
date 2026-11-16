@@ -197,6 +197,12 @@ function details(result: ScenarioResult): string {
         poller.commandsPerSecond,
       ]),
   );
+  const callers = table(
+    ['CLUSTER NODES sent by', 'Call site', 'Per second'],
+    result.clusterNodesCallers
+      .filter((entry) => entry.perSecond >= 0.1)
+      .map((entry) => [entry.poller, entry.caller, entry.perSecond]),
+  );
   const events = Object.entries(result.webhookEvents)
     .map(([event, count]) => `${event}: ${count}`)
     .join(', ');
@@ -207,6 +213,8 @@ function details(result: ScenarioResult): string {
     commands,
     '',
     pollers,
+    '',
+    callers,
     '',
     `Webhook events dispatched in the window: ${events || 'none'}.`,
     `Warnings: ${result.log.warn}, errors: ${result.log.error}.`,

@@ -61,6 +61,7 @@ export interface ScenarioResult {
     eventLoopDelayMaxMs: number;
   };
   webhookEvents: Record<string, number>;
+  clusterNodesCallers: Array<{ poller: string; caller: string; perSecond: number }>;
   log: { warn: number; error: number; top: Array<{ message: string; count: number }> };
 }
 
@@ -72,6 +73,24 @@ const mb = (bytes: number): number => round(bytes / 1024 / 1024);
 
 const percentile = (sorted: number[], fraction: number): number =>
   sorted.length === 0 ? 0 : sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * fraction))];
+
+const APP_FRAME = /at (?:async )?(\S+) \(.*?\/(?:apps\/api\/src|proprietary)\/(.*?)\.ts:\d+:\d+\)/;
+
+function callSite(): string {
+  const limit = Error.stackTraceLimit;
+  Error.stackTraceLimit = 50;
+  const stack = new Error().stack ?? '';
+  Error.stackTraceLimit = limit;
+  const frames: string[] = [];
+  for (const line of stack.split('\n')) {
+    const match = APP_FRAME.exec(line);
+    if (!match || match[2].includes('database/adapters/')) continue;
+    const frame = `${match[2].split('/').pop()}: ${match[1]}`;
+    if (!frames.includes(frame)) frames.push(frame);
+    if (frames.length === 2) break;
+  }
+  return frames.length ? frames.join(' < ') : 'unknown';
+}
 
 class CountingLogger {
   warnCount = 0;
@@ -151,11 +170,17 @@ export async function runScenario(options: ScenarioOptions): Promise<ScenarioRes
 
   const context = new AsyncLocalStorage<string>();
   const clientCommands = new Map<string, number>();
+  const clusterNodesCallers = new Map<string, number>();
   const prototype = Valkey.prototype as unknown as { sendCommand: (...args: unknown[]) => unknown };
   const sendCommand = prototype.sendCommand;
   prototype.sendCommand = function (this: unknown, ...args: unknown[]) {
     const owner = context.getStore() ?? BACKGROUND;
     clientCommands.set(owner, (clientCommands.get(owner) ?? 0) + 1);
+    const command = args[0] as { name?: string; args?: unknown[] } | undefined;
+    if (command?.name?.toLowerCase() === 'cluster' && String(command.args?.[0]).toLowerCase() === 'nodes') {
+      const key = `${owner}\n${callSite()}`;
+      clusterNodesCallers.set(key, (clusterNodesCallers.get(key) ?? 0) + 1);
+    }
     return sendCommand.apply(this, args);
   };
 
@@ -229,6 +254,7 @@ export async function runScenario(options: ScenarioOptions): Promise<ScenarioRes
   const loopDelay = monitorEventLoopDelay({ resolution: 10 });
   await cluster.resetStats();
   clientCommands.clear();
+  clusterNodesCallers.clear();
   webhookEvents.clear();
   logger.reset();
   for (const durations of tickDurations.values()) durations.length = 0;
@@ -250,6 +276,12 @@ export async function runScenario(options: ScenarioOptions): Promise<ScenarioRes
   const stats = await cluster.stats();
   const ticks = new Map([...tickDurations].map(([name, durations]) => [name, [...durations].sort((a, b) => a - b)]));
   const commandsByOwner = new Map(clientCommands);
+  const nodesCallers = [...clusterNodesCallers]
+    .map(([key, count]) => {
+      const [poller, caller] = key.split('\n');
+      return { poller, caller, perSecond: round(count / windowSeconds) };
+    })
+    .sort((left, right) => right.perSecond - left.perSecond);
   const connections = registry.list() as Array<{ isConnected: boolean }>;
   (global as { gc?: () => void }).gc?.();
   const memory = process.memoryUsage();
@@ -316,6 +348,7 @@ export async function runScenario(options: ScenarioOptions): Promise<ScenarioRes
       eventLoopDelayMaxMs: round(loopDelay.max / 1e6),
     },
     webhookEvents: Object.fromEntries(webhookEvents),
+    clusterNodesCallers: nodesCallers,
     log: { warn: logger.warnCount, error: logger.errorCount, top: logger.top(8) },
   };
 
