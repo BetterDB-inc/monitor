@@ -59,9 +59,13 @@ const LICENSES: readonly LicenseTier[] = ['pro', 'enterprise', 'community'];
 const PROFILES: readonly ReplyProfile[] = ['realistic', 'empty'];
 const MODES: ReadonlyArray<'seed' | 'auto'> = ['seed', 'auto'];
 
-function rejectValue(flag: string, value: string, expected: string): never {
-  process.stderr.write(`Unknown value "${value}" for ${flag}, expected ${expected}.\n\n${USAGE}`);
+function reject(reason: string): never {
+  process.stderr.write(`${reason}\n\n${USAGE}`);
   process.exit(1);
+}
+
+function rejectValue(flag: string, value: string, expected: string): never {
+  return reject(`Unknown value "${value}" for ${flag}, expected ${expected}.`);
 }
 
 function oneOf<T extends string>(flag: string, value: string, allowed: readonly T[]): T {
@@ -147,7 +151,23 @@ function parseArgs(argv: string[]): CliOptions {
         process.exit(flag === '--help' || flag === '-h' ? 0 : 1);
     }
   }
+  checkCombinations(options);
   return options;
+}
+
+function checkCombinations(options: CliOptions): void {
+  const perShard = options.replicas + 1;
+  for (const nodes of options.nodes) {
+    const size = `--nodes ${nodes} with --replicas ${options.replicas}`;
+    if (nodes % perShard !== 0) {
+      reject(`${size} leaves a shard incomplete, a cluster size must be a multiple of ${perShard}.`);
+    }
+    if (options.hang >= nodes) reject(`--hang ${options.hang} leaves no node answering with --nodes ${nodes}.`);
+    if (options.failover && nodes / perShard < 2) reject(`--failover needs two shards, ${size} makes one.`);
+  }
+  if (options.failover && options.replicas === 0) {
+    reject('--failover needs a replica to promote, --replicas is 0.');
+  }
 }
 
 function failureReason(child: SpawnSyncReturns<string>, timeoutMs: number): string {
@@ -159,9 +179,18 @@ function failureReason(child: SpawnSyncReturns<string>, timeoutMs: number): stri
   return `failed with exit code ${child.status}`;
 }
 
+const resultFileOf = (scenario: ScenarioOptions, workDir: string): string =>
+  join(workDir, `${scenario.nodes}-${scenario.mode}.json`);
+
+function withoutNumbers(scenario: ScenarioOptions, workDir: string, reason: string): InvalidRun {
+  const run: InvalidRun = { options: scenario, invalid: reason };
+  writeFileSync(resultFileOf(scenario, workDir), JSON.stringify(run, null, 2));
+  return run;
+}
+
 function runChild(scenario: ScenarioOptions, workDir: string): ScenarioResult | InvalidRun {
   const label = `${scenario.nodes}-${scenario.mode}`;
-  const resultFile = join(workDir, `${label}.json`);
+  const resultFile = resultFileOf(scenario, workDir);
   const stages = scenario.hang > 0 ? 2 : 1;
   const timeoutMs = scenario.settleTimeoutMs + scenario.warmupMs * stages + scenario.measureMs + CHILD_MARGIN_MS;
   const child = spawnSync(
@@ -194,7 +223,7 @@ function runChild(scenario: ScenarioOptions, workDir: string): ScenarioResult | 
       ?.trim()
       .slice(0, 200);
     process.stderr.write(`Run ${label} ${reason}\n${(child.stderr ?? '').slice(-2000)}\n`);
-    return { options: scenario, invalid: errorLine ? `${reason} (${errorLine})` : reason };
+    return withoutNumbers(scenario, workDir, errorLine ? `${reason} (${errorLine})` : reason);
   }
   return JSON.parse(readFileSync(resultFile, 'utf8')) as ScenarioResult | InvalidRun;
 }
@@ -354,7 +383,7 @@ function main(): void {
           `Skipping ${nodes} nodes, mode ${mode}: ${problem}.\n` +
             `To run it anyway: pnpm load:cluster --nodes ${nodes} --modes ${mode} --force\n`,
         );
-        invalid.push({ options: scenario, invalid: `skipped, ${problem}` });
+        invalid.push(withoutNumbers(scenario, workDir, `skipped, ${problem}`));
         continue;
       }
       process.stderr.write(`Running ${nodes} nodes, mode ${mode}...\n`);

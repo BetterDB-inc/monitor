@@ -98,18 +98,18 @@ pnpm load:cluster --nodes 500 --modes seed
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--nodes 100,250,500` | `100,250,500` | Cluster sizes |
+| `--nodes 100,250,500` | `100,250,500` | Cluster sizes, each a multiple of replicas + 1 |
 | `--modes seed,auto` | both | `seed` = one connection, `auto` = every node registered |
 | `--replicas 1` | `1` | Replicas per shard |
 | `--warmup 30` | `30` | Seconds before measuring starts |
 | `--measure 120` | `120` | Seconds measured |
 | `--settle 300` | `300` | Longest wait for auto-registration to finish, seconds |
-| `--hang 2` | `0` | Nodes that stop answering when the window starts |
-| `--failover` | off | Promote a replica of shard 1 halfway through the window |
+| `--hang 2` | `0` | Nodes that stop answering when the window starts, fewer than the cluster size |
+| `--failover` | off | Promote a replica of shard 1 halfway through the window; needs two shards and a replica |
 | `--license pro` | `pro` | `pro` or `enterprise` = licensed features on, `community` = no license |
 | `--profile realistic` | `realistic` | `realistic` or `empty` replies, see above |
 | `--reply-delay-ms 1` | `0` | Hold every reply back this long, to stand in for a network |
-| `--out <dir>` | none | Also write one JSON file per run and `report.md` |
+| `--out <dir>` | none | Also write one JSON file per run, failed and skipped runs included, and `report.md` |
 | `--force` | off | Run a size even when it does not fit the local port range |
 
 ## Local ports

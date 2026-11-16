@@ -5,6 +5,7 @@ import type { ProcessLoad } from './process-load';
 
 const CALL_TIMEOUT_MS = 30_000;
 const START_TIMEOUT_MS = 120_000;
+const PROCESS_EXITED = 'Fake cluster process exited';
 
 export type RemoteClusterStats = FakeClusterStats & { load: ProcessLoad };
 
@@ -28,13 +29,8 @@ export class RemoteCluster {
       if (message.error) waiter.reject(new Error(message.error));
       else waiter.resolve(message.result);
     });
-    child.on('exit', () => {
-      for (const waiter of this.pending.values()) {
-        clearTimeout(waiter.timer);
-        waiter.reject(new Error('Fake cluster process exited'));
-      }
-      this.pending.clear();
-    });
+    child.on('exit', () => this.rejectPending(new Error(PROCESS_EXITED)));
+    child.on('error', (failure) => this.rejectPending(failure));
   }
 
   static async start(options: FakeClusterOptions): Promise<RemoteCluster> {
@@ -82,6 +78,7 @@ export class RemoteCluster {
   }
 
   private request(method: string, timeoutMs: number, ...args: unknown[]): Promise<unknown> {
+    if (!this.child.connected) return Promise.reject(new Error(PROCESS_EXITED));
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -89,7 +86,19 @@ export class RemoteCluster {
         reject(new Error(`Fake cluster did not answer "${method}" within ${timeoutMs / 1000}s`));
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
-      this.child.send({ id, method, args });
+      this.child.send({ id, method, args }, (failure) => {
+        if (!failure || !this.pending.delete(id)) return;
+        clearTimeout(timer);
+        reject(failure);
+      });
     });
+  }
+
+  private rejectPending(reason: Error): void {
+    for (const waiter of this.pending.values()) {
+      clearTimeout(waiter.timer);
+      waiter.reject(reason);
+    }
+    this.pending.clear();
   }
 }
