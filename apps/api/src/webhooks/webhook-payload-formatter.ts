@@ -5,6 +5,8 @@ const TITLE_LIMIT = 120;
 const SLACK_TEXT_LIMIT = 3000;
 const DISCORD_DESCRIPTION_LIMIT = 4096;
 const NODE_LIST_LIMIT = 5;
+const SLACK_NODE_FIELD_LIMIT = 1900;
+const DISCORD_FIELD_VALUE_LIMIT = 1024;
 const SHARD_ID_LENGTH = 8;
 const ANOMALY_PAGE_EVENTS: ReadonlySet<string> = new Set([
   'anomaly.detected',
@@ -141,7 +143,12 @@ export function toSlack(payload: WebhookPayload, appBaseUrl?: string): Record<st
     });
   }
   const node = nodeField(payload.data ?? {});
-  if (node) fields.push({ type: 'mrkdwn', text: `*${node.name}:*\n${escapeSlack(node.value)}` });
+  if (node) {
+    fields.push({
+      type: 'mrkdwn',
+      text: `*${node.name}:*\n${escapeWithin(node.value, SLACK_NODE_FIELD_LIMIT, escapeSlack)}`,
+    });
+  }
   const message = truncatedMessage(payload);
   const blocks: unknown[] = [
     { type: 'section', text: { type: 'mrkdwn', text: `*${escapeSlack(title)}*` } },
@@ -190,7 +197,13 @@ export function toDiscord(payload: WebhookPayload, appBaseUrl?: string): Record<
     fields.push({ name: 'Value / baseline', value: `${s.value ?? '?'} / ${s.baseline ?? '?'}`, inline: true });
   }
   const node = nodeField(payload.data ?? {});
-  if (node) fields.push({ name: node.name, value: escapeDiscord(node.value), inline: false });
+  if (node) {
+    fields.push({
+      name: node.name,
+      value: escapeWithin(node.value, DISCORD_FIELD_VALUE_LIMIT, escapeDiscord),
+      inline: false,
+    });
+  }
   const link = dashboardLink(payload, appBaseUrl);
   const safeTitle = escapeDiscord(title);
   const message = truncatedMessage(payload);

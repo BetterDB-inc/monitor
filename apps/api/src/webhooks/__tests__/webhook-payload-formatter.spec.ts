@@ -325,6 +325,22 @@ describe('webhook-payload-formatter: failing node', () => {
     expect(text.endsWith('\nand 2 more')).toBe(true);
   });
 
+  it('keeps the node field inside the Slack and Discord field limits', () => {
+    const nodes = Array.from({ length: 5 }, (_, i) => ({
+      nodeId: `n${i}`,
+      address: `${'h'.repeat(250)}.example.com:6379`,
+      role: 'primary',
+      availabilityZone: '('.repeat(400),
+    }));
+    const payload = withData({ nodes });
+
+    const [slack] = slackFields(payload).filter((field) => field.startsWith('*Nodes'));
+
+    expect(slack.length).toBeLessThanOrEqual(2000);
+    expect(discordField(payload, 'Nodes')!.length).toBeLessThanOrEqual(1024);
+    expect(discordField(payload, 'Nodes')!.endsWith('\\')).toBe(false);
+  });
+
   it('neutralises markup in what the cluster reports for a node', () => {
     const payload = withData({ node: { ...node, address: '<!channel>:6379', availabilityZone: '[x](https://evil)' } });
 
