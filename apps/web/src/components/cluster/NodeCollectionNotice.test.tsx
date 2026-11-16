@@ -154,6 +154,73 @@ describe('NodeCollectionNotice', () => {
     expect(screen.queryByRole('button', { name: BUTTON })).not.toBeInTheDocument();
   });
 
+  describe('after the node was connected from here', () => {
+    const clusterConnection = { id: 'conn-1', host: '10.0.0.1', connectionType: 'direct' as const };
+
+    function notice(overrides: Partial<Props> = {}) {
+      return (
+        <MemoryRouter>
+          <NodeCollectionNotice
+            nodeId={NODE_ID}
+            address="10.0.0.2:6379"
+            collection={{ collected: false }}
+            clusterConnection={clusterConnection}
+            {...overrides}
+          />
+        </MemoryRouter>
+      );
+    }
+
+    async function connectFromHere() {
+      mocks.connectClusterNode.mockResolvedValue({ id: 'conn-node', created: true });
+      const view = render(notice());
+      fireEvent.click(screen.getByRole('button', { name: BUTTON }));
+      await screen.findByRole('link', { name: 'Open node dashboard' });
+      return view;
+    }
+
+    it('offers to connect again once that connection is gone', async () => {
+      const { rerender } = await connectFromHere();
+
+      rerender(notice({ collection: { collected: true, connectionId: 'conn-node' } }));
+      expect(screen.getByRole('link', { name: 'Open node dashboard' })).toBeInTheDocument();
+
+      rerender(notice({ collection: { collected: false } }));
+
+      expect(screen.queryByRole('link', { name: 'Open node dashboard' })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: BUTTON })).toBeEnabled();
+    });
+
+    it('links to the connection the server names for the node', async () => {
+      const { rerender } = await connectFromHere();
+
+      rerender(notice({ collection: { collected: true, connectionId: 'conn-other' } }));
+
+      expect(screen.getByRole('link', { name: 'Open node dashboard' })).toHaveAttribute(
+        'href',
+        '/?connection=conn-other',
+      );
+    });
+
+    it('does not carry the link over to another node', async () => {
+      const { rerender } = await connectFromHere();
+
+      rerender(notice({ nodeId: 'c'.repeat(40), address: '10.0.0.3:6379' }));
+
+      expect(screen.queryByRole('link', { name: 'Open node dashboard' })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: BUTTON })).toBeEnabled();
+    });
+
+    it('does not carry the link over to another cluster connection', async () => {
+      const { rerender } = await connectFromHere();
+
+      rerender(notice({ clusterConnection: { ...clusterConnection, id: 'conn-2' } }));
+
+      expect(screen.queryByRole('link', { name: 'Open node dashboard' })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: BUTTON })).toBeEnabled();
+    });
+  });
+
   it('shows nothing for the node the cluster connection itself is on', () => {
     const { container } = render(
       <MemoryRouter>

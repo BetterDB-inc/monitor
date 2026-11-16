@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { connectionsApi } from '../../api/connections';
 import { useCanMutate } from '../../hooks/useCanMutate';
@@ -12,6 +12,12 @@ interface NodeCollectionNoticeProps {
   collection: NodeCollection | undefined;
   clusterConnection: ClusterConnectionRef | null | undefined;
   onConnected?: () => void;
+}
+
+interface ConnectedFromHere {
+  id: string;
+  nodeId: string;
+  clusterConnectionId: string;
 }
 
 const DOCS_URL = 'https://docs.betterdb.com/cluster-auto-registration.html';
@@ -42,12 +48,21 @@ export function NodeCollectionNotice({
 }: NodeCollectionNoticeProps) {
   const canMutate = useCanMutate();
   const [connecting, setConnecting] = useState(false);
-  const [connectedId, setConnectedId] = useState<string | null>(null);
+  const [connectedFromHere, setConnectedFromHere] = useState<ConnectedFromHere | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
+  const confirmed = collection?.collected === true;
+
+  useEffect(() => {
+    if (confirmed) setConnectedFromHere(null);
+  }, [confirmed]);
 
   if (!collection || !clusterConnection) return null;
 
-  const nodeConnectionId = connectedId ?? (collection.collected ? collection.connectionId : undefined);
+  const awaitingConfirmation =
+    connectedFromHere?.nodeId === nodeId && connectedFromHere.clusterConnectionId === clusterConnection.id
+      ? connectedFromHere.id
+      : undefined;
+  const nodeConnectionId = collection.collected ? collection.connectionId : awaitingConfirmation;
   if (nodeConnectionId) {
     if (nodeConnectionId === clusterConnection.id) return null;
     return (
@@ -66,7 +81,7 @@ export function NodeCollectionNotice({
     setFailure(null);
     try {
       const { id } = await connectionsApi.connectClusterNode(clusterConnection.id, nodeId);
-      setConnectedId(id);
+      setConnectedFromHere({ id, nodeId, clusterConnectionId: clusterConnection.id });
       onConnected?.();
     } catch (error) {
       setFailure(failureText(address, error));
