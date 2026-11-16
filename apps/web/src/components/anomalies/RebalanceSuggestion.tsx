@@ -7,7 +7,7 @@ import { metricsApi } from '../../api/metrics';
 import { useCanMutate } from '../../hooks/useCanMutate';
 import { useOpenHotShards } from '../../hooks/useOpenHotShards';
 import { copyToClipboard } from '../../lib/clipboard';
-import { REBALANCE_BLOCKED, formatRatio, formatSlotRanges, shortShardId } from './anomaly-display';
+import { REBALANCE_BLOCKED, formatRatio, slotRangeLabels, shortShardId } from './anomaly-display';
 import type {
   HotShardDetail,
   RebalanceCommand,
@@ -51,7 +51,7 @@ function listed(parts: string[]): string {
 }
 
 function describeMove(move: RebalanceMove): string {
-  const ranges = formatSlotRanges(move.ranges);
+  const ranges = slotRangeLabels(move.ranges);
   const single = move.slotCount === 1;
   return (
     `Move slot${single ? '' : 's'} ${listed(ranges)} ` +
@@ -206,30 +206,25 @@ function Commands({ plan, runnable }: { plan: RebalancePlan; runnable: boolean }
 }
 
 
-const REFUSED: Record<
-  RebalanceRecheckFailure | 'plan_changed' | 'no_plan' | RebalanceExecutionBlocker,
-  string
-> = {
+const REFUSED: Record<RebalanceRecheckFailure | 'plan_changed' | 'no_plan', string> = {
   plan_changed: 'The suggestion changed since you opened it. Review the new one.',
   no_plan: 'There is no suggestion to run any more.',
   slots_moved: 'The hot shard no longer owns these slots. A new suggestion follows.',
   source_unhealthy: 'The hot shard is not a healthy primary now.',
   target_unhealthy: 'A target shard is not a healthy primary now.',
-  flag_off: REBALANCE_BLOCKED.flag_off ?? '',
-  not_dialed: REBALANCE_BLOCKED.not_dialed ?? '',
-  migration_running: REBALANCE_BLOCKED.migration_running ?? '',
-  plan_outdated: REBALANCE_BLOCKED.plan_outdated ?? '',
-  server_refused: REBALANCE_BLOCKED.server_refused ?? '',
-  provider_managed: 'Slot commands are not supported on this managed service.',
-  unsupported_server: 'Running a plan needs Valkey 9.0 or later on every shard of the plan.',
 };
 
 function refusal(err: unknown): string {
   if (!(err instanceof ApiError)) return err instanceof Error ? err.message : String(err);
   const payload = (err.payload ?? {}) as { reason?: string; blockedBy?: string; message?: string };
-  const code = (payload.reason ?? payload.blockedBy) as keyof typeof REFUSED | undefined;
-  if (code && REFUSED[code]) return REFUSED[code];
-  return payload.message ?? err.message;
+  const reason = payload.reason as keyof typeof REFUSED | undefined;
+  const blockedBy = payload.blockedBy as RebalanceExecutionBlocker | undefined;
+  return (
+    (reason && REFUSED[reason]) ||
+    (blockedBy && REBALANCE_BLOCKED[blockedBy]) ||
+    payload.message ||
+    err.message
+  );
 }
 
 function RunPlan({ plan, onRun }: { plan: RebalancePlan; onRun: (plan: RebalancePlan) => void }) {
@@ -237,9 +232,8 @@ function RunPlan({ plan, onRun }: { plan: RebalancePlan; onRun: (plan: Rebalance
   const execution = plan.execution;
   if (!execution || !canMutate) return null;
   if (!execution.available) {
-    const blocked = execution.blockedBy && REBALANCE_BLOCKED[execution.blockedBy];
-    const relevant = execution.blockedBy !== 'flag_off' || plan.support === 'valkey_atomic';
-    return blocked && relevant ? <p className="text-muted-foreground">{blocked}</p> : null;
+    if (!execution.blockedBy || plan.support !== 'valkey_atomic') return null;
+    return <p className="text-muted-foreground">{REBALANCE_BLOCKED[execution.blockedBy]}</p>;
   }
   return (
     <Button size="sm" onClick={() => onRun(plan)}>
@@ -250,7 +244,7 @@ function RunPlan({ plan, onRun }: { plan: RebalancePlan; onRun: (plan: Rebalance
 
 const movesKey = (plan: RebalancePlan) =>
   plan.moves
-    .map((move) => `${move.targetShardId}:${formatSlotRanges(move.ranges).join(',')}`)
+    .map((move) => `${move.targetShardId}:${slotRangeLabels(move.ranges).join(',')}`)
     .join(' ');
 
 function RunDialog({
@@ -271,6 +265,12 @@ function RunDialog({
   const [error, setError] = useState<string | null>(null);
   const source = shown.projection.find((row) => row.role === 'source');
   const changed = current !== undefined && movesKey(current) !== movesKey(shown);
+  const blockedBy = current?.execution?.available === false ? current.execution.blockedBy : undefined;
+  const notice = !current
+    ? REFUSED.no_plan
+    : changed
+      ? REFUSED.plan_changed
+      : blockedBy && REBALANCE_BLOCKED[blockedBy];
   const refresh = () =>
     Promise.all([
       queryClient.invalidateQueries({ queryKey: ['open-hot-shards', connectionId] }),
@@ -326,6 +326,7 @@ function RunDialog({
               {error}
             </p>
           )}
+          {notice && notice !== error && <p className="text-muted-foreground">{notice}</p>}
         </div>
         <DialogFooter>
           <Button variant="outline" disabled={sending} onClick={onClose}>
@@ -451,7 +452,9 @@ function NoPlan({ verdict, shard }: { verdict: RebalanceNoPlan; shard: HotShardD
 }
 
 export function RebalanceSuggestion({ connectionId }: Props) {
-  const shards = useOpenHotShards(connectionId).filter((shard) => shard.rebalance);
+  const shards = useOpenHotShards(connectionId, { keepOnError: true }).filter(
+    (shard) => shard.rebalance,
+  );
   const [confirmed, setConfirmed] = useState<RebalancePlan | null>(null);
   const current = shards
     .map((shard) => shard.rebalance)

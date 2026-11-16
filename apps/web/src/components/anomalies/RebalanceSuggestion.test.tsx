@@ -291,6 +291,55 @@ describe('RebalanceSuggestion', () => {
       await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     });
 
+    it('says why Start is off when the plan is held back while the dialog is open', async () => {
+      const client = await show([hotShard(runnable())]);
+      fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+
+      getHotShards.mockResolvedValue([
+        hotShard(plan({ execution: { available: false, blockedBy: 'migration_running' } })),
+      ]);
+      await act(async () => {
+        await client.invalidateQueries();
+      });
+
+      await waitFor(() =>
+        expect(dialog).toHaveTextContent('A slot migration is running. A plan can run once it ends.'),
+      );
+      expect(within(dialog).getByRole('button', { name: 'Start the migration' })).toBeDisabled();
+    });
+
+    it('says there is nothing to run once the suggestion is gone', async () => {
+      const client = await show([hotShard(runnable())]);
+      fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+
+      getHotShards.mockResolvedValue([hotShard(noPlan('settling'))]);
+      await act(async () => {
+        await client.invalidateQueries();
+      });
+
+      await waitFor(() => expect(dialog).toHaveTextContent('There is no suggestion to run any more.'));
+      expect(within(dialog).getByRole('button', { name: 'Start the migration' })).toBeDisabled();
+    });
+
+    it('keeps the suggestion and its Start through a failed poll', async () => {
+      const client = await show([hotShard(runnable())]);
+      fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+
+      getHotShards.mockRejectedValue(new Error('socket hang up'));
+      await act(async () => {
+        await client.invalidateQueries();
+      });
+
+      expect(
+        await screen.findByRole('region', { name: /hot shard 3f2a9c1e/i, hidden: true }),
+      ).toHaveTextContent('2000');
+      expect(dialog).not.toHaveTextContent('There is no suggestion to run any more.');
+      expect(within(dialog).getByRole('button', { name: 'Start the migration' })).toBeEnabled();
+    });
+
     it('says a running migration holds the plan back', async () => {
       await show([hotShard(plan({ execution: { available: false, blockedBy: 'migration_running' } }))]);
 

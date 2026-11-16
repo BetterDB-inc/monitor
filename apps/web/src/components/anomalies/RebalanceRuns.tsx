@@ -11,7 +11,7 @@ import type {
   RebalanceRunJob,
   RebalanceRunState,
 } from '../../types/anomaly';
-import { REBALANCE_BLOCKED, formatRatio, formatSlotRanges, shortShardId } from './anomaly-display';
+import { REBALANCE_BLOCKED, formatRatio, slotRangeLabels, shortShardId } from './anomaly-display';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
@@ -45,7 +45,7 @@ const JOB_STATE: Record<RebalanceJobState, string> = {
 };
 
 function describeJob(job: RebalanceRunJob): string {
-  const ranges = formatSlotRanges(job.ranges).join(', ');
+  const ranges = slotRangeLabels(job.ranges).join(', ');
   const phase = job.state === 'running' && job.phase ? ` (${job.phase})` : '';
   const message = job.message ? `: ${job.message}` : '';
   return `Slots ${ranges} to ${job.targetAddr}: ${JOB_STATE[job.state]}${phase}${message}.`;

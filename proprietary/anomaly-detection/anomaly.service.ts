@@ -10660,7 +10660,7 @@ export class AnomalyService
     };
     const cached = this.hotShardRebalance.get(connectionId)?.get(signature)?.verdict;
     if (cached?.kind !== 'plan') return changed('no_plan');
-    const plan = cached;
+    let plan = cached;
     const blockedBy = this.rebalanceExecution(connectionId, plan).blockedBy;
     if (blockedBy) return { status: 'blocked', blockedBy };
     if (!sameMoves(plan, confirmed)) return changed('plan_changed');
@@ -10698,7 +10698,15 @@ export class AnomalyService
         };
       }
       const latest = this.hotShardRebalance.get(connectionId)?.get(signature)?.verdict;
-      if (latest !== cached) return changed(latest?.kind === 'plan' ? 'plan_changed' : 'no_plan');
+      if (latest !== cached) {
+        if (latest?.kind !== 'plan') return changed('no_plan');
+        const remade =
+          sameMoves(latest, confirmed) &&
+          latest.support === plan.support &&
+          !this.refusedRebalancePlans.has(latest);
+        if (!remade) return changed('plan_changed');
+        plan = latest;
+      }
       const failure = recheckFailure(plan, nodes);
       const source = nodes.find((node) => node.id === plan.sourceShardId);
       if (failure || !source) {

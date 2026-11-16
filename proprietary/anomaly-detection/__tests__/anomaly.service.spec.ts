@@ -4539,6 +4539,46 @@ describe('AnomalyService', () => {
             expect((service as any).rebalanceRuns.get('conn-a')).toBeUndefined();
           });
 
+          it('starts when a poll makes the same moves again during the re-check', async () => {
+            enable();
+            const { calls, discovery } = await planned();
+            const isolated = (discovery as any).discoverNodesIsolated as jest.Mock;
+            const answer = isolated.getMockImplementation()!;
+            isolated.mockImplementationOnce(async () => {
+              const [entry] = (service as any).hotShardRebalance.get('conn-a').values();
+              entry.verdict = { ...entry.verdict, moves: entry.verdict.moves.map((move: object) => ({ ...move })) };
+              return answer();
+            });
+
+            expect(await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN)).toMatchObject({
+              status: 'started',
+            });
+            expect(calls).toEqual([
+              ['CLUSTER', 'MIGRATESLOTS', 'SLOTSRANGE', '100', '107', 'NODE', 'b0000000'],
+            ]);
+          });
+
+          it('answers changed when a poll makes other moves during the re-check', async () => {
+            enable();
+            const { calls, discovery } = await planned();
+            const isolated = (discovery as any).discoverNodesIsolated as jest.Mock;
+            const answer = isolated.getMockImplementation()!;
+            isolated.mockImplementationOnce(async () => {
+              const [entry] = (service as any).hotShardRebalance.get('conn-a').values();
+              entry.verdict = {
+                ...entry.verdict,
+                moves: [{ ...entry.verdict.moves[0], ranges: [[100, 103]] }],
+              };
+              return answer();
+            });
+
+            expect(await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN)).toMatchObject({
+              status: 'changed',
+              reason: 'plan_changed',
+            });
+            expect(calls).toEqual([]);
+          });
+
           it('refuses and plans again when the source no longer owns the slots', async () => {
             enable();
             const { calls } = await planned();
