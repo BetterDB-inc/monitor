@@ -12601,6 +12601,29 @@ describe('AnomalyService', () => {
         expect(detail?.entries[0].node).toEqual({ ...REPLICA_NODE, collected: false });
       });
     });
+
+    describe('when the webhook is sent', () => {
+      it('says whether the node is collected', async () => {
+        await poll();
+
+        const event = await raise();
+
+        expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledWith(
+          expect.objectContaining({
+            id: event.id,
+            node: { ...PRIMARY_NODE, collected: true, connectionId: 'conn-1' },
+          }),
+        );
+      });
+
+      it('sends an event without a node as it is', async () => {
+        const event = await raise();
+
+        const [sent] = anomalyWebhookSink.dispatchAnomalyWebhook.mock.calls.find(([e]) => e.id === event.id)!;
+
+        expect(sent).not.toHaveProperty('node');
+      });
+    });
   });
 
   describe('saved anomaly webhooks', () => {
@@ -16054,6 +16077,23 @@ describe('AnomalyService', () => {
         expect(group.correlationId).toBe(
           storage.saveCorrelatedGroup.mock.calls[0][0].correlationId,
         );
+      });
+
+      it('says whether the node of each event in the alert is collected', async () => {
+        const now = Date.now();
+        const node = { nodeId: 'primA', address: '10.0.0.1:6379', role: 'primary' as const };
+        useRules(rule);
+        (service as any).recentAnomalies.push(
+          anomaly({ id: 'a', timestamp: now - 2 * MIN, node }),
+          anomaly({ id: 'b', timestamp: now - MIN, metricType: MetricType.MEMORY_USED }),
+        );
+
+        await (service as any).tickIncidentTimelines(now);
+
+        const [group] = anomalyWebhookSink.dispatchSequenceWebhook.mock.calls[0];
+        expect(group.anomalies[0].node).toEqual({ ...node, collected: false });
+        expect(group.anomalies[1]).not.toHaveProperty('node');
+        expect((service as any).recentAnomalies[0].node).toEqual(node);
       });
 
       it('alerts only once the sequence group is stored', async () => {

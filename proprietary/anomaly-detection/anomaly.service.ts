@@ -9549,7 +9549,7 @@ export class AnomalyService
       dedicatedHook?.();
       this.announceSaved(anomaly, { ...stored, connectionId });
       if (!dedicatedHook) {
-        this.anomalyWebhookSink?.dispatchAnomalyWebhook(stored).catch((err) => {
+        this.anomalyWebhookSink?.dispatchAnomalyWebhook(this.withServedNode(stored)).catch((err) => {
           this.logger.error(`Failed to dispatch webhook for anomaly ${anomaly.id}`, err);
         });
       }
@@ -10044,7 +10044,8 @@ export class AnomalyService
           );
           continue;
         }
-        this.anomalyWebhookSink?.dispatchSequenceWebhook(group).catch((err) => {
+        const served = { ...group, anomalies: group.anomalies.map((a) => this.withServedNode(a)) };
+        this.anomalyWebhookSink?.dispatchSequenceWebhook(served).catch((err) => {
           this.logger.error(`Failed to dispatch webhook for sequence ${match.pattern}`, err);
         });
       }
