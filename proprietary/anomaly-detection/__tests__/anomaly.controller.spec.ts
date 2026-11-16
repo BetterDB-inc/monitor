@@ -1,6 +1,7 @@
 import { BadRequestException } from '@nestjs/common';
 import { AnomalyController } from '../anomaly.controller';
 import { AnomalyService } from '../anomaly.service';
+import { LicenseGuard } from '@proprietary/licenses';
 
 jest.mock('@proprietary/licenses', () => ({
   LicenseGuard: class {},
@@ -211,5 +212,39 @@ describe('AnomalyController.getTopologyDivergence', () => {
       'topology-divergence',
     );
     expect(Object.values(args)).toEqual([expect.objectContaining({ data: { required: true } })]);
+  });
+});
+
+describe('AnomalyController.getTopologyDisagreements', () => {
+  const summary = {
+    status: 'ok',
+    sampledAt: 1000,
+    coverage: { nodes: 3, asked: 3, answered: 3, complete: true, unanswered: [], unansweredCount: 0 },
+    disagreements: [],
+    shards: [],
+  };
+  const service = { getTopologyDisagreements: jest.fn().mockReturnValue(summary) };
+  const controller = new AnomalyController(service as unknown as AnomalyService);
+
+  beforeEach(() => jest.clearAllMocks());
+
+  it('returns the disagreement summary of the connection in the header', () => {
+    expect(controller.getTopologyDisagreements('c1')).toEqual(summary);
+    expect(service.getTopologyDisagreements).toHaveBeenCalledWith('c1');
+  });
+
+  it('is served at topology-disagreements and requires the connection header', () => {
+    const args = Reflect.getMetadata('__routeArguments__', AnomalyController, 'getTopologyDisagreements');
+
+    expect(Reflect.getMetadata('path', AnomalyController.prototype.getTopologyDisagreements)).toBe(
+      'topology-disagreements',
+    );
+    expect(Object.values(args)).toEqual([expect.objectContaining({ data: { required: true } })]);
+  });
+
+  it('sits behind the licence guard, which answers 402 without the feature', () => {
+    expect(Reflect.getMetadata('__guards__', AnomalyController.prototype.getTopologyDisagreements)).toContain(
+      LicenseGuard,
+    );
   });
 });

@@ -393,4 +393,30 @@ describe('TopologyDivergenceMonitor', () => {
 
     expect(await poll('conn-2', 'b1', INTERVAL)).toMatchObject({ anchorConnectionId: 'conn-2' });
   });
+
+  it('records which views show a node as fail? and which as fail', async () => {
+    const { poll, answers } = harness();
+    answers.set('b1', viewOf('b1', { c2: { flags: ['master', 'fail'] } }));
+
+    const round = await poll('conn-1', 'a1', 0, { c2: failing });
+
+    expect([...(round?.failureFlags ?? [])]).toEqual([['c2', { suspected: ['a1'], failed: ['b1'] }]]);
+  });
+
+  it('leaves out what a node says of itself and entries without an address', async () => {
+    const { poll, answers } = harness();
+    answers.set('b1', viewOf('b1', { b1: failing, c2: { flags: ['master', 'fail', 'noaddr'] } }));
+
+    const round = await poll('conn-1', 'a1', 0);
+
+    expect(round?.failureFlags.size).toBe(0);
+  });
+
+  it('records no failure flags in a round that cannot compare', async () => {
+    const { poll } = harness();
+
+    const round = await poll('agent', 'a1', 0, { c2: failing }, false);
+
+    expect(round?.failureFlags.size).toBe(0);
+  });
 });

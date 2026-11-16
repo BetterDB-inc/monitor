@@ -92,6 +92,16 @@ export class McpAnomalyController {
     }
   }
 
+  @Get('instance/:id/anomalies/topology-disagreements')
+  getTopologyDisagreements(@Param('id', ValidateInstanceIdPipe) id: string) {
+    try {
+      this.registry.get(id);
+      return this.anomalyService.getTopologyDisagreements(id);
+    } catch (error) {
+      throw mapMcpError(this.logger, error, 'Failed to get topology disagreements');
+    }
+  }
+
   @Get('instance/:id/history/replication-divergence')
   async getReplicationDivergence(
     @Param('id', ValidateInstanceIdPipe) id: string,

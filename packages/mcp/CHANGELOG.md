@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   slots, hot keys and a suggested slot rebalance (which slot ranges to move
   to which shards, and the projected load), or the reason no move is
   suggested. Read-only; nothing is moved.
+- `get_topology_disagreements`: where the nodes of a cluster disagree about
+  slot owners, config epochs, failure flags or membership, with the number
+  of views on each side, and one line per shard. Built for large clusters:
+  lines that differ only in the node they are about are merged, node lists
+  are capped at 25 and `coverage` says how many nodes answered.
 
 ### Changed
 

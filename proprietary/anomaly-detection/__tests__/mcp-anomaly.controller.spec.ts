@@ -13,6 +13,7 @@ describe('McpAnomalyController', () => {
     getIncidentTimelines: jest.fn(),
     getRetryAmplificationStatus: jest.fn(),
     getHotShards: jest.fn(),
+    getTopologyDisagreements: jest.fn(),
     getReplicationDivergenceHistory: jest.fn(),
   };
   const registry = { get: jest.fn() };
@@ -191,5 +192,35 @@ describe('McpAnomalyController', () => {
 
     expect((caught as HttpException).getStatus()).toBe(404);
     expect(svc.getHotShards).not.toHaveBeenCalled();
+  });
+
+  it('topology disagreements returns the summary of the instance', () => {
+    const summary = { status: 'ok', coverage: { nodes: 500, answered: 12, complete: false }, disagreements: [], shards: [] };
+    svc.getTopologyDisagreements.mockReturnValue(summary);
+
+    expect(controller.getTopologyDisagreements('inst1')).toBe(summary);
+    expect(svc.getTopologyDisagreements).toHaveBeenCalledWith('inst1');
+  });
+
+  it('topology disagreements returns 404 for an unregistered instance', () => {
+    registry.get.mockImplementationOnce(() => {
+      throw new NotFoundException('nope');
+    });
+
+    let caught: unknown;
+    try {
+      controller.getTopologyDisagreements('ghost');
+    } catch (error) {
+      caught = error;
+    }
+
+    expect((caught as HttpException).getStatus()).toBe(404);
+    expect(svc.getTopologyDisagreements).not.toHaveBeenCalled();
+  });
+
+  it('topology disagreements is served under the instance anomalies path', () => {
+    expect(Reflect.getMetadata('path', McpAnomalyController.prototype.getTopologyDisagreements)).toBe(
+      'instance/:id/anomalies/topology-disagreements',
+    );
   });
 });

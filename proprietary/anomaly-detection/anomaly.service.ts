@@ -272,6 +272,11 @@ import {
   outranksSeverity,
   toDivergenceNode,
 } from './topology-divergence-report';
+import {
+  type DisagreementEvent,
+  type TopologyDisagreementSummary,
+  summarizeDisagreements,
+} from './topology-disagreements';
 import { ShardLoadService } from '@app/cluster/shard-load.service';
 import type { ShardLoadSample, SlotLoadRate } from '@app/cluster/shard-load';
 import { parseNodeAddress } from '@app/topology/membership-diff';
@@ -10580,6 +10585,23 @@ export class AnomalyService
       unanswered: round.unanswered.map((id) => toDivergenceNode(id, round.nodes)),
       divergences: [...raised, ...counting],
     };
+  }
+
+  getTopologyDisagreements(connectionId: string): TopologyDisagreementSummary {
+    const clusterKey = this.connectionClusterKeys.get(connectionId);
+    const round = clusterKey ? this.topologyDivergence.lastRound(clusterKey) : undefined;
+    if (!clusterKey || !round) return summarizeDisagreements(undefined, () => undefined);
+    const eventIds = this.topologyDivergenceEventIds.get(round.anchorConnectionId);
+    const events = new Map<string, DisagreementEvent>();
+    for (const [signature, entry] of this.topologyDivergenceOpen.get(clusterKey) ?? []) {
+      const eventId = eventIds?.get(signature);
+      if (eventId === undefined) continue;
+      const event = this.eventInMemory(eventId);
+      if (event?.resolved === true) continue;
+      const eventType = event?.metricType ?? MetricType.TOPOLOGY_DIVERGENCE;
+      for (const { key } of entry.group?.disagreements ?? []) events.set(key, { eventId, eventType });
+    }
+    return summarizeDisagreements(round, (key) => events.get(key));
   }
 
   getRecentEvents(limit = 100, metricType?: MetricType): AnomalyEvent[] {

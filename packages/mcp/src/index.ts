@@ -785,6 +785,33 @@ server.tool(
 );
 
 server.tool(
+  'get_topology_disagreements',
+  'Get where the nodes of a cluster disagree about the cluster, summarised for large clusters. `disagreements` has one line per disagreement with the number of views on each side, for example "Slots 0-5460: owned by A in 497 views, by B in 3 views" or "node X: fail? in 12 views, ok in 488 views": `kind` is `slot_owner`, `config_epoch`, `failure_flags` or `membership`, `positions` lists each side with its `count` and the nodes that hold it, `subjects` the nodes it is about, `confirmed` and `eventId` tell whether an anomaly event is open for it, and `text` is the same line in words. Lines that differ only in the node they are about are merged into one. `shards` has one line per shard with `state` `disputed`, `undisputed` or `not_compared`; a disputed shard lists its `disagreementIds`. Node lists are capped at 25, the counts are exact. The counts are over the views that answered in the last round, not over every node: read `coverage` (`nodes` in the cluster, `asked`, `answered`, `complete`, `unanswered`) before concluding anything. An empty `disagreements` list with `complete: false` means the nodes that were asked agree, not that the whole cluster does. `status` is `not_sampled` before the first round or on a cluster that is not sampled, and `insufficient_views` when fewer than two nodes answered. Read-only. Use when a cluster looks split, a topology_divergence anomaly is open, or to check which nodes see a node as failing.',
+  {
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ instanceId }) =>
+    withTelemetry('get_topology_disagreements', async () => {
+      const id = resolveInstanceId(instanceId);
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/anomalies/topology-disagreements`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return unavailableOrNotFoundResult(id, 'Anomaly detection');
+        }
+        throw err;
+      }
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
+);
+
+server.tool(
   'get_client_activity',
   'Get time-bucketed client activity from persisted snapshots. Shows connection counts, command distribution, and buffer usage over time. Use startTime/endTime to focus on a specific incident window.',
   {

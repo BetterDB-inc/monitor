@@ -37,6 +37,11 @@ export interface DivergencePoll {
   readView: (node: ClusterNode) => Promise<ClusterNode[] | null>;
 }
 
+export interface FailureFlagViews {
+  suspected: string[];
+  failed: string[];
+}
+
 export interface DivergenceRoundResult {
   clusterKey: string;
   anchorConnectionId: string;
@@ -47,6 +52,7 @@ export interface DivergenceRoundResult {
   disagreements: TrackedDisagreement[];
   nodes: Map<string, ClusterNode>;
   selves: Map<string, ClusterNode>;
+  failureFlags: Map<string, FailureFlagViews>;
 }
 
 interface ReadBackoff {
@@ -176,6 +182,7 @@ export class TopologyDivergenceMonitor {
       disagreements: state.tracker.tracked(),
       nodes: new Map(input.nodes.map((node) => [node.id, node])),
       selves: new Map([[self.id, self]]),
+      failureFlags: new Map(),
     };
     return state.last;
   }
@@ -273,6 +280,7 @@ export class TopologyDivergenceMonitor {
       disagreements: state.tracker.tracked(),
       nodes,
       selves,
+      failureFlags: this.failureFlagsBy(views),
     };
   }
 
@@ -291,6 +299,23 @@ export class TopologyDivergenceMonitor {
 
   private backingOff(state: ClusterRounds, id: string, at: number): boolean {
     return (state.backoff.get(id)?.retryAt ?? -Infinity) > at;
+  }
+
+  private failureFlagsBy(views: TopologyView[]): Map<string, FailureFlagViews> {
+    const flagged = new Map<string, FailureFlagViews>();
+    for (const view of views) {
+      for (const node of view.nodes) {
+        if (node.id === view.observerId || !isAccused(node)) continue;
+        const entry = flagged.get(node.id) ?? { suspected: [], failed: [] };
+        (node.flags.includes('fail') ? entry.failed : entry.suspected).push(view.observerId);
+        flagged.set(node.id, entry);
+      }
+    }
+    for (const entry of flagged.values()) {
+      entry.suspected.sort();
+      entry.failed.sort();
+    }
+    return new Map([...flagged].sort((a, b) => (a[0] < b[0] ? -1 : 1)));
   }
 
   private accusedBy(views: TopologyView[]): string[] {

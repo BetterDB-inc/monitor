@@ -26203,5 +26203,131 @@ describe('AnomalyService', () => {
       await new Promise((resolve) => setImmediate(resolve));
       expect(storage.resolveAnomaly.mock.calls.map(([eventId]) => eventId)).toContain(id);
     });
+
+    describe('disagreement summary', () => {
+      it('says nothing was sampled before the first round', () => {
+        expect(service.getTopologyDisagreements('conn-1')).toEqual({
+          status: 'not_sampled',
+          sampledAt: null,
+          coverage: { nodes: 0, asked: 0, answered: 0, complete: false, unanswered: [], unansweredCount: 0 },
+          disagreements: [],
+          shards: [],
+        });
+      });
+
+      it('lists one undisputed line per shard while the views agree', async () => {
+        await rounds(2);
+
+        const summary = service.getTopologyDisagreements('conn-1');
+
+        expect(summary).toMatchObject({
+          status: 'ok',
+          sampledAt: now,
+          coverage: { nodes: 3, asked: 3, answered: 3, complete: true, unansweredCount: 0 },
+          disagreements: [],
+        });
+        expect(summary.shards.map((shard) => [shard.shardId, shard.state, shard.slotCount, shard.ownViews])).toEqual([
+          ['a', 'undisputed', 5461, 1],
+          ['b', 'undisputed', 5462, 1],
+          ['c', 'undisputed', 5461, 1],
+        ]);
+      });
+
+      it('counts the views on each side of a disagreement that is still being counted', async () => {
+        views.b = { a: { epoch: 9 } };
+
+        await rounds(2);
+
+        const summary = service.getTopologyDisagreements('conn-1');
+        expect(summary.disagreements).toMatchObject([
+          {
+            id: 'config_epoch:a',
+            kind: 'config_epoch',
+            severity: AnomalySeverity.WARNING,
+            confirmed: false,
+            eventId: null,
+            eventType: null,
+            rounds: 2,
+            text: 'Config epoch of 10.0.0.1:6379: 1 in 2 views, 9 in 1 view.',
+          },
+        ]);
+        expect(summary.shards.map((shard) => [shard.shardId, shard.state])).toEqual([
+          ['a', 'disputed'],
+          ['b', 'undisputed'],
+          ['c', 'undisputed'],
+        ]);
+      });
+
+      it('points a confirmed disagreement at its open event', async () => {
+        views.b = { a: { epoch: 9 } };
+
+        await rounds(4);
+
+        const [event] = divergenceEvents();
+        expect(service.getTopologyDisagreements('conn-1').disagreements).toMatchObject([
+          { id: 'config_epoch:a', confirmed: true, eventId: event.id, eventType: MetricType.TOPOLOGY_DIVERGENCE },
+        ]);
+      });
+
+      it('keeps the line without an event once the event is resolved by hand', async () => {
+        views.b = { a: { epoch: 9 } };
+        await rounds(3);
+
+        await service.resolveAnomaly(divergenceEvents()[0].id);
+
+        expect(service.getTopologyDisagreements('conn-1').disagreements).toMatchObject([
+          { id: 'config_epoch:a', confirmed: false, eventId: null, eventType: null },
+        ]);
+      });
+
+      it('names the nodes that did not answer and does not call the round complete', async () => {
+        silent.add('b');
+
+        await rounds(2);
+
+        const summary = service.getTopologyDisagreements('conn-1');
+        expect(summary.coverage).toMatchObject({
+          nodes: 3,
+          asked: 3,
+          answered: 2,
+          complete: false,
+          unanswered: [{ nodeId: 'b', address: '10.0.0.2:6379' }],
+          unansweredCount: 1,
+        });
+        expect(summary.shards.find((shard) => shard.shardId === 'b')?.ownViews).toBe(0);
+      });
+
+      it('answers for every connection that watches the cluster', async () => {
+        views.c = { a: { epoch: 9 } };
+        const second: ConnectionContext = {
+          ...mockCtx,
+          connectionId: 'conn-2',
+          connectionName: 'Second',
+          client: clusterClient('b') as any,
+        };
+
+        for (let i = 0; i < 4; i++) {
+          now += 5_000;
+          await poll(mockCtx);
+          await poll(second);
+        }
+
+        const [event] = divergenceEvents();
+        expect(service.getTopologyDisagreements('conn-2').disagreements).toMatchObject([
+          { id: 'config_epoch:a', confirmed: true, eventId: event.id },
+        ]);
+      });
+
+      it('marks every shard as not compared when no other node can be dialed', async () => {
+        discovery.getNodeConnection.mockRejectedValue(new Error('ECONNREFUSED'));
+
+        await rounds(2);
+
+        const summary = service.getTopologyDisagreements('conn-1');
+        expect(summary.status).toBe('insufficient_views');
+        expect(summary.coverage.complete).toBe(false);
+        expect(summary.shards.map((shard) => shard.state)).toEqual(['not_compared', 'not_compared', 'not_compared']);
+      });
+    });
   });
 });
