@@ -307,6 +307,7 @@ Stats merged across connections (`GET /client-analytics/stats` without a connect
 | Variable                      | Required | Default | Description                                                                                                                     |
 | ------------------------------ | -------- | ------- | --------------------------------------------------------------------------------------------------------------------------------- |
 | `CLUSTER_AUTO_REGISTER_NODES` | No       | `false` | Default for whether a cluster connection auto-registers its nodes as child connections; overridable per connection. See [Cluster Auto-Registration](cluster-auto-registration.md) |
+| `CLUSTER_NODE_COMMAND_TIMEOUT_MS` | No | `5000` | How long BetterDB waits for one command sent directly to a cluster node (per-node checks, replica reads) before giving up on it, in milliseconds. A node that accepts connections but stops answering is skipped after this long instead of holding up the poll |
 | `SENTINEL_AUTO_REGISTER_NODES` | No       | `false` | Default for whether a Sentinel connection auto-registers the primaries and replicas it monitors; overridable per connection. See [Sentinel Auto-Registration](sentinel-auto-registration.md) |
 
 ### Data Retention

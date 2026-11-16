@@ -588,6 +588,42 @@ describe('ClusterDiscoveryService', () => {
       expect(entry.lastHealthCheck).toBeGreaterThan(staleStamp);
     });
 
+    describe('command timeout', () => {
+      const previous = process.env.CLUSTER_NODE_COMMAND_TIMEOUT_MS;
+
+      afterEach(() => {
+        if (previous === undefined) delete process.env.CLUSTER_NODE_COMMAND_TIMEOUT_MS;
+        else process.env.CLUSTER_NODE_COMMAND_TIMEOUT_MS = previous;
+      });
+
+      it('gives a node client a 5 second command timeout by default', async () => {
+        delete process.env.CLUSTER_NODE_COMMAND_TIMEOUT_MS;
+        const nodes = await service.discoverNodes();
+
+        await service.getNodeConnection(nodes[0].id, 'test-connection');
+
+        expect(Valkey).toHaveBeenLastCalledWith(expect.objectContaining({ commandTimeout: 5000 }));
+      });
+
+      it('takes the command timeout from CLUSTER_NODE_COMMAND_TIMEOUT_MS', async () => {
+        process.env.CLUSTER_NODE_COMMAND_TIMEOUT_MS = '1500';
+        const nodes = await service.discoverNodes();
+
+        await service.getNodeConnection(nodes[0].id, 'test-connection');
+
+        expect(Valkey).toHaveBeenLastCalledWith(expect.objectContaining({ commandTimeout: 1500 }));
+      });
+
+      it('falls back to 5 seconds for a value that is not a usable number', async () => {
+        process.env.CLUSTER_NODE_COMMAND_TIMEOUT_MS = 'soon';
+        const nodes = await service.discoverNodes();
+
+        await service.getNodeConnection(nodes[0].id, 'test-connection');
+
+        expect(Valkey).toHaveBeenLastCalledWith(expect.objectContaining({ commandTimeout: 5000 }));
+      });
+    });
+
     it("does not hand one connection another connection's node client", async () => {
       const nodes = await service.discoverNodes();
       const target = nodes[0];

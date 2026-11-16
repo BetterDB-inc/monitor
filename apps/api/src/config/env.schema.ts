@@ -393,6 +393,7 @@ export const envSchema = z
 
     CLUSTER_AUTO_REGISTER_NODES: z.string().default('false'),
     SENTINEL_AUTO_REGISTER_NODES: z.string().default('false'),
+    CLUSTER_NODE_COMMAND_TIMEOUT_MS: z.coerce.number().int().min(100).default(5000),
 
     // Cloud mode (set by the hosted deployment; gates per-tenant auth)
     CLOUD_MODE: z.string().optional(),

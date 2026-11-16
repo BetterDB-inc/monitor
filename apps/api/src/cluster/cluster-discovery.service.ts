@@ -61,6 +61,16 @@ interface DiscoveryCache {
   lastDiscoveryTime: number;
 }
 
+const DEFAULT_NODE_COMMAND_TIMEOUT_MS = 5000;
+const MIN_NODE_COMMAND_TIMEOUT_MS = 100;
+
+function nodeCommandTimeoutMs(): number {
+  const configured = Number(process.env.CLUSTER_NODE_COMMAND_TIMEOUT_MS);
+  return Number.isInteger(configured) && configured >= MIN_NODE_COMMAND_TIMEOUT_MS
+    ? configured
+    : DEFAULT_NODE_COMMAND_TIMEOUT_MS;
+}
+
 @Injectable()
 export class ClusterDiscoveryService implements OnModuleDestroy {
   private readonly logger = new Logger(ClusterDiscoveryService.name);
@@ -563,6 +573,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     const client = new Valkey({
       ...this.nodeClientOptions(ownerId, node, host, port, { username, password }),
       connectTimeout: this.CONNECTION_TIMEOUT,
+      commandTimeout: nodeCommandTimeoutMs(),
     });
 
     // Node clients are long-lived, so pick up rotated client cert/key material
