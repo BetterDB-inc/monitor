@@ -1518,6 +1518,58 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     return config.id;
   }
 
+  async addNodeConnection(sourceId: string, node: { host: string; port: number }): Promise<string> {
+    const source = this.configs.get(sourceId);
+    if (!source) {
+      throw new NotFoundException(`Connection '${sourceId}' not found.`);
+    }
+    const now = Date.now();
+    const config: DatabaseConnectionConfig = {
+      id: randomUUID(),
+      name: `${source.name} · ${node.host}:${node.port}`,
+      host: node.host,
+      port: node.port,
+      ...dataNodeCredentialsOf(source),
+      dbIndex: 0,
+      tls: source.tls,
+      tlsConfig: source.tlsConfig,
+      authMode: source.authMode,
+      connectionType: 'direct',
+      autoRegisterNodes: false,
+      isDefault: false,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const adapter = this.createAdapter(config);
+    try {
+      await connectWithin(adapter, CHILD_CONNECT_TIMEOUT_MS);
+    } catch (error) {
+      await adapter.disconnect().catch(() => { });
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(`Could not connect to ${node.host}:${node.port}: ${errorMsg}`);
+    }
+    try {
+      if (this.secretsAreMemoryOnly(source)) {
+        this.memoryOnlySecrets.add(config.id);
+        this.logger.warn(`${config.name}: connected in memory only (ENCRYPTION_KEY is not set; inherited secrets are not written)`);
+      } else {
+        await this.storage.saveConnection(this.encryptConfig(config));
+      }
+      this.configs.set(config.id, { ...config, credentialStatus: 'valid' });
+      this.connections.set(config.id, adapter);
+    } catch (error) {
+      this.memoryOnlySecrets.delete(config.id);
+      this.configs.delete(config.id);
+      this.connections.delete(config.id);
+      await adapter.disconnect().catch(() => { });
+      this.logger.error(`Failed to persist node connection ${config.name}: ${error instanceof Error ? error.message : error}`);
+      throw error;
+    }
+    this.discoveredInstances?.forget(config.host, config.port);
+    this.logger.log(`Connected cluster node ${config.name}`);
+    return config.id;
+  }
+
   async adoptChild(id: string, seedId: string, node: DesiredNode): Promise<void> {
     await this.setMembership(id, { seedId, origin: 'adopted', ...membershipFields(node) });
     // The adopted connection keeps its configured dbIndex: whether SELECT on a
