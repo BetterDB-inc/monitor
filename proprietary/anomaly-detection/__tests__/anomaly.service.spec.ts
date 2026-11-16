@@ -4859,6 +4859,32 @@ describe('AnomalyService', () => {
             expect((service as any).rebalanceFollowedAt.get('conn-a')).toBe(clock);
           });
 
+          it('follows on the read of the poll even when it lands just under 5 seconds', async () => {
+            enable();
+            await planned();
+            await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN);
+            const metrics = (service as any).clusterMetrics;
+            const reads = metrics.readSlotMigrations as jest.Mock;
+            await service.followRebalanceRuns('conn-a');
+            reads.mockClear();
+
+            clock += 4_997;
+            metrics.coveredBySeed = () => false;
+            (service as any).slotMigrationCheckedAt.delete('conn-a');
+            await (service as any).detectSlotMigrations(
+              { connectionId: 'conn-a', connectionName: 'conn-a' },
+              clock,
+            );
+            await (service as any).followRebalanceRunsOnPoll('conn-a', clock);
+            expect(reads).toHaveBeenCalledTimes(1);
+            expect((service as any).rebalanceFollowedAt.get('conn-a')).toBe(clock);
+
+            clock += 1_000;
+            await (service as any).followRebalanceRunsOnPoll('conn-a', clock);
+            await service.followRebalanceRuns('conn-a');
+            expect(reads).toHaveBeenCalledTimes(1);
+          });
+
           it('follows a run from the poll without a reader, at most every 5 seconds', async () => {
             enable();
             await planned();

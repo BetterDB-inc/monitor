@@ -10717,7 +10717,11 @@ export class AnomalyService
     }
     const running = [...runs.values()].filter((run) => run.state === 'running');
     const followed = this.rebalanceFollowedAt.get(connectionId);
-    const due = options.force || followed === undefined || now - followed >= REBALANCE_FOLLOW_MS;
+    const due =
+      options.force ||
+      options.report !== undefined ||
+      followed === undefined ||
+      now - followed >= REBALANCE_FOLLOW_MS;
     let read: SlotMigrationReport | undefined;
     if (running.length > 0 && due && this.clusterMetrics && this.clusterDiscovery) {
       this.rebalanceFollowedAt.set(connectionId, now);
