@@ -65,7 +65,12 @@ const PRELOAD_KEYS = 800_000;
 const ATOMIC_SLOTS = 1_000;
 const ATOMIC_LINK_RATE = '20mbit';
 const LEGACY_SLOTS = 3_000;
+const LEGACY_SHARE = 0.55;
 const FINISHED_MIGRATION_STATES = ['success', 'failed', 'cancelled'];
+
+export function legacySlots(owned: number): number {
+  return Math.min(LEGACY_SLOTS, Math.floor(owned * LEGACY_SHARE));
+}
 
 async function slotsOwned(node: NodeSpec): Promise<number> {
   return ownedSlots(String(await command(node.hostPort, ['CLUSTER', 'NODES'])));
@@ -378,6 +383,7 @@ export function scenarios(nodeTimeoutMs: number): Scenario[] {
         const target = nextPrimary(ctx, source.name);
         const before = Number(await command(source.hostPort, ['DBSIZE']));
         const slotsBefore = await slotsOwned(source);
+        const wanted = legacySlots(slotsBefore);
         inject(ctx, [source, target]);
         const out = await exec(
           source.container,
@@ -391,7 +397,7 @@ export function scenarios(nodeTimeoutMs: number): Scenario[] {
             '--cluster-to',
             ctx.ids[target.name],
             '--cluster-slots',
-            String(LEGACY_SLOTS),
+            String(wanted),
             '--cluster-yes',
           ],
           300_000,
@@ -399,8 +405,8 @@ export function scenarios(nodeTimeoutMs: number): Scenario[] {
         const problem = out.split('\n').find((line) => /\[ERR\]|failed/.test(line));
         if (problem) throw new Error(`the legacy reshard from ${source.name} reported: ${problem.trim().slice(0, 120)}`);
         const moved = slotsBefore - (await slotsOwned(source));
-        if (moved < LEGACY_SLOTS) {
-          throw new Error(`the legacy reshard moved ${moved} of ${LEGACY_SLOTS} slots away from ${source.name}`);
+        if (moved < wanted) {
+          throw new Error(`the legacy reshard moved ${moved} of ${wanted} slots away from ${source.name}`);
         }
         mark(ctx, 'reshard-done', {
           tookMs: ctx.recorder.now() - ctx.meta.t0,

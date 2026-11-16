@@ -39,7 +39,7 @@ when any of them differs.
 | idle | control | nothing happens |
 | manual-failover | control | `CLUSTER FAILOVER` on a replica |
 | slot-migration-atomic | control | `CLUSTER MIGRATESLOTS` of 1000 slots (about 49k keys) from each primary in turn, with the primaries' links limited to 20 Mbit/s so a move takes 6–7 s; a move that does not end as `success` drops the attempt |
-| slot-migration-legacy | control | `valkey-cli --cluster reshard` of 3000 slots (about 140k keys), about 9 s; a reshard that reports an error or moves fewer slots drops the attempt |
+| slot-migration-legacy | control | `valkey-cli --cluster reshard` of 3000 slots (about 140k keys), about 9 s, or 55% of the source's slots when that is fewer, as with a larger `--size`; a reshard that reports an error or moves fewer slots drops the attempt |
 | rolling-restart | control | every node restarted, one at a time; a restart after which the cluster does not agree again within 60 s drops the attempt |
 | slow-node | control | 800 ms ± 200 ms of network delay on one node for 60 s |
 | clean-join | control | a new node meets the cluster with nothing blocked |

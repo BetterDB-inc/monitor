@@ -5,7 +5,7 @@ import { type NodeSpec, PROBE_TIMEOUT_MS, laneSpec } from '../src/config';
 import { ownedSlots } from '../src/cluster';
 import { Probe } from '../src/recorder';
 import { recordedWith } from '../src/trace';
-import type { TrialMeta } from '../src/scenarios';
+import { type TrialMeta, legacySlots } from '../src/scenarios';
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -59,4 +59,11 @@ test('a resume is refused when a recorded trial used another setup', () => {
   assert.match(recordedWith(meta, { nodeTimeoutMs: 15_000, clusterSize: 6 }) ?? '', /5000 ms, not 15000 ms/);
   assert.match(recordedWith(meta, { nodeTimeoutMs: 5_000, clusterSize: 12 }) ?? '', /6 nodes, not 12/);
   assert.match(recordedWith(joined, { nodeTimeoutMs: 5_000, clusterSize: 12 }) ?? '', /6 nodes, not 12/);
+});
+
+test('the legacy reshard never asks a primary for more slots than it can give', () => {
+  assert.equal(legacySlots(5_461), 3_000);
+  assert.equal(legacySlots(5_462), 3_000);
+  assert.equal(legacySlots(2_730), 1_501);
+  assert.equal(legacySlots(1_092), 600);
 });
