@@ -1,6 +1,11 @@
 import { isIP } from 'net';
 import type { ClusterNode } from '@app/common/types/metrics.types';
-import type { TopologyDisagreement, TopologyView, TrackedDisagreement } from './topology-divergence';
+import {
+  type TopologyDisagreement,
+  type TopologyView,
+  type TrackedDisagreement,
+  UNASSIGNED_SLOT_OWNER,
+} from './topology-divergence';
 
 export const PARTIAL_MEMBERSHIP_SIGNATURE_PREFIX = 'partial_membership:';
 export const PARTIAL_MEMBERSHIP_MIN_AGE_MS = 90_000;
@@ -37,6 +42,7 @@ export interface PartialMembership {
   notKnownBy: MembershipGapPeer[];
   ownViewMissing: MembershipGapPeer[];
   disagreementKeys: string[];
+  slotDisputeKeys: string[];
   firstSeenAt: number;
   rounds: number;
   confirmed: boolean;
@@ -211,6 +217,7 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
     .filter(claims);
 
   const found: PartialMembership[] = [];
+  const lacking = new Map<string, Set<string>>();
   while (links.length > 0) {
     const degree = new Map<string, number>();
     for (const link of links) {
@@ -224,6 +231,9 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
     );
     const own = links.filter((link) => link.observer === hub || link.subject === hub);
     links = links.filter((link) => !own.includes(link));
+    if (tier(hub) < TIER_SLOT_OWNER) {
+      lacking.set(hub, new Set(own.filter((link) => link.observer === hub).map((link) => link.subject)));
+    }
 
     const disputes = sortedUnique(own.map((link) => link.key)).map((key) => byKey.get(key) as TrackedDisagreement);
     const about = memberships.find((disagreement) => disagreement.subjectIds[0] === hub);
@@ -250,6 +260,7 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
       notKnownBy,
       ownViewMissing,
       disagreementKeys: disputes.map((dispute) => dispute.key),
+      slotDisputeKeys: [],
       firstSeenAt: Math.min(...disputes.map((dispute) => dispute.firstSeenAt)),
       rounds: Math.max(...disputes.map((dispute) => dispute.rounds)),
       confirmed: disputes.some(
@@ -259,7 +270,27 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
     });
   }
 
+  for (const { key, nodeIds } of slotDisputesExplainedBy(input.disagreements, lacking)) {
+    for (const finding of found) {
+      if (nodeIds.includes(finding.nodeId)) finding.slotDisputeKeys.push(key);
+    }
+  }
+
   return found.sort((a, b) => compareText(a.nodeId, b.nodeId));
+}
+
+function slotDisputesExplainedBy(
+  disagreements: TrackedDisagreement[],
+  lacking: ReadonlyMap<string, ReadonlySet<string>>,
+): Array<{ key: string; nodeIds: string[] }> {
+  return disagreements.flatMap((dispute) => {
+    if (dispute.kind !== 'slot_owner' || dispute.positions.length !== 2) return [];
+    const unassigned = dispute.positions.find((position) => position.value === UNASSIGNED_SLOT_OWNER);
+    const owner = dispute.positions.find((position) => position.value !== UNASSIGNED_SLOT_OWNER);
+    if (!unassigned || !owner) return [];
+    const explained = unassigned.observers.every((id) => lacking.get(id)?.has(owner.value));
+    return explained ? [{ key: dispute.key, nodeIds: unassigned.observers }] : [];
+  });
 }
 
 function meetCommand(endpoint: Endpoint, runOn: MembershipPeer[]): MeetCommand {
@@ -275,7 +306,7 @@ export function unclaimedByPartialMembership<T extends { key: string }>(
   disagreements: T[],
   found: PartialMembership[],
 ): T[] {
-  const claimed = new Set(found.flatMap((finding) => finding.disagreementKeys));
+  const claimed = new Set(found.flatMap((finding) => [...finding.disagreementKeys, ...finding.slotDisputeKeys]));
   return disagreements.filter((disagreement) => !claimed.has(disagreement.key));
 }
 
