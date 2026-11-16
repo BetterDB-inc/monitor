@@ -52,6 +52,7 @@ export interface DivergenceRound {
   disagreements: TopologyDisagreement[];
   unanswered: string[];
   views: number;
+  members?: ReadonlyMap<string, ReadonlySet<string>>;
 }
 
 export interface ConfirmationRule {
@@ -339,6 +340,15 @@ function dissentCandidates(disagreement: TopologyDisagreement): string[][] {
     .sort((a, b) => compareText(a.join(','), b.join(',')));
 }
 
+export function membersByObserver(views: TopologyView[]): Map<string, Set<string>> {
+  return new Map(
+    views.map((view) => {
+      const listed = view.nodes.filter((node) => statusOf(node) === KNOWN_MEMBER).map((node) => node.id);
+      return [view.observerId, new Set([view.observerId, ...listed])];
+    }),
+  );
+}
+
 export function lackingObservers(disagreement: TopologyDisagreement): LackingObserver[] {
   return disagreement.positions
     .filter((position) => position.value !== KNOWN_MEMBER)
@@ -375,7 +385,7 @@ export class DivergenceTracker {
       ).length;
       const unseeable = !comparable || answeringSides < 2;
       if (!unseeable || round.at - entry.lastSeenAt > TOPOLOGY_DIVERGENCE_BLIND_MS) this.entries.delete(key);
-      else if (entry.gapStreaks) this.entries.set(key, { ...entry, gapStreaks: this.answeredStreaks(entry, round) });
+      else if (entry.gapStreaks) this.entries.set(key, { ...entry, gapStreaks: this.streaksThroughHold(entry, round) });
     }
 
     for (const disagreement of joined) {
@@ -471,13 +481,14 @@ export class DivergenceTracker {
     return Object.fromEntries([...held, ...lacking]);
   }
 
-  private answeredStreaks(entry: TrackedDisagreement, round: DivergenceRound): Record<string, GapStreak> {
-    const silent = new Set(round.unanswered);
+  private streaksThroughHold(entry: TrackedDisagreement, round: DivergenceRound): Record<string, GapStreak> {
+    const [subject] = entry.subjectIds;
     return Object.fromEntries(
-      Object.entries(entry.gapStreaks ?? {}).map(([observer, streak]) => [
-        observer,
-        silent.has(observer) ? streak : { ...streak, lastAnsweredAt: round.at },
-      ]),
+      Object.entries(entry.gapStreaks ?? {}).flatMap(([observer, streak]): Array<[string, GapStreak]> => {
+        const listed = round.members?.get(observer);
+        if (!listed) return [[observer, streak]];
+        return listed.has(subject) ? [] : [[observer, { ...streak, lastAnsweredAt: round.at }]];
+      }),
     );
   }
 

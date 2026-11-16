@@ -231,8 +231,9 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
   const links = memberships
     .flatMap((disagreement): Link[] => {
       const [subject] = disagreement.subjectIds;
+      const streaks = disagreement.gapStreaks;
       return lackingObservers(disagreement).map(({ observer, status }) => {
-        const gone = selves.has(observer) && lists(observer, subject);
+        const gone = (!!streaks && !streaks[observer]) || (selves.has(observer) && lists(observer, subject));
         return { observer, subject, status, key: disagreement.key, answered: selves.has(observer) && !gone, gone };
       });
     })

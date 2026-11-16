@@ -370,6 +370,25 @@ describe('TopologyDivergenceMonitor', () => {
     ]);
   });
 
+  it('counts a view that still lacks the member as an answer while the disagreement is held', async () => {
+    const { poll, answers } = harness();
+    const withoutA2 = IDS.filter((id) => id !== 'a2');
+    answers.set('b1', viewOf('b1', {}, withoutA2));
+    const lacking = (at: number) => poll('conn-1', 'a1', at, {}, true, withoutA2);
+
+    await lacking(0);
+    answers.set('c1', null);
+    const round = await lacking(INTERVAL);
+
+    expect(round?.disagreements.find((entry) => entry.key === 'membership:a2')).toMatchObject({
+      lastSeenAt: 0,
+      gapStreaks: {
+        a1: { firstSeenAt: 0, lastAnsweredAt: INTERVAL },
+        b1: { firstSeenAt: 0, lastAnsweredAt: INTERVAL },
+      },
+    });
+  });
+
   it('keeps asking an accused node once it is part of a disagreement', async () => {
     const { poll, answers } = harness();
     const isolatedView = Object.fromEntries(IDS.filter((id) => id !== 'c2').map((id) => [id, failing]));
