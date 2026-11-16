@@ -716,6 +716,7 @@ describe('slot rebalance run', () => {
     const cancelledReport = () =>
       report({
         finishedJobs: ['job-a', 'job-b'],
+        cancelledJobs: ['job-a', 'job-b'],
         failed: [
           {
             jobName: 'job-a',
@@ -737,6 +738,49 @@ describe('slot rebalance run', () => {
       const run = followRun(cancelled(listed, 2_500), cancelledReport(), nodes(), 3_000);
       expect(run.jobs.map((job) => job.state)).toEqual(['cancelled', 'cancelled']);
       expect(run.state).toBe('cancelled');
+    });
+
+    const listedBoth = () =>
+      followRun(
+        started(),
+        report({ jobViews: [view('job-a', 'tgt1', '0-99 200-200'), view('job-b', 'tgt2', '300-399')] }),
+        nodes(),
+        2_000,
+      );
+
+    it('keeps following a move that finished after an accepted cancel until the target owns its slots', () => {
+      const finished = report({ finishedJobs: ['job-a', 'job-b'] });
+      const stale = followRun(cancelled(listedBoth(), 2_500), finished, nodes(), 3_000);
+      expect(stale.jobs.map((job) => job.state)).toEqual(['running', 'running']);
+      expect(stale.state).toBe('running');
+      const run = followRun(stale, finished, movedNodes(), 4_000);
+      expect(run.jobs.map((job) => job.state)).toEqual(['succeeded', 'succeeded']);
+      expect(run.state).toBe('succeeded');
+    });
+
+    it('ends a move as cancelled when the server lists it as cancelled', () => {
+      const run = followRun(
+        cancelled(listedBoth(), 2_500),
+        report({ finishedJobs: ['job-a', 'job-b'], cancelledJobs: ['job-a', 'job-b'] }),
+        nodes(),
+        3_000,
+      );
+      expect(run.jobs.map((job) => job.state)).toEqual(['cancelled', 'cancelled']);
+      expect(run.state).toBe('cancelled');
+    });
+
+    it('keeps following a move seen finished when its nodes go silent after an accepted cancel', () => {
+      const seenFinished = followRun(
+        listedBoth(),
+        report({ finishedJobs: ['job-a', 'job-b'] }),
+        nodes(),
+        2_200,
+      );
+      const silent = report({ complete: false, jobsReadNodeIds: [] });
+      const stale = followRun(cancelled(seenFinished, 2_500), silent, nodes(), 3_000);
+      expect(stale.jobs.map((job) => job.state)).toEqual(['running', 'running']);
+      const run = followRun(stale, silent, movedNodes(), 4_000);
+      expect(run.jobs.map((job) => job.state)).toEqual(['succeeded', 'succeeded']);
     });
 
     it('keeps a job that failed before the cancel as failed', () => {

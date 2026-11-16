@@ -53,6 +53,7 @@ export interface RunReport {
     phase?: string;
   }>;
   finishedJobs: string[];
+  cancelledJobs?: string[];
   failed: Array<{
     jobName: string;
     message: string;
@@ -282,6 +283,14 @@ const isRunJob = (run: RebalanceRun, job: RebalanceRunJob, entry: JobEntry) =>
 const findFailure = (run: RebalanceRun, job: RunJob, report: RunReport) =>
   report.failed.find((entry) => isRunJob(run, job, entry));
 
+const cancelledByServer = (job: RunJob, report: RunReport) =>
+  job.jobName !== undefined && (report.cancelledJobs ?? []).includes(job.jobName);
+
+const mayHaveSucceeded = (job: RunJob, report: RunReport, failed: unknown) =>
+  !failed &&
+  (job.finishedSeenAt !== undefined ||
+    (job.jobName !== undefined && report.finishedJobs.includes(job.jobName)));
+
 function listedJob(run: RebalanceRun, job: RunJob, report: RunReport): RunJob | undefined {
   const listed = report.jobViews.find(
     (view) =>
@@ -314,8 +323,11 @@ function followJob(
     message: failed.message,
   };
   if (failedJob && failedOnItsOwn(run, failedJob.jobName)) return failedJob;
-  if (run.cancelAcceptedAt !== undefined && !moved && job.finishedSeenAt === undefined) {
-    return { ...job, state: sourceOwns ? 'cancelled' : 'unknown' };
+  if (run.cancelAcceptedAt !== undefined && !moved) {
+    if (cancelledByServer(job, report)) return { ...job, state: 'cancelled' };
+    if (!mayHaveSucceeded(job, report, failed)) {
+      return { ...job, state: sourceOwns ? 'cancelled' : 'unknown' };
+    }
   }
   if (failedJob) return failedJob;
   if (moved) return { ...job, state: 'succeeded' };
@@ -344,8 +356,11 @@ function followOwnership(
     return { ...job, state: 'failed', jobName: failed.jobName, message: failed.message };
   }
   if (owns(byId.get(job.targetShardId), job.ranges)) return { ...job, state: 'succeeded' };
-  if (run.cancelAcceptedAt !== undefined && owns(byId.get(run.sourceShardId), job.ranges)) {
-    return { ...job, state: 'cancelled' };
+  if (run.cancelAcceptedAt !== undefined) {
+    const sourceOwns = owns(byId.get(run.sourceShardId), job.ranges);
+    if (cancelledByServer(job, report) || (sourceOwns && !mayHaveSucceeded(job, report, failed))) {
+      return { ...job, state: 'cancelled' };
+    }
   }
   const since = unreadSince ?? now;
   if (now - since >= REBALANCE_JOB_LISTING_GRACE_MS) return { ...job, state: 'unknown' };

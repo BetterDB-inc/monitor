@@ -714,6 +714,19 @@ used_cpu_user:20.3\r
         },
       );
 
+      it.each([
+        ['success', []],
+        ['cancelled', ['job-1']],
+        ['failed', []],
+      ])('names a job that ended as %s among the cancelled ones only when cancelled', async (state, cancelled) => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({ abc123node1: { jobs: [job({ ...running, state })] } });
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect(report.cancelledJobs).toEqual(cancelled);
+      });
+
       it('does not name a running job among the finished ones', async () => {
         mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
         nodeClients({ abc123node1: { jobs: [job(running)] } });
@@ -1028,6 +1041,7 @@ used_cpu_user:20.3\r
             expect(report.migrations).toEqual([]);
             expect(report.failed).toEqual([]);
             expect(report.finishedJobs).toEqual([TASK_ID]);
+            expect(report.cancelledJobs).toEqual(state === 'canceled' ? [TASK_ID] : []);
           },
         );
 

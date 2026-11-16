@@ -4355,6 +4355,7 @@ describe('AnomalyService', () => {
           let report: {
             jobViews: unknown[];
             finishedJobs: string[];
+            cancelledJobs?: string[];
             failed: unknown[];
             complete: boolean;
           };
@@ -4703,6 +4704,7 @@ describe('AnomalyService', () => {
             }
             report.jobViews = [];
             report.finishedJobs = ['job-1'];
+            report.cancelledJobs = ['job-1'];
 
             expect((await service.followRebalanceRuns('conn-a'))[0]).toMatchObject({
               state: 'cancelled',
@@ -4995,6 +4997,7 @@ describe('AnomalyService', () => {
 
             report.jobViews = [];
             report.finishedJobs = ['job-1'];
+            report.cancelledJobs = ['job-1'];
             const sent = calls.length;
 
             expect(await service.cancelRebalance('conn-a', 'a0000000')).toEqual({
