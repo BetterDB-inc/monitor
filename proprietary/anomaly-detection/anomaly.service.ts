@@ -274,9 +274,17 @@ import {
 } from './topology-divergence-report';
 import {
   type DisagreementEvent,
-  type TopologyDisagreementSummary,
   summarizeDisagreements,
 } from './topology-disagreements';
+import {
+  FULL_CHECK_BLOCKER_TEXT,
+  TopologyFullChecks,
+  fullCheckView,
+  runFullCheck,
+  type FullCheckBlocker,
+  type TopologyDisagreementReport,
+  type TopologyFullCheckStart,
+} from './topology-full-check';
 import { ShardLoadService } from '@app/cluster/shard-load.service';
 import type { ShardLoadSample, SlotLoadRate } from '@app/cluster/shard-load';
 import { parseNodeAddress } from '@app/topology/membership-diff';
@@ -844,6 +852,8 @@ export class AnomalyService
   private topologyDivergenceAnchors = new Map<string, string>();
   private topologyDivergenceNodeTimeouts = new Map<string, { ms: number; readAt: number }>();
   private topologyDivergenceSettledSlots = new Map<string, Set<string>>();
+  private readonly topologyFullChecks = new TopologyFullChecks();
+  private readonly topologyFullCheckOwners = new Map<string, string>();
   private hotShardFirstSeen = new Map<string, Map<string, number>>();
   private activeHotShards = new Map<string, Set<string>>();
   private hotShardEventIds = new Map<string, Map<string, string>>();
@@ -1521,6 +1531,7 @@ export class AnomalyService
     }
     this.forgetClusterKey(connectionId);
     this.forgetTopologyDivergence(connectionId);
+    this.forgetTopologyFullChecks(connectionId);
     this.reshardSkewFirstSeen.delete(connectionId);
     this.activeReshardSkews.delete(connectionId);
     this.reshardSkewEventIds.delete(connectionId);
@@ -8410,6 +8421,7 @@ export class AnomalyService
    * Matches the spirit of healthCheckNode's 2s ping race.
    */
   private static readonly FANOUT_COMMAND_TIMEOUT_MS = 2_000;
+  private static readonly FULL_CHECK_UNASKABLE_FLAGS = ['handshake', 'noaddr'];
   private static readonly PRIMARY_REREAD_RESERVE_MS = 500;
   private static readonly REPLICA_READ_TIMED_OUT = 'Reading the replica timed out';
   private static readonly FANOUT_NODE_EVENT_LIMIT = 8;
@@ -10587,12 +10599,51 @@ export class AnomalyService
     };
   }
 
-  getTopologyDisagreements(connectionId: string): TopologyDisagreementSummary {
+  getTopologyDisagreements(connectionId: string): TopologyDisagreementReport {
     const clusterKey = this.connectionClusterKeys.get(connectionId);
     const round = clusterKey ? this.topologyDivergence.lastRound(clusterKey) : undefined;
-    if (!clusterKey || !round) return summarizeDisagreements(undefined, () => undefined);
-    const eventIds = this.topologyDivergenceEventIds.get(round.anchorConnectionId);
+    const events = clusterKey ? this.topologyDisagreementEvents(clusterKey) : new Map<string, DisagreementEvent>();
+    const eventOf = (key: string) => events.get(key);
+    const check = clusterKey ? this.topologyFullChecks.state(clusterKey, Date.now()) : ({ state: 'none' } as const);
+    return {
+      ...summarizeDisagreements(round, eventOf),
+      fullCheck: fullCheckView(check, this.topologyFullCheckBlocker(connectionId), eventOf),
+    };
+  }
+
+  async startTopologyFullCheck(connectionId: string): Promise<TopologyFullCheckStart> {
+    const blocker = this.topologyFullCheckBlocker(connectionId);
+    if (blocker) return { result: 'unavailable', reason: blocker, text: FULL_CHECK_BLOCKER_TEXT[blocker] };
+    const clusterKey = this.connectionClusterKeys.get(connectionId) as string;
+    const refusal = this.topologyFullChecks.blocked(clusterKey, Date.now());
+    if (refusal) return refusal;
+
+    let nodes: ClusterNode[];
+    try {
+      nodes = await this.topologyFullCheckNodes(connectionId);
+    } catch (err) {
+      this.logger.debug(
+        `Full topology check could not read the node list of ${connectionId}: ${err instanceof Error ? err.message : err}`,
+      );
+      return { result: 'view_unreadable' };
+    }
+
+    const started = this.topologyFullChecks.start(clusterKey, Date.now(), nodes.length, (onProgress) =>
+      runFullCheck({
+        nodes,
+        readView: (node) => this.readTopologyViewOnce(connectionId, node),
+        now: () => Date.now(),
+        onProgress,
+      }),
+    );
+    if (started.result === 'started') this.topologyFullCheckOwners.set(clusterKey, connectionId);
+    return started;
+  }
+
+  private topologyDisagreementEvents(clusterKey: string): Map<string, DisagreementEvent> {
     const events = new Map<string, DisagreementEvent>();
+    const anchor = this.topologyDivergence.lastRound(clusterKey)?.anchorConnectionId;
+    const eventIds = anchor === undefined ? undefined : this.topologyDivergenceEventIds.get(anchor);
     for (const [signature, entry] of this.topologyDivergenceOpen.get(clusterKey) ?? []) {
       const eventId = eventIds?.get(signature);
       if (eventId === undefined) continue;
@@ -10601,7 +10652,46 @@ export class AnomalyService
       const eventType = event?.metricType ?? MetricType.TOPOLOGY_DIVERGENCE;
       for (const { key } of entry.group?.disagreements ?? []) events.set(key, { eventId, eventType });
     }
-    return summarizeDisagreements(round, (key) => events.get(key));
+    return events;
+  }
+
+  private topologyFullCheckBlocker(connectionId: string): FullCheckBlocker | null {
+    if (!this.clusterDiscovery || !this.dialsDataNodes(connectionId)) return 'no_direct_access';
+    if (this.raftMode.get(connectionId)) return 'raft_cluster';
+    return this.connectionClusterKeys.has(connectionId) ? null : 'no_cluster_view';
+  }
+
+  private async topologyFullCheckNodes(connectionId: string): Promise<ClusterNode[]> {
+    const client = this.connectionRegistry.get(connectionId);
+    const [nodes, shards] = await Promise.all([
+      withTimeout(client.getClusterNodes(), this.infoTimeoutMs, 'CLUSTER NODES timed out'),
+      withTimeout(
+        (async () => client.getClusterShards())(),
+        this.infoTimeoutMs,
+        'CLUSTER SHARDS timed out',
+      ).catch(() => undefined),
+    ]);
+    return withConfiguredZones(
+      withShardMetadata(nodes, shards),
+      this.connectionRegistry.getNodeAvailabilityZones(connectionId),
+    ).filter((node) => !node.flags.some((flag) => AnomalyService.FULL_CHECK_UNASKABLE_FLAGS.includes(flag)));
+  }
+
+  private readTopologyViewOnce(connectionId: string, node: ClusterNode): Promise<ClusterNode[]> {
+    return this.clusterDiscovery!.onNodeClientOnce(
+      connectionId,
+      node,
+      AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
+      async (client) => MetricsParser.parseClusterNodes((await client.call('CLUSTER', 'NODES')) as string),
+    );
+  }
+
+  private forgetTopologyFullChecks(connectionId: string): void {
+    for (const [clusterKey, owner] of [...this.topologyFullCheckOwners]) {
+      if (owner !== connectionId) continue;
+      this.topologyFullChecks.forget(clusterKey);
+      this.topologyFullCheckOwners.delete(clusterKey);
+    }
   }
 
   getRecentEvents(limit = 100, metricType?: MetricType): AnomalyEvent[] {

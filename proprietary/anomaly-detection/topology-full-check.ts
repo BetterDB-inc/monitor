@@ -2,6 +2,11 @@ import { createHash } from 'crypto';
 import type { ClusterNode } from '@app/common/types/metrics.types';
 import { compareTopologyViews, type TopologyDisagreement, type TopologyView } from './topology-divergence';
 import type { FailureFlagViews } from './topology-divergence-monitor';
+import {
+  summarizeDisagreements,
+  type DisagreementEvent,
+  type TopologyDisagreementSummary,
+} from './topology-disagreements';
 
 export const FULL_CHECK_DEFAULTS = {
   concurrency: 16,
@@ -49,7 +54,70 @@ export type FullCheckState =
   | { state: 'running'; startedAt: number; asked: number; total: number }
   | { state: 'done'; startedAt: number; finishedAt: number; asked: number; total: number; outcome: FullCheckOutcome };
 
-export type FullCheckStart = { result: 'started' } | { result: 'running' } | { result: 'too_soon'; retryAt: number };
+export type FullCheckRefusal = { result: 'running' } | { result: 'too_soon'; retryAt: number };
+
+export type FullCheckStart = { result: 'started' } | FullCheckRefusal;
+
+export type FullCheckBlocker = 'no_direct_access' | 'raft_cluster' | 'no_cluster_view';
+
+export const FULL_CHECK_BLOCKER_TEXT: Record<FullCheckBlocker, string> = {
+  no_direct_access: 'The monitor reaches this cluster through one node only, so it cannot ask every node.',
+  raft_cluster: 'The nodes of a Raft cluster share one agreed view, so there is nothing to compare.',
+  no_cluster_view: 'No cluster view has been read on this connection yet.',
+};
+
+export interface TopologyFullCheckView {
+  state: 'none' | 'running' | 'done';
+  unavailable: { reason: FullCheckBlocker; text: string } | null;
+  startedAt: number | null;
+  finishedAt: number | null;
+  asked: number;
+  total: number;
+  retryAt: number | null;
+  summary?: TopologyDisagreementSummary;
+}
+
+export interface TopologyDisagreementReport extends TopologyDisagreementSummary {
+  fullCheck: TopologyFullCheckView;
+}
+
+export type TopologyFullCheckStart =
+  | FullCheckStart
+  | { result: 'unavailable'; reason: FullCheckBlocker; text: string }
+  | { result: 'view_unreadable' };
+
+export function fullCheckView(
+  check: FullCheckState,
+  blocker: FullCheckBlocker | null,
+  eventOf: (key: string) => DisagreementEvent | undefined,
+  minIntervalMs: number = FULL_CHECK_DEFAULTS.minIntervalMs,
+): TopologyFullCheckView {
+  const unavailable = blocker ? { reason: blocker, text: FULL_CHECK_BLOCKER_TEXT[blocker] } : null;
+  if (check.state === 'none') {
+    return { state: 'none', unavailable, startedAt: null, finishedAt: null, asked: 0, total: 0, retryAt: null };
+  }
+  if (check.state === 'running') {
+    return {
+      state: 'running',
+      unavailable,
+      startedAt: check.startedAt,
+      finishedAt: null,
+      asked: check.asked,
+      total: check.total,
+      retryAt: null,
+    };
+  }
+  return {
+    state: 'done',
+    unavailable,
+    startedAt: check.startedAt,
+    finishedAt: check.finishedAt,
+    asked: check.asked,
+    total: check.total,
+    retryAt: check.finishedAt + minIntervalMs,
+    summary: summarizeDisagreements(check.outcome.round, eventOf),
+  };
+}
 
 interface DistinctView {
   nodes: ClusterNode[];
@@ -230,10 +298,9 @@ export class TopologyFullChecks {
     total: number,
     run: (onProgress: (asked: number) => void) => Promise<FullCheckOutcome>,
   ): FullCheckStart {
+    const refusal = this.blocked(clusterKey, at);
+    if (refusal) return refusal;
     const current = this.clusters.get(clusterKey);
-    if (current?.running) return { result: 'running' };
-    const retryAt = (current?.done?.finishedAt ?? -Infinity) + this.limits.minIntervalMs;
-    if (at < retryAt) return { result: 'too_soon', retryAt };
 
     const running = { startedAt: at, asked: 0, total };
     const entry: ClusterCheck = { token: ++this.tokens, running, done: current?.done };
@@ -253,6 +320,13 @@ export class TopologyFullChecks {
       },
     );
     return { result: 'started' };
+  }
+
+  blocked(clusterKey: string, at: number): FullCheckRefusal | null {
+    const current = this.clusters.get(clusterKey);
+    if (current?.running) return { result: 'running' };
+    const retryAt = (current?.done?.finishedAt ?? -Infinity) + this.limits.minIntervalMs;
+    return at < retryAt ? { result: 'too_soon', retryAt } : null;
   }
 
   state(clusterKey: string, at: number): FullCheckState {

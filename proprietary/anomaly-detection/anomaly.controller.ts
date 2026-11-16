@@ -1,12 +1,15 @@
 import {
   BadRequestException,
+  ConflictException,
   Controller,
   Get,
   Post,
   Query,
   Param,
   HttpCode,
+  HttpException,
   HttpStatus,
+  ServiceUnavailableException,
   UseGuards,
   NotFoundException,
 } from '@nestjs/common';
@@ -25,7 +28,7 @@ import {
 import { ReplicaDivergenceHistory } from './replication-divergence-detector';
 import { HotShardDetail } from './hot-shard-detector';
 import { TopologyDivergenceReport } from './topology-divergence-report';
-import { TopologyDisagreementSummary } from './topology-disagreements';
+import { TopologyDisagreementReport, TopologyFullCheckView } from './topology-full-check';
 import { LicenseGuard, RequiresFeature, Feature } from '@proprietary/licenses';
 import { ConnectionId, CONNECTION_ID_HEADER } from '../../apps/api/src/common/decorators';
 import { parseOptionalInt } from '../../apps/api/src/common/utils/parse-query-param';
@@ -197,11 +200,45 @@ export class AnomalyController {
     summary: 'Where the cluster views disagree, with one line per shard',
     description:
       'Counts are over the views that answered in the last round, not over every node: coverage says how many ' +
-      'nodes there are, how many were asked and how many answered. Node lists are capped at 25, the counts are exact.',
+      'nodes there are, how many were asked and how many answered. Node lists are capped at 25, the counts are exact. ' +
+      'fullCheck holds the last check that asked every node, when one was run, with its own summary.',
   })
   @ApiHeader({ name: CONNECTION_ID_HEADER, required: true, description: 'Connection ID of the cluster' })
-  getTopologyDisagreements(@ConnectionId({ required: true }) connectionId: string): TopologyDisagreementSummary {
+  getTopologyDisagreements(@ConnectionId({ required: true }) connectionId: string): TopologyDisagreementReport {
     return this.anomalyService.getTopologyDisagreements(connectionId);
+  }
+
+  @Post('topology-disagreements/full-check')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
+  @HttpCode(HttpStatus.ACCEPTED)
+  @ApiOperation({
+    summary: 'Ask every node of the cluster for its view, once',
+    description:
+      'Starts the check and returns at once; progress and the result are in fullCheck of topology-disagreements. ' +
+      'A request made while a check runs joins it. Answers 409 when the check cannot be run on the connection, ' +
+      '429 within 30 seconds of the last check and 503 when the node list cannot be read.',
+  })
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: true, description: 'Connection ID of the cluster' })
+  async startTopologyFullCheck(@ConnectionId({ required: true }) connectionId: string): Promise<TopologyFullCheckView> {
+    const started = await this.anomalyService.startTopologyFullCheck(connectionId);
+    if (started.result === 'unavailable') {
+      throw new ConflictException({ statusCode: HttpStatus.CONFLICT, message: started.text, reason: started.reason });
+    }
+    if (started.result === 'too_soon') {
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.TOO_MANY_REQUESTS,
+          message: 'The last full check finished less than 30 seconds ago',
+          retryAt: started.retryAt,
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+    if (started.result === 'view_unreadable') {
+      throw new ServiceUnavailableException('The node list of the cluster could not be read');
+    }
+    return this.anomalyService.getTopologyDisagreements(connectionId).fullCheck;
   }
 
   @Post('events/:id/resolve')

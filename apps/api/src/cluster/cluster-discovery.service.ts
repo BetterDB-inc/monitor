@@ -142,12 +142,44 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     const { host, port, username, password, tls } = this.connectionRegistry
       .get(connectionId)
       .getClient().options;
+    return this.onShortLivedClient(
+      { host, port, username, password, tls, connectionName: 'BetterDB-Monitor-Discovery' },
+      timeoutMs,
+      run,
+    );
+  }
+
+  async onNodeClientOnce<T>(
+    connectionId: string,
+    node: Pick<ClusterNode, 'id' | 'address' | 'hostname'>,
+    timeoutMs: number,
+    run: (client: Valkey) => Promise<T>,
+  ): Promise<T> {
+    this.assertDialsDataNodes(connectionId, node.id);
+    const parsed = parseNodeAddress(node.address);
+    if (!parsed) throw new Error(`Invalid node address: ${node.address}`);
+    const { username, password } = this.connectionRegistry.get(connectionId).getClient().options;
+    return this.onShortLivedClient(
+      {
+        host: parsed.host,
+        port: parsed.port,
+        username,
+        password,
+        tls: this.nodeTlsOptions(connectionId, parsed.host, node.hostname),
+        connectionName: `BetterDB-Monitor-Once-${node.id.substring(0, 8)}`,
+      },
+      timeoutMs,
+      run,
+    );
+  }
+
+  private async onShortLivedClient<T>(
+    target: Pick<Valkey['options'], 'host' | 'port' | 'username' | 'password' | 'tls' | 'connectionName'>,
+    timeoutMs: number,
+    run: (client: Valkey) => Promise<T>,
+  ): Promise<T> {
     const client = new Valkey({
-      host,
-      port,
-      username,
-      password,
-      tls,
+      ...target,
       lazyConnect: true,
       enableOfflineQueue: false,
       maxRetriesPerRequest: 0,
@@ -155,7 +187,6 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       enableReadyCheck: false,
       connectTimeout: timeoutMs,
       commandTimeout: timeoutMs,
-      connectionName: 'BetterDB-Monitor-Discovery',
     });
     client.on('error', () => undefined);
     try {

@@ -1,7 +1,9 @@
 import type { ClusterNode } from '@app/common/types/metrics.types';
+import { MetricType } from '../types';
 import {
   FULL_CHECK_DEFAULTS,
   TopologyFullChecks,
+  fullCheckView,
   runFullCheck,
   type FullCheckOutcome,
   type FullCheckRun,
@@ -408,5 +410,116 @@ describe('TopologyFullChecks', () => {
 
     expect(checks.state('c1', AT + 10)).toEqual({ state: 'none' });
     expect(checks.start('c1', AT + 20, 4, () => deferred().promise)).toEqual({ result: 'started' });
+  });
+
+  it('says whether a check may start without starting one', async () => {
+    const checks = new TopologyFullChecks();
+    const run = deferred();
+
+    expect(checks.blocked('c1', AT)).toBeNull();
+
+    checks.start('c1', AT, 4, () => run.promise);
+    expect(checks.blocked('c1', AT + 10)).toEqual({ result: 'running' });
+
+    run.finish(await outcomeAt(AT + 500));
+    await settled();
+
+    expect(checks.blocked('c1', AT + 600)).toEqual({
+      result: 'too_soon',
+      retryAt: AT + 500 + FULL_CHECK_DEFAULTS.minIntervalMs,
+    });
+    expect(checks.blocked('c1', AT + 500 + FULL_CHECK_DEFAULTS.minIntervalMs)).toBeNull();
+  });
+});
+
+describe('fullCheckView', () => {
+  const noEvent = () => undefined;
+
+  it('is empty when no check was run', () => {
+    expect(fullCheckView({ state: 'none' }, null, noEvent)).toEqual({
+      state: 'none',
+      unavailable: null,
+      startedAt: null,
+      finishedAt: null,
+      asked: 0,
+      total: 0,
+      retryAt: null,
+    });
+  });
+
+  it('says why a check cannot be run', () => {
+    expect(fullCheckView({ state: 'none' }, 'raft_cluster', noEvent).unavailable).toEqual({
+      reason: 'raft_cluster',
+      text: 'The nodes of a Raft cluster share one agreed view, so there is nothing to compare.',
+    });
+    expect(fullCheckView({ state: 'none' }, 'no_direct_access', noEvent).unavailable?.reason).toBe('no_direct_access');
+    expect(fullCheckView({ state: 'none' }, 'no_cluster_view', noEvent).unavailable?.reason).toBe('no_cluster_view');
+  });
+
+  it('shows how far a running check is', () => {
+    expect(fullCheckView({ state: 'running', startedAt: AT, asked: 312, total: 500 }, null, noEvent)).toEqual({
+      state: 'running',
+      unavailable: null,
+      startedAt: AT,
+      finishedAt: null,
+      asked: 312,
+      total: 500,
+      retryAt: null,
+    });
+  });
+
+  it('summarises a finished check with real counts and no tracking', async () => {
+    const nodes = cluster(250);
+    const cutOff = new Set(['s001r', 's002p', 's004r']);
+    const outcome = await check(nodes, {
+      readView: async (asked) =>
+        viewOf(nodes, asked.id, (entry) => {
+          if (!cutOff.has(asked.id)) return entry;
+          if (entry.id === 's000p') return { ...entry, slots: [[10, 64]] };
+          if (entry.id === 's001p') return { ...entry, slots: [[0, 9], ...entry.slots] };
+          return entry;
+        }),
+      now: () => AT + 900,
+    });
+
+    const view = fullCheckView(
+      { state: 'done', startedAt: AT, finishedAt: AT + 900, asked: 500, total: 500, outcome },
+      null,
+      (key) => (key.startsWith('slot_owner:') ? { eventId: 'e1', eventType: MetricType.TOPOLOGY_DIVERGENCE } : undefined),
+    );
+
+    expect(view).toMatchObject({
+      state: 'done',
+      startedAt: AT,
+      finishedAt: AT + 900,
+      asked: 500,
+      total: 500,
+      retryAt: AT + 900 + FULL_CHECK_DEFAULTS.minIntervalMs,
+    });
+    expect(view.summary?.coverage).toMatchObject({ nodes: 500, asked: 500, answered: 500, complete: true });
+    expect(view.summary?.disagreements).toHaveLength(1);
+    expect(view.summary?.disagreements[0]).toMatchObject({
+      kind: 'slot_owner',
+      tracked: false,
+      confirmed: true,
+      eventId: 'e1',
+    });
+    expect(view.summary?.disagreements[0].positions.map((position) => position.count)).toEqual([497, 3]);
+    expect(view.summary?.disagreements[0]).not.toHaveProperty('since');
+  });
+
+  it('does not call a check complete when a node did not answer', async () => {
+    const nodes = cluster(3);
+    const outcome = await check(nodes, {
+      readView: async (asked) => (asked.id === 's001r' ? null : viewOf(nodes, asked.id)),
+    });
+
+    const view = fullCheckView(
+      { state: 'done', startedAt: AT, finishedAt: AT, asked: 6, total: 6, outcome },
+      null,
+      noEvent,
+    );
+
+    expect(view.summary?.coverage).toMatchObject({ nodes: 6, asked: 6, answered: 5, complete: false, unansweredCount: 1 });
   });
 });

@@ -1097,6 +1097,115 @@ describe('ClusterDiscoveryService', () => {
     });
   });
 
+  describe('onNodeClientOnce', () => {
+    const node = { id: 'node2-id-def456', address: '192.168.1.11:6379@16379', hostname: 'node-2.example' };
+
+    function dedicatedClient() {
+      const client = {
+        connect: jest.fn().mockResolvedValue(undefined),
+        call: jest.fn().mockResolvedValue('OK'),
+        disconnect: jest.fn(),
+        on: jest.fn(),
+      };
+      jest.mocked(Valkey).mockImplementationOnce(() => client as never);
+      return client;
+    }
+
+    beforeEach(() => {
+      mockDbClient.getClient.mockReturnValue({
+        options: { host: 'seed.example', port: 7001, username: 'u', password: 'p' },
+        call: jest.fn(),
+      });
+    });
+
+    it('runs the work on a socket to that node, with bounded dial and commands, and closes it', async () => {
+      const client = dedicatedClient();
+
+      const reply = await service.onNodeClientOnce('test-connection', node, 2_000, (own) =>
+        own.call('CLUSTER', 'NODES'),
+      );
+
+      expect(reply).toBe('OK');
+      expect(jest.mocked(Valkey)).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          host: '192.168.1.11',
+          port: 6379,
+          username: 'u',
+          password: 'p',
+          connectTimeout: 2_000,
+          commandTimeout: 2_000,
+          enableOfflineQueue: false,
+          maxRetriesPerRequest: 0,
+          retryStrategy: expect.any(Function),
+        }),
+      );
+      expect(client.call).toHaveBeenCalledWith('CLUSTER', 'NODES');
+      expect(client.disconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves nothing in the shared pool', async () => {
+      dedicatedClient();
+      const before = service.getConnectionPoolSize();
+
+      await service.onNodeClientOnce('test-connection', node, 2_000, (own) => own.call('PING'));
+
+      expect(service.getConnectionPoolSize()).toBe(before);
+      expect(service.getActiveConnections()).toEqual([]);
+    });
+
+    it('checks the node certificate against the node, not the seed', async () => {
+      mockDbClient.getClient.mockReturnValue({
+        options: { host: 'seed.example', port: 7001, tls: { servername: 'seed.example', ca: 'ca-pem' } },
+      });
+      dedicatedClient();
+
+      await service.onNodeClientOnce('test-connection', node, 2_000, (own) => own.call('PING'));
+
+      expect(jest.mocked(Valkey)).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          tls: expect.objectContaining({ ca: 'ca-pem', servername: 'node-2.example' }),
+        }),
+      );
+    });
+
+    it('closes the socket when the work gives up', async () => {
+      const client = dedicatedClient();
+
+      await expect(
+        service.onNodeClientOnce('test-connection', node, 2_000, () => Promise.reject(new Error('deadline'))),
+      ).rejects.toThrow('deadline');
+      expect(client.disconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it('closes the socket when the node cannot be dialed, without running the work', async () => {
+      const client = dedicatedClient();
+      client.connect.mockRejectedValue(new Error('connect ETIMEDOUT'));
+      const work = jest.fn();
+
+      await expect(service.onNodeClientOnce('test-connection', node, 2_000, work)).rejects.toThrow(
+        'connect ETIMEDOUT',
+      );
+      expect(work).not.toHaveBeenCalled();
+      expect(client.disconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses a node of a connection reached through the agent', async () => {
+      mockConnectionRegistry.getConfig.mockReturnValue({ id: 'test-connection', host: 'agent', port: 0 });
+      const work = jest.fn();
+
+      await expect(service.onNodeClientOnce('test-connection', node, 2_000, work)).rejects.toThrow(
+        'cannot dial node2-id-def456 directly',
+      );
+      expect(work).not.toHaveBeenCalled();
+    });
+
+    it('refuses an address it cannot read', async () => {
+      await expect(
+        service.onNodeClientOnce('test-connection', { id: 'x', address: ':0@0' }, 2_000, jest.fn()),
+      ).rejects.toThrow('Invalid node address');
+    });
+  });
+
   describe('onOwnNodeClient', () => {
     let shared: { options: Record<string, unknown>; call: jest.Mock };
 

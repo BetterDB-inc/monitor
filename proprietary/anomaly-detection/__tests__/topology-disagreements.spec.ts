@@ -349,6 +349,7 @@ describe('summarizeDisagreements', () => {
         confirmed: false,
         eventId: null,
         eventType: null,
+        tracked: true,
         since: AT - 10_000,
         rounds: 3,
         stale: false,
@@ -736,6 +737,74 @@ describe('summarizeDisagreements', () => {
 
     expect(eventOf).toHaveBeenCalledWith('membership:s001r0');
     expect(line).toMatchObject({ confirmed: true, eventId: 'e7', eventType: MetricType.TOPOLOGY_DIVERGENCE });
+  });
+
+  it('marks the lines of a tracked round as tracked, with their age', () => {
+    const membership = tracked({
+      key: 'membership:s001r0',
+      kind: 'membership',
+      subjectIds: ['s001r0'],
+      positions: [
+        { value: 'known', observers: ['s000p'] },
+        { value: 'missing', observers: ['s002p'] },
+      ],
+    });
+
+    const [line] = summarizeDisagreements(round(cluster(3), { disagreements: [membership] }), noEvent).disagreements;
+
+    expect(line).toMatchObject({ tracked: true, since: AT - 10_000, rounds: 3 });
+  });
+
+  it('gives the lines of a one-off round no age and no round count', () => {
+    const { firstSeenAt: _firstSeenAt, lastSeenAt: _lastSeenAt, rounds: _rounds, ...membership } = tracked({
+      key: 'membership:s001r0',
+      kind: 'membership',
+      subjectIds: ['s001r0'],
+      positions: [
+        { value: 'known', observers: ['s000p'] },
+        { value: 'missing', observers: ['s002p'] },
+      ],
+    });
+    const eventOf = jest.fn().mockReturnValue({ eventId: 'e7', eventType: MetricType.TOPOLOGY_DIVERGENCE });
+
+    const [line] = summarizeDisagreements(round(cluster(3), { disagreements: [membership] }), eventOf).disagreements;
+
+    expect(line.tracked).toBe(false);
+    expect(line).not.toHaveProperty('since');
+    expect(line).not.toHaveProperty('rounds');
+    expect(line).toMatchObject({ confirmed: true, eventId: 'e7' });
+  });
+
+  it('orders the lines of a one-off round by severity, then event, then id', () => {
+    const untracked = (key: string, kind: 'membership' | 'slot_owner') => ({
+      key,
+      kind,
+      subjectIds: kind === 'membership' ? [key.split(':')[1]] : ['s000p', 's001p'],
+      ...(kind === 'slot_owner' ? { slots: [[5, 5]] } : {}),
+      positions: [
+        { value: kind === 'membership' ? 'known' : 's000p', observers: ['s000p'] },
+        { value: kind === 'membership' ? 'missing' : 's001p', observers: [`${key}-observer`] },
+      ],
+    });
+    const eventOf = (key: string) =>
+      key === 'membership:s002r0' ? { eventId: 'e1', eventType: MetricType.TOPOLOGY_DIVERGENCE } : undefined;
+
+    const summary = summarizeDisagreements(
+      round(cluster(3), {
+        disagreements: [
+          untracked('membership:s001r0', 'membership'),
+          untracked('membership:s002r0', 'membership'),
+          untracked('slot_owner:s000p|s001p#0', 'slot_owner'),
+        ],
+      }),
+      eventOf,
+    );
+
+    expect(summary.disagreements.map((line) => line.id)).toEqual([
+      'slot_owner:s000p|s001p#0',
+      'membership:s002r0',
+      'membership:s001r0',
+    ]);
   });
 
   it('puts critical first, then confirmed, then the oldest', () => {

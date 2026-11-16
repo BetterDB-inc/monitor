@@ -4,6 +4,7 @@ import {
   intersectSlotRanges,
   type DivergenceKind,
   type DivergencePosition,
+  type TopologyDisagreement,
   type TrackedDisagreement,
 } from './topology-divergence';
 import type { FailureFlagViews } from './topology-divergence-monitor';
@@ -28,12 +29,14 @@ export interface DisagreementEvent {
   eventType: MetricType;
 }
 
+export type RoundDisagreement = TopologyDisagreement & Partial<Pick<TrackedDisagreement, 'firstSeenAt' | 'lastSeenAt' | 'rounds'>>;
+
 export interface DisagreementRound {
   status: 'ok' | 'insufficient_views';
   at: number;
   observers: string[];
   unanswered: string[];
-  disagreements: TrackedDisagreement[];
+  disagreements: RoundDisagreement[];
   nodes: ReadonlyMap<string, ClusterNode>;
   failureFlags: ReadonlyMap<string, FailureFlagViews>;
 }
@@ -61,8 +64,9 @@ export interface DisagreementLine {
   confirmed: boolean;
   eventId: string | null;
   eventType: MetricType | null;
-  since: number;
-  rounds: number;
+  tracked: boolean;
+  since?: number;
+  rounds?: number;
   stale: boolean;
   lastSeenAt: number;
   subjects: DivergenceNode[];
@@ -106,7 +110,7 @@ export interface TopologyDisagreementSummary {
 }
 
 interface Draft {
-  disagreement: TrackedDisagreement;
+  disagreement: RoundDisagreement;
   positions: DivergencePosition[];
   event: DisagreementEvent | undefined;
   stale: boolean;
@@ -170,7 +174,7 @@ function primaryOf(members: ClusterNode[]): ClusterNode | undefined {
 }
 
 function splitFailing(
-  disagreement: TrackedDisagreement,
+  disagreement: RoundDisagreement,
   failureFlags: ReadonlyMap<string, FailureFlagViews>,
 ): DivergencePosition[] {
   if (disagreement.kind !== 'failure_flags') return disagreement.positions;
@@ -353,6 +357,9 @@ export function summarizeDisagreements(
       observers: listed(side.observers),
     }));
     const event = first.event;
+    const seen = drafts.flatMap((draft) => draft.disagreement.firstSeenAt ?? []);
+    const counted = drafts.flatMap((draft) => draft.disagreement.rounds ?? []);
+    const tracked = seen.length === drafts.length && counted.length === drafts.length;
 
     return {
       id: merged ? `${first.disagreement.key}+${drafts.length - 1}` : first.disagreement.key,
@@ -361,10 +368,10 @@ export function summarizeDisagreements(
       confirmed: event !== undefined,
       eventId: event?.eventId ?? null,
       eventType: event?.eventType ?? null,
-      since: Math.min(...drafts.map((draft) => draft.disagreement.firstSeenAt)),
-      rounds: Math.max(...drafts.map((draft) => draft.disagreement.rounds)),
+      tracked,
+      ...(tracked ? { since: Math.min(...seen), rounds: Math.max(...counted) } : {}),
       stale,
-      lastSeenAt: first.disagreement.lastSeenAt,
+      lastSeenAt: first.disagreement.lastSeenAt ?? round.at,
       subjects: listed(subjectIds),
       subjectCount: subjectIds.length,
       ...(kind === 'slot_owner' ? { slots, slotCount: countSlots(slots) } : {}),
@@ -393,7 +400,7 @@ export function summarizeDisagreements(
     disagreement,
     positions: splitFailing(disagreement, round.failureFlags),
     event: eventOf(disagreement.key),
-    stale: !compared || disagreement.lastSeenAt < round.at,
+    stale: !compared || (disagreement.lastSeenAt ?? round.at) < round.at,
   }));
   const disagreements = mergeDrafts(drafts)
     .map(lineOf)
@@ -402,7 +409,7 @@ export function summarizeDisagreements(
         Number(a.stale) - Number(b.stale) ||
         SEVERITY_RANK.indexOf(b.severity) - SEVERITY_RANK.indexOf(a.severity) ||
         Number(b.confirmed) - Number(a.confirmed) ||
-        a.since - b.since ||
+        (a.since ?? 0) - (b.since ?? 0) ||
         compareText(a.id, b.id),
     );
 
@@ -471,7 +478,7 @@ function totalsOf(shards: ShardLine[]): ShardTotals {
   };
 }
 
-export function withDisputedShardsOnly(summary: TopologyDisagreementSummary): TopologyDisagreementSummary {
+export function withDisputedShardsOnly<T extends TopologyDisagreementSummary>(summary: T): T {
   return {
     ...summary,
     shards: summary.shards.filter((shard) => shard.state === 'disputed'),

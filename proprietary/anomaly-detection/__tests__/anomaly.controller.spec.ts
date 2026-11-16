@@ -1,4 +1,4 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, HttpException } from '@nestjs/common';
 import { AnomalyController } from '../anomaly.controller';
 import { AnomalyService } from '../anomaly.service';
 import { LicenseGuard } from '@proprietary/licenses';
@@ -244,6 +244,89 @@ describe('AnomalyController.getTopologyDisagreements', () => {
 
   it('sits behind the licence guard, which answers 402 without the feature', () => {
     expect(Reflect.getMetadata('__guards__', AnomalyController.prototype.getTopologyDisagreements)).toContain(
+      LicenseGuard,
+    );
+  });
+});
+
+describe('AnomalyController.startTopologyFullCheck', () => {
+  const fullCheck = {
+    state: 'running',
+    unavailable: null,
+    startedAt: 1000,
+    finishedAt: null,
+    asked: 0,
+    total: 500,
+    retryAt: null,
+  };
+  const service = {
+    startTopologyFullCheck: jest.fn(),
+    getTopologyDisagreements: jest.fn().mockReturnValue({ status: 'ok', fullCheck }),
+  };
+  const controller = new AnomalyController(service as unknown as AnomalyService);
+
+  async function refusal(): Promise<HttpException> {
+    return controller.startTopologyFullCheck('c1').then(
+      () => {
+        throw new Error('expected a refusal');
+      },
+      (error: HttpException) => error,
+    );
+  }
+
+  beforeEach(() => jest.clearAllMocks());
+
+  it.each(['started', 'running'])('answers with the state of the check when it is %s', async (result) => {
+    service.startTopologyFullCheck.mockResolvedValue({ result });
+
+    await expect(controller.startTopologyFullCheck('c1')).resolves.toEqual(fullCheck);
+    expect(service.startTopologyFullCheck).toHaveBeenCalledWith('c1');
+    expect(service.getTopologyDisagreements).toHaveBeenCalledWith('c1');
+  });
+
+  it('answers 409 with the reason when the check cannot be run on the connection', async () => {
+    service.startTopologyFullCheck.mockResolvedValue({
+      result: 'unavailable',
+      reason: 'raft_cluster',
+      text: 'The nodes of a Raft cluster share one agreed view, so there is nothing to compare.',
+    });
+
+    const error = await refusal();
+
+    expect(error.getStatus()).toBe(409);
+    expect(error.getResponse()).toMatchObject({
+      reason: 'raft_cluster',
+      message: 'The nodes of a Raft cluster share one agreed view, so there is nothing to compare.',
+    });
+  });
+
+  it('answers 429 with the earliest next start when the last check is too recent', async () => {
+    service.startTopologyFullCheck.mockResolvedValue({ result: 'too_soon', retryAt: 31_000 });
+
+    const error = await refusal();
+
+    expect(error.getStatus()).toBe(429);
+    expect(error.getResponse()).toMatchObject({ retryAt: 31_000 });
+  });
+
+  it('answers 503 when the node list cannot be read', async () => {
+    service.startTopologyFullCheck.mockResolvedValue({ result: 'view_unreadable' });
+
+    expect((await refusal()).getStatus()).toBe(503);
+  });
+
+  it('is a POST at topology-disagreements/full-check that answers 202 and requires the connection header', () => {
+    const handler = AnomalyController.prototype.startTopologyFullCheck;
+    const args = Reflect.getMetadata('__routeArguments__', AnomalyController, 'startTopologyFullCheck');
+
+    expect(Reflect.getMetadata('path', handler)).toBe('topology-disagreements/full-check');
+    expect(Reflect.getMetadata('method', handler)).toBe(1);
+    expect(Reflect.getMetadata('__httpCode__', handler)).toBe(202);
+    expect(Object.values(args)).toEqual([expect.objectContaining({ data: { required: true } })]);
+  });
+
+  it('sits behind the licence guard, which answers 402 without the feature', () => {
+    expect(Reflect.getMetadata('__guards__', AnomalyController.prototype.startTopologyFullCheck)).toContain(
       LicenseGuard,
     );
   });
