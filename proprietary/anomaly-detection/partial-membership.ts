@@ -3,11 +3,15 @@ import type { ClusterNode } from '@app/common/types/metrics.types';
 import {
   FAILING_FLAGS,
   KNOWN_MEMBER,
+  type MembershipGap,
   type TopologyDisagreement,
   type TopologyView,
   type TrackedDisagreement,
   UNASSIGNED_SLOT_OWNER,
+  UNREACHABLE_FLAGS,
   compareText,
+  durationOf,
+  lackingObservers,
   sortedUnique,
 } from './topology-divergence';
 import { normalizeIp, splitHostPort } from './topology-targets';
@@ -15,7 +19,7 @@ import { normalizeIp, splitHostPort } from './topology-targets';
 export const PARTIAL_MEMBERSHIP_SIGNATURE_PREFIX = 'partial_membership:';
 export const PARTIAL_MEMBERSHIP_MIN_AGE_MS = 90_000;
 
-export type MembershipGap = 'missing' | 'handshake' | 'noaddr';
+export type { MembershipGap };
 
 export interface MembershipSighting {
   observerId: string;
@@ -79,7 +83,6 @@ interface Link {
   answered: boolean;
 }
 
-const UNLISTED_FLAGS = ['handshake', 'noaddr'];
 const BUS_PORT_OFFSET = 10_000;
 const SHORT_ID_LENGTH = 8;
 const TIER_NEW = 0;
@@ -92,7 +95,7 @@ const GAP_LABELS: Record<MembershipGap, string> = {
 };
 
 function isListed(node: ClusterNode): boolean {
-  return !node.flags.some((flag) => UNLISTED_FLAGS.includes(flag));
+  return !node.flags.some((flag) => UNREACHABLE_FLAGS.includes(flag));
 }
 
 function isFailing(node: ClusterNode): boolean {
@@ -150,12 +153,6 @@ function mostCommon(endpoints: Endpoint[], own: Endpoint | undefined): Endpoint 
   return first ? first[1].endpoint : null;
 }
 
-function lackingObservers(disagreement: TopologyDisagreement): string[] {
-  return disagreement.positions
-    .filter((position) => position.value !== KNOWN_MEMBER)
-    .flatMap((position) => position.observers);
-}
-
 export function membershipSightings(
   views: TopologyView[],
   disagreements: TopologyDisagreement[],
@@ -163,7 +160,10 @@ export function membershipSightings(
   const wanted = new Set(
     disagreements
       .filter(isMembership)
-      .flatMap((disagreement) => [...disagreement.subjectIds, ...lackingObservers(disagreement)]),
+      .flatMap((disagreement) => [
+        ...disagreement.subjectIds,
+        ...lackingObservers(disagreement).map(({ observer }) => observer),
+      ]),
   );
   const sightings = new Map<string, MembershipSighting[]>();
   if (wanted.size === 0) return sightings;
@@ -226,20 +226,19 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
     return found;
   };
 
+  const lists = (observer: string, subject: string): boolean =>
+    !!sightings.get(subject)?.some((sighting) => sighting.observerId === observer);
+
   const links = memberships
     .flatMap((disagreement): Link[] => {
       const [subject] = disagreement.subjectIds;
-      return disagreement.positions
-        .filter((position) => position.value !== KNOWN_MEMBER)
-        .flatMap((position) =>
-          position.observers.map((observer) => ({
-            observer,
-            subject,
-            status: position.value as MembershipGap,
-            key: disagreement.key,
-            answered: selves.has(observer),
-          })),
-        );
+      return lackingObservers(disagreement).map(({ observer, status }) => ({
+        observer,
+        subject,
+        status,
+        key: disagreement.key,
+        answered: selves.has(observer) && !lists(observer, subject),
+      }));
     })
     .filter(claims);
 
@@ -279,7 +278,7 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
       : own.flatMap((link) => (byKey.get(link.key) as TrackedDisagreement).positions).flatMap((side) => side.observers);
     const history = own.map((link) => {
       const dispute = byKey.get(link.key) as TrackedDisagreement;
-      const { firstSeenAt, rounds } = (link.observer === hub && dispute.gapStreaks?.[hub]) || dispute;
+      const { firstSeenAt, rounds } = dispute.gapStreaks?.[link.observer] ?? dispute;
       return { firstSeenAt, rounds, seen: dispute.lastSeenAt >= at };
     });
     const read = own.filter((link) => link.answered);
@@ -297,7 +296,7 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
       nodeId: hub,
       address: addressOf(endpoint),
       knownBy: sortedUnique(knowers)
-        .filter((id) => id !== hub && selves.has(id))
+        .filter((id) => id !== hub && selves.has(id) && lists(id, hub))
         .map(peer),
       notKnownBy,
       ownViewMissing,
@@ -353,11 +352,6 @@ function nameOf(peer: MembershipPeer): string {
 function listOf(names: string[]): string {
   if (names.length < 2) return names.join('');
   return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
-}
-
-function durationOf(ms: number): string {
-  const seconds = Math.max(0, Math.round(ms / 1000));
-  return seconds < 120 ? `${seconds}s` : `${Math.round(seconds / 60)}m`;
 }
 
 function whyNoCommand(finding: PartialMembership): string {

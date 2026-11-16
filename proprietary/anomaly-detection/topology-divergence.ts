@@ -28,7 +28,15 @@ export interface SlotStreak {
 
 export interface GapStreak {
   firstSeenAt: number;
+  lastSeenAt: number;
   rounds: number;
+}
+
+export type MembershipGap = 'missing' | 'handshake' | 'noaddr';
+
+export interface LackingObserver {
+  observer: string;
+  status: MembershipGap;
 }
 
 export interface TrackedDisagreement extends TopologyDisagreement {
@@ -63,8 +71,14 @@ export const TOPOLOGY_DIVERGENCE_SIGNATURE_PREFIX = 'topology_divergence:';
 export const UNASSIGNED_SLOT_OWNER = 'unassigned';
 export const KNOWN_MEMBER = 'known';
 export const FAILING_FLAGS = ['fail', 'fail?'];
+export const UNREACHABLE_FLAGS = ['handshake', 'noaddr'];
 
 const SLOT_COUNT = 16384;
+const DURATION_UNITS: Array<[string, number]> = [
+  ['d', 86_400],
+  ['h', 3_600],
+  ['m', 60],
+];
 const FINISHED_MIGRATION_STATES = ['success', 'failed', 'cancelled'];
 
 type MemberStatus = typeof KNOWN_MEMBER | 'handshake' | 'noaddr';
@@ -325,6 +339,20 @@ function dissentCandidates(disagreement: TopologyDisagreement): string[][] {
     .sort((a, b) => compareText(a.join(','), b.join(',')));
 }
 
+export function lackingObservers(disagreement: TopologyDisagreement): LackingObserver[] {
+  return disagreement.positions
+    .filter((position) => position.value !== KNOWN_MEMBER)
+    .flatMap((position) =>
+      position.observers.map((observer) => ({ observer, status: position.value as MembershipGap })),
+    );
+}
+
+export function durationOf(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  const unit = DURATION_UNITS.find(([, size]) => seconds >= 2 * size);
+  return unit ? `${Math.round(seconds / unit[1])}${unit[0]}` : `${seconds}s`;
+}
+
 export function dissentOf(disagreement: TopologyDisagreement): string[] {
   return dissentCandidates(disagreement)[0] ?? [];
 }
@@ -431,14 +459,13 @@ export class DivergenceTracker {
     at: number,
     unanswered: ReadonlySet<string>,
   ): Record<string, GapStreak> {
-    const held = Object.entries(previous).filter(([observer]) => unanswered.has(observer));
-    const lacking = disagreement.positions
-      .filter((position) => position.value !== KNOWN_MEMBER)
-      .flatMap((position) => position.observers)
-      .map((observer): [string, GapStreak] => {
-        const streak = previous[observer];
-        return [observer, { firstSeenAt: streak?.firstSeenAt ?? at, rounds: (streak?.rounds ?? 0) + 1 }];
-      });
+    const held = Object.entries(previous).filter(
+      ([observer, streak]) => unanswered.has(observer) && at - streak.lastSeenAt <= TOPOLOGY_DIVERGENCE_BLIND_MS,
+    );
+    const lacking = lackingObservers(disagreement).map(({ observer }): [string, GapStreak] => {
+      const streak = previous[observer];
+      return [observer, { firstSeenAt: streak?.firstSeenAt ?? at, lastSeenAt: at, rounds: (streak?.rounds ?? 0) + 1 }];
+    });
     return Object.fromEntries([...held, ...lacking]);
   }
 

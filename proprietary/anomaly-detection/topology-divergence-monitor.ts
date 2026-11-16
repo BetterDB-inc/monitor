@@ -2,6 +2,7 @@ import type { ClusterNode } from '@app/common/types/metrics.types';
 import {
   DivergenceTracker,
   FAILING_FLAGS,
+  UNREACHABLE_FLAGS,
   type TopologyView,
   type TrackedDisagreement,
   compareTopologyViews,
@@ -23,8 +24,6 @@ export const TOPOLOGY_DIVERGENCE_MAX_OBSERVERS = 12;
 export const TOPOLOGY_DIVERGENCE_MAX_ACCUSED = 2;
 export const TOPOLOGY_DIVERGENCE_IDLE_ROUNDS = 3;
 export const TOPOLOGY_DIVERGENCE_BACKOFF_MAX_ROUNDS = 8;
-
-const UNREACHABLE_FLAGS = ['handshake', 'noaddr'];
 
 export interface DivergencePoll {
   clusterKey: string;
@@ -197,7 +196,12 @@ export class TopologyDivergenceMonitor {
     }
 
     const tracked = state.tracker.tracked();
-    const frozen = new Set(tracked.flatMap((entry) => entry.positions.flatMap((position) => position.observers)));
+    const frozen = new Set(
+      tracked.flatMap((entry) => [
+        ...entry.positions.flatMap((position) => position.observers),
+        ...Object.keys(entry.gapStreaks ?? {}),
+      ]),
+    );
     const selection = selectObservers({
       nodes: input.nodes,
       anchorId: self.id,
