@@ -67,6 +67,14 @@ describe('nodeOfEvent', () => {
     });
   });
 
+  it('gives the node of a role change the role it changed to', () => {
+    const demoted = resolve({ metricType: MetricType.REPLICATION_ROLE, value: 0, baseline: 1 });
+    const promoted = resolve({ metricType: MetricType.REPLICATION_ROLE, value: 1, baseline: 0 });
+
+    expect(demoted).toMatchObject({ nodeId: 'primary-a', role: 'replica' });
+    expect(promoted).toMatchObject({ nodeId: 'primary-a', role: 'primary' });
+  });
+
   it('names the node a detector points at over the own node', () => {
     expect(resolve({ metricType: MetricType.GHOST_MEMBERSHIP, nodeSubject: { nodeId: 'primary-b' } })?.nodeId).toBe(
       'primary-b',

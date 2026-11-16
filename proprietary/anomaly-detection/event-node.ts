@@ -65,6 +65,10 @@ function subjectOfDetector(
   return { nodeId: subject.nodeId, address: subject.address.split('@')[0], role: 'unknown' };
 }
 
+function roleChangedTo(event: AnomalyEvent): ClusterNodeRef['role'] {
+  return event.value === 1 ? 'primary' : 'replica';
+}
+
 export function nodeOfEvent(
   event: AnomalyEvent,
   directory: NodeDirectory | undefined,
@@ -78,5 +82,6 @@ export function nodeOfEvent(
   }
   if (event.nodeAddr) return resolveNodeRef(directory, { address: event.nodeAddr });
   if (!ownNodeId || METRICS_WITHOUT_OWN_NODE.has(event.metricType)) return undefined;
-  return resolveNodeRef(directory, { nodeId: ownNodeId });
+  const own = resolveNodeRef(directory, { nodeId: ownNodeId });
+  return own && event.metricType === MetricType.REPLICATION_ROLE ? { ...own, role: roleChangedTo(event) } : own;
 }
