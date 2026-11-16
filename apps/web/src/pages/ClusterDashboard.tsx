@@ -12,6 +12,7 @@ import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
 import { useConnectionDialog } from '../hooks/useConnectionDialog';
 import { useClusterTab } from '../hooks/useClusterTab';
+import { useNodeCollection } from '../hooks/useNodeCollection';
 import { metricsApi } from '../api/metrics';
 import { ClusterHealthCard } from '../components/cluster/ClusterHealthCard';
 import { ClusterTopology } from '../components/cluster/ClusterTopology';
@@ -88,6 +89,14 @@ export function ClusterDashboard() {
   const [tab, setTab] = useClusterTab();
   const [searchParams] = useSearchParams();
   const focusNodeId = searchParams.get(CLUSTER_NODE_PARAM);
+  const { collection, refresh: refreshCollection } = useNodeCollection(
+    currentConnection?.id,
+    shouldPoll && tab === 'nodes',
+  );
+  const handleNodeConnected = useCallback(async () => {
+    await refreshConnections();
+    await refreshCollection();
+  }, [refreshConnections, refreshCollection]);
 
   // Memoize slot-to-node mapping separately for reuse
   const slotNodeMap = useMemo(() => buildSlotNodeMap(nodes), [nodes]);
@@ -370,7 +379,13 @@ export function ClusterDashboard() {
         {/* Nodes Tab */}
         <TabsContent value="nodes" className="space-y-4">
           <NodeStatsComparison nodeStats={nodeStats || undefined} />
-          <ClusterNodesTable nodes={nodes} focusNodeId={focusNodeId} />
+          <ClusterNodesTable
+            nodes={nodes}
+            focusNodeId={focusNodeId}
+            collection={collection}
+            clusterConnection={currentConnection}
+            onNodeConnected={handleNodeConnected}
+          />
         </TabsContent>
 
         {/* Replication Tab */}

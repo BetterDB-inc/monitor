@@ -14,10 +14,15 @@ import { ChevronDown, ChevronRight, Server, Copy } from 'lucide-react';
 import { clusterNodeState, type ClusterNodeState } from '@betterdb/shared';
 import type { ClusterNode } from '../../types/metrics';
 import { formatSlotRanges, countSlots } from '../../types/cluster';
+import { NodeCollectionNotice } from './NodeCollectionNotice';
+import type { ClusterConnectionRef, NodeCollection } from './nodeCollection';
 
 interface ClusterNodesTableProps {
   nodes: ClusterNode[];
   focusNodeId?: string | null;
+  collection?: ReadonlyMap<string, NodeCollection>;
+  clusterConnection?: ClusterConnectionRef | null;
+  onNodeConnected?: () => void;
 }
 
 type SortColumn = 'address' | 'role' | 'slots' | 'state';
@@ -30,7 +35,13 @@ function stateSortKey(node: ClusterNode): string {
   return `${STATE_RANK[clusterNodeState(node.flags)]}:${node.linkState}`;
 }
 
-export function ClusterNodesTable({ nodes, focusNodeId }: ClusterNodesTableProps) {
+export function ClusterNodesTable({
+  nodes,
+  focusNodeId,
+  collection,
+  clusterConnection,
+  onNodeConnected,
+}: ClusterNodesTableProps) {
   const [sortColumn, setSortColumn] = useState<SortColumn>('address');
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
   const [filterTab, setFilterTab] = useState<FilterTab>('all');
@@ -43,28 +54,22 @@ export function ClusterNodesTable({ nodes, focusNodeId }: ClusterNodesTableProps
     return map;
   }, [nodes]);
 
-  const shownFocus = useRef<string | null>(null);
   const rows = useRef(new Map<string, HTMLTableRowElement>());
-  const [scrollTo, setScrollTo] = useState<string | null>(null);
+  const [shownFocus, setShownFocus] = useState<string | null>(null);
   const focusKnown = focusNodeId ? nodeMap.has(focusNodeId) : false;
 
-  useEffect(() => {
-    if (!focusNodeId) {
-      shownFocus.current = null;
-      return;
-    }
-    if (!focusKnown || shownFocus.current === focusNodeId) return;
-    shownFocus.current = focusNodeId;
+  if (!focusNodeId && shownFocus !== null) {
+    setShownFocus(null);
+  }
+  if (focusNodeId && focusKnown && shownFocus !== focusNodeId) {
+    setShownFocus(focusNodeId);
     setFilterTab('all');
     setExpandedNode(focusNodeId);
-    setScrollTo(focusNodeId);
-  }, [focusNodeId, focusKnown]);
+  }
 
   useEffect(() => {
-    if (!scrollTo) return;
-    rows.current.get(scrollTo)?.scrollIntoView?.({ block: 'center' });
-    setScrollTo(null);
-  }, [scrollTo]);
+    if (shownFocus) rows.current.get(shownFocus)?.scrollIntoView?.({ block: 'center' });
+  }, [shownFocus]);
 
   const showZone = useMemo(() => nodes.some((node) => node.availabilityZone), [nodes]);
 
@@ -266,6 +271,15 @@ export function ClusterNodesTable({ nodes, focusNodeId }: ClusterNodesTableProps
                             MYSELF
                           </Badge>
                         )}
+                        {collection?.get(node.id)?.collected === false && (
+                          <Badge
+                            variant="outline"
+                            className="text-[10px]"
+                            title="BetterDB has no connection of its own to this node"
+                          >
+                            Not collected
+                          </Badge>
+                        )}
                       </div>
                     </TableCell>
                     <TableCell>{getRoleBadge(node)}</TableCell>
@@ -307,6 +321,13 @@ export function ClusterNodesTable({ nodes, focusNodeId }: ClusterNodesTableProps
                     <TableRow>
                       <TableCell colSpan={showZone ? 7 : 6} className="bg-muted/30">
                         <div className="p-4 space-y-3 text-sm">
+                          <NodeCollectionNotice
+                            nodeId={node.id}
+                            address={node.address.split('@')[0]}
+                            collection={collection?.get(node.id)}
+                            clusterConnection={clusterConnection}
+                            onConnected={onNodeConnected}
+                          />
                           <div className="grid grid-cols-2 gap-4">
                             <div>
                               <span className="text-muted-foreground">Node ID:</span>

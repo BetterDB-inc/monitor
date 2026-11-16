@@ -1,12 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { clusterNodePath } from '@betterdb/shared';
 
 const table = vi.hoisted(() => ({ props: [] as Array<Record<string, unknown>> }));
+const calls = vi.hoisted(() => ({
+  refreshConnections: vi.fn(),
+  refreshCollection: vi.fn(),
+  collection: new Map([['n1', { collected: false }]]),
+  asked: [] as Array<{ connectionId: string | undefined; enabled: boolean }>,
+}));
+const CONNECTION = vi.hoisted(() => ({ id: 'conn-1', host: '10.0.0.1', connectionType: 'direct' }));
 
 vi.mock('../hooks/useConnection', () => ({
-  useConnection: () => ({ currentConnection: { id: 'conn-1' }, refreshConnections: vi.fn() }),
+  useConnection: () => ({
+    currentConnection: CONNECTION,
+    refreshConnections: calls.refreshConnections,
+  }),
 }));
 vi.mock('../hooks/useCluster', () => ({
   useCluster: () => ({
@@ -33,6 +43,12 @@ vi.mock('../hooks/useCluster', () => ({
 }));
 vi.mock('../hooks/usePolling', () => ({
   usePolling: () => ({ data: null, error: null, loading: false, refresh: vi.fn() }),
+}));
+vi.mock('../hooks/useNodeCollection', () => ({
+  useNodeCollection: (connectionId: string | undefined, enabled: boolean) => {
+    calls.asked.push({ connectionId, enabled });
+    return { collection: calls.collection, refresh: calls.refreshCollection };
+  },
 }));
 vi.mock('../components/cluster/ClusterHealthCard', () => ({ ClusterHealthCard: () => null }));
 vi.mock('../components/cluster/ClusterTopology', () => ({ ClusterTopology: () => null }));
@@ -70,6 +86,36 @@ function open(url: string) {
 describe('ClusterDashboard node link', () => {
   beforeEach(() => {
     table.props = [];
+    calls.asked = [];
+    calls.refreshConnections.mockReset().mockResolvedValue(undefined);
+    calls.refreshCollection.mockReset().mockResolvedValue(undefined);
+  });
+
+  it('tells the nodes table which nodes are collected and which connection reads the cluster', () => {
+    open(clusterNodePath('n1', 'conn-1'));
+
+    expect(calls.asked.at(-1)).toEqual({ connectionId: 'conn-1', enabled: true });
+    expect(table.props.at(-1)).toMatchObject({
+      collection: calls.collection,
+      clusterConnection: CONNECTION,
+    });
+  });
+
+  it('does not ask which nodes are collected while another tab is open', () => {
+    open('/cluster');
+
+    expect(calls.asked.at(-1)).toEqual({ connectionId: 'conn-1', enabled: false });
+  });
+
+  it('reloads the connections and the collection once a node is connected', async () => {
+    open(clusterNodePath('n1', 'conn-1'));
+
+    await act(async () => {
+      await (table.props.at(-1)?.onNodeConnected as () => Promise<void>)();
+    });
+
+    expect(calls.refreshConnections).toHaveBeenCalledTimes(1);
+    expect(calls.refreshCollection).toHaveBeenCalledTimes(1);
   });
 
   it('opens the Nodes tab on the node a node link names', () => {
