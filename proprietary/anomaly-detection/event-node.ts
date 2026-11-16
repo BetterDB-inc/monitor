@@ -108,7 +108,11 @@ export function nodeOfEvent(
 ): ClusterNodeRef | undefined {
   if (event.node) return event.node;
   const node = nodeInView(event, directory, ownNodeId);
-  return node && !roleKnown ? { ...node, role: 'unknown' } : node;
+  if (!node) return undefined;
+  if (event.metricType === MetricType.REPLICATION_ROLE && node.nodeId === ownNodeId) {
+    return { ...node, role: roleChangedTo(event) };
+  }
+  return roleKnown ? node : { ...node, role: 'unknown' };
 }
 
 function nodeInView(
@@ -123,6 +127,5 @@ function nodeInView(
   }
   if (event.nodeAddr) return resolveNodeRef(directory, { address: event.nodeAddr });
   if (!ownNodeId || METRICS_WITHOUT_OWN_NODE.has(event.metricType)) return undefined;
-  const own = resolveNodeRef(directory, { nodeId: ownNodeId });
-  return own && event.metricType === MetricType.REPLICATION_ROLE ? { ...own, role: roleChangedTo(event) } : own;
+  return resolveNodeRef(directory, { nodeId: ownNodeId });
 }

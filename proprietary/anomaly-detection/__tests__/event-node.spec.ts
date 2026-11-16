@@ -149,6 +149,12 @@ describe('nodeOfEvent', () => {
     expect(resolve({ node })).toBe(node);
   });
 
+  it('keeps the role a role change names when the view is too old to say', () => {
+    const promoted = event({ metricType: MetricType.REPLICATION_ROLE, value: 1, baseline: 0 });
+
+    expect(nodeOfEvent(promoted, directory, ownNodeId, false)?.role).toBe('primary');
+  });
+
   it('gives the node an unknown role when the view is too old to say', () => {
     expect(nodeOfEvent(event(), directory, ownNodeId, false)).toEqual({
       nodeId: 'primary-a',
