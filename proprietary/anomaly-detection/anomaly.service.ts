@@ -6678,7 +6678,16 @@ export class AnomalyService
 
   private async readSlotMigrationState(connectionId: string): Promise<SlotMigrationState> {
     if (!this.clusterMetrics) return 'none';
-    const check = await this.clusterMetrics.checkSlotMigrations(connectionId);
+    return this.slotMigrationStateOf(
+      connectionId,
+      await this.clusterMetrics.checkSlotMigrations(connectionId),
+    );
+  }
+
+  private slotMigrationStateOf(
+    connectionId: string,
+    check: { migrations: Array<{ jobName?: string }>; complete: boolean },
+  ): SlotMigrationState {
     const watch = this.slotMigrationWatch.get(connectionId);
     const running = check.migrations.filter(
       (migration) =>
@@ -10603,12 +10612,24 @@ export class AnomalyService
     this.rebalanceStarting.add(connectionId);
     try {
       let nodes: DiscoveredNode[];
-      let migration: SlotMigrationState;
+      let migration: SlotMigrationState = 'none';
+      let jobsBefore: string[] = [];
       try {
-        [nodes, migration] = await Promise.all([
+        const [discovered, report] = await Promise.all([
           discovery.discoverNodesIsolated(connectionId, AnomalyService.FANOUT_COMMAND_TIMEOUT_MS),
-          this.readSlotMigrationState(connectionId),
+          this.clusterMetrics?.readSlotMigrations(connectionId),
         ]);
+        nodes = discovered;
+        if (report) {
+          migration = this.slotMigrationStateOf(connectionId, report);
+          jobsBefore = [
+            ...new Set([
+              ...report.finishedJobs,
+              ...report.failed.map((entry) => entry.jobName),
+              ...report.jobViews.flatMap((view) => (view.jobName ? [view.jobName] : [])),
+            ]),
+          ];
+        }
       } catch (err) {
         return { status: 'refused', message: `Could not re-check the cluster: ${errorText(err)}` };
       }
@@ -10634,7 +10655,7 @@ export class AnomalyService
       } catch (err) {
         return { status: 'refused', message: errorText(err) };
       }
-      const run = startRun(plan, startedBy, Date.now());
+      const run = startRun(plan, startedBy, Date.now(), jobsBefore);
       const runs = this.rebalanceRuns.get(connectionId) ?? new Map<string, RebalanceRun>();
       runs.set(plan.sourceShardId, run);
       this.rebalanceRuns.set(connectionId, runs);

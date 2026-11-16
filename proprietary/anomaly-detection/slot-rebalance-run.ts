@@ -35,7 +35,13 @@ export interface RunReport {
     phase?: string;
   }>;
   finishedJobs: string[];
-  failed: Array<{ jobName: string; message: string }>;
+  failed: Array<{
+    jobName: string;
+    message: string;
+    sourceNodeId?: string;
+    targetNodeId?: string;
+    slotRange?: string;
+  }>;
 }
 
 export type RebalanceJobState =
@@ -69,6 +75,7 @@ export interface RebalanceRun {
   startedBy: RebalanceRunActor;
   startedAt: number;
   projectedRatio: number;
+  jobsBefore: string[];
   jobs: RebalanceRunJob[];
   state: RebalanceRunState;
   endedAt?: number;
@@ -177,6 +184,7 @@ export function startRun(
   plan: RebalancePlan,
   startedBy: RebalanceRunActor,
   now: number,
+  jobsBefore: readonly string[] = [],
 ): RebalanceRun {
   const source = plan.projection.find((row) => row.role === 'source');
   return {
@@ -185,6 +193,7 @@ export function startRun(
     startedBy,
     startedAt: now,
     projectedRatio: source?.after.ratio ?? 0,
+    jobsBefore: [...jobsBefore],
     jobs: plan.moves.map((move) => ({
       targetShardId: move.targetShardId,
       targetAddr: move.targetAddr,
@@ -231,10 +240,20 @@ function followJob(
   if (listed) {
     return { ...job, state: 'running', jobName: listed.jobName, phase: listed.phase };
   }
-  const failed = job.jobName && report.failed.find((entry) => entry.jobName === job.jobName);
-  if (failed) return { ...job, state: 'failed', message: failed.message };
+  const isNew = (jobName: string) => !run.jobsBefore.includes(jobName);
+  const failed = report.failed.find((entry) =>
+    job.jobName
+      ? entry.jobName === job.jobName
+      : isNew(entry.jobName) &&
+        entry.sourceNodeId === run.sourceShardId &&
+        entry.targetNodeId === job.targetShardId &&
+        inside(slotsOf(entry.slotRange), job.ranges),
+  );
+  if (failed) return { ...job, state: 'failed', jobName: failed.jobName, message: failed.message };
+  const moved = owns(byId.get(job.targetShardId), job.ranges);
+  if (!job.jobName && moved) return { ...job, state: 'succeeded' };
   if (job.jobName && report.finishedJobs.includes(job.jobName)) {
-    if (owns(byId.get(job.targetShardId), job.ranges)) return { ...job, state: 'succeeded' };
+    if (moved) return { ...job, state: 'succeeded' };
     if (owns(byId.get(run.sourceShardId), job.ranges)) return { ...job, state: 'cancelled' };
     return { ...job, state: 'unknown' };
   }

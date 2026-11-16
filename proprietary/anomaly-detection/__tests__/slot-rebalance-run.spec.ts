@@ -352,6 +352,87 @@ describe('slot rebalance run', () => {
       expect(isRunKept(started(), 1_000 + 3_599_999)).toBe(true);
     });
 
+    const movedNodes = () => [
+      node('src', [
+        [100, 199],
+        [201, 299],
+        [400, 5460],
+      ]),
+      node('tgt1', [
+        [0, 99],
+        [200, 200],
+        [5461, 10922],
+      ]),
+      node('tgt2', [
+        [300, 399],
+        [10923, 16383],
+      ]),
+    ];
+
+    it('calls a job that finished before it was listed a success once the target owns its slots', () => {
+      const run = followRun(started(), report({ finishedJobs: ['job-a', 'job-b'] }), movedNodes(), 2_000);
+      expect(run.jobs.map((job) => job.state)).toEqual(['succeeded', 'succeeded']);
+      expect(run.state).toBe('succeeded');
+      expect(run.endedAt).toBe(2_000);
+    });
+
+    it('does not take a finished job from another target as this one', () => {
+      const partly = movedNodes();
+      partly[0] = node('src', [
+        [100, 199],
+        [201, 5460],
+      ]);
+      partly[2] = node('tgt2', [[10923, 16383]]);
+      const run = followRun(started(), report({ finishedJobs: ['job-a'] }), partly, 2_000);
+      expect(run.jobs.map((job) => job.state)).toEqual(['succeeded', 'starting']);
+      expect(run.state).toBe('running');
+    });
+
+    it('matches a failure it never saw listed by source, target and slots', () => {
+      const run = followRun(
+        started(),
+        report({
+          finishedJobs: ['job-b'],
+          failed: [
+            {
+              jobName: 'job-b',
+              message: 'target refused',
+              sourceNodeId: 'src',
+              targetNodeId: 'tgt2',
+              slotRange: '300-399',
+            },
+          ],
+        }),
+        nodes(),
+        2_000,
+      );
+      expect(run.jobs[1]).toMatchObject({ state: 'failed', jobName: 'job-b', message: 'target refused' });
+      expect(run.jobs[0].state).toBe('starting');
+    });
+
+    it('ignores a failure that was listed before the run started', () => {
+      const before = startRun(plan(), { userId: 'u1', email: null }, 1_000, ['old-job']);
+      const run = followRun(
+        before,
+        report({
+          finishedJobs: ['old-job'],
+          failed: [
+            {
+              jobName: 'old-job',
+              message: 'earlier failure',
+              sourceNodeId: 'src',
+              targetNodeId: 'tgt2',
+              slotRange: '300-399',
+            },
+          ],
+        }),
+        nodes(),
+        2_000,
+      );
+      expect(run.jobsBefore).toEqual(['old-job']);
+      expect(run.jobs[1].state).toBe('starting');
+    });
+
     it('keeps an unlisted job starting for a minute, then unknown', () => {
       expect(followRun(started(), report(), nodes(), 61_000).jobs[0].state).toBe('starting');
       const lost = followRun(started(), report(), nodes(), 61_001);

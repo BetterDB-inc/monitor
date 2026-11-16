@@ -4573,6 +4573,32 @@ describe('AnomalyService', () => {
             });
           });
 
+          it('follows a job that finished before it was ever listed', async () => {
+            enable();
+            await planned();
+            report.finishedJobs = ['old-job'];
+            report.failed = [
+              {
+                jobName: 'old-job',
+                message: 'earlier failure',
+                sourceNodeId: 'a0000000',
+                targetNodeId: 'b0000000',
+                slotRange: '100-107',
+              },
+            ];
+            const started = await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN);
+            expect(started).toMatchObject({ status: 'started', run: { jobsBefore: ['old-job'] } });
+
+            report.finishedJobs = ['old-job', 'job-1'];
+            slotsOf.a0000000 = [[108, 119]];
+            slotsOf.b0000000 = [[10, 11], [100, 107]];
+
+            expect((await service.followRebalanceRuns('conn-a'))[0]).toMatchObject({
+              state: 'succeeded',
+              jobs: [{ state: 'succeeded' }],
+            });
+          });
+
           it('cancels only a run of its own that is still running', async () => {
             enable();
             const { calls } = await planned();
