@@ -29,6 +29,8 @@ const MIN_ROUNDS = 3;
 
 const NEW_NODE = primary('n1', 7, [], 0);
 
+const NEW_REPLICA: ClusterNode = { ...primary('r1', 8, [], 0), flags: ['slave'], master: 'n1' };
+
 const BASE: ClusterNode[] = [
   primary('p1', 1, [[0, 5460]], 1),
   primary('p2', 2, [[5461, 10922]], 2),
@@ -255,7 +257,40 @@ describe('partiallyKnownNodes', () => {
 
     expect(found).toHaveLength(1);
     expect(found[0]).toMatchObject({ nodeId: 'n1', rounds: 2, confirmed: false });
-    expect(ids(found[0].notKnownBy)).toEqual(['p2']);
+    expect(found[0].notKnownBy).toEqual([]);
+  });
+
+  describe('when a dispute is held because one side gave no view', () => {
+    const p2 = BASE[1];
+    const p3 = BASE[2];
+    const ownView = view('n1', { p2: null, p3: null }, [handshakeWith(p2), handshakeWith(p3)]);
+    const stuck = every([view('p1'), view('p2', { n1: null }), view('p3', { n1: null }), ownView], 0, LONG_ENOUGH);
+    const at = LONG_ENOUGH + ROUND_MS;
+
+    it('leaves out what the unread view of the node itself was missing', () => {
+      const views = [view('p1'), view('p2', { n1: null })];
+      const { found } = judge([...stuck, { at, views, unanswered: ['p3', 'n1'] }]);
+
+      expect(found).toHaveLength(1);
+      expect(found[0]).toMatchObject({ nodeId: 'n1', confirmed: true });
+      expect(ids(found[0].knownBy)).toEqual(['p1']);
+      expect(ids(found[0].notKnownBy)).toEqual(['p2']);
+      expect(found[0].ownViewMissing).toEqual([]);
+      expect(ids(found[0].meet?.runOn ?? [])).toEqual(['p2']);
+      expect(found[0].disagreementKeys).toEqual(['membership:n1', 'membership:p2', 'membership:p3']);
+      expect(partialMembershipMessage(found[0], at)).not.toContain('Its own view is missing');
+    });
+
+    it('leaves out the unread peers that lacked the node', () => {
+      const { found } = judge([...stuck, { at, views: [view('p1'), ownView], unanswered: ['p2', 'p3'] }]);
+
+      expect(found).toHaveLength(1);
+      expect(found[0]).toMatchObject({ nodeId: 'n1', confirmed: true });
+      expect(ids(found[0].knownBy)).toEqual(['p1']);
+      expect(found[0].notKnownBy).toEqual([]);
+      expect(ids(found[0].ownViewMissing)).toEqual(['p2', 'p3']);
+      expect(partialMembershipMessage(found[0], at)).not.toContain('Not known by');
+    });
   });
 
   it('makes one finding of a join that is broken in both directions', () => {
@@ -302,25 +337,82 @@ describe('partiallyKnownNodes', () => {
     });
   });
 
-  it('files a broken link between two established nodes under the smaller id', () => {
+  it('files a broken link between two slot owners under the one that is not known', () => {
     const views = [view('p1'), view('p2', { p3: null }), view('p3')];
     const { found } = judge(every(views, 0, LONG_ENOUGH));
 
     expect(found).toHaveLength(1);
-    expect(found[0].nodeId).toBe('p2');
-    expect(ids(found[0].ownViewMissing)).toEqual(['p3']);
-    expect(found[0].meet?.command).toBe('CLUSTER MEET 10.0.0.2 6379');
-    expect(ids(found[0].meet?.runOn ?? [])).toEqual(['p3']);
+    expect(found[0].nodeId).toBe('p3');
+    expect(ids(found[0].notKnownBy)).toEqual(['p2']);
+    expect(found[0].ownViewMissing).toEqual([]);
+    expect(found[0].meet?.command).toBe('CLUSTER MEET 10.0.0.3 6379');
+    expect(ids(found[0].meet?.runOn ?? [])).toEqual(['p2']);
   });
 
-  it('keeps a broken link under the node that already has an open event', () => {
-    const views = [view('p1'), view('p2', { p3: null }), view('p3')];
+  it('files two slot owners that do not know each other under the smaller id', () => {
+    const views = [view('p1'), view('p2', { p3: null }), view('p3', { p2: null })];
+    const { found } = judge(every(views, 0, LONG_ENOUGH));
+
+    expect(found).toHaveLength(1);
+    expect(found[0].nodeId).toBe('p2');
+    expect(ids(found[0].notKnownBy)).toEqual(['p3']);
+    expect(ids(found[0].ownViewMissing)).toEqual(['p3']);
+  });
+
+  it('keeps two slot owners that do not know each other under the one with an open event', () => {
+    const views = [view('p1'), view('p2', { p3: null }), view('p3', { p2: null })];
     const { found } = judge(every(views, 0, LONG_ENOUGH), ['p3']);
 
     expect(found).toHaveLength(1);
     expect(found[0].nodeId).toBe('p3');
-    expect(ids(found[0].notKnownBy)).toEqual(['p2']);
     expect(found[0].meet?.command).toBe('CLUSTER MEET 10.0.0.3 6379');
+  });
+
+  it('names a new primary and its replica, not the slot owner that has not learned them', () => {
+    const views = [view('p1', {}, [NEW_REPLICA]), view('p2', { n1: null }), view('p3', {}, [NEW_REPLICA])];
+    const { found, tracked } = judge(every(views, 0, LONG_ENOUGH));
+
+    expect(found.map((finding) => finding.nodeId)).toEqual(['n1', 'r1']);
+    for (const finding of found) {
+      expect(finding.confirmed).toBe(true);
+      expect(ids(finding.knownBy)).toEqual(['p1', 'p3']);
+      expect(ids(finding.notKnownBy)).toEqual(['p2']);
+      expect(finding.ownViewMissing).toEqual([]);
+      expect(ids(finding.meet?.runOn ?? [])).toEqual(['p2']);
+    }
+    expect(found[1].meet?.command).toBe('CLUSTER MEET 10.0.0.8 6379');
+    expect(unclaimedMemberships(tracked, found)).toEqual([]);
+  });
+
+  it('does not name that slot owner because it has an open event either', () => {
+    const views = [view('p1', {}, [NEW_REPLICA]), view('p2', { n1: null }), view('p3', {}, [NEW_REPLICA])];
+    const { found } = judge(every(views, 0, LONG_ENOUGH), ['p2']);
+    expect(found.map((finding) => finding.nodeId)).toEqual(['n1', 'r1']);
+  });
+
+  it('names a new replica one slot owner has not learned, not the slot owner', () => {
+    const views = [view('p1', {}, [NEW_REPLICA]), view('p2'), view('p3', {}, [NEW_REPLICA])];
+    const { found } = judge(every(views, 0, LONG_ENOUGH));
+
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({ nodeId: 'r1', address: '10.0.0.8:6379' });
+    expect(ids(found[0].notKnownBy)).toEqual(['p2']);
+  });
+
+  it('names a replica whose own view lacks a slot owner, not the slot owner', () => {
+    const blind: TopologyView = {
+      observerId: 'r1',
+      nodes: [BASE[0], BASE[2], NEW_NODE, { ...NEW_REPLICA, flags: ['myself', 'slave'] }],
+    };
+    const everyone = ['p1', 'p2', 'p3'].map((id) => view(id, {}, [NEW_REPLICA]));
+    const { found } = judge(every([...everyone, blind], 0, LONG_ENOUGH));
+
+    expect(found).toHaveLength(1);
+    expect(found[0].nodeId).toBe('r1');
+    expect(ids(found[0].knownBy)).toEqual(['p1', 'p2', 'p3']);
+    expect(ids(found[0].ownViewMissing)).toEqual(['p2']);
+    expect(found[0].meet).toMatchObject({ command: 'CLUSTER MEET 10.0.0.8 6379' });
+    expect(ids(found[0].meet?.runOn ?? [])).toEqual(['p2']);
   });
 
   it('reads a handshake line on an address two node ids share as missing, not as handshake', () => {
@@ -374,6 +466,8 @@ describe('partiallyKnownNodes', () => {
       const { found, tracked } = judge([...seen, ...unread], ['n1']);
       expect(found).toHaveLength(1);
       expect(found[0]).toMatchObject({ nodeId: 'n1', confirmed: false });
+      expect(found[0].knownBy).toEqual([]);
+      expect(ids(found[0].notKnownBy)).toEqual(['p2']);
       expect(unclaimedMemberships(tracked, found)).toEqual([]);
     });
   });
@@ -421,6 +515,16 @@ describe('partiallyKnownNodes', () => {
 
     expect(found).toHaveLength(1);
     expect(found[0]).toMatchObject({ nodeId: 'n1', address: '', knownBy: [] });
+    expect(found[0].meet).toBeUndefined();
+  });
+
+  it('gives no command when the address has a name where the IP should be', () => {
+    const named = { address: 'node-7.internal:6379@16379' };
+    const views = [view('p1', { n1: named }), view('p2', { n1: null }), view('p3', { n1: named })];
+    const { found } = judge(every(views, 0, LONG_ENOUGH));
+
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({ nodeId: 'n1', address: 'node-7.internal:6379', confirmed: true });
     expect(found[0].meet).toBeUndefined();
   });
 
@@ -524,6 +628,20 @@ describe('partialMembershipMessage', () => {
         'Known by none of the sampled nodes. ' +
         'Not known by 10.0.0.1:6379 (missing), 10.0.0.2:6379 (missing). ' +
         'No view has an address for it, so no CLUSTER MEET command can be given.',
+    );
+  });
+
+  it('says why there is no command when the address has a name where the IP should be', () => {
+    const named = { address: 'node-7.internal:6379@16379' };
+    const views = [view('p1', { n1: named }), view('p2', { n1: null }), view('p3', { n1: named })];
+    const { found } = judge(every(views, 0, 95_000));
+
+    expect(partialMembershipMessage(found[0], 95_000)).toBe(
+      'Node node-7.internal:6379 has only partly joined the cluster for 95s. ' +
+        'Known by 10.0.0.1:6379, 10.0.0.3:6379. ' +
+        'Not known by 10.0.0.2:6379 (missing). ' +
+        'Its address node-7.internal:6379 has a host name where CLUSTER MEET needs an IP address, ' +
+        'so no command can be given.',
     );
   });
 

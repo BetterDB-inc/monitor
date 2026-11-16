@@ -1,3 +1,4 @@
+import { isIP } from 'net';
 import type { ClusterNode } from '@app/common/types/metrics.types';
 import type { TopologyDisagreement, TopologyView, TrackedDisagreement } from './topology-divergence';
 
@@ -64,6 +65,7 @@ interface Link {
   subject: string;
   status: MembershipGap;
   key: string;
+  answered: boolean;
 }
 
 const KNOWN = 'known';
@@ -71,9 +73,9 @@ const UNLISTED_FLAGS = ['handshake', 'noaddr'];
 const FAILING_FLAGS = ['fail', 'fail?'];
 const BUS_PORT_OFFSET = 10_000;
 const SHORT_ID_LENGTH = 8;
-const RANK_OPEN = 0;
-const RANK_NEW = 1;
-const RANK_ESTABLISHED = 2;
+const TIER_NEW = 0;
+const TIER_REPLICA = 1;
+const TIER_SLOT_OWNER = 2;
 const GAP_LABELS: Record<MembershipGap, string> = {
   missing: 'missing',
   handshake: 'stuck in handshake',
@@ -182,11 +184,14 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
     return !others.every((sighting) => isFailing(sighting.node));
   };
 
-  const rank = (id: string): number => {
-    if (open.has(id)) return RANK_OPEN;
+  const tier = (id: string): number => {
     const node = describe(id);
-    return node && (node.slots.length > 0 || node.flags.includes('slave')) ? RANK_ESTABLISHED : RANK_NEW;
+    if (!node) return TIER_NEW;
+    if (node.slots.length > 0) return TIER_SLOT_OWNER;
+    return node.flags.includes('slave') ? TIER_REPLICA : TIER_NEW;
   };
+
+  const newerEnd = (link: Link): string => (tier(link.observer) < tier(link.subject) ? link.observer : link.subject);
 
   let links = memberships
     .flatMap((disagreement): Link[] => {
@@ -199,6 +204,7 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
             subject,
             status: position.value as MembershipGap,
             key: disagreement.key,
+            answered: selves.has(observer),
           })),
         );
     })
@@ -210,8 +216,11 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
     for (const link of links) {
       for (const id of [link.observer, link.subject]) degree.set(id, (degree.get(id) ?? 0) + 1);
     }
-    const [hub] = [...degree.keys()].sort(
-      (a, b) => (degree.get(b) as number) - (degree.get(a) as number) || rank(a) - rank(b) || compareText(a, b),
+    const [hub] = sortedUnique(links.map(newerEnd)).sort(
+      (a, b) =>
+        (degree.get(b) as number) - (degree.get(a) as number) ||
+        Number(open.has(b)) - Number(open.has(a)) ||
+        compareText(a, b),
     );
     const own = links.filter((link) => link.observer === hub || link.subject === hub);
     links = links.filter((link) => !own.includes(link));
@@ -221,12 +230,13 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
     const knowers = about
       ? about.positions.filter((position) => position.value === KNOWN).flatMap((position) => position.observers)
       : disputes.flatMap((dispute) => dispute.positions.flatMap((position) => position.observers));
+    const read = own.filter((link) => link.answered);
     const gapPeers = (ids: Link[], end: 'observer' | 'subject'): MembershipGapPeer[] =>
       ids
         .map((link) => ({ ...peer(link[end]), status: link.status }))
         .sort((a, b) => compareText(a.nodeId, b.nodeId));
-    const notKnownBy = gapPeers(own.filter((link) => link.subject === hub), 'observer');
-    const ownViewMissing = gapPeers(own.filter((link) => link.observer === hub), 'subject');
+    const notKnownBy = gapPeers(read.filter((link) => link.subject === hub), 'observer');
+    const ownViewMissing = gapPeers(read.filter((link) => link.observer === hub), 'subject');
     const endpoint = endpointFor(hub);
     const runOn = sortedUnique([...notKnownBy, ...ownViewMissing].map((gap) => gap.nodeId)).map(peer);
 
@@ -235,7 +245,7 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
       nodeId: hub,
       address: addressOf(endpoint),
       knownBy: sortedUnique(knowers)
-        .filter((id) => id !== hub)
+        .filter((id) => id !== hub && selves.has(id))
         .map(peer),
       notKnownBy,
       ownViewMissing,
@@ -245,7 +255,7 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
       confirmed: disputes.some(
         (dispute) => dispute.lastSeenAt >= at && dispute.rounds >= minRounds && at - dispute.firstSeenAt >= minAgeMs,
       ),
-      ...(endpoint ? { meet: meetCommand(endpoint, runOn) } : {}),
+      ...(endpoint && isIP(endpoint.ip) ? { meet: meetCommand(endpoint, runOn) } : {}),
     });
   }
 
@@ -294,7 +304,12 @@ export function partialMembershipMessage(finding: PartialMembership, at: number)
   }
   if (ownViewMissing.length > 0) parts.push(`Its own view is missing ${ownViewMissing.map(nameOf).join(', ')}.`);
   if (!meet) {
-    parts.push('No view has an address for it, so no CLUSTER MEET command can be given.');
+    parts.push(
+      finding.address
+        ? `Its address ${finding.address} has a host name where CLUSTER MEET needs an IP address, ` +
+            'so no command can be given.'
+        : 'No view has an address for it, so no CLUSTER MEET command can be given.',
+    );
     return parts.join(' ');
   }
   parts.push(
