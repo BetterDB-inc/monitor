@@ -134,9 +134,11 @@ import {
   type RebalanceRunActor,
   type RebalanceRunResult,
   type RebalanceRunView,
+  type RunNode,
   REBALANCE_FOLLOW_MS,
   executionBlocker,
   followRun,
+  runNodesOf,
   isCancelledJob,
   isRunKept,
   migrateSlotsArgs,
@@ -2361,7 +2363,7 @@ export class AnomalyService
           await this.detectOrphanedSlotKeys(ctx, timestamp, nodes);
           await this.detectReshardPressure(info, ctx, timestamp, nodes, cpuUtilizationSample);
           await this.detectSlotMigrations(ctx, timestamp);
-          await this.followRebalanceRunsOnPoll(ctx.connectionId, timestamp);
+          await this.followRebalanceRunsOnPoll(ctx.connectionId, timestamp, nodes);
           // A slot-owning primary with no synced replica (#714). Runs in both
           // topology modes, and is not held back during a rolling update: that
           // is when the shard is most often left with a single copy.
@@ -10667,6 +10669,7 @@ export class AnomalyService
         return { status: 'changed', reason: failure, rebalance: current };
       }
       const timedOut = `CLUSTER MIGRATESLOTS did not answer within ${AnomalyService.FANOUT_COMMAND_TIMEOUT_MS}ms; the migration may still have started`;
+      const notConnected = `Could not connect to the hot shard within ${AnomalyService.FANOUT_COMMAND_TIMEOUT_MS}ms; no migration was started`;
       const record = () => {
         const run = startRun(plan, startedBy, Date.now(), jobsBefore);
         const runs = this.rebalanceRuns.get(connectionId) ?? new Map<string, RebalanceRun>();
@@ -10677,14 +10680,18 @@ export class AnomalyService
         this.holdRebalance(connectionId, 'migration_running');
         return run;
       };
+      let sent = false;
       try {
-        await this.readShard(connectionId, plan.sourceShardId, timedOut, (client) =>
-          client.call('CLUSTER', ...migrateSlotsArgs(plan)),
-        );
+        await this.readShard(connectionId, plan.sourceShardId, timedOut, (client) => {
+          sent = true;
+          return client.call('CLUSTER', ...migrateSlotsArgs(plan));
+        });
       } catch (err) {
         this.refusedRebalancePlans.set(plan, 'server_refused');
-        if (err instanceof Error && err.message === timedOut) record();
-        return { status: 'refused', message: errorText(err) };
+        const late = err instanceof Error && err.message === timedOut;
+        if (late && sent) record();
+        const message = late && !sent ? notConnected : errorText(err);
+        return { status: 'refused', message };
       }
       return { status: 'started', run: runView(record()) };
     } finally {
@@ -10696,18 +10703,23 @@ export class AnomalyService
     return (await this.advanceRebalanceRuns(connectionId)).runs.map(runView);
   }
 
-  private async followRebalanceRunsOnPoll(connectionId: string, timestamp: number): Promise<void> {
+  private async followRebalanceRunsOnPoll(
+    connectionId: string,
+    timestamp: number,
+    nodes: readonly ClusterNode[],
+  ): Promise<void> {
     const read = this.slotMigrationReadOnPoll.get(connectionId);
     this.slotMigrationReadOnPoll.delete(connectionId);
     if (!this.rebalanceRuns.has(connectionId)) return;
     await this.advanceRebalanceRuns(connectionId, {
       report: read?.timestamp === timestamp ? read.report : undefined,
+      nodes: runNodesOf(nodes),
     });
   }
 
   private async advanceRebalanceRuns(
     connectionId: string,
-    options: { report?: SlotMigrationReport; force?: boolean } = {},
+    options: { report?: SlotMigrationReport; nodes?: RunNode[]; force?: boolean } = {},
   ): Promise<{ runs: RebalanceRun[]; report?: SlotMigrationReport }> {
     const runs = this.rebalanceRuns.get(connectionId);
     if (!runs) return { runs: [] };
@@ -10728,19 +10740,18 @@ export class AnomalyService
       try {
         const [report, nodes] = await Promise.all([
           options.report ?? this.clusterMetrics.readSlotMigrations(connectionId),
-          this.clusterDiscovery.discoverNodesIsolated(
-            connectionId,
-            AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
-          ),
+          options.nodes ??
+            this.clusterDiscovery.discoverNodesIsolated(
+              connectionId,
+              AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
+            ),
         ]);
         read = report;
-        if (report.complete) {
-          for (const run of running) {
-            if (runs.get(run.sourceShardId) !== run) continue;
-            const next = followRun(run, report, nodes, Date.now());
-            runs.set(run.sourceShardId, next);
-            if (next.state !== 'running') this.slotMigrationCheckedAt.delete(connectionId);
-          }
+        for (const run of running) {
+          if (runs.get(run.sourceShardId) !== run) continue;
+          const next = followRun(run, report, nodes, Date.now());
+          runs.set(run.sourceShardId, next);
+          if (next.state !== 'running') this.slotMigrationCheckedAt.delete(connectionId);
         }
       } catch (err) {
         this.logger.warn(`Could not follow the slot rebalance on ${connectionId}: ${errorText(err)}`);

@@ -7,6 +7,7 @@ import {
   isRunKept,
   migrateSlotsArgs,
   parseConfirmedMoves,
+  REBALANCE_JOB_LISTING_GRACE_MS,
   recheckFailure,
   sameMoves,
   startRun,
@@ -505,6 +506,42 @@ describe('slot rebalance run', () => {
         [10923, 16383],
       ]),
     ];
+
+    it('follows the jobs on an incomplete read when the nodes of the run answered', () => {
+      const run = followRun(
+        started(),
+        report({
+          complete: false,
+          jobsReadNodeIds: ['src', 'tgt1', 'tgt2'],
+          jobViews: [view('job-a', 'tgt1', '0-99 200-200')],
+        }),
+        nodes(),
+        2_000,
+      );
+      expect(run.jobs[0]).toMatchObject({ jobName: 'job-a', state: 'running' });
+    });
+
+    it('ends a job on slot ownership alone when a node of the run did not answer', () => {
+      const run = followRun(
+        started(),
+        report({ complete: false, jobsReadNodeIds: ['src', 'tgt1'] }),
+        movedNodes(),
+        2_000,
+      );
+      expect(run.jobs.map((job) => job.state)).toEqual(['succeeded', 'succeeded']);
+      expect(run.state).toBe('succeeded');
+    });
+
+    it('keeps a job as it is when a node of the run did not answer and nothing moved', () => {
+      const run = followRun(
+        started(),
+        report({ complete: false, jobsReadNodeIds: ['tgt1', 'tgt2'] }),
+        nodes(),
+        1_000 + REBALANCE_JOB_LISTING_GRACE_MS + 1,
+      );
+      expect(run.jobs.map((job) => job.state)).toEqual(['starting', 'starting']);
+      expect(run.state).toBe('running');
+    });
 
     it('calls a job that finished before it was listed a success once the target owns its slots', () => {
       const run = followRun(started(), report({ finishedJobs: ['job-a', 'job-b'] }), movedNodes(), 2_000);

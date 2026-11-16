@@ -7,6 +7,7 @@ import { metricsApi } from '../../api/metrics';
 import { useCanMutate } from '../../hooks/useCanMutate';
 import { useOpenHotShards } from '../../hooks/useOpenHotShards';
 import { copyToClipboard } from '../../lib/clipboard';
+import { REBALANCE_BLOCKED } from './anomaly-display';
 import type {
   HotShardDetail,
   RebalanceCommand,
@@ -208,15 +209,6 @@ function Commands({ plan, runnable }: { plan: RebalancePlan; runnable: boolean }
   );
 }
 
-const BLOCKED: Partial<Record<RebalanceExecutionBlocker, string>> = {
-  flag_off:
-    'Running a plan from BetterDB is off. An operator can turn it on with BETTERDB_SLOT_MIGRATION=true.',
-  not_dialed: 'BetterDB does not connect to the cluster nodes directly, so it cannot run this plan.',
-  migration_running: 'A slot migration is running. A plan can run once it ends.',
-  plan_outdated: 'The slots or the nodes changed since this suggestion was made. A new one follows.',
-  server_refused:
-    'The server refused the last start of this plan. It can run again once the suggestion is made again.',
-};
 
 const REFUSED: Record<
   RebalanceRecheckFailure | 'plan_changed' | 'no_plan' | RebalanceExecutionBlocker,
@@ -227,11 +219,11 @@ const REFUSED: Record<
   slots_moved: 'The hot shard no longer owns these slots. A new suggestion follows.',
   source_unhealthy: 'The hot shard is not a healthy primary now.',
   target_unhealthy: 'A target shard is not a healthy primary now.',
-  flag_off: BLOCKED.flag_off ?? '',
-  not_dialed: BLOCKED.not_dialed ?? '',
-  migration_running: BLOCKED.migration_running ?? '',
-  plan_outdated: BLOCKED.plan_outdated ?? '',
-  server_refused: BLOCKED.server_refused ?? '',
+  flag_off: REBALANCE_BLOCKED.flag_off ?? '',
+  not_dialed: REBALANCE_BLOCKED.not_dialed ?? '',
+  migration_running: REBALANCE_BLOCKED.migration_running ?? '',
+  plan_outdated: REBALANCE_BLOCKED.plan_outdated ?? '',
+  server_refused: REBALANCE_BLOCKED.server_refused ?? '',
   provider_managed: 'Slot commands are not supported on this managed service.',
   unsupported_server: 'Running a plan needs Valkey 9.0 or later on every shard of the plan.',
 };
@@ -244,21 +236,36 @@ function refusal(err: unknown): string {
   return payload.message ?? err.message;
 }
 
-function RunPlan({ plan, connectionId }: { plan: RebalancePlan; connectionId: string | undefined }) {
+function RunPlan({ plan, onRun }: { plan: RebalancePlan; onRun: (plan: RebalancePlan) => void }) {
   const canMutate = useCanMutate();
-  const queryClient = useQueryClient();
-  const [confirmed, setConfirmed] = useState<RebalancePlan | null>(null);
-  const [sending, setSending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const open = confirmed !== null;
   const execution = plan.execution;
   if (!execution || !canMutate) return null;
-  if (!execution.available && !open) {
-    const blocked = execution.blockedBy && BLOCKED[execution.blockedBy];
+  if (!execution.available) {
+    const blocked = execution.blockedBy && REBALANCE_BLOCKED[execution.blockedBy];
     const relevant = execution.blockedBy !== 'flag_off' || plan.support === 'valkey_atomic';
     return blocked && relevant ? <p className="text-muted-foreground">{blocked}</p> : null;
   }
-  const shown = confirmed ?? plan;
+  return (
+    <Button size="sm" onClick={() => onRun(plan)}>
+      Run this plan
+    </Button>
+  );
+}
+
+function RunDialog({
+  shown,
+  current,
+  connectionId,
+  onClose,
+}: {
+  shown: RebalancePlan;
+  current: RebalancePlan | undefined;
+  connectionId: string | undefined;
+  onClose: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const source = shown.projection.find((row) => row.role === 'source');
   const refresh = () =>
     Promise.all([
@@ -268,75 +275,64 @@ function RunPlan({ plan, connectionId }: { plan: RebalancePlan; connectionId: st
   const run = async () => {
     setSending(true);
     setError(null);
+    let started = false;
     try {
       await metricsApi.runRebalance(
         shown.sourceShardId,
         shown.moves.map(({ targetShardId, ranges }) => ({ targetShardId, ranges })),
       );
-      setConfirmed(null);
+      started = true;
     } catch (err) {
       setError(refusal(err));
     } finally {
       setSending(false);
       await refresh();
     }
+    if (started) onClose();
   };
   return (
-    <>
-      {execution.available && (
-        <Button
-          size="sm"
-          onClick={() => {
-            setError(null);
-            setConfirmed(plan);
-          }}
-        >
-          Run this plan
-        </Button>
-      )}
-      <Dialog open={open} onOpenChange={(next) => !sending && !next && setConfirmed(null)}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Run this rebalance?</DialogTitle>
-            <DialogDescription>
-              BetterDB sends one CLUSTER MIGRATESLOTS to the hot shard
-              {source ? ` at ${source.nodeAddr}` : ''}. The server starts all of these moves or none.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-3 text-sm">
-            <ul className="list-disc pl-5">
-              {shown.moves.map((move) => (
-                <li key={move.targetShardId}>{describeMove(move)}</li>
+    <Dialog open onOpenChange={(next) => !sending && !next && onClose()}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Run this rebalance?</DialogTitle>
+          <DialogDescription>
+            BetterDB sends one CLUSTER MIGRATESLOTS to the hot shard
+            {source ? ` at ${source.nodeAddr}` : ''}. The server starts all of these moves or none.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3 text-sm">
+          <ul className="list-disc pl-5">
+            {shown.moves.map((move) => (
+              <li key={move.targetShardId}>{describeMove(move)}</li>
+            ))}
+          </ul>
+          {shown.warnings.length > 0 && (
+            <ul className="list-disc pl-5 text-yellow-600 dark:text-yellow-500">
+              {shown.warnings.map((warning) => (
+                <li key={`${warning.code} ${warning.shardId}`}>{describeWarning(warning)}</li>
               ))}
             </ul>
-            {shown.warnings.length > 0 && (
-              <ul className="list-disc pl-5 text-yellow-600 dark:text-yellow-500">
-                {shown.warnings.map((warning) => (
-                  <li key={`${warning.code} ${warning.shardId}`}>{describeWarning(warning)}</li>
-                ))}
-              </ul>
-            )}
-            <p className="text-muted-foreground">
-              Cancel stops every slot migration on the hot shard, not only these. Slots already moved
-              stay on their target.
+          )}
+          <p className="text-muted-foreground">
+            Cancel stops every slot migration on the hot shard, not only these. Slots already moved
+            stay on their target.
+          </p>
+          {error && (
+            <p role="alert" className="text-destructive">
+              {error}
             </p>
-            {error && (
-              <p role="alert" className="text-destructive">
-                {error}
-              </p>
-            )}
-          </div>
-          <DialogFooter>
-            <Button variant="outline" disabled={sending} onClick={() => setConfirmed(null)}>
-              Keep the plan
-            </Button>
-            <Button disabled={sending || !execution.available} onClick={run}>
-              {sending ? 'Starting…' : 'Start the migration'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" disabled={sending} onClick={onClose}>
+            Keep the plan
+          </Button>
+          <Button disabled={sending || current?.execution?.available !== true} onClick={run}>
+            {sending ? 'Starting…' : 'Start the migration'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -347,7 +343,7 @@ function describePlannedAfter(plan: RebalancePlan): string {
   return `These numbers count the suggestion${earlier.length === 1 ? '' : 's'} for ${listed(earlier)} as applied.`;
 }
 
-function Plan({ plan, connectionId }: { plan: RebalancePlan; connectionId: string | undefined }) {
+function Plan({ plan, onRun }: { plan: RebalancePlan; onRun: (plan: RebalancePlan) => void }) {
   const canMutate = useCanMutate();
   const source = plan.projection.find((row) => row.role === 'source');
   const moved = plan.moves.reduce((total, move) => total + move.shareOfShard, 0);
@@ -421,7 +417,7 @@ function Plan({ plan, connectionId }: { plan: RebalancePlan; connectionId: strin
         </ul>
       )}
       <Commands plan={plan} runnable={canMutate && plan.execution?.available === true} />
-      <RunPlan plan={plan} connectionId={connectionId} />
+      <RunPlan plan={plan} onRun={onRun} />
     </div>
   );
 }
@@ -444,6 +440,13 @@ function NoPlan({ verdict, shard }: { verdict: RebalanceNoPlan; shard: HotShardD
 
 export function RebalanceSuggestion({ connectionId }: Props) {
   const shards = useOpenHotShards(connectionId).filter((shard) => shard.rebalance);
+  const [confirmed, setConfirmed] = useState<RebalancePlan | null>(null);
+  const current = shards
+    .map((shard) => shard.rebalance)
+    .find(
+      (verdict): verdict is RebalancePlan =>
+        verdict?.kind === 'plan' && verdict.sourceShardId === confirmed?.sourceShardId,
+    );
   return (
     <>
       {shards.map((shard) => {
@@ -466,7 +469,7 @@ export function RebalanceSuggestion({ connectionId }: Props) {
             </CardHeader>
             <CardContent className="text-sm">
               {verdict.kind === 'plan' ? (
-                <Plan plan={verdict} connectionId={connectionId} />
+                <Plan plan={verdict} onRun={setConfirmed} />
               ) : (
                 <NoPlan verdict={verdict} shard={shard} />
               )}
@@ -474,6 +477,14 @@ export function RebalanceSuggestion({ connectionId }: Props) {
           </Card>
         );
       })}
+      {confirmed && (
+        <RunDialog
+          shown={confirmed}
+          current={current}
+          connectionId={connectionId}
+          onClose={() => setConfirmed(null)}
+        />
+      )}
     </>
   );
 }

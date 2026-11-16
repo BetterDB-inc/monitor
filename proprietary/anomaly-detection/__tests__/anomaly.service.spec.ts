@@ -4398,8 +4398,10 @@ describe('AnomalyService', () => {
               checkSlotMigrations: jest.fn(async () => ({ migrations, complete: true })),
               readSlotMigrations: jest.fn(async () => ({ ...report, migrations })),
             };
-            return { calls, source };
+            return { calls, source, discovery };
           }
+
+          const pollNodes = () => IDS.map((id) => ({ id, flags: ['master'], slots: slotsOf[id] }));
 
           async function planned() {
             spreadLoad();
@@ -4551,6 +4553,26 @@ describe('AnomalyService', () => {
             });
           });
 
+          it('records no run when the hot shard does not connect in time', async () => {
+            enable();
+            const { source, discovery } = await planned();
+            (discovery.getNodeConnection as jest.Mock).mockImplementationOnce(
+              () => new Promise(() => undefined),
+            );
+            const budget = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+            (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;
+            try {
+              expect(await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN)).toEqual({
+                status: 'refused',
+                message: 'Could not connect to the hot shard within 20ms; no migration was started',
+              });
+            } finally {
+              (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = budget;
+            }
+            expect(source.call).not.toHaveBeenCalled();
+            expect(await service.followRebalanceRuns('conn-a')).toEqual([]);
+          });
+
           it('follows a start whose MIGRATESLOTS did not answer in time', async () => {
             enable();
             const { source } = await planned();
@@ -4683,6 +4705,37 @@ describe('AnomalyService', () => {
               endedAt: clock,
               jobs: [{ state: 'succeeded' }],
             });
+          });
+
+          it('ends a run on slot ownership when a primary did not answer the migration read', async () => {
+            enable();
+            await planned();
+            await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN);
+            report.complete = false;
+            slotsOf.a0000000 = [[108, 119]];
+            slotsOf.b0000000 = [[10, 11], [100, 107]];
+
+            expect((await service.followRebalanceRuns('conn-a'))[0]).toMatchObject({
+              state: 'succeeded',
+              jobs: [{ state: 'succeeded' }],
+            });
+          });
+
+          it('follows from the poll with the nodes the poll read', async () => {
+            enable();
+            const { discovery } = await planned();
+            await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN);
+            const isolated = (discovery as any).discoverNodesIsolated as jest.Mock;
+            isolated.mockClear();
+            slotsOf.a0000000 = [[108, 119]];
+            slotsOf.b0000000 = [[10, 11], [100, 107]];
+
+            await (service as any).followRebalanceRunsOnPoll('conn-a', clock, pollNodes());
+
+            expect(isolated).not.toHaveBeenCalled();
+            expect((service as any).rebalanceRuns.get('conn-a').get('a0000000').state).toBe(
+              'succeeded',
+            );
           });
 
           it('follows a job that finished before it was ever listed', async () => {
@@ -4854,7 +4907,7 @@ describe('AnomalyService', () => {
               { connectionId: 'conn-a', connectionName: 'conn-a' },
               clock,
             );
-            await (service as any).followRebalanceRunsOnPoll('conn-a', clock);
+            await (service as any).followRebalanceRunsOnPoll('conn-a', clock, pollNodes());
             expect(reads).toHaveBeenCalledTimes(2);
             expect((service as any).rebalanceFollowedAt.get('conn-a')).toBe(clock);
           });
@@ -4875,12 +4928,12 @@ describe('AnomalyService', () => {
               { connectionId: 'conn-a', connectionName: 'conn-a' },
               clock,
             );
-            await (service as any).followRebalanceRunsOnPoll('conn-a', clock);
+            await (service as any).followRebalanceRunsOnPoll('conn-a', clock, pollNodes());
             expect(reads).toHaveBeenCalledTimes(1);
             expect((service as any).rebalanceFollowedAt.get('conn-a')).toBe(clock);
 
             clock += 1_000;
-            await (service as any).followRebalanceRunsOnPoll('conn-a', clock);
+            await (service as any).followRebalanceRunsOnPoll('conn-a', clock, pollNodes());
             await service.followRebalanceRuns('conn-a');
             expect(reads).toHaveBeenCalledTimes(1);
           });
@@ -4895,8 +4948,8 @@ describe('AnomalyService', () => {
             slotsOf.a0000000 = [[108, 119]];
             slotsOf.b0000000 = [[10, 11], [100, 107]];
 
-            await (service as any).followRebalanceRunsOnPoll('conn-a', clock);
-            await (service as any).followRebalanceRunsOnPoll('conn-a', clock + 4_999);
+            await (service as any).followRebalanceRunsOnPoll('conn-a', clock, pollNodes());
+            await (service as any).followRebalanceRunsOnPoll('conn-a', clock + 4_999, pollNodes());
 
             expect(reads).toHaveBeenCalledTimes(1);
             const run = (service as any).rebalanceRuns.get('conn-a').get('a0000000');

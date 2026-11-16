@@ -5,11 +5,13 @@ import { metricsApi } from '../../api/metrics';
 import { useCanMutate } from '../../hooks/useCanMutate';
 import { usePolling } from '../../hooks/usePolling';
 import type {
+  RebalanceExecutionBlocker,
   RebalanceJobState,
   RebalanceRun,
   RebalanceRunJob,
   RebalanceRunState,
 } from '../../types/anomaly';
+import { REBALANCE_BLOCKED } from './anomaly-display';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
@@ -66,8 +68,13 @@ function describeOutcome(run: RebalanceRun): string | null {
 function cancelRefusal(err: unknown): string {
   if (err instanceof ApiError && err.status === 409) return 'The migration is no longer running.';
   if (err instanceof ApiError) {
-    const payload = (err.payload ?? {}) as { message?: string };
-    return payload.message ?? err.message;
+    const payload = (err.payload ?? {}) as {
+      message?: string;
+      blockedBy?: RebalanceExecutionBlocker;
+    };
+    return (
+      (payload.blockedBy && REBALANCE_BLOCKED[payload.blockedBy]) || payload.message || err.message
+    );
   }
   return err instanceof Error ? err.message : String(err);
 }

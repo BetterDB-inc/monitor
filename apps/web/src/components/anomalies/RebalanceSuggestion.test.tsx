@@ -230,6 +230,32 @@ describe('RebalanceSuggestion', () => {
       expect(region).toHaveTextContent('The server refused the last start of this plan.');
     });
 
+    it('keeps the dialog and its error when the suggestion turns into no plan', async () => {
+      runRebalance.mockRejectedValue(
+        new ApiError('Bad Gateway', 502, {
+          message: 'CLUSTER MIGRATESLOTS did not answer within 2000ms; the migration may still have started',
+        }),
+      );
+      const client = await show([hotShard(runnable())]);
+      fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+
+      getHotShards.mockResolvedValue([hotShard(noPlan('migration_running'))]);
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Start the migration' }));
+
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+        'the migration may still have started',
+      );
+      await act(async () => {
+        await client.invalidateQueries();
+      });
+      expect(screen.getByRole('dialog')).toHaveTextContent('the migration may still have started');
+      expect(within(dialog).getByRole('button', { name: 'Start the migration' })).toBeDisabled();
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Keep the plan' }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    });
+
     it('says a running migration holds the plan back', async () => {
       await show([hotShard(plan({ execution: { available: false, blockedBy: 'migration_running' } }))]);
 

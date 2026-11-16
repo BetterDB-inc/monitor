@@ -153,6 +153,19 @@ describe('RebalanceRuns', () => {
     );
   });
 
+  it('says why a cancel is blocked', async () => {
+    cancelRebalance.mockRejectedValue(new ApiError('Forbidden', 403, { blockedBy: 'flag_off' }));
+    await show([run()]);
+    fireEvent.click(within(await panel()).getByRole('button', { name: 'Cancel' }));
+    const dialog = await screen.findByRole('dialog');
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel the migration' }));
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+      'BETTERDB_SLOT_MIGRATION=true',
+    );
+  });
+
   it('offers no cancel to a read-only member', async () => {
     canMutate.mockReturnValue(false);
     await show([run()]);

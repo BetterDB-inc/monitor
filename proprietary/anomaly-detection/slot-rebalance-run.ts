@@ -1,8 +1,9 @@
-import type { ClusterNodeState } from '@betterdb/shared';
+import { clusterNodeState, type ClusterNodeState } from '@betterdb/shared';
+import type { ClusterNode } from '@app/common/types/metrics.types';
 import type { ShardLoadSample } from '@app/cluster/shard-load';
 import { median } from '../latency-regression/regression-detector';
 import { hotShardRatio } from './hot-shard-detector';
-import { parseSlotRangeList } from './topology-divergence';
+import { mergeSlotRanges, parseSlotRangeList } from './topology-divergence';
 import type {
   RebalanceExecutionBlocker,
   RebalancePlan,
@@ -29,6 +30,20 @@ export interface RunNode {
   slots: number[][];
 }
 
+export const runNodesOf = (nodes: readonly ClusterNode[]): RunNode[] =>
+  nodes.flatMap((node) => {
+    const master = node.flags.includes('master');
+    if (!master && !node.flags.includes('slave') && !node.flags.includes('replica')) return [];
+    return [
+      {
+        id: node.id,
+        role: master ? 'master' : 'replica',
+        state: clusterNodeState(node.flags),
+        slots: node.slots,
+      },
+    ];
+  });
+
 export interface RunReport {
   jobViews: Array<{
     jobName?: string;
@@ -45,6 +60,8 @@ export interface RunReport {
     targetNodeId?: string;
     slotRange?: string;
   }>;
+  complete?: boolean;
+  jobsReadNodeIds?: readonly string[];
 }
 
 export type RebalanceJobState =
@@ -229,19 +246,9 @@ export function startRun(
   };
 }
 
-function merged(ranges: ReadonlyArray<readonly [number, number]>): Array<[number, number]> {
-  const joined: Array<[number, number]> = [];
-  for (const [start, end] of [...ranges].sort((a, b) => a[0] - b[0])) {
-    const last = joined[joined.length - 1];
-    if (last && start <= last[1] + 1) last[1] = Math.max(last[1], end);
-    else joined.push([start, end]);
-  }
-  return joined;
-}
-
 function inside(text: string | undefined, ranges: ReadonlyArray<readonly [number, number]>) {
   const listed = parseSlotRangeList(text);
-  const own = merged(ranges);
+  const own = mergeSlotRanges(ranges);
   return (
     listed.length > 0 &&
     listed.every(([start, end]) => own.some(([from, to]) => start >= from && end <= to))
@@ -303,6 +310,11 @@ function followJob(
   return { ...job, state: 'unknown' };
 }
 
+function followOwnership(job: RunJob, byId: ReadonlyMap<string, RunNode>): RunJob {
+  if (job.state === 'succeeded' || job.state === 'failed' || job.state === 'cancelled') return job;
+  return owns(byId.get(job.targetShardId), job.ranges) ? { ...job, state: 'succeeded' } : job;
+}
+
 function stateOf(jobs: readonly RebalanceRunJob[]): RebalanceRunState {
   const states = new Set(jobs.map((job) => job.state));
   if (states.has('starting') || states.has('running')) return 'running';
@@ -320,7 +332,14 @@ export function followRun(
 ): RebalanceRun {
   if (run.state !== 'running' || isCancelPending(run, now)) return run;
   const byId = new Map(nodes.map((node) => [node.id, node]));
-  const jobs = run.jobs.map((job) => followJob(run, job, report, byId, now));
+  const jobsRead =
+    report.complete !== false ||
+    [run.sourceShardId, ...run.jobs.map((job) => job.targetShardId)].every((id) =>
+      report.jobsReadNodeIds?.includes(id),
+    );
+  const jobs = run.jobs.map((job) =>
+    jobsRead ? followJob(run, job, report, byId, now) : followOwnership(job, byId),
+  );
   const state = stateOf(jobs);
   return { ...run, jobs, state, ...(state === 'running' ? {} : { endedAt: now }) };
 }
