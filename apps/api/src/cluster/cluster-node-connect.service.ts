@@ -17,6 +17,8 @@ function messageOf(error: unknown): string {
 
 @Injectable()
 export class ClusterNodeConnectService {
+  private readonly nodeLocks = new Map<string, Promise<unknown>>();
+
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
     private readonly clusterDiscovery: ClusterDiscoveryService,
@@ -29,7 +31,21 @@ export class ClusterNodeConnectService {
         `${source.name} cannot open its own connection to a cluster node: it reads the cluster through an agent or from pushed metrics.`,
       );
     }
-    return this.connectionRegistry.withSeedLock(source.id, () => this.connectUnderLock(connectionId, source.id, nodeId));
+    return this.withNodeLock(nodeId, () =>
+      this.connectionRegistry.withSeedLock(source.id, () => this.connectUnderLock(connectionId, source.id, nodeId)),
+    );
+  }
+
+  private async withNodeLock<T>(nodeId: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.nodeLocks.get(nodeId) ?? Promise.resolve();
+    const run = previous.then(fn);
+    const tail = run.catch(() => undefined);
+    this.nodeLocks.set(nodeId, tail);
+    try {
+      return await run;
+    } finally {
+      if (this.nodeLocks.get(nodeId) === tail) this.nodeLocks.delete(nodeId);
+    }
   }
 
   private sourceOf(connectionId: string): DatabaseConnectionConfig {

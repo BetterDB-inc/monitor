@@ -18,7 +18,9 @@ function connection(id: string, extra: Partial<DatabaseConnectionConfig> = {}): 
   return { id, name: id, host: 'seed.local', port: 7001, isDefault: false, createdAt: 1, ...extra };
 }
 
-function build(options: { configs?: DatabaseConnectionConfig[]; nodes?: DiscoveredNode[] | Error } = {}) {
+function build(
+  options: { configs?: DatabaseConnectionConfig[]; nodes?: DiscoveredNode[] | Error; dial?: Promise<void> } = {},
+) {
   const configs = new Map((options.configs ?? [connection('cluster')]).map((config) => [config.id, config]));
   const order: string[] = [];
   const registry = {
@@ -35,6 +37,7 @@ function build(options: { configs?: DatabaseConnectionConfig[]; nodes?: Discover
     }),
     addNodeConnection: jest.fn(async (_sourceId: string, node: { host: string; port: number }) => {
       order.push('add');
+      await options.dial;
       configs.set('new', connection('new', node));
       return 'new';
     }),
@@ -103,6 +106,57 @@ describe('ClusterNodeConnectService', () => {
     expect(first).toEqual({ id: 'new', created: true });
     expect(second).toEqual({ id: 'new', created: false });
     expect(registry.addNodeConnection).toHaveBeenCalledTimes(1);
+  });
+
+  it('adds one connection when two cluster connections ask for the same node at once', async () => {
+    let finishDial: () => void = () => {};
+    const dial = new Promise<void>((resolve) => {
+      finishDial = resolve;
+    });
+    const { service, registry } = build({
+      configs: [connection('cluster'), connection('second', { host: '10.0.0.3', port: 7003 })],
+      dial,
+    });
+
+    const both = Promise.all([service.connect('cluster', 'n2'), service.connect('second', 'n2')]);
+    await new Promise((resolve) => setImmediate(resolve));
+    finishDial();
+
+    await expect(both).resolves.toEqual([
+      { id: 'new', created: true },
+      { id: 'new', created: false },
+    ]);
+    expect(registry.addNodeConnection).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets the next request for a node through after one for it failed', async () => {
+    const { service, registry } = build({
+      configs: [connection('cluster'), connection('second', { host: '10.0.0.3', port: 7003 })],
+    });
+    registry.addNodeConnection.mockRejectedValueOnce(new Error('Could not connect to 10.0.0.2:7002: ECONNREFUSED'));
+
+    const [failed, connected] = await Promise.allSettled([
+      service.connect('cluster', 'n2'),
+      service.connect('second', 'n2'),
+    ]);
+
+    expect(failed.status).toBe('rejected');
+    expect(connected).toEqual({ status: 'fulfilled', value: { id: 'new', created: true } });
+  });
+
+  it('does not make a request for one node wait for another node', async () => {
+    let finishDial: () => void = () => {};
+    const dial = new Promise<void>((resolve) => {
+      finishDial = resolve;
+    });
+    const { service, registry } = build({ dial });
+
+    const both = Promise.all([service.connect('cluster', 'n2'), service.connect('cluster', 'n3')]);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(registry.addNodeConnection).toHaveBeenCalledTimes(2);
+    finishDial();
+    await both;
   });
 
   it('copies the credentials of the seed when asked through a member', async () => {
