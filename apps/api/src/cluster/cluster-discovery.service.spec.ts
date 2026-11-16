@@ -142,6 +142,35 @@ describe('ClusterDiscoveryService', () => {
       });
     });
 
+    it('does not count a connection that reads another node of this cluster', async () => {
+      configs['moved'] = {
+        id: 'moved',
+        host: '192.168.1.11',
+        port: 6379,
+        membership: { nodeId: 'node1-id-abc123' },
+      };
+
+      const replica = await replicaCollectedBy('moved');
+
+      expect(replica?.collected).toBe(false);
+      expect(replica?.connectionId).toBeUndefined();
+    });
+
+    it('keeps the viewing connection it started with when the default changes meanwhile', async () => {
+      mockConnectionRegistry.getConfig.mockImplementation((id: string) => configs[id]);
+      mockConnectionRegistry.findIdByHostPort = jest.fn().mockReturnValue(null);
+      mockConnectionRegistry.getDefaultId
+        .mockReturnValueOnce('test-connection')
+        .mockReturnValue('another-default');
+
+      const nodes = await service.discoverNodesWithCollection();
+
+      expect(nodes.find((node) => node.id === 'node1-id-abc123')).toMatchObject({
+        collected: true,
+        connectionId: 'test-connection',
+      });
+    });
+
     it('counts the node the viewing connection reads', async () => {
       await replicaCollectedBy('same-cluster');
       const nodes = await service.discoverNodesWithCollection();

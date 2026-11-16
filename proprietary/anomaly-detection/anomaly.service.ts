@@ -249,7 +249,7 @@ import {
   parseSlotMigrationJobs,
 } from '@app/cluster/cluster-metrics.service';
 import { withConfiguredZones, withShardMetadata } from '@app/cluster/shard-metadata';
-import { resolveNodeRef } from '@app/cluster/node-ref';
+import { resolveNodeRef, type NodeSubject } from '@app/cluster/node-ref';
 import { ClusterNodeViews, nodeOfEvent } from './event-node';
 import {
   type DivergenceGroup,
@@ -10626,7 +10626,7 @@ export class AnomalyService
     };
     return [...(this.hotShardDetails.get(connectionId) ?? [])]
       .filter(([signature]) => !resolvedByHand(signature))
-      .map(([, detail]) => ({ ...detail, ...this.servedNodeAt(connectionId, detail.nodeAddr) }))
+      .map(([, detail]) => ({ ...detail, ...this.servedNodeOf(connectionId, { nodeId: detail.shardId }) }))
       .sort((a, b) => b.cpu.ratio - a.cpu.ratio);
   }
 
@@ -10728,9 +10728,9 @@ export class AnomalyService
     return event.node ? { node: this.servedNode(event.node, event.connectionId) } : {};
   }
 
-  private servedNodeAt(connectionId: string, address: string): { node?: ServedClusterNodeRef } {
+  private servedNodeOf(connectionId: string, subject: NodeSubject): { node?: ServedClusterNodeRef } {
     const directory = this.clusterNodeViews.view(this.nodeViewKeyOf(connectionId))?.directory;
-    const node = resolveNodeRef(directory, { address });
+    const node = resolveNodeRef(directory, subject);
     return node ? { node: this.servedNode(node, connectionId) } : {};
   }
 
@@ -12717,7 +12717,7 @@ export class AnomalyService
         ...data,
         instance: { host: ctx.host, port: ctx.port },
         connectionId: ctx.connectionId,
-        ...this.servedNodeAt(ctx.connectionId, data.replica),
+        ...this.servedNodeOf(ctx.connectionId, { address: data.replica }),
       })
       .catch((err) => {
         this.logger.error('Failed to dispatch replication.recovered webhook', err);

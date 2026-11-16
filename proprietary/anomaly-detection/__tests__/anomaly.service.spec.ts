@@ -2210,6 +2210,23 @@ describe('AnomalyService', () => {
       });
     });
 
+    it('names no node for a hot shard whose address another node has taken since', async () => {
+      await step([100_000, 900_000, 100_000], 6);
+      const taken = clusterNodes().map((node, i) => (i === 1 ? { ...node, id: 'd0000000' } : node));
+      (service as any).clusterNodeViews.remember('conn-a', (service as any).nodeViewKeyOf('conn-a'), taken, clock);
+
+      expect(service.getHotShards('conn-a')[0].shardId).toBe(IDS[1]);
+      expect(service.getHotShards('conn-a')[0].node).toBeUndefined();
+    });
+
+    it('names the hot primary at the address it has now', async () => {
+      await step([100_000, 900_000, 100_000], 6);
+      const moved = clusterNodes().map((node, i) => (i === 1 ? { ...node, address: '10.0.0.9:6379@16379' } : node));
+      (service as any).clusterNodeViews.remember('conn-a', (service as any).nodeViewKeyOf('conn-a'), moved, clock);
+
+      expect(service.getHotShards('conn-a')[0].node).toMatchObject({ nodeId: IDS[1], address: '10.0.0.9:6379' });
+    });
+
     it('keeps the event open between the release and the raise factor, then resolves it', async () => {
       await step(HOT, 6);
       await step([170_000, 100_000, 100_000], 25);
