@@ -178,10 +178,7 @@ function droppedTable(results: Results): string {
     const trials = results.of(scenario);
     const reasons = new Map<string, number>();
     for (const trial of trials) {
-      for (const reason of trial.dropped) {
-        const short = reason.replace(/[0-9.]+/g, 'N').slice(0, 60);
-        reasons.set(short, (reasons.get(short) ?? 0) + 1);
-      }
+      for (const reason of trial.dropped) reasons.set(reason, (reasons.get(reason) ?? 0) + 1);
     }
     return [
       scenario,
@@ -505,7 +502,7 @@ export function buildReport(input: {
       '- **zone 1, zone 2**: the product setting `nodesPerZone` with `randomNodes` 3 and zones known. **zone 1 with N = 3 is what ships today.**',
       '- **all**: every node is asked every round.',
       '- **N**: rounds a disagreement must last before an event is raised (`minRounds`).',
-      '- A cell such as `97% [91–100]` is the mean over trials of the share of replays that raised an event, with a 95% interval. The interval is a bootstrap over trials, and it is never narrower than the Wilson interval for the number of trials that raised at all, so one raising trial of 30 gives an upper end near 17%, and none of 30 gives 11%.',
+      '- A cell such as `97% [91–100]` is the mean over trials of the share of replays that raised an event, with a 95% interval. The interval is a bootstrap over trials, widened for rare outcomes: the upper end is at least the Wilson upper bound for the number of trials in which any replay raised, multiplied by the mean share of replays that raised in those trials, and the lower end is the mirror image for the trials in which any replay missed. When no trial raised at all the interval is the plain Wilson interval for 0 of n, so none of 30 gives [0–11]; when every replay of every trial raised it is the plain Wilson interval for n of n, so 30 of 30 gives [89–100]. When every trial raised in part, as in a cell such as `57% [54–60]`, the bootstrap decides.',
       '- In the control tables a cell such as `1/30 [1–17], 0% of replays` is the number of trials in which at least one replay raised an event, with its Wilson interval, then the share of all replays that raised.',
       '- A time such as `12 s [11 s–14 s], p90 16 s, never 3/30` is the median over trials of the per-trial median, with a bootstrap 95% interval of that median, the 90th percentile over trials, and the number of trials in which no replay raised an event. Trials that never raised are not in the time. Times are counted from the moment the fault was injected.',
       '- Fault windows run from the injection to the heal, or to the end of the recording when the fault is never healed. Control windows run from the start of the operation to the end of the recording.',
@@ -527,7 +524,7 @@ export function buildReport(input: {
     '## 6. Controls: false positives',
     'Any event raised between the start of the operation and the end of the recording.',
     controlTables(results, controls),
-    'Views and events side by side. A view difference means the views of two answering nodes differed at some sampled second (flags, primary, config epoch or slots, read once a second without the detector). "At any setting" covers every coverage, N, vantage and join variant. An event in a trial with identical views did not come from a disagreement the one-second samples could see.',
+    'Views and events side by side. A view difference means the views of two answering nodes differed at some sampled second (flags, primary, config epoch or slots, read once a second without the detector). "At any setting" covers every coverage, every N and, for the clean join, every join variant. Controls cut no link, so they are replayed with the monitor outside only. An event in a trial with identical views did not come from a disagreement the one-second samples could see.',
     controlViewsTable(results, controls),
     '## 7. What the first event says',
     'N = 3. "Only after the window" counts replays whose first event came after the fault was healed.',
