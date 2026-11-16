@@ -877,6 +877,10 @@ export class AnomalyService
   private rebalanceRuns = new Map<string, Map<string, RebalanceRun>>();
   private rebalanceStarting = new Set<string>();
   private rebalanceFollowedAt = new Map<string, number>();
+  private slotMigrationReadOnPoll = new Map<
+    string,
+    { timestamp: number; report: SlotMigrationReport }
+  >();
   private refusedRebalancePlans = new WeakMap<RebalancePlan, RebalanceExecutionBlocker>();
   private hotShardKeys = new Map<
     string,
@@ -1558,6 +1562,7 @@ export class AnomalyService
     this.hotShardRebalance.delete(connectionId);
     this.rebalanceRuns.delete(connectionId);
     this.rebalanceFollowedAt.delete(connectionId);
+    this.slotMigrationReadOnPoll.delete(connectionId);
     this.hotKeyNoteLogged.delete(connectionId);
     this.forgetNodeWriteP99(connectionId);
     this.reshardWriteP99.delete(connectionId);
@@ -8824,7 +8829,10 @@ export class AnomalyService
         rememberNodesWithoutJobs: true,
       });
       if (this.slotMigrationCheckedAt.get(connectionId) !== timestamp) return;
-      if (!ownNodeOnly) this.noteSlotMigrationDial(connectionId, timestamp, report);
+      if (!ownNodeOnly) {
+        this.slotMigrationReadOnPoll.set(connectionId, { timestamp, report });
+        this.noteSlotMigrationDial(connectionId, timestamp, report);
+      }
       const judged = judgeSlotMigrations(
         this.slotMigrationWatch.get(connectionId),
         report,
@@ -10664,6 +10672,7 @@ export class AnomalyService
         runs.set(plan.sourceShardId, run);
         this.rebalanceRuns.set(connectionId, runs);
         this.slotMigrationCheckedAt.delete(connectionId);
+        this.rebalanceFollowedAt.delete(connectionId);
         this.holdRebalance(connectionId, 'migration_running');
         return run;
       };
@@ -10683,34 +10692,43 @@ export class AnomalyService
   }
 
   async followRebalanceRuns(connectionId: string): Promise<RebalanceRunView[]> {
-    return (await this.advanceRebalanceRuns(connectionId)).map(runView);
+    return (await this.advanceRebalanceRuns(connectionId)).runs.map(runView);
   }
 
   private async followRebalanceRunsOnPoll(connectionId: string, timestamp: number): Promise<void> {
-    const runs = this.rebalanceRuns.get(connectionId);
-    if (!runs) return;
-    const followed = this.rebalanceFollowedAt.get(connectionId);
-    if (followed !== undefined && timestamp - followed < REBALANCE_FOLLOW_MS) return;
-    this.rebalanceFollowedAt.set(connectionId, timestamp);
-    await this.advanceRebalanceRuns(connectionId);
+    const read = this.slotMigrationReadOnPoll.get(connectionId);
+    this.slotMigrationReadOnPoll.delete(connectionId);
+    if (!this.rebalanceRuns.has(connectionId)) return;
+    await this.advanceRebalanceRuns(connectionId, {
+      report: read?.timestamp === timestamp ? read.report : undefined,
+    });
   }
 
-  private async advanceRebalanceRuns(connectionId: string): Promise<RebalanceRun[]> {
+  private async advanceRebalanceRuns(
+    connectionId: string,
+    options: { report?: SlotMigrationReport; force?: boolean } = {},
+  ): Promise<{ runs: RebalanceRun[]; report?: SlotMigrationReport }> {
     const runs = this.rebalanceRuns.get(connectionId);
-    if (!runs) return [];
+    if (!runs) return { runs: [] };
+    const now = Date.now();
     for (const [sourceShardId, run] of runs) {
-      if (!isRunKept(run, Date.now())) runs.delete(sourceShardId);
+      if (!isRunKept(run, now)) runs.delete(sourceShardId);
     }
     const running = [...runs.values()].filter((run) => run.state === 'running');
-    if (running.length > 0 && this.clusterMetrics && this.clusterDiscovery) {
+    const followed = this.rebalanceFollowedAt.get(connectionId);
+    const due = options.force || followed === undefined || now - followed >= REBALANCE_FOLLOW_MS;
+    let read: SlotMigrationReport | undefined;
+    if (running.length > 0 && due && this.clusterMetrics && this.clusterDiscovery) {
+      this.rebalanceFollowedAt.set(connectionId, now);
       try {
         const [report, nodes] = await Promise.all([
-          this.clusterMetrics.readSlotMigrations(connectionId),
+          options.report ?? this.clusterMetrics.readSlotMigrations(connectionId),
           this.clusterDiscovery.discoverNodesIsolated(
             connectionId,
             AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
           ),
         ]);
+        read = report;
         if (report.complete) {
           for (const run of running) {
             if (runs.get(run.sourceShardId) !== run) continue;
@@ -10730,9 +10748,9 @@ export class AnomalyService
         this.rebalanceRuns.delete(connectionId);
         this.rebalanceFollowedAt.delete(connectionId);
       }
-      return [];
+      return { runs: [], report: read };
     }
-    return [...runs.values()].sort((a, b) => b.startedAt - a.startedAt);
+    return { runs: [...runs.values()].sort((a, b) => b.startedAt - a.startedAt), report: read };
   }
 
   async cancelRebalance(
@@ -10743,11 +10761,15 @@ export class AnomalyService
     if (!this.clusterDiscovery || !this.dialsDataNodes(connectionId)) {
       return { status: 'blocked', blockedBy: 'not_dialed' };
     }
-    await this.advanceRebalanceRuns(connectionId);
+    const { report } = await this.advanceRebalanceRuns(connectionId, { force: true });
     const runs = this.rebalanceRuns.get(connectionId);
     const run = runs?.get(sourceShardId);
     if (!runs || run?.state !== 'running') return { status: 'not_running' };
-    const cancelling = { ...run, cancelRequestedAt: Date.now() };
+    const cancelling = {
+      ...run,
+      cancelRequestedAt: Date.now(),
+      failedBeforeCancel: report?.failed.map((entry) => entry.jobName) ?? run.failedBeforeCancel,
+    };
     runs.set(sourceShardId, cancelling);
     try {
       await this.readShard(
@@ -10773,6 +10795,7 @@ export class AnomalyService
     };
     if (current?.state === 'running') runs.set(sourceShardId, accepted);
     this.slotMigrationCheckedAt.delete(connectionId);
+    this.rebalanceFollowedAt.delete(connectionId);
     return { status: 'cancelling', run: runView(accepted) };
   }
 

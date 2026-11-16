@@ -2,6 +2,7 @@ import type { ClusterNodeState } from '@betterdb/shared';
 import type { ShardLoadSample } from '@app/cluster/shard-load';
 import { median } from '../latency-regression/regression-detector';
 import { hotShardRatio } from './hot-shard-detector';
+import { parseSlotRangeList } from './topology-divergence';
 import type {
   RebalanceExecutionBlocker,
   RebalancePlan,
@@ -90,12 +91,14 @@ export interface RunJob extends RebalanceRunJob {
 export interface RebalanceRun extends RebalanceRunView {
   jobs: RunJob[];
   jobsBefore: string[];
+  failedBeforeCancel?: string[];
   cancelRequestedAt?: number;
   cancelAcceptedAt?: number;
 }
 
 export function runView(run: RebalanceRun): RebalanceRunView {
-  const { jobsBefore, cancelRequestedAt, cancelAcceptedAt, jobs, ...view } = run;
+  const { jobsBefore, failedBeforeCancel, cancelRequestedAt, cancelAcceptedAt, jobs, ...view } =
+    run;
   return { ...view, jobs: jobs.map(({ finishedSeenAt, ...job }) => job) };
 }
 
@@ -226,23 +229,27 @@ export function startRun(
   };
 }
 
-function slotsOf(text: string | undefined): number[] {
-  const slots: number[] = [];
-  for (const token of (text ?? '').trim().split(/\s+/)) {
-    const [start, end] = token.split('-').map(Number);
-    if (!Number.isInteger(start)) return [];
-    const last = Number.isInteger(end) ? end : start;
-    for (let slot = start; slot <= last; slot++) slots.push(slot);
+function merged(ranges: ReadonlyArray<readonly [number, number]>): Array<[number, number]> {
+  const joined: Array<[number, number]> = [];
+  for (const [start, end] of [...ranges].sort((a, b) => a[0] - b[0])) {
+    const last = joined[joined.length - 1];
+    if (last && start <= last[1] + 1) last[1] = Math.max(last[1], end);
+    else joined.push([start, end]);
   }
-  return slots;
+  return joined;
 }
 
-function inside(slots: readonly number[], ranges: ReadonlyArray<readonly [number, number]>) {
+function inside(text: string | undefined, ranges: ReadonlyArray<readonly [number, number]>) {
+  const listed = parseSlotRangeList(text);
+  const own = merged(ranges);
   return (
-    slots.length > 0 &&
-    slots.every((slot) => ranges.some(([start, end]) => slot >= start && slot <= end))
+    listed.length > 0 &&
+    listed.every(([start, end]) => own.some(([from, to]) => start >= from && end <= to))
   );
 }
+
+const failedOnItsOwn = (run: RebalanceRun, jobName: string) =>
+  run.cancelAcceptedAt === undefined || (run.failedBeforeCancel ?? []).includes(jobName);
 
 function followJob(
   run: RebalanceRun,
@@ -260,28 +267,34 @@ function followJob(
       view.targetNodeId === job.targetShardId &&
       (job.jobName
         ? view.jobName === job.jobName
-        : isNew(view.jobName) && inside(slotsOf(view.slotRange), job.ranges)),
+        : isNew(view.jobName) && inside(view.slotRange, job.ranges)),
   );
   if (listed) {
     return { ...job, state: 'running', jobName: listed.jobName, phase: listed.phase };
   }
   const moved = owns(byId.get(job.targetShardId), job.ranges);
   const sourceOwns = owns(byId.get(run.sourceShardId), job.ranges);
-  if (run.cancelAcceptedAt !== undefined && !moved && job.finishedSeenAt === undefined) {
-    return { ...job, state: sourceOwns ? 'cancelled' : 'unknown' };
-  }
   const failed = report.failed.find((entry) =>
     job.jobName
       ? entry.jobName === job.jobName
       : isNew(entry.jobName) &&
         entry.sourceNodeId === run.sourceShardId &&
         entry.targetNodeId === job.targetShardId &&
-        inside(slotsOf(entry.slotRange), job.ranges),
+        inside(entry.slotRange, job.ranges),
   );
-  if (failed) return { ...job, state: 'failed', jobName: failed.jobName, message: failed.message };
-  if (!job.jobName && moved) return { ...job, state: 'succeeded' };
+  const failedJob = failed && {
+    ...job,
+    state: 'failed' as const,
+    jobName: failed.jobName,
+    message: failed.message,
+  };
+  if (failedJob && failedOnItsOwn(run, failedJob.jobName)) return failedJob;
+  if (run.cancelAcceptedAt !== undefined && !moved && job.finishedSeenAt === undefined) {
+    return { ...job, state: sourceOwns ? 'cancelled' : 'unknown' };
+  }
+  if (failedJob) return failedJob;
+  if (moved) return { ...job, state: 'succeeded' };
   if (job.jobName && report.finishedJobs.includes(job.jobName)) {
-    if (moved) return { ...job, state: 'succeeded' };
     const finishedSeenAt = job.finishedSeenAt ?? now;
     if (now - finishedSeenAt < REBALANCE_JOB_LISTING_GRACE_MS) return { ...job, finishedSeenAt };
     return { ...job, state: sourceOwns ? 'cancelled' : 'unknown' };
@@ -334,6 +347,9 @@ export function isCancelledJob(
   failure: { jobName?: string; sourceNodeId: string; targetNodeId: string; slots: string },
 ): boolean {
   if (run.cancelRequestedAt === undefined) return false;
+  if (failure.jobName !== undefined && run.failedBeforeCancel?.includes(failure.jobName)) {
+    return false;
+  }
   return run.jobs.some(
     (job) =>
       job.state !== 'failed' &&
@@ -343,7 +359,7 @@ export function isCancelledJob(
           !run.jobsBefore.includes(failure.jobName) &&
           failure.sourceNodeId === run.sourceShardId &&
           job.targetShardId === failure.targetNodeId &&
-          inside(slotsOf(failure.slots), job.ranges)),
+          inside(failure.slots, job.ranges)),
   );
 }
 

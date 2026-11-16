@@ -304,6 +304,88 @@ describe('slot rebalance run', () => {
       expect(run.jobs[1].jobName).toBeUndefined();
     });
 
+    it('takes no failure without slot ranges for a job that holds slot 0', () => {
+      const run = followRun(
+        started(),
+        report({
+          failed: [
+            { jobName: 'job-x', message: 'other', sourceNodeId: 'src', targetNodeId: 'tgt1', slotRange: '' },
+          ],
+        }),
+        nodes(),
+        2_000,
+      );
+      expect(run.jobs[0].state).toBe('starting');
+      const cancelling = { ...started(), cancelRequestedAt: 1_500 };
+      for (const slots of ['', '  ']) {
+        expect(
+          isCancelledJob(cancelling, { jobName: 'job-x', sourceNodeId: 'src', targetNodeId: 'tgt1', slots }),
+        ).toBe(false);
+      }
+    });
+
+    it('matches a listed range that spans adjacent ranges of the move', () => {
+      const split = plan({
+        moves: [
+          {
+            ...plan().moves[0],
+            ranges: [
+              [0, 49],
+              [50, 99],
+            ],
+          },
+        ],
+      });
+      const run = followRun(
+        startRun(split, { userId: 'u1', email: null }, 1_000),
+        report({ jobViews: [view('job-a', 'tgt1', '0-99')] }),
+        nodes(),
+        2_000,
+      );
+      expect(run.jobs[0]).toMatchObject({ jobName: 'job-a', state: 'running' });
+    });
+
+    it('calls a named job a success once the target owns its slots, with no history left', () => {
+      const listed = followRun(
+        started(),
+        report({ jobViews: [view('job-a', 'tgt1', '0-99 200-200'), view('job-b', 'tgt2', '300-399')] }),
+        nodes(),
+        2_000,
+      );
+      const run = followRun(listed, report(), movedNodes(), 3_000);
+      expect(run.jobs.map((job) => job.state)).toEqual(['succeeded', 'succeeded']);
+      expect(run.state).toBe('succeeded');
+    });
+
+    it('keeps the server message of a job that failed before the cancel', () => {
+      const listed = followRun(
+        started(),
+        report({ jobViews: [view('job-a', 'tgt1', '0-99 200-200'), view('job-b', 'tgt2', '300-399')] }),
+        nodes(),
+        2_000,
+      );
+      const run = followRun(
+        { ...cancelled(listed, 2_500), failedBeforeCancel: ['job-a'] },
+        report({
+          finishedJobs: ['job-a', 'job-b'],
+          failed: [
+            { jobName: 'job-a', message: 'target refused' },
+            { jobName: 'job-b', message: 'Connection lost to source' },
+          ],
+        }),
+        nodes(),
+        3_000,
+      );
+      expect(run.jobs.map((job) => [job.state, job.message])).toEqual([
+        ['failed', 'target refused'],
+        ['cancelled', undefined],
+      ]);
+      const failure = (jobName: string) => ({ jobName, sourceNodeId: 'src', targetNodeId: 'tgt1', slots: '0-99' });
+      expect(isCancelledJob({ ...listed, cancelRequestedAt: 2_500, failedBeforeCancel: ['job-a'] }, failure('job-a'))).toBe(
+        false,
+      );
+    });
+
     it('follows a named job by its name only', () => {
       const listed = followRun(
         started(),
@@ -314,7 +396,7 @@ describe('slot rebalance run', () => {
       const run = followRun(
         listed,
         report({ jobViews: [view('job-a', 'tgt1', '0-99 200-200'), view('job-z', 'tgt2', '300-399')] }),
-        movedNodes(),
+        nodes(),
         3_000,
       );
       expect(run.jobs[1]).toMatchObject({ jobName: 'job-b', state: 'unknown' });
@@ -653,9 +735,11 @@ describe('slot rebalance run', () => {
       const view = runView({
         ...cancelled(run, 2_000),
         jobsBefore: ['old-job'],
+        failedBeforeCancel: ['job-a'],
         jobs: run.jobs.map((job) => ({ ...job, finishedSeenAt: 1_500 })),
       });
       expect(view).not.toHaveProperty('jobsBefore');
+      expect(view).not.toHaveProperty('failedBeforeCancel');
       expect(view).not.toHaveProperty('cancelRequestedAt');
       expect(view).not.toHaveProperty('cancelAcceptedAt');
       expect(view.jobs[0]).not.toHaveProperty('finishedSeenAt');

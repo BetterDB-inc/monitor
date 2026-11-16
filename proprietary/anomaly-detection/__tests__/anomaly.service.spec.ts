@@ -4640,10 +4640,12 @@ describe('AnomalyService', () => {
               jobs: [{ jobName: 'job-1', state: 'running', phase: 'snapshotting' }],
             });
 
+            clock += 5_000;
             report.complete = false;
             report.jobViews = [];
             expect((await service.followRebalanceRuns('conn-a'))[0].state).toBe('running');
 
+            clock += 5_000;
             report.complete = true;
             report.finishedJobs = ['job-1'];
             slotsOf.a0000000 = [[108, 119]];
@@ -4772,6 +4774,7 @@ describe('AnomalyService', () => {
 
           it('still reports a run that failed on its own', async () => {
             const added = await failAfterRun(false);
+            clock += 5_000;
 
             expect(added).toHaveBeenCalledTimes(1);
             expect((added.mock.calls[0][0] as { message: string }).message).toContain(
@@ -4781,6 +4784,52 @@ describe('AnomalyService', () => {
               state: 'failed',
               jobs: [{ state: 'failed', message: 'Connection lost to source' }],
             });
+          });
+
+          it('keeps the server message of a move that failed before the cancel', async () => {
+            enable();
+            await planned();
+            await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN);
+            report.jobViews = [listed()];
+            await service.followRebalanceRuns('conn-a');
+            report.complete = false;
+            report.jobViews = [];
+            report.finishedJobs = ['job-1'];
+            report.failed = [{ ...failedImport, message: 'target refused' }];
+
+            expect(await service.cancelRebalance('conn-a', 'a0000000')).toMatchObject({
+              status: 'cancelling',
+            });
+            report.complete = true;
+
+            expect((await service.followRebalanceRuns('conn-a'))[0]).toMatchObject({
+              state: 'failed',
+              jobs: [{ state: 'failed', message: 'target refused' }],
+            });
+          });
+
+          it('reads the cluster once per follow window and reuses the read of the poll', async () => {
+            enable();
+            await planned();
+            await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN);
+            const metrics = (service as any).clusterMetrics;
+            const reads = metrics.readSlotMigrations as jest.Mock;
+            reads.mockClear();
+
+            await service.followRebalanceRuns('conn-a');
+            await service.followRebalanceRuns('conn-a');
+            expect(reads).toHaveBeenCalledTimes(1);
+
+            clock += 5_000;
+            metrics.coveredBySeed = () => false;
+            (service as any).slotMigrationCheckedAt.delete('conn-a');
+            await (service as any).detectSlotMigrations(
+              { connectionId: 'conn-a', connectionName: 'conn-a' },
+              clock,
+            );
+            await (service as any).followRebalanceRunsOnPoll('conn-a', clock);
+            expect(reads).toHaveBeenCalledTimes(2);
+            expect((service as any).rebalanceFollowedAt.get('conn-a')).toBe(clock);
           });
 
           it('follows a run from the poll without a reader, at most every 5 seconds', async () => {
@@ -4827,6 +4876,7 @@ describe('AnomalyService', () => {
             report.jobViews = [];
             slotsOf.a0000000 = [[108, 119]];
             slotsOf.b0000000 = [[10, 11], [100, 107]];
+            clock += 5_000;
             await service.followRebalanceRuns('conn-a');
 
             clock += 60 * 60_000;

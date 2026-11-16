@@ -285,7 +285,7 @@ function subtractSlotRanges(from: number[][], taken: number[][]): number[][] {
   return left;
 }
 
-function parseSlotRangeList(text: string | undefined): number[][] {
+export function parseSlotRangeList(text: string | undefined): number[][] {
   return (text ?? '')
     .split(/\s+/)
     .filter(Boolean)
