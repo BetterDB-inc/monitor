@@ -222,15 +222,6 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
     return !failingForAll(link.subject);
   };
 
-  const tiers = new Map<string, number>();
-  const tier = (id: string): number => {
-    const known = tiers.get(id);
-    if (known !== undefined) return known;
-    const found = tierOf(selves.get(id) ?? sightings.get(id)?.[0]?.node ?? nodes.get(id));
-    tiers.set(id, found);
-    return found;
-  };
-
   const links = memberships
     .flatMap((disagreement): Link[] => {
       const [subject] = disagreement.subjectIds;
@@ -264,6 +255,18 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
   }
   const lacks = (observer: string, subject: string): boolean => !!lacked.get(observer)?.has(subject);
   const lackers = (id: string): number => lackedBy.get(id)?.size ?? 0;
+
+  const tiers = new Map<string, number>();
+  const tier = (id: string): number => {
+    const known = tiers.get(id);
+    if (known !== undefined) return known;
+    const own = selves.get(id);
+    const seen = own ? [own] : [...(sightings.get(id) ?? []).map((sighting) => sighting.node), nodes.get(id)];
+    const shown = Math.max(...seen.map(tierOf));
+    const found = shown === TIER_NEW && lackers(id) === 0 ? TIER_REPLICA : shown;
+    tiers.set(id, found);
+    return found;
+  };
 
   const newerEnd = (link: Link): string => {
     const { observer, subject } = link;

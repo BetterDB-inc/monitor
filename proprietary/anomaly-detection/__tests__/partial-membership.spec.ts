@@ -828,15 +828,73 @@ describe('partiallyKnownNodes', () => {
     });
   });
 
-  it('names a new node whose own view lacks a replica, whichever flag marks the replica', () => {
+  it('names a new node a peer lacks before a replica it has not learned, whichever flag marks the replica', () => {
     const replica: ClusterNode = { ...primary('a1', 8, [], 0), flags: ['replica'], master: 'p1' };
-    const peers = ['p1', 'p2', 'p3'].map((id) => view(id, {}, [replica]));
+    const peers = [view('p1', {}, [replica]), view('p2', { n1: null }, [replica]), view('p3', {}, [replica])];
     const ownView = view('a1', {}, [{ ...replica, flags: ['myself', 'replica'] }]);
     const { found } = judge(every([...peers, ownView, view('n1')], 0, LONG_ENOUGH));
 
     expect(found.map((finding) => finding.nodeId)).toEqual(['n1']);
-    expect(ids(found[0].knownBy)).toEqual(['a1', 'p1', 'p2', 'p3']);
+    expect(ids(found[0].knownBy)).toEqual(['a1', 'p1', 'p3']);
+    expect(ids(found[0].notKnownBy)).toEqual(['p2']);
     expect(ids(found[0].ownViewMissing)).toEqual(['a1']);
+  });
+
+  describe('when an empty primary every peer knows has not learned a new replica', () => {
+    const replica: ClusterNode = { ...primary('r1', 8, [], 0), flags: ['slave'], master: 'p1' };
+    const owners = ['p1', 'p2', 'p3'].map((id) => view(id, {}, [replica]));
+    const ownView = view('r1', {}, [{ ...replica, flags: ['myself', 'slave'] }]);
+    const spare = view('n1');
+    const views = [...owners, ownView, spare];
+
+    it('names the replica and not the empty primary', () => {
+      const { found } = judge(every(views, 0, LONG_ENOUGH));
+
+      expect(found.map((finding) => finding.nodeId)).toEqual(['r1']);
+      expect(found[0]).toMatchObject({ confirmed: true, ownViewMissing: [] });
+      expect(ids(found[0].knownBy)).toEqual(['p1', 'p2', 'p3']);
+      expect(ids(found[0].notKnownBy)).toEqual(['n1']);
+      expect(found[0].meet).toMatchObject({ command: 'CLUSTER MEET 10.0.0.8 6379' });
+      expect(ids(found[0].meet?.runOn ?? [])).toEqual(['n1']);
+    });
+
+    it.each([
+      ['the slot owners', [ownView, spare], ['p1', 'p2', 'p3']],
+      ['the replica', [...owners, spare], ['r1']],
+      ['the empty primary', [...owners, ownView], ['n1']],
+    ])('names the same one in rounds %s give no view', (_who, answered, unanswered) => {
+      const before = every(views, 0, LONG_ENOUGH);
+      for (let n = 1; n <= 3; n += 1) {
+        const silent = every(answered, LONG_ENOUGH + ROUND_MS, LONG_ENOUGH + n * ROUND_MS, unanswered);
+        const { found } = judge([...before, ...silent]);
+        expect(found.map((finding) => finding.nodeId)).toEqual(['r1']);
+      }
+    });
+
+    it('still names an empty primary a peer lacks before its replica', () => {
+      const lacking = [view('p1', {}, [replica]), view('p2', { n1: null }, [replica]), view('p3', {}, [replica])];
+      const { found } = judge(every([...lacking, ownView, spare], 0, LONG_ENOUGH));
+
+      expect(found.map((finding) => finding.nodeId)).toEqual(['n1']);
+      expect(ids(found[0].notKnownBy)).toEqual(['p2']);
+      expect(ids(found[0].ownViewMissing)).toEqual(['r1']);
+    });
+  });
+
+  describe('when the views disagree about the slots of a node that gives no view', () => {
+    const withoutSlots = view('p1', { p2: { slots: [] } });
+    const withSlots = view('p3');
+    const lacking = view('n1', { p2: null });
+
+    it.each([
+      ['first', [withoutSlots, withSlots, lacking]],
+      ['last', [withSlots, withoutSlots, lacking]],
+    ])('takes it for a slot owner when the view that shows no slots comes %s', (_order, views) => {
+      const { found } = judge(every(views, 0, LONG_ENOUGH, ['p2']));
+
+      expect(found.map((finding) => finding.nodeId)).toEqual(['n1']);
+      expect(ids(found[0].ownViewMissing)).toEqual(['p2']);
+    });
   });
 
   it('names a new replica one slot owner has not learned, not the slot owner', () => {
