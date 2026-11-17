@@ -1133,6 +1133,7 @@ describe('judgeSlotMigrations', () => {
         {
           kind: 'failed',
           signature: 'failed:job-1',
+          jobName: 'job-1',
           atomic: true,
           slots: '0-100',
           sourceNodeId: A.id,

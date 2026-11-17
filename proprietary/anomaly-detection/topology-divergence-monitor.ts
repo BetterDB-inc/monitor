@@ -85,6 +85,16 @@ function isUnreachable(node: ClusterNode): boolean {
   return node.flags.some((flag) => UNREACHABLE_FLAGS.includes(flag));
 }
 
+function withMetadataOf(kept: ClusterNode, node: ClusterNode): ClusterNode {
+  const shardId = node.shardId ?? kept.shardId;
+  const availabilityZone = node.availabilityZone ?? kept.availabilityZone;
+  return {
+    ...node,
+    ...(shardId === undefined ? {} : { shardId }),
+    ...(availabilityZone === undefined ? {} : { availabilityZone }),
+  };
+}
+
 function isAccused(node: ClusterNode): boolean {
   return node.flags.some((flag) => FAILING_FLAGS.includes(flag)) && !isUnreachable(node);
 }
@@ -267,7 +277,8 @@ export class TopologyDivergenceMonitor {
     for (const view of views) {
       for (const node of view.nodes) {
         const kept = nodes.get(node.id);
-        if (!kept || (isUnreachable(kept) && !isUnreachable(node))) nodes.set(node.id, node);
+        if (!kept) nodes.set(node.id, node);
+        else if (isUnreachable(kept) && !isUnreachable(node)) nodes.set(node.id, withMetadataOf(kept, node));
         if (node.id === view.observerId) selves.set(node.id, node);
       }
     }

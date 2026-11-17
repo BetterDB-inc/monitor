@@ -151,8 +151,14 @@ function viewsOf(count: number): string {
 
 function shardKeyOf(node: ClusterNode, nodes: ReadonlyMap<string, ClusterNode>): string {
   if (node.shardId) return node.shardId;
-  const primary = isPrimary(node) ? node : nodes.get(node.master);
-  return primary?.shardId ?? primary?.id ?? node.id;
+  if (isPrimary(node)) return node.id;
+  const primary = nodes.get(node.master);
+  if (primary) return primary.shardId ?? primary.id;
+  return namesPrimary(node) ? node.master : node.id;
+}
+
+function namesPrimary(node: ClusterNode): boolean {
+  return node.master !== '' && node.master !== '-';
 }
 
 function shardsOf(members: ClusterNode[], nodes: ReadonlyMap<string, ClusterNode>): Shard[] {

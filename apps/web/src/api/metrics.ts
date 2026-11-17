@@ -52,6 +52,8 @@ import type {
   AnomalyBufferStats,
   FanoutCoverage,
   HotShardDetail,
+  RebalanceMove,
+  RebalanceRun,
   ReplicaDivergenceHistory,
   IncidentTimeline,
   TopologyDisagreementSummary,
@@ -466,6 +468,20 @@ export const metricsApi = {
     fetchApi<TopologyDisagreementSummary>('/anomaly/topology-disagreements', {
       signal,
       headers: { 'x-connection-id': connectionId },
+    }),
+
+  runRebalance: (shardId: string, moves: Array<Pick<RebalanceMove, 'targetShardId' | 'ranges'>>) =>
+    fetchApi<RebalanceRun>(`/anomaly/hot-shards/${encodeURIComponent(shardId)}/rebalance`, {
+      method: 'POST',
+      body: JSON.stringify({ moves }),
+    }),
+
+  getRebalanceRuns: () => fetchApi<RebalanceRun[]>('/anomaly/slot-rebalance'),
+
+  cancelRebalance: (sourceShardId: string) =>
+    fetchApi<RebalanceRun>('/anomaly/slot-rebalance/cancel', {
+      method: 'POST',
+      body: JSON.stringify({ sourceShardId }),
     }),
 
   getReplicationDivergence: (params?: { startTime?: number; endTime?: number }) => {

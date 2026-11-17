@@ -12,6 +12,14 @@ import {
   HardDrive,
   AlertOctagon,
 } from 'lucide-react';
+import type { RebalanceExecutionBlocker } from '../../types/anomaly';
+
+export const shortShardId = (shardId: string) => shardId.substring(0, 8);
+
+export const formatRatio = (value: number) => `${Number(value.toFixed(2))}x`;
+
+export const slotRangeLabels = (ranges: ReadonlyArray<readonly [number, number]>) =>
+  ranges.map(([start, end]) => (start === end ? `${start}` : `${start}-${end}`));
 
 export const SEVERITY_CONFIG = {
   critical: {
@@ -155,3 +163,17 @@ export function patternLabel(pattern: string): string {
 export function metricLabel(metricType: string): string {
   return METRIC_LABELS[metricType] ?? metricType;
 }
+
+export const REBALANCE_BLOCKED: Record<RebalanceExecutionBlocker, string> = {
+  flag_off:
+    'Running a plan from BetterDB is off. An operator can turn it on with BETTERDB_SLOT_MIGRATION=true.',
+  provider_managed: 'Slot commands are not supported on this managed service.',
+  unsupported_server: 'Running a plan needs Valkey 9.0 or later on every shard of the plan.',
+  not_dialed:
+    'BetterDB does not connect to the cluster nodes directly, so it cannot run this plan.',
+  migration_running: 'A slot migration is running. A plan can run once it ends.',
+  plan_outdated:
+    'The slots or the nodes changed since this suggestion was made. A new one follows.',
+  server_refused:
+    'The server refused the last start of this plan. It can run again once the suggestion is made again.',
+};
