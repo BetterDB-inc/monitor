@@ -276,6 +276,55 @@ describe('partiallyKnownNodes', () => {
     expect(found[0].notKnownBy).toEqual([]);
   });
 
+  describe('when the only peer that lacks the node stops giving a view', () => {
+    const seen = every([view('p1'), view('p2', { n1: null }), view('p3')], 0, LONG_ENOUGH);
+    const down = { flags: ['master', 'fail'] };
+    const after = (views: TopologyView[], rounds: number) =>
+      judge([...seen, ...every(views, LONG_ENOUGH + ROUND_MS, LONG_ENOUGH + rounds * ROUND_MS, ['p2'])]).found;
+
+    it.each([1, 2, 3])('lets go of the node in round %i in which every peer flags that peer as failing', (rounds) => {
+      expect(after([view('p1', { p2: down }), view('p3', { p2: down })], rounds)).toEqual([]);
+    });
+
+    it.each([1, 2, 3])('keeps the node through round %i in which no peer flags that peer', (rounds) => {
+      const found = after([view('p1'), view('p3')], rounds);
+
+      expect(found.map((finding) => finding.nodeId)).toEqual(['n1']);
+      expect(found[0].notKnownBy).toEqual([]);
+    });
+
+    it('keeps the node while only some peers flag that peer as failing', () => {
+      const found = after([view('p1', { p2: { flags: ['master', 'fail?'] } }), view('p3')], 3);
+
+      expect(found.map((finding) => finding.nodeId)).toEqual(['n1']);
+    });
+  });
+
+  it('counts each peer of a join broken in both directions once', () => {
+    const views = [view('p1'), view('p2', { n1: null }), view('p3', { n1: null }), view('n1', { p2: null, p3: null })];
+    const { found } = judge(every(views, 0, LONG_ENOUGH));
+
+    expect(found[0]).toMatchObject({ nodeId: 'n1', brokenPeers: 2 });
+    expect(found[0].notKnownBy).toHaveLength(2);
+    expect(found[0].ownViewMissing).toHaveLength(2);
+  });
+
+  it('still counts a peer that lacks the node in a round it gives no view', () => {
+    const seen = every([view('p1'), view('p2', { n1: null }), view('p3')], 0, ROUND_MS);
+    const unread = every([view('p1'), view('p3')], 2 * ROUND_MS, LONG_ENOUGH, ['p2']);
+    const { found } = judge([...seen, ...unread]);
+
+    expect(found[0]).toMatchObject({ nodeId: 'n1', brokenPeers: 1, notKnownBy: [] });
+  });
+
+  it('does not count a peer whose link is gone while another is left', () => {
+    const before = every([view('p1'), view('p2', { n1: null }), view('p3', { n1: null })], 0, LONG_ENOUGH);
+    const learned = { at: LONG_ENOUGH + ROUND_MS, views: [view('p1'), view('p2'), view('p3', { n1: null })] };
+    const { found } = judge([...before, learned]);
+
+    expect(found[0]).toMatchObject({ nodeId: 'n1', brokenPeers: 1 });
+  });
+
   it('gives no command while no node that showed the gap gives a view', () => {
     const seen = every([view('p1'), view('p2', { n1: null }), view('p3')], 0, ROUND_MS);
     const unread = every([view('p1'), view('p3')], 2 * ROUND_MS, LONG_ENOUGH, ['p2']);
@@ -1034,6 +1083,36 @@ describe('partiallyKnownNodes', () => {
     const views = [view('p1', { n1: moved }), view('p2', { n1: null }), view('p3'), view('n1', { p2: null })];
     const { found } = judge(every(views, 0, LONG_ENOUGH));
     expect(found[0].address).toBe('10.0.0.7:6379');
+  });
+
+  it('takes the address of the peers that do not flag the node as failing, however many still give the old one', () => {
+    const helper = primary('q1', 8, [], 0);
+    const lacking = primary('x1', 9, [], 0);
+    const self = (node: ClusterNode) => ({ ...node, flags: ['myself', ...node.flags] });
+    const stale = { flags: ['master', 'fail?'] };
+    const back = { address: '10.0.0.50:6379@16379' };
+    const views = [
+      ...['p1', 'p2', 'p3'].map((id) => view(id, { n1: stale }, [helper, lacking])),
+      view('q1', { n1: back }, [self(helper), lacking]),
+      view('x1', { n1: null }, [helper, self(lacking)]),
+      view('n1', { n1: back }, [helper, lacking]),
+    ];
+    const { found } = judge(every(views, 0, LONG_ENOUGH));
+
+    expect(found.map((finding) => finding.nodeId)).toEqual(['n1']);
+    expect(found[0].address).toBe('10.0.0.50:6379');
+    expect(found[0].meet?.command).toBe('CLUSTER MEET 10.0.0.50 6379');
+    expect(ids(found[0].meet?.runOn ?? [])).toEqual(['x1']);
+  });
+
+  it('takes the address the node gives for itself over one only peers that flag it as failing give', () => {
+    const stale = { flags: ['master', 'fail?'] };
+    const back = { address: '10.0.0.50:6379@16379' };
+    const peers = [view('p1', { n1: stale }), view('p2', { n1: null }), view('p3', { n1: stale })];
+    const views = [...peers, view('n1', { n1: back })];
+    const { found } = judge(every(views, 0, LONG_ENOUGH));
+
+    expect(found[0]).toMatchObject({ nodeId: 'n1', address: '10.0.0.50:6379' });
   });
 
   it('takes the address a peer reaches the node at over the one it gives for itself', () => {

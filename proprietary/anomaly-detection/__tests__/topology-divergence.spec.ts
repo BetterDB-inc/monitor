@@ -721,6 +721,97 @@ describe('DivergenceTracker', () => {
       expect(Object.keys(tracker.tracked()[0].gapStreaks ?? {})).toEqual(['c']);
     });
 
+    it('starts over for an observer that comes back after the blind limit', () => {
+      const tracker = new DivergenceTracker();
+      const everyone = membership('p2', ['a'], ['b', 'c']);
+      const throughC = membership('p2', ['a'], ['c']);
+
+      tracker.observe(round(5000, [everyone]));
+      for (const at of [60_000, 120_000, 180_000]) tracker.observe(round(at, [throughC], ['b']));
+      for (const at of [240_000, 300_000]) tracker.observe(held(at, ['a', 'b'], { c: ['a'] }));
+      expect(tracker.tracked()[0].gapStreaks?.b).toEqual({ firstSeenAt: 5000, lastAnsweredAt: 5000, rounds: 1 });
+
+      tracker.observe(round(360_000, [everyone]));
+      expect(tracker.tracked()[0].gapStreaks?.b).toEqual({
+        firstSeenAt: 360_000,
+        lastAnsweredAt: 360_000,
+        rounds: 1,
+      });
+    });
+
+    it('starts over for an observer that answers after the blind limit while the disagreement is held', () => {
+      const tracker = new DivergenceTracker();
+
+      tracker.observe(round(5000, [membership('p2', ['a'], ['b', 'c'])]));
+      for (const at of [60_000, 120_000, 180_000]) {
+        tracker.observe(round(at, [membership('p2', ['a'], ['c'])], ['b']));
+      }
+      tracker.observe(held(240_000, ['a', 'b'], { c: ['a'] }));
+      tracker.observe(held(330_000, ['a'], { b: ['a'], c: ['a'] }));
+
+      expect(tracker.tracked()[0].gapStreaks?.b).toEqual({
+        firstSeenAt: 330_000,
+        lastAnsweredAt: 330_000,
+        rounds: 1,
+      });
+    });
+
+    it('gives up a count past the blind limit also while the disagreement is held', () => {
+      const tracker = new DivergenceTracker();
+
+      tracker.observe(round(5000, [membership('p2', ['a'], ['b', 'c'])]));
+      for (const at of [60_000, 120_000, 180_000]) {
+        tracker.observe(round(at, [membership('p2', ['a'], ['c'])], ['b']));
+      }
+      tracker.observe(held(240_000, ['a', 'b'], { c: ['a'] }));
+      tracker.observe(held(330_000, ['a', 'b'], { c: ['a'] }));
+
+      expect(Object.keys(tracker.tracked()[0].gapStreaks ?? {})).toEqual(['c']);
+    });
+
+    describe('when one observer learns the node while another that lacked it gives no view', () => {
+      const learned = (at: number, unanswered: string[]) =>
+        held(at, unanswered, { a: ['p2'], b: ['p2'], ...(unanswered.includes('c') ? {} : { c: ['a'] }) });
+      const start = () => {
+        const tracker = new DivergenceTracker();
+        tracker.observe(round(1000, [membership('p2', ['a'], ['b', 'c'])]));
+        tracker.observe(learned(6000, ['c']));
+        return tracker;
+      };
+
+      it('keeps the count of the one that gave no view and ends the other', () => {
+        expect(start().tracked()).toMatchObject([
+          { key: 'membership:p2', lastSeenAt: 1000, gapStreaks: { c: { firstSeenAt: 1000, lastAnsweredAt: 1000 } } },
+        ]);
+        expect(Object.keys(start().tracked()[0].gapStreaks ?? {})).toEqual(['c']);
+      });
+
+      it('goes on with that count when the observer answers and still lacks the node', () => {
+        const tracker = start();
+        tracker.observe(round(11_000, [membership('p2', ['a', 'b'], ['c'])]));
+
+        expect(tracker.tracked()[0].gapStreaks).toEqual({
+          c: { firstSeenAt: 1000, lastAnsweredAt: 11_000, rounds: 2 },
+        });
+      });
+
+      it('lets go of the disagreement when the observer answers and lists the node', () => {
+        const tracker = start();
+        tracker.observe(held(11_000, [], { a: ['p2'], b: ['p2'], c: ['p2'] }));
+
+        expect(tracker.tracked()).toEqual([]);
+      });
+
+      it('lets go of the disagreement once the observer has given no view for longer than the blind limit', () => {
+        const tracker = start();
+        tracker.observe(learned(1000 + TOPOLOGY_DIVERGENCE_BLIND_MS, ['c']));
+        expect(tracker.tracked()).toHaveLength(1);
+
+        tracker.observe(learned(1001 + TOPOLOGY_DIVERGENCE_BLIND_MS, ['c']));
+        expect(tracker.tracked()).toEqual([]);
+      });
+    });
+
     it('keeps the count through a change between missing and handshake', () => {
       const tracker = new DivergenceTracker();
       const stuck: TopologyDisagreement = {

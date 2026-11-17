@@ -389,7 +389,7 @@ export class DivergenceTracker {
       const answeringSides = entry.positions.filter((position) =>
         position.observers.some((observer) => !unanswered.has(observer)),
       ).length;
-      const unseeable = !comparable || answeringSides < 2;
+      const unseeable = !comparable || answeringSides < 2 || this.holdsUnreadGap(entry, round.at, unanswered);
       if (!unseeable || round.at - entry.lastSeenAt > TOPOLOGY_DIVERGENCE_BLIND_MS) this.entries.delete(key);
       else if (entry.gapStreaks) this.entries.set(key, { ...entry, gapStreaks: this.streaksThroughHold(entry, round) });
     }
@@ -489,10 +489,10 @@ export class DivergenceTracker {
     unanswered: ReadonlySet<string>,
   ): Record<string, GapStreak> {
     const held = Object.entries(previous).filter(
-      ([observer, streak]) => unanswered.has(observer) && at - streak.lastAnsweredAt <= TOPOLOGY_DIVERGENCE_BLIND_MS,
+      ([observer, streak]) => unanswered.has(observer) && !this.pastBlindLimit(streak, at),
     );
     const lacking = lackingObservers(disagreement).map(({ observer }): [string, GapStreak] => {
-      const streak = previous[observer];
+      const streak = this.pastBlindLimit(previous[observer], at) ? undefined : previous[observer];
       const rounds = (streak?.rounds ?? 0) + 1;
       return [observer, { firstSeenAt: streak?.firstSeenAt ?? at, lastAnsweredAt: at, rounds }];
     });
@@ -503,10 +503,23 @@ export class DivergenceTracker {
     const [subject] = entry.subjectIds;
     return Object.fromEntries(
       Object.entries(entry.gapStreaks ?? {}).flatMap(([observer, streak]): Array<[string, GapStreak]> => {
+        const expired = this.pastBlindLimit(streak, round.at);
         const listed = round.members?.get(observer);
-        if (!listed) return [[observer, streak]];
-        return listed.has(subject) ? [] : [[observer, { ...streak, lastAnsweredAt: round.at }]];
+        if (!listed) return expired ? [] : [[observer, streak]];
+        if (listed.has(subject)) return [];
+        const kept = expired ? { firstSeenAt: round.at, rounds: 1 } : streak;
+        return [[observer, { ...kept, lastAnsweredAt: round.at }]];
       }),
+    );
+  }
+
+  private pastBlindLimit(streak: GapStreak | undefined, at: number): boolean {
+    return !!streak && at - streak.lastAnsweredAt > TOPOLOGY_DIVERGENCE_BLIND_MS;
+  }
+
+  private holdsUnreadGap(entry: TrackedDisagreement, at: number, unanswered: ReadonlySet<string>): boolean {
+    return Object.entries(entry.gapStreaks ?? {}).some(
+      ([observer, streak]) => unanswered.has(observer) && !this.pastBlindLimit(streak, at),
     );
   }
 
