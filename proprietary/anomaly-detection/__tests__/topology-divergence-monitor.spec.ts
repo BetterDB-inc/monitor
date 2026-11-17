@@ -422,6 +422,25 @@ describe('TopologyDivergenceMonitor', () => {
     expect(round?.nodes.get('b2')).toMatchObject({ flags: ['master'] });
   });
 
+  it('keeps the shard and the zone of a node whose entry is taken from another view', async () => {
+    const { poll, answers } = harness();
+    const bare = (observerId: string) =>
+      viewOf(observerId).map(({ availabilityZone: _zone, ...node }) => node);
+    answers.set('b1', bare('b1'));
+    answers.set('c1', bare('c1'));
+
+    const round = await poll('conn-1', 'a1', 0, {
+      c2: { flags: ['master', 'noaddr'], address: ':0@0', shardId: 'shard-c2' },
+    });
+
+    expect(round?.nodes.get('c2')).toMatchObject({
+      flags: ['master'],
+      address: 'c2.internal:6379@16379',
+      shardId: 'shard-c2',
+      availabilityZone: 'c',
+    });
+  });
+
   it('records no failure flags in a round that cannot compare', async () => {
     const { poll } = harness();
 
