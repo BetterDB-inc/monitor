@@ -70,10 +70,9 @@ export interface DivergenceGroup {
 export const TOPOLOGY_DIVERGENCE_BLIND_MS = 5 * 60_000;
 export const TOPOLOGY_DIVERGENCE_SIGNATURE_PREFIX = 'topology_divergence:';
 export const UNASSIGNED_SLOT_OWNER = 'unassigned';
-export const KNOWN_MEMBER = 'known';
-export const FAILING_FLAGS = ['fail', 'fail?'];
-export const UNREACHABLE_FLAGS = ['handshake', 'noaddr'];
 
+const KNOWN_MEMBER = 'known';
+const FAILING_FLAGS = ['fail', 'fail?'];
 const SLOT_COUNT = 16384;
 const DURATION_UNITS: Array<[string, number]> = [
   ['d', 86_400],
@@ -108,11 +107,19 @@ function statusOf(node: ClusterNode): MemberStatus {
   return node.flags.includes('noaddr') ? 'noaddr' : KNOWN_MEMBER;
 }
 
+export function isKnownMember(node: ClusterNode): boolean {
+  return statusOf(node) === KNOWN_MEMBER;
+}
+
+export function isFlaggedFailing(node: ClusterNode): boolean {
+  return node.flags.some((flag) => FAILING_FLAGS.includes(flag));
+}
+
 function indexViews(views: TopologyView[]): ViewIndex[] {
   const idsByAddress = new Map<string, Set<string>>();
   for (const view of views) {
     for (const node of view.nodes) {
-      if (statusOf(node) !== KNOWN_MEMBER) continue;
+      if (!isKnownMember(node)) continue;
       const address = hostPort(node.address);
       const ids = idsByAddress.get(address);
       if (ids) ids.add(node.id);
@@ -170,8 +177,7 @@ function perNodeDisagreements(indexes: ViewIndex[]): TopologyDisagreement[] {
       if (!node) continue;
       vote(epochs, String(node.configEpoch), index.observerId);
       if (index.observerId === subject) continue;
-      const failing = node.flags.some((flag) => FAILING_FLAGS.includes(flag));
-      vote(failures, failing ? 'failing' : 'ok', index.observerId);
+      vote(failures, isFlaggedFailing(node) ? 'failing' : 'ok', index.observerId);
     }
 
     const kinds: Array<[DivergenceKind, Map<string, string[]>]> = [
@@ -343,7 +349,7 @@ function dissentCandidates(disagreement: TopologyDisagreement): string[][] {
 export function membersByObserver(views: TopologyView[]): Map<string, Set<string>> {
   return new Map(
     views.map((view) => {
-      const listed = view.nodes.filter((node) => statusOf(node) === KNOWN_MEMBER).map((node) => node.id);
+      const listed = view.nodes.filter(isKnownMember).map((node) => node.id);
       return [view.observerId, new Set([view.observerId, ...listed])];
     }),
   );

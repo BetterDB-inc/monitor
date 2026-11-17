@@ -1,5 +1,5 @@
 import type { ClusterNode } from '@app/common/types/metrics.types';
-import { FAILING_FLAGS, UNREACHABLE_FLAGS, compareText } from './topology-divergence';
+import { compareText, isFlaggedFailing, isKnownMember } from './topology-divergence';
 
 export interface ObserverSelectionInput {
   nodes: ClusterNode[];
@@ -38,7 +38,7 @@ function zoneOf(node: ClusterNode): string {
 
 export function selectObservers(input: ObserverSelectionInput): ObserverSelection {
   const eligible = input.nodes
-    .filter((node) => !node.flags.some((flag) => UNREACHABLE_FLAGS.includes(flag)))
+    .filter(isKnownMember)
     .sort((a, b) => compareText(a.id, b.id));
   const byId = new Map(eligible.map((node) => [node.id, node]));
   const sampled: string[] = [];
@@ -51,7 +51,7 @@ export function selectObservers(input: ObserverSelectionInput): ObserverSelectio
 
   const rank = (node: ClusterNode, replicaPenalty: boolean) =>
     (input.registeredIds.has(node.id) ? 0 : RANK_UNREGISTERED) +
-    (node.flags.some((flag) => FAILING_FLAGS.includes(flag)) ? RANK_FAILING : 0) +
+    (isFlaggedFailing(node) ? RANK_FAILING : 0) +
     (input.unanswered.has(node.id) ? RANK_SILENT : 0) +
     (replicaPenalty && !isPrimary(node) && !input.registeredIds.has(node.id) ? RANK_REPLICA : 0);
 
