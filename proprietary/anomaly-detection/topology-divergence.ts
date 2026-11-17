@@ -606,6 +606,7 @@ export function groupDivergences(tracked: TrackedDisagreement[]): DivergenceGrou
 
 export interface OpenDivergence<G = DivergenceGroup> {
   group?: G;
+  observed?: G;
   lastCountedAt: number;
   clean: number;
 }

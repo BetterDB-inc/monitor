@@ -3,6 +3,7 @@ import {
   type DivergenceGroup,
   type DivergenceKind,
   type TrackedDisagreement,
+  compareText,
   durationOf,
   intersectSlotRanges,
 } from './topology-divergence';
@@ -213,6 +214,7 @@ export function buildDivergenceDetail(
   group: DivergenceGroup,
   nodes: ReadonlyMap<string, ClusterNode>,
   state: DivergenceEventState,
+  listed: TrackedDisagreement[] = group.disagreements,
 ): TopologyDivergenceDetail {
   const held = { eventId: state.eventId, eventType: 'topology_divergence' as const };
   return {
@@ -220,8 +222,33 @@ export function buildDivergenceDetail(
     confirmed: state.confirmed,
     since: divergenceSince(group),
     sides: [{ nodes: namedNodes(group.dissent, nodes) }, { nodes: namedNodes(group.others, nodes) }],
-    disagreements: group.disagreements.map((disagreement) => toDetailDisagreement(disagreement, nodes, held)),
+    disagreements: listed.map((disagreement) => toDetailDisagreement(disagreement, nodes, held)),
   };
+}
+
+export function disagreementsByFinding(
+  findings: Array<{ finding: PartialMembership; eventId: string | null }>,
+  disagreements: TrackedDisagreement[],
+): Map<string, TrackedDisagreement[]> {
+  const listed = new Map<string, TrackedDisagreement[]>();
+  for (const disagreement of disagreements) {
+    const holds = ({ finding }: { finding: PartialMembership }) =>
+      finding.disagreementKeys.includes(disagreement.key) || finding.slotDisputeKeys.includes(disagreement.key);
+    const about = (finding: PartialMembership) => Number(disagreement.subjectIds.includes(finding.nodeId));
+    const [holder] = findings
+      .filter(holds)
+      .sort(
+        (a, b) =>
+          Number(b.eventId !== null) - Number(a.eventId !== null) ||
+          about(b.finding) - about(a.finding) ||
+          compareText(a.finding.nodeId, b.finding.nodeId),
+      );
+    if (!holder) continue;
+    const own = listed.get(holder.finding.signature);
+    if (own) own.push(disagreement);
+    else listed.set(holder.finding.signature, [disagreement]);
+  }
+  return listed;
 }
 
 export function buildPartialMembershipDetail(

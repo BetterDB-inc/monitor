@@ -279,6 +279,7 @@ import {
   buildDivergenceDetail,
   buildPartialMembershipDetail,
   closingPartialMembershipDetail,
+  disagreementsByFinding,
   divergenceMessage,
   divergenceSeverity,
   outranksSeverity,
@@ -7481,6 +7482,7 @@ export class AnomalyService
       store: partialStore,
       open: openPartial,
       confirmed: confirmedPartial,
+      observed: partial,
       pendingSignatures: new Set(partial.map((finding) => finding.signature)),
       superseded: renamed,
       metricType: MetricType.PARTIAL_MEMBERSHIP,
@@ -7503,6 +7505,7 @@ export class AnomalyService
     store: TopologyEventStore;
     open: Map<string, OpenDivergence<G>>;
     confirmed: G[];
+    observed?: G[];
     pendingSignatures: ReadonlySet<string>;
     superseded: string[];
     metricType: MetricType;
@@ -7540,6 +7543,10 @@ export class AnomalyService
       if (eventIds.has(finding.signature) && !open.get(finding.signature)?.group) {
         open.set(finding.signature, { group: finding, lastCountedAt: round.at, clean: 0 });
       }
+    }
+    for (const finding of params.observed ?? []) {
+      const entry = open.get(finding.signature);
+      if (entry && !entry.group && eventIds.has(finding.signature)) entry.observed = finding;
     }
   }
 
@@ -10765,7 +10772,7 @@ export class AnomalyService
         const eventId = eventIds?.get(signature);
         const group = groupOf(signature, entry);
         if (!group || eventId === undefined) return [];
-        if (this.eventInMemory(eventId)?.resolved === true) return [];
+        if ((this.eventInMemory(eventId) ?? this.findIncidentEvent(eventId))?.resolved === true) return [];
         return [{ signature, eventId, group }];
       });
 
@@ -10775,14 +10782,14 @@ export class AnomalyService
       this.topologyDivergenceOpen.get(clusterKey),
       this.topologyEventStores.divergence.eventIds.get(round.anchorConnectionId),
       (signature, entry) => raisedDivergenceGroup(trackedBySignature.get(signature), entry.group),
-    )
-      .map((entry) => ({
-        ...entry,
-        group: { ...entry.group, disagreements: unclaimedByPartialMembership(entry.group.disagreements, found) },
-      }))
-      .filter(({ group }) => group.disagreements.length > 0);
+    );
     const raised = raisedGroups.map(({ group, eventId }) =>
-      buildDivergenceDetail(group, round.nodes, { eventId, confirmed: true }),
+      buildDivergenceDetail(
+        group,
+        round.nodes,
+        { eventId, confirmed: true },
+        unclaimedByPartialMembership(group.disagreements, found),
+      ),
     );
     const raisedSignatures = new Set(raisedGroups.map(({ signature }) => signature));
     const counting = tracked
@@ -10793,19 +10800,23 @@ export class AnomalyService
     const raisedFindings = shown(
       this.partialMembershipOpen.get(clusterKey),
       this.topologyEventStores.partial.eventIds.get(round.anchorConnectionId),
-      (signature, entry) => seen.get(signature) ?? entry.group,
+      (signature, entry) => seen.get(signature) ?? entry.group ?? entry.observed,
     );
+    const raisedIds = new Map(raisedFindings.map(({ signature, eventId }) => [signature, eventId]));
+    const listed = disagreementsByFinding(
+      found.map((finding) => ({ finding, eventId: raisedIds.get(finding.signature) ?? null })),
+      round.disagreements,
+    );
+    const detailOf = (finding: PartialMembership, state: { eventId: string | null; confirmed: boolean }) =>
+      buildPartialMembershipDetail(finding, listed.get(finding.signature) ?? [], round.nodes, state);
     const raisedPartial = raisedFindings.map(({ signature, eventId, group }) =>
       seen.has(signature)
-        ? buildPartialMembershipDetail(group, round.disagreements, round.nodes, { eventId, confirmed: true })
+        ? detailOf(group, { eventId, confirmed: true })
         : closingPartialMembershipDetail(group, round.nodes, eventId),
     );
-    const raisedNodes = new Set(raisedFindings.map(({ signature }) => signature));
     const countingPartial = found
-      .filter((finding) => !raisedNodes.has(finding.signature))
-      .map((finding) =>
-        buildPartialMembershipDetail(finding, round.disagreements, round.nodes, { eventId: null, confirmed: false }),
-      );
+      .filter((finding) => !raisedIds.has(finding.signature))
+      .map((finding) => detailOf(finding, { eventId: null, confirmed: false }));
     return {
       status: round.status,
       sampledAt: round.at,

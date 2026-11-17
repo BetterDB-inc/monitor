@@ -5,6 +5,7 @@ import {
   buildDivergenceDetail,
   buildPartialMembershipDetail,
   closingPartialMembershipDetail,
+  disagreementsByFinding,
   divergenceMessage,
   divergenceSeverity,
   outranksSeverity,
@@ -413,5 +414,89 @@ describe('closingPartialMembershipDetail', () => {
       runOn: [],
       disagreements: [],
     });
+  });
+});
+
+describe('disagreementsByFinding', () => {
+  const held = (nodeId: string, keys: string[], slotKeys: string[] = []) =>
+    ({
+      signature: `partial_membership:${nodeId}`,
+      nodeId,
+      disagreementKeys: keys,
+      slotDisputeKeys: slotKeys,
+    }) as PartialMembership;
+  const keysOf = (listed: Map<string, TrackedDisagreement[]>) =>
+    Object.fromEntries([...listed].map(([signature, disagreements]) => [signature, disagreements.map((d) => d.key)]));
+
+  it('lists a disagreement under the only finding that holds it', () => {
+    const listed = disagreementsByFinding(
+      [
+        { finding: held('n0', ['membership:n0']), eventId: null },
+        { finding: held('n1', ['membership:n1']), eventId: null },
+      ],
+      [tracked('membership', 'n0'), tracked('membership', 'n1')],
+    );
+
+    expect(keysOf(listed)).toEqual({
+      'partial_membership:n0': ['membership:n0'],
+      'partial_membership:n1': ['membership:n1'],
+    });
+  });
+
+  it('lists a disagreement two findings hold under the one with an open event', () => {
+    const listed = disagreementsByFinding(
+      [
+        { finding: held('n0', ['membership:n0']), eventId: null },
+        { finding: held('n1', ['membership:n0']), eventId: 'event-1' },
+      ],
+      [tracked('membership', 'n0')],
+    );
+
+    expect(keysOf(listed)).toEqual({ 'partial_membership:n1': ['membership:n0'] });
+  });
+
+  it('lists it under the finding of the node it is about when both have an open event', () => {
+    const listed = disagreementsByFinding(
+      [
+        { finding: held('n0', ['membership:n1']), eventId: 'event-0' },
+        { finding: held('n1', ['membership:n1']), eventId: 'event-1' },
+      ],
+      [tracked('membership', 'n1')],
+    );
+
+    expect(keysOf(listed)).toEqual({ 'partial_membership:n1': ['membership:n1'] });
+  });
+
+  it('lists it under the finding of the node it is about when neither has an open event', () => {
+    const listed = disagreementsByFinding(
+      [
+        { finding: held('n0', ['membership:n1']), eventId: null },
+        { finding: held('n1', ['membership:n1']), eventId: null },
+      ],
+      [tracked('membership', 'n1')],
+    );
+
+    expect(keysOf(listed)).toEqual({ 'partial_membership:n1': ['membership:n1'] });
+  });
+
+  it('lists a slot dispute about neither node under the finding with the smaller node id', () => {
+    const listed = disagreementsByFinding(
+      [
+        { finding: held('n1', [], ['slot_owner:0-99']), eventId: null },
+        { finding: held('n0', [], ['slot_owner:0-99']), eventId: null },
+      ],
+      [tracked('slot_owner', '0-99', { subjectIds: ['a'] })],
+    );
+
+    expect(keysOf(listed)).toEqual({ 'partial_membership:n0': ['slot_owner:0-99'] });
+  });
+
+  it('leaves out a disagreement no finding holds', () => {
+    const listed = disagreementsByFinding(
+      [{ finding: held('n0', ['membership:n0']), eventId: null }],
+      [tracked('membership', 'n0'), tracked('membership', 'n1')],
+    );
+
+    expect(keysOf(listed)).toEqual({ 'partial_membership:n0': ['membership:n0'] });
   });
 });
