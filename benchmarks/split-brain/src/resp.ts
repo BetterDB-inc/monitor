@@ -4,6 +4,8 @@ export type Reply = string | number | null | Reply[];
 
 export class RespError extends Error {}
 
+class CommandTimeout extends Error {}
+
 interface Parsed {
   value: Reply | RespError;
   next: number;
@@ -135,13 +137,16 @@ export async function command(port: number, args: string[], timeoutMs = 3_000): 
     if (pool.get(port) === opening) pool.delete(port);
     return command(port, args, timeoutMs);
   }
-  const timer = setTimeout(() => client.close(new Error(`${args.join(' ')} timed out`)), timeoutMs);
+  const expired = new CommandTimeout(`${args.join(' ')} timed out`);
+  const timer = setTimeout(() => client.close(expired), timeoutMs);
   try {
     return await client.send(...args);
   } catch (err) {
-    if (!(err instanceof RespError)) {
-      client.close();
-      if (pool.get(port) === opening) pool.delete(port);
+    if (err instanceof RespError) throw err;
+    client.close();
+    if (pool.get(port) === opening) pool.delete(port);
+    if (err instanceof CommandTimeout && err !== expired) {
+      throw new Error(`${args.join(' ')} failed: the connection was closed after ${err.message}`);
     }
     throw err;
   } finally {

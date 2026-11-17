@@ -31,6 +31,7 @@ export const STRATEGIES: Strategy[] = [
 ];
 
 export const MIN_ROUNDS = [2, 3, 5];
+export const MIN_RANDOM_NODES = 2;
 export const ROUND_INTERVAL_MS = 5_000;
 export const PHASES = ROUND_INTERVAL_MS / TICK_MS;
 
@@ -68,6 +69,7 @@ export interface ReplayEvent {
   kinds: DivergenceKind[];
   dissent: string[];
   replaces: boolean;
+  closedAt: number | null;
 }
 
 export interface ReplayResult {
@@ -78,8 +80,13 @@ export interface ReplayResult {
   bytes: number;
   migrationChecks: number;
   events: ReplayEvent[];
-  lastCloseAt: number | null;
-  openAtEnd: number;
+}
+
+export function noteRound(events: ReplayEvent[], t: number, raised: ReplayEvent[], closed: string[]): void {
+  for (const event of events) {
+    if (event.closedAt === null && closed.includes(event.signature)) event.closedAt = t;
+  }
+  events.push(...raised);
 }
 
 const BASE_AT = 1_000_000_000;
@@ -178,8 +185,6 @@ async function replayOnce(
     ...cost,
     migrationChecks: 0,
     events: [],
-    lastCloseAt: null,
-    openAtEnd: 0,
   }));
 
   for (let index = params.phase; index < trace.length; index++) {
@@ -226,18 +231,20 @@ async function replayOnce(
       };
       const judged = await judges[j].observe(round, readMigrations);
       if (restarted && judges.length > 1) return null;
-      for (const event of judged.raised) {
-        result.events.push({
+      noteRound(
+        result.events,
+        t,
+        judged.raised.map((event) => ({
           t,
           signature: event.signature,
           severity: event.severity,
           kinds: event.kinds,
           dissent: event.dissent.map((id) => trace.nameOf(id)),
           replaces: event.replaces,
-        });
-      }
-      if (judged.closed.length > 0) result.lastCloseAt = t;
-      result.openAtEnd = judged.open.length;
+          closedAt: null,
+        })),
+        judged.closed,
+      );
     }
   }
   return results.map((result) => ({ ...result, ...cost }));

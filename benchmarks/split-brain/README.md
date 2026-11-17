@@ -24,7 +24,9 @@ cannot be imported without the whole service, so it is restated in
 `src/judge.ts`. `test/judge.test.ts` replays the service's own test cases
 through it. `product-pin.json` holds the hashes of the imported files and of
 the service files the glue was restated from; replay and report refuse to run
-when any of them differs.
+when any of them differs. Replay writes the pinned commit into every trial.
+Report prints that commit, and refuses trials that carry no pin, more than one
+pin, or a pin other than the current one.
 
 ## Scenarios
 

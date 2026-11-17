@@ -6,6 +6,7 @@ import {
   PHASES,
   PreparedTrace,
   ROUND_INTERVAL_MS,
+  type ReplayEvent,
   type ReplayResult,
   STRATEGIES,
   type Vantage,
@@ -13,6 +14,7 @@ import {
   seedOnly,
 } from './replay';
 import { parseView } from './cluster';
+import type { ProductStamp } from './product';
 import type { TrialMeta } from './scenarios';
 import type { Trace } from './trace';
 
@@ -41,6 +43,7 @@ export interface Cell {
   kinds: Record<string, number>;
   blame: { faulted: number; healthy: number; mixed: number };
   closed: Spread | null;
+  closedBeforeHeal: number;
   stillOpen: number;
   rounds: number;
   comparable: number;
@@ -77,6 +80,7 @@ export interface TrialOutput {
   attempt: number;
   dropped: string[];
   host?: TrialMeta['host'];
+  product: ProductStamp;
   shown: Shown;
   cells: Cell[];
   seedOnly: SeedOnlyCell[];
@@ -157,6 +161,17 @@ export function spread(values: number[]): Spread | null {
   return { n: sorted.length, min: sorted[0], p50: at(0.5), p90: at(0.9), max: sorted[sorted.length - 1] };
 }
 
+export function windowClose(events: ReplayEvent[], from: number, to: number): number | null {
+  let last = -Infinity;
+  for (const event of events) {
+    if (event.t < from) continue;
+    if (event.t > to && event.t > last) break;
+    if (event.closedAt === null) return null;
+    last = Math.max(last, event.closedAt);
+  }
+  return last;
+}
+
 interface Outcome {
   seed: string;
   result: ReplayResult;
@@ -177,6 +192,7 @@ function cellOf(
     kinds: {} as Record<string, number>,
     blame: { faulted: 0, healthy: 0, mixed: 0 },
     closed: null as Spread | null,
+    closedBeforeHeal: 0,
     stillOpen: 0,
     rounds: 0,
     comparable: 0,
@@ -213,15 +229,17 @@ function cellOf(
       else if (hits === 0) cell.blame.healthy += 1;
       else cell.blame.mixed += 1;
     }
-    if (result.openAtEnd > 0) cell.stillOpen += 1;
-    else if (result.lastCloseAt !== null) closed.push(result.lastCloseAt - (window.healedAt ?? window.from));
+    const closedAt = windowClose(result.events, window.from, window.to);
+    if (closedAt === null) cell.stillOpen += 1;
+    else if (window.healedAt !== null && closedAt < window.healedAt) cell.closedBeforeHeal += 1;
+    else closed.push(closedAt - (window.healedAt ?? window.from));
   }
   cell.ttd = spread(ttd);
   cell.closed = spread(closed);
   return cell;
 }
 
-export async function collectTrial(trace: Trace): Promise<TrialOutput> {
+export async function collectTrial(trace: Trace, product: ProductStamp): Promise<TrialOutput> {
   const prepared = new PreparedTrace(trace);
   const { meta } = trace;
   const fault = meta.kind === 'fault';
@@ -305,6 +323,7 @@ export async function collectTrial(trace: Trace): Promise<TrialOutput> {
     attempt: meta.attempt ?? 1,
     dropped: meta.dropped ?? [],
     host: meta.host,
+    product,
     shown: shownInViews(trace, prepared.seeds, window.from, window.to),
     cells,
     seedOnly: seedCells,

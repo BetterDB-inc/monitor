@@ -3,15 +3,15 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { collectTrial } from './collect';
-import { assertPinned } from './product';
+import { assertPinned, pinStamp } from './product';
 import { readTrace, traceFiles } from './trace';
 
 export async function collectChunk(outFile: string, files: string[]): Promise<void> {
-  assertPinned();
+  const product = pinStamp(assertPinned());
   const lines: string[] = [];
   for (const file of files) {
     const startedAt = Date.now();
-    const output = await collectTrial(readTrace(file));
+    const output = await collectTrial(readTrace(file), product);
     lines.push(JSON.stringify(output));
     console.log(`${output.trial} replayed in ${Math.round((Date.now() - startedAt) / 1000)}s`);
   }

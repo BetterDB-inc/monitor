@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { shownInViews } from '../src/collect';
+import { shownInViews, windowClose } from '../src/collect';
+import { PINNED_FILES, pinStamp } from '../src/product';
 import type { Sample, Tick } from '../src/recorder';
-import { PreparedTrace, seedOnly } from '../src/replay';
-import { assertOneConfiguration } from '../src/report';
+import { PreparedTrace, type ReplayEvent, noteRound, seedOnly } from '../src/replay';
+import { assertOneConfiguration, replayedProduct } from '../src/report';
 import type { TrialOutput } from '../src/collect';
 import type { Trace } from '../src/trace';
 
@@ -95,4 +96,62 @@ test('a report refuses trials recorded with different setups', () => {
   assert.doesNotThrow(() => assertOneConfiguration([trial(6, 5_000), trial(6, 5_000)]));
   assert.throws(() => assertOneConfiguration([trial(6, 5_000), trial(12, 5_000)]), /mix configurations/);
   assert.throws(() => assertOneConfiguration([trial(6, 5_000), trial(6, 15_000)]), /mix configurations/);
+});
+
+const raisedAt = (t: number, signature: string, replaces = false): ReplayEvent => ({
+  t,
+  signature,
+  severity: 'warning',
+  kinds: ['failure_flags'],
+  dissent: [],
+  replaces,
+  closedAt: null,
+});
+
+test('a close is stamped on the event it closes, not on the replay', () => {
+  const events: ReplayEvent[] = [];
+  noteRound(events, 10_000, [raisedAt(10_000, 'x')], []);
+  noteRound(events, 15_000, [raisedAt(15_000, 'y')], []);
+  noteRound(events, 20_000, [], ['y']);
+  assert.deepEqual(events.map((event) => event.closedAt), [null, 20_000]);
+  noteRound(events, 30_000, [raisedAt(30_000, 'y')], ['x']);
+  assert.deepEqual(events.map((event) => event.closedAt), [30_000, 20_000, null]);
+});
+
+test('an event replaced at a higher severity closes with its replacement', () => {
+  const events: ReplayEvent[] = [];
+  noteRound(events, 10_000, [raisedAt(10_000, 'x')], []);
+  noteRound(events, 15_000, [raisedAt(15_000, 'x', true)], []);
+  noteRound(events, 40_000, [], ['x']);
+  assert.deepEqual(events.map((event) => event.closedAt), [40_000, 40_000]);
+});
+
+test('the close of a window is the last close of its own events', () => {
+  const closed = (t: number, closedAt: number | null) => ({ ...raisedAt(t, `s${t}`), closedAt });
+  const before = closed(2_000, 90_000);
+  const later = closed(70_000, 80_000);
+  assert.equal(windowClose([before, closed(10_000, 20_000), closed(12_000, 45_000), later], 5_000, 40_000), 45_000);
+  assert.equal(windowClose([closed(10_000, 20_000), closed(12_000, null)], 5_000, 40_000), null);
+  assert.equal(windowClose([closed(10_000, 20_000), closed(70_000, null)], 5_000, 40_000), 20_000);
+});
+
+test('an event raised while a window event is still open closes with it', () => {
+  const closed = (t: number, closedAt: number | null) => ({ ...raisedAt(t, `s${t}`), closedAt });
+  assert.equal(windowClose([closed(10_000, 46_000), closed(41_000, 51_000)], 5_000, 40_000), 51_000);
+  assert.equal(windowClose([closed(10_000, 46_000), closed(46_000, 51_000)], 5_000, 40_000), 51_000);
+  assert.equal(windowClose([closed(10_000, 46_000), closed(41_000, null)], 5_000, 40_000), null);
+  assert.equal(windowClose([closed(10_000, 46_000), closed(47_000, 60_000)], 5_000, 40_000), 46_000);
+});
+
+test('a report names the product commit the trials were replayed at', () => {
+  const files = Object.fromEntries(PINNED_FILES.map((file) => [file, 'a']));
+  const pin = { commit: 'aaaaaaaa', files };
+  const at = (stamp: TrialOutput['product'] | undefined) => ({ product: stamp }) as TrialOutput;
+  const stamp = pinStamp(pin);
+  assert.deepEqual(replayedProduct([at(stamp), at(stamp)], pin), stamp);
+  assert.equal(replayedProduct([at(stamp)], { commit: 'bbbbbbbb', files }).commit, 'aaaaaaaa');
+  const moved = { commit: 'bbbbbbbb', files: { ...files, [PINNED_FILES[0]]: 'b' } };
+  assert.throws(() => replayedProduct([at(stamp)], moved), /replayed at product commit aaaaaaaa and the pin is now bbbbbbbb/);
+  assert.throws(() => replayedProduct([at(stamp), at(pinStamp(moved))], pin), /more than one product pin/);
+  assert.throws(() => replayedProduct([at(stamp), at(undefined)], pin), /do not say which product commit/);
 });

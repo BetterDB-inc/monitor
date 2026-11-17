@@ -54,6 +54,16 @@ export interface ProductPin {
   files: Record<string, string>;
 }
 
+export interface ProductStamp {
+  commit: string;
+  files: string;
+}
+
+export function pinStamp(pin: ProductPin): ProductStamp {
+  const listed = PINNED_FILES.map((file) => `${file} ${pin.files[file]}`).join('\n');
+  return { commit: pin.commit, files: createHash('sha256').update(listed).digest('hex').slice(0, 16) };
+}
+
 function currentHashes(): Record<string, string> {
   const hashes: Record<string, string> = {};
   for (const file of PINNED_FILES) {

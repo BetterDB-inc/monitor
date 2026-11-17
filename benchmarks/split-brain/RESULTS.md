@@ -8,17 +8,17 @@ All numbers are for product commit `bfbfa505`, Valkey 9.1.3, 6 nodes and a node 
 
 1. **No control raised an event.** None of the 210 control trials raised an event at any coverage or any N, nor at any join variant for the clean join (section 6). Per scenario that is 0 of 30, with a 95% upper bound of 11% per trial. Pooled it is 0 of 210; the Wilson upper bound for 0 of 210 is 1.8%, which assumes the seven operations share one rate. The views of two nodes did differ during a clean join (29 of 30 trials), a legacy reshard (20 of 30) and an atomic migration (5 of 30), but never at more than 4, 2 and 1 one-second samples in a row, and in no control at two detector rounds in a row (section 2). On false positives N = 2, N = 3 and N = 5 are identical: all three are zero.
 
-2. **Both partitions were raised by every setting when the monitor could reach every node.** Zone partition and minority partition: 100% [89–100] at every coverage and every N (section 1). Coverage changed only the time (section 12). Against what ships today (zone 1, N = 3, median 18–19 s after the cut), k=1 was 3.8 s later in the minority partition and 5.3 s later in the zone partition, and k=2 was 0.9 s and 1.6 s later. k=3 and zone 2 were within 0.2 s. k=4, k=5 and all nodes were 1.1–1.5 s sooner in the minority partition and a tie in the zone partition.
+2. **Both partitions were raised by every setting when the monitor could reach every node.** Zone partition and minority partition: 100% [89–100] at every coverage and every N (section 1). Coverage changed only the time (section 12). Against what ships today (zone 1, N = 3, median 18–19 s after the cut), k=2, the smallest sample the product accepts, was 0.9 s later in the minority partition and 1.6 s later in the zone partition. k=3 and zone 2 were within 0.2 s. k=4, k=5 and all nodes were 1.1–1.5 s sooner in the minority partition and a tie in the zone partition. k=1, which the product does not accept (finding 7), was 3.8 s and 5.3 s later.
 
 3. **Each round of persistence cost 5 s and bought nothing measurable here.** With zone 1 coverage, N = 2 raised 5.0 s sooner than N = 3 and N = 5 raised 10.0 s later, with the same raise rate in every trial (section 12, which compares N at zone 1 only). The medians of the other coverages move by the same steps (section 3). With zone 1 coverage, events closed 8 s, 13 s and 23 s after the heal at N = 2, 3 and 5 (section 8).
 
-4. **On the two partitions, a monitor on one side of the cut raised nothing at any coverage.** When the monitor can read only the nodes on the seed's side, the zone partition and the minority partition gave 0% at every coverage, asking all nodes included (section 4): the nodes it can still read agree with each other. More coverage does not fix this. The partial join is different: its cut only separates the joiner from three nodes, and from the inside position it was still raised in 7% (k=1) to 100% (k=5, all nodes) of replays. On the partition recordings the seed's own `cluster_state` turned to fail for every cut-off seed (60 of 60) and for 64 of 120 (minority partition) and 9 of 120 (zone partition) seeds on the larger side, at a median of 7–8 s after the cut (section 9).
+4. **On the two partitions, a monitor on one side of the cut raised nothing at any coverage.** When the monitor can read only the nodes on the seed's side, the zone partition and the minority partition gave 0% at every coverage, asking all nodes included (section 4): the nodes it can still read agree with each other. More coverage does not fix this. The partial join is different: its cut only separates the joiner from three nodes, and from the inside position it was still raised in 61% (k=2) to 100% (k=5, all nodes) of replays, and in 7% at k=1, which cannot be set. On the partition recordings the seed's own `cluster_state` turned to fail for every cut-off seed (60 of 60) and for 64 of 120 (minority partition) and 9 of 120 (zone partition) seeds on the larger side, at a median of 7–8 s after the cut (section 9).
 
 5. **Killed primary, paused node and flapping node were never raised.** 0 of 30 at every setting (section 1). The nodes' views disagreed only briefly (section 2): at most 2 one-second samples in a row for the killed primary and the paused node, with a median of 1, and a median of 3 for the flapping node, where one trial of 30 reached 5. An event at N = 2 needs a disagreement at two rounds 5 s apart. In none of the 90 trials did the views differ at two rounds in a row, for any seed node or round phase. At a 5 s node timeout the cluster agrees that the node failed in less time than the detector's round interval. A 15 s node timeout was not measured.
 
-6. **Coverage mattered in one scenario: the failure-flag dispute of the partial join.** In all 30 trials every node listed the joiner within 1.9–4.9 s, and then the three nodes cut off from it kept it flagged as failed while the other three did not, for the rest of the 150 s window (140–145 s), ending within 1 s of the heal. Raise rates (section 1): k=1 57% [54–60], k=2 79% [72–84], k=3 90% [83–96], zone 1 89% [82–96], and 100% [89–100] for k=4, k=5, zone 2 and all nodes. zone 1 and k=3 are a tie. k=4, k=5, zone 2 and all nodes are 10.6 points [4.4, 17.8] above zone 1 and 3.0–5.8 s sooner (section 12). Counting only membership after 90 s raised nothing (section 10), because membership was never in dispute for that long.
+6. **Coverage mattered in one scenario: the failure-flag dispute of the partial join.** In all 30 trials every node listed the joiner within 1.9–4.9 s, and then the three nodes cut off from it kept it flagged as failed while the other three did not, for the rest of the 150 s window (140–145 s), ending within 1 s of the heal. Raise rates (section 1): k=2 79% [72–84], k=3 90% [83–96], zone 1 89% [82–96], and 100% [89–100] for k=4, k=5, zone 2 and all nodes. k=1, which cannot be set, raised 57% [54–60]. zone 1 and k=3 are a tie. k=4, k=5, zone 2 and all nodes are 10.6 points [4.4, 17.8] above zone 1 and 3.0–5.8 s sooner (section 12). Counting only membership after 90 s raised nothing (section 10), because membership was never in dispute for that long.
 
-7. **k=1 follows the accused.** It asks no second node until the seed's own view flags someone, so it costs no extra read while idle and about one extra read per round during a fault (section 11). That is why it is 3.8–5.3 s later on the partitions and misses 43% of the partial-join replays, and why it raised only 7% of the partial-join replays from inside the cut (section 4).
+7. **k=1 cannot be set, and it follows the accused.** The product accepts `randomNodes` of 2 or more (`ANOMALY_TOPOLOGY_DIVERGENCE_RANDOM_NODES`) and the service raises a lower value to 2, so no user can run k=1. It is in the tables as the lower bound of coverage; the smallest sample that can be set is k=2. k=1 asks no second node until the seed's own view flags someone, so it costs no extra read while idle and about one extra read per round during a fault (section 11). That is why it is 3.8–5.3 s later on the partitions and misses 43% of the partial-join replays, and why it raised only 7% of the partial-join replays from inside the cut (section 4).
 
 8. **zone 2 is not full fan-out at 6 nodes.** 2 per zone gives primaries only when every zone has a primary. Here every zone has one, so on the idle recordings zone 2 compared 3 views per round when the seed was a primary and 4 when it was a replica, 3.5 on average, against 3 for zone 1 and 6 for all nodes (section 11). Asking all nodes is its own row: while idle it costs 5 extra reads and 3.7 KB per round, 60 extra reads a minute, against 2 extra reads and 1.5 KB for zone 1.
 
@@ -47,6 +47,7 @@ Where the numbers outside the tables come from: the raw one-second recordings, w
 ## How to read the tables
 
 - **k=1 … k=5**: the product setting `randomNodes` with zones hidden from the detector. It is the size of the sample including the seed node, so k=1 asks no extra node unless the seed itself accuses someone.
+- **k=1 cannot be set in the product.** `ANOMALY_TOPOLOGY_DIVERGENCE_RANDOM_NODES` accepts 2 or more and the service raises a lower value to 2. k=1 is in the tables as the lower bound of coverage, not as a setting to choose; k=2 is the smallest sample a user can set.
 - **zone 1, zone 2**: the product setting `nodesPerZone` with `randomNodes` 3 and zones known. **zone 1 with N = 3 is what ships today.**
 - **all**: every node is asked every round, up to the detector's limit of 12 observers per round. With 5 other nodes the limit is not reached.
 - **N**: rounds a disagreement must last before an event is raised (`minRounds`).
@@ -61,7 +62,7 @@ The monitor can reach every node. Killed primary and paused node are listed as f
 
 **N = 2**
 
-| scenario | k=1 | k=2 | k=3 | k=4 | k=5 | zone 1 | zone 2 | all |
+| scenario | k=1 (cannot be set) | k=2 | k=3 | k=4 | k=5 | zone 1 | zone 2 | all |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | flapping-node | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] |
 | killed-primary | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] |
@@ -72,7 +73,7 @@ The monitor can reach every node. Killed primary and paused node are listed as f
 
 **N = 3**
 
-| scenario | k=1 | k=2 | k=3 | k=4 | k=5 | zone 1 | zone 2 | all |
+| scenario | k=1 (cannot be set) | k=2 | k=3 | k=4 | k=5 | zone 1 | zone 2 | all |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | flapping-node | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] |
 | killed-primary | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] |
@@ -83,7 +84,7 @@ The monitor can reach every node. Killed primary and paused node are listed as f
 
 **N = 5**
 
-| scenario | k=1 | k=2 | k=3 | k=4 | k=5 | zone 1 | zone 2 | all |
+| scenario | k=1 (cannot be set) | k=2 | k=3 | k=4 | k=5 | zone 1 | zone 2 | all |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | flapping-node | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] |
 | killed-primary | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] |
@@ -116,7 +117,7 @@ Read straight from the recordings, without the detector. Inside the window of ea
 
 **N = 2**
 
-| scenario | k=1 | k=2 | k=3 | k=4 | k=5 | zone 1 | zone 2 | all |
+| scenario | k=1 (cannot be set) | k=2 | k=3 | k=4 | k=5 | zone 1 | zone 2 | all |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | flapping-node | never 30/30 | never 30/30 | never 30/30 | never 30/30 | never 30/30 | never 30/30 | never 30/30 | never 30/30 |
 | killed-primary | never 30/30 | never 30/30 | never 30/30 | never 30/30 | never 30/30 | never 30/30 | never 30/30 | never 30/30 |
@@ -127,7 +128,7 @@ Read straight from the recordings, without the detector. Inside the window of ea
 
 **N = 3**
 
-| scenario | k=1 | k=2 | k=3 | k=4 | k=5 | zone 1 | zone 2 | all |
+| scenario | k=1 (cannot be set) | k=2 | k=3 | k=4 | k=5 | zone 1 | zone 2 | all |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | flapping-node | never 30/30 | never 30/30 | never 30/30 | never 30/30 | never 30/30 | never 30/30 | never 30/30 | never 30/30 |
 | killed-primary | never 30/30 | never 30/30 | never 30/30 | never 30/30 | never 30/30 | never 30/30 | never 30/30 | never 30/30 |
@@ -138,7 +139,7 @@ Read straight from the recordings, without the detector. Inside the window of ea
 
 **N = 5**
 
-| scenario | k=1 | k=2 | k=3 | k=4 | k=5 | zone 1 | zone 2 | all |
+| scenario | k=1 (cannot be set) | k=2 | k=3 | k=4 | k=5 | zone 1 | zone 2 | all |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | flapping-node | never 30/30 | never 30/30 | never 30/30 | never 30/30 | never 30/30 | never 30/30 | never 30/30 | never 30/30 |
 | killed-primary | never 30/30 | never 30/30 | never 30/30 | never 30/30 | never 30/30 | never 30/30 | never 30/30 | never 30/30 |
@@ -153,7 +154,7 @@ Same recordings, but the monitor cannot read nodes that the seed node is cut off
 
 **N = 2**
 
-| scenario | k=1 | k=2 | k=3 | k=4 | k=5 | zone 1 | zone 2 | all |
+| scenario | k=1 (cannot be set) | k=2 | k=3 | k=4 | k=5 | zone 1 | zone 2 | all |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | flapping-node | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] |
 | minority-partition | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] |
@@ -162,7 +163,7 @@ Same recordings, but the monitor cannot read nodes that the seed node is cut off
 
 **N = 3**
 
-| scenario | k=1 | k=2 | k=3 | k=4 | k=5 | zone 1 | zone 2 | all |
+| scenario | k=1 (cannot be set) | k=2 | k=3 | k=4 | k=5 | zone 1 | zone 2 | all |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | flapping-node | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] |
 | minority-partition | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] |
@@ -171,7 +172,7 @@ Same recordings, but the monitor cannot read nodes that the seed node is cut off
 
 **N = 5**
 
-| scenario | k=1 | k=2 | k=3 | k=4 | k=5 | zone 1 | zone 2 | all |
+| scenario | k=1 (cannot be set) | k=2 | k=3 | k=4 | k=5 | zone 1 | zone 2 | all |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | flapping-node | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] |
 | minority-partition | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] | 0% [0–11] |
@@ -207,7 +208,7 @@ Any event raised between the start of the operation and the end of the recording
 
 **N = 2**
 
-| scenario | k=1 | k=2 | k=3 | k=4 | k=5 | zone 1 | zone 2 | all |
+| scenario | k=1 (cannot be set) | k=2 | k=3 | k=4 | k=5 | zone 1 | zone 2 | all |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | clean-join | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays |
 | idle | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays |
@@ -219,7 +220,7 @@ Any event raised between the start of the operation and the end of the recording
 
 **N = 3**
 
-| scenario | k=1 | k=2 | k=3 | k=4 | k=5 | zone 1 | zone 2 | all |
+| scenario | k=1 (cannot be set) | k=2 | k=3 | k=4 | k=5 | zone 1 | zone 2 | all |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | clean-join | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays |
 | idle | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays |
@@ -231,7 +232,7 @@ Any event raised between the start of the operation and the end of the recording
 
 **N = 5**
 
-| scenario | k=1 | k=2 | k=3 | k=4 | k=5 | zone 1 | zone 2 | all |
+| scenario | k=1 (cannot be set) | k=2 | k=3 | k=4 | k=5 | zone 1 | zone 2 | all |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | clean-join | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays |
 | idle | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays | 0/30 [0–11], 0% of replays |
@@ -288,25 +289,25 @@ N = 3. "Only after the window" counts replays whose first event came after the f
 
 ## 8. Faults: time from the heal until the events close
 
-zone 1. Replays that raised an event.
+zone 1. Replays that raised an event inside the fault window. The time runs from the heal to the moment the events raised in the window are closed, together with any event raised while one of them was still open, because the cluster can regroup a dispute into a new event while it heals. An event that replaced an earlier one with a higher severity counts as the same event. Events raised before the window, or after those events closed, are not counted. Replays whose events all closed before the heal are counted in their own column and are not in the times.
 
-| scenario | N | median | p90 | still open when the recording ended |
-| --- | --- | --- | --- | --- |
-| flapping-node | 2 | – | – | – |
-| flapping-node | 3 | – | – | – |
-| flapping-node | 5 | – | – | – |
-| minority-partition | 2 | 7.9 s | 8.9 s | 0% |
-| minority-partition | 3 | 13 s | 14 s | 0% |
-| minority-partition | 5 | 23 s | 24 s | 0% |
-| partial-join | 2 | 8.0 s | 8.9 s | 0% |
-| partial-join | 3 | 13 s | 14 s | 0% |
-| partial-join | 5 | 23 s | 24 s | 0% |
-| paused-node | 2 | – | – | – |
-| paused-node | 3 | – | – | – |
-| paused-node | 5 | – | – | – |
-| zone-partition | 2 | 7.9 s | 8.9 s | 0% |
-| zone-partition | 3 | 13 s | 14 s | 0% |
-| zone-partition | 5 | 23 s | 24 s | 0% |
+| scenario | N | median | p90 | closed before the heal | still open when the recording ended |
+| --- | --- | --- | --- | --- | --- |
+| flapping-node | 2 | – | – | – | – |
+| flapping-node | 3 | – | – | – | – |
+| flapping-node | 5 | – | – | – | – |
+| minority-partition | 2 | 7.9 s | 8.9 s | 0% | 0% |
+| minority-partition | 3 | 13 s | 14 s | 0% | 0% |
+| minority-partition | 5 | 23 s | 24 s | 0% | 0% |
+| partial-join | 2 | 8.0 s | 8.9 s | 0% | 0% |
+| partial-join | 3 | 13 s | 14 s | 0% | 0% |
+| partial-join | 5 | 23 s | 24 s | 0% | 0% |
+| paused-node | 2 | – | – | – | – |
+| paused-node | 3 | – | – | – | – |
+| paused-node | 5 | – | – | – | – |
+| zone-partition | 2 | 7.9 s | 8.9 s | 0% | 0% |
+| zone-partition | 3 | 13 s | 14 s | 0% | 0% |
+| zone-partition | 5 | 23 s | 24 s | 0% | 0% |
 
 ## 9. Seed only: what today's single-view signals see
 
@@ -353,7 +354,7 @@ N = 3. A round runs every 5 s. The seed node's own view is already read by the n
 
 | coverage | views compared per round (idle) | extra CLUSTER NODES reads per round (idle) | reply bytes per round (idle) | extra reads per minute (idle) | views per round (faults) | extra reads per round (faults) | migration checks per round (faults) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| k=1 | 1.00 | 0.00 | 0.0 KB | 0 | 1.94 | 0.97 | 0.019 |
+| k=1 (cannot be set) | 1.00 | 0.00 | 0.0 KB | 0 | 1.94 | 0.97 | 0.019 |
 | k=2 | 2.00 | 1.00 | 0.7 KB | 12 | 2.91 | 1.94 | 0.021 |
 | k=3 | 3.00 | 2.00 | 1.5 KB | 24 | 3.78 | 2.82 | 0.022 |
 | k=4 | 4.00 | 3.00 | 2.2 KB | 36 | 4.55 | 3.59 | 0.022 |
@@ -368,7 +369,7 @@ Each row compares one setting with zone 1, N = 3 on the same recordings. "tie" m
 
 | scenario | compared with zone 1, N=3 | raise rate difference | verdict | time to first event difference |
 | --- | --- | --- | --- | --- |
-| flapping-node | k=1, N=3 | 0 | same in every trial | – |
+| flapping-node | k=1 (cannot be set), N=3 | 0 | same in every trial | – |
 | flapping-node | k=2, N=3 | 0 | same in every trial | – |
 | flapping-node | k=3, N=3 | 0 | same in every trial | – |
 | flapping-node | k=4, N=3 | 0 | same in every trial | – |
@@ -377,7 +378,7 @@ Each row compares one setting with zone 1, N = 3 on the same recordings. "tie" m
 | flapping-node | all, N=3 | 0 | same in every trial | – |
 | flapping-node | zone 1, N=2 | 0 | same in every trial | – |
 | flapping-node | zone 1, N=5 | 0 | same in every trial | – |
-| killed-primary | k=1, N=3 | 0 | same in every trial | – |
+| killed-primary | k=1 (cannot be set), N=3 | 0 | same in every trial | – |
 | killed-primary | k=2, N=3 | 0 | same in every trial | – |
 | killed-primary | k=3, N=3 | 0 | same in every trial | – |
 | killed-primary | k=4, N=3 | 0 | same in every trial | – |
@@ -386,7 +387,7 @@ Each row compares one setting with zone 1, N = 3 on the same recordings. "tie" m
 | killed-primary | all, N=3 | 0 | same in every trial | – |
 | killed-primary | zone 1, N=2 | 0 | same in every trial | – |
 | killed-primary | zone 1, N=5 | 0 | same in every trial | – |
-| minority-partition | k=1, N=3 | 0 | same in every trial | +3.8 s [+3.1, +4.4] (30 trials) |
+| minority-partition | k=1 (cannot be set), N=3 | 0 | same in every trial | +3.8 s [+3.1, +4.4] (30 trials) |
 | minority-partition | k=2, N=3 | 0 | same in every trial | +0.9 s [+0.6, +1.1] (30 trials) |
 | minority-partition | k=3, N=3 | 0 | same in every trial | −0.1 s [−0.3, −0.0] (30 trials) |
 | minority-partition | k=4, N=3 | 0 | same in every trial | −1.1 s [−1.6, −0.7] (30 trials) |
@@ -395,7 +396,7 @@ Each row compares one setting with zone 1, N = 3 on the same recordings. "tie" m
 | minority-partition | all, N=3 | 0 | same in every trial | −1.5 s [−2.1, −0.9] (30 trials) |
 | minority-partition | zone 1, N=2 | 0 | same in every trial | −5.0 s [−5.0, −5.0] (30 trials) |
 | minority-partition | zone 1, N=5 | 0 | same in every trial | +10.0 s [+10.0, +10.0] (30 trials) |
-| partial-join | k=1, N=3 | −32.3 pp [−37.9, −26.1] | lower | +4.1 s [+3.5, +4.6] (30 trials) |
+| partial-join | k=1 (cannot be set), N=3 | −32.3 pp [−37.9, −26.1] | lower | +4.1 s [+3.5, +4.6] (30 trials) |
 | partial-join | k=2, N=3 | −10.8 pp [−14.4, −7.3] | lower | +0.8 s [+0.5, +1.1] (30 trials) |
 | partial-join | k=3, N=3 | +0.4 pp [−1.2, +2.3] | tie | −0.1 s [−0.2, 0.0] tie (30 trials) |
 | partial-join | k=4, N=3 | +10.6 pp [+4.4, +17.8] | higher | −3.0 s [−3.5, −2.5] (30 trials) |
@@ -404,7 +405,7 @@ Each row compares one setting with zone 1, N = 3 on the same recordings. "tie" m
 | partial-join | all, N=3 | +10.6 pp [+4.4, +17.8] | higher | −5.8 s [−6.3, −5.3] (30 trials) |
 | partial-join | zone 1, N=2 | 0 | same in every trial | −5.0 s [−5.0, −5.0] (30 trials) |
 | partial-join | zone 1, N=5 | 0 | same in every trial | +10.0 s [+10.0, +10.0] (30 trials) |
-| paused-node | k=1, N=3 | 0 | same in every trial | – |
+| paused-node | k=1 (cannot be set), N=3 | 0 | same in every trial | – |
 | paused-node | k=2, N=3 | 0 | same in every trial | – |
 | paused-node | k=3, N=3 | 0 | same in every trial | – |
 | paused-node | k=4, N=3 | 0 | same in every trial | – |
@@ -413,7 +414,7 @@ Each row compares one setting with zone 1, N = 3 on the same recordings. "tie" m
 | paused-node | all, N=3 | 0 | same in every trial | – |
 | paused-node | zone 1, N=2 | 0 | same in every trial | – |
 | paused-node | zone 1, N=5 | 0 | same in every trial | – |
-| zone-partition | k=1, N=3 | 0 | same in every trial | +5.3 s [+5.1, +5.4] (30 trials) |
+| zone-partition | k=1 (cannot be set), N=3 | 0 | same in every trial | +5.3 s [+5.1, +5.4] (30 trials) |
 | zone-partition | k=2, N=3 | 0 | same in every trial | +1.6 s [+1.4, +1.8] (30 trials) |
 | zone-partition | k=3, N=3 | 0 | same in every trial | same (30 trials) |
 | zone-partition | k=4, N=3 | 0 | same in every trial | −0.0 s [−0.1, 0.0] tie (30 trials) |
@@ -422,7 +423,7 @@ Each row compares one setting with zone 1, N = 3 on the same recordings. "tie" m
 | zone-partition | all, N=3 | 0 | same in every trial | −0.1 s [−0.2, 0.0] tie (30 trials) |
 | zone-partition | zone 1, N=2 | 0 | same in every trial | −5.0 s [−5.0, −5.0] (30 trials) |
 | zone-partition | zone 1, N=5 | 0 | same in every trial | +10.0 s [+10.0, +10.0] (30 trials) |
-| clean-join | k=1, N=3 | 0 | same in every trial | – |
+| clean-join | k=1 (cannot be set), N=3 | 0 | same in every trial | – |
 | clean-join | k=2, N=3 | 0 | same in every trial | – |
 | clean-join | k=3, N=3 | 0 | same in every trial | – |
 | clean-join | k=4, N=3 | 0 | same in every trial | – |
@@ -431,7 +432,7 @@ Each row compares one setting with zone 1, N = 3 on the same recordings. "tie" m
 | clean-join | all, N=3 | 0 | same in every trial | – |
 | clean-join | zone 1, N=2 | 0 | same in every trial | – |
 | clean-join | zone 1, N=5 | 0 | same in every trial | – |
-| idle | k=1, N=3 | 0 | same in every trial | – |
+| idle | k=1 (cannot be set), N=3 | 0 | same in every trial | – |
 | idle | k=2, N=3 | 0 | same in every trial | – |
 | idle | k=3, N=3 | 0 | same in every trial | – |
 | idle | k=4, N=3 | 0 | same in every trial | – |
@@ -440,7 +441,7 @@ Each row compares one setting with zone 1, N = 3 on the same recordings. "tie" m
 | idle | all, N=3 | 0 | same in every trial | – |
 | idle | zone 1, N=2 | 0 | same in every trial | – |
 | idle | zone 1, N=5 | 0 | same in every trial | – |
-| manual-failover | k=1, N=3 | 0 | same in every trial | – |
+| manual-failover | k=1 (cannot be set), N=3 | 0 | same in every trial | – |
 | manual-failover | k=2, N=3 | 0 | same in every trial | – |
 | manual-failover | k=3, N=3 | 0 | same in every trial | – |
 | manual-failover | k=4, N=3 | 0 | same in every trial | – |
@@ -449,7 +450,7 @@ Each row compares one setting with zone 1, N = 3 on the same recordings. "tie" m
 | manual-failover | all, N=3 | 0 | same in every trial | – |
 | manual-failover | zone 1, N=2 | 0 | same in every trial | – |
 | manual-failover | zone 1, N=5 | 0 | same in every trial | – |
-| rolling-restart | k=1, N=3 | 0 | same in every trial | – |
+| rolling-restart | k=1 (cannot be set), N=3 | 0 | same in every trial | – |
 | rolling-restart | k=2, N=3 | 0 | same in every trial | – |
 | rolling-restart | k=3, N=3 | 0 | same in every trial | – |
 | rolling-restart | k=4, N=3 | 0 | same in every trial | – |
@@ -458,7 +459,7 @@ Each row compares one setting with zone 1, N = 3 on the same recordings. "tie" m
 | rolling-restart | all, N=3 | 0 | same in every trial | – |
 | rolling-restart | zone 1, N=2 | 0 | same in every trial | – |
 | rolling-restart | zone 1, N=5 | 0 | same in every trial | – |
-| slot-migration-atomic | k=1, N=3 | 0 | same in every trial | – |
+| slot-migration-atomic | k=1 (cannot be set), N=3 | 0 | same in every trial | – |
 | slot-migration-atomic | k=2, N=3 | 0 | same in every trial | – |
 | slot-migration-atomic | k=3, N=3 | 0 | same in every trial | – |
 | slot-migration-atomic | k=4, N=3 | 0 | same in every trial | – |
@@ -467,7 +468,7 @@ Each row compares one setting with zone 1, N = 3 on the same recordings. "tie" m
 | slot-migration-atomic | all, N=3 | 0 | same in every trial | – |
 | slot-migration-atomic | zone 1, N=2 | 0 | same in every trial | – |
 | slot-migration-atomic | zone 1, N=5 | 0 | same in every trial | – |
-| slot-migration-legacy | k=1, N=3 | 0 | same in every trial | – |
+| slot-migration-legacy | k=1 (cannot be set), N=3 | 0 | same in every trial | – |
 | slot-migration-legacy | k=2, N=3 | 0 | same in every trial | – |
 | slot-migration-legacy | k=3, N=3 | 0 | same in every trial | – |
 | slot-migration-legacy | k=4, N=3 | 0 | same in every trial | – |
@@ -476,7 +477,7 @@ Each row compares one setting with zone 1, N = 3 on the same recordings. "tie" m
 | slot-migration-legacy | all, N=3 | 0 | same in every trial | – |
 | slot-migration-legacy | zone 1, N=2 | 0 | same in every trial | – |
 | slot-migration-legacy | zone 1, N=5 | 0 | same in every trial | – |
-| slow-node | k=1, N=3 | 0 | same in every trial | – |
+| slow-node | k=1 (cannot be set), N=3 | 0 | same in every trial | – |
 | slow-node | k=2, N=3 | 0 | same in every trial | – |
 | slow-node | k=3, N=3 | 0 | same in every trial | – |
 | slow-node | k=4, N=3 | 0 | same in every trial | – |
