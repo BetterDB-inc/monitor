@@ -152,6 +152,7 @@ Apart from `ACL LOG RESET` (see above) and `SENTINEL CONFIG SET` (see [Sentinel]
 | `CLIENT KILL` | The `DELETE /metrics/clients` API endpoint |
 | `SENTINEL CONFIG SET` | Nothing in BetterDB, but `+sentinel\|config` allows it (see [Sentinel](#sentinel)) |
 | `UNLINK` | Bulk delete **Execute** |
+| `CLUSTER MIGRATESLOTS`, `CLUSTER CANCELSLOTMIGRATIONS` | **Run this plan** and **Cancel** on a suggested slot rebalance, only with `BETTERDB_SLOT_MIGRATION=true` (see [Running a plan](anomaly-detection.md#running-a-plan)) |
 | `HSET`, `LPUSH`, `LTRIM`, `DEL` on cache keys | Approving a semantic-cache or agent-cache proposal. `LTRIM` caps the tuning history; without it the history list keeps growing. |
 | `DEL` on memory keys | Approving an agent memory forget proposal |
 | Anything you type | The CLI terminal. Safe mode blocks dangerous commands unless `BETTERDB_UNSAFE_CLI=true`. |
