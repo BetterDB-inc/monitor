@@ -587,10 +587,14 @@ describe('partiallyKnownNodes', () => {
     const alone = seenBy('zzz', [primary('zzz', 9, [], 0)]);
     const views = [...established.map((node) => seenBy(node.id, established)), alone];
 
-    it('names the one fewer peers know, not the smaller id', () => {
-      const { found } = judge(every(views, 0, LONG_ENOUGH));
+    it('names the one more peers lack, not the smaller id, in each of 30 rounds', () => {
+      const rounds = every(views, 0, 29 * ROUND_MS);
+      for (let n = 1; n <= rounds.length; n += 1) {
+        const { found } = judge(rounds.slice(0, n));
+        expect(found.map((finding) => finding.nodeId)).toEqual(['zzz']);
+      }
+      const { found } = judge(rounds);
 
-      expect(found.map((finding) => finding.nodeId)).toEqual(['zzz']);
       expect(found[0]).toMatchObject({ confirmed: true, address: '10.0.0.9:6379' });
       expect(found[0].knownBy).toEqual([]);
       expect(ids(found[0].notKnownBy)).toEqual(['aaa', 'bbb', 'ccc']);
@@ -598,13 +602,71 @@ describe('partiallyKnownNodes', () => {
       expect(found[0].meet?.command).toBe('CLUSTER MEET 10.0.0.9 6379');
     });
 
-    it('names the same one in a round the slot owners give no view', () => {
-      const at = LONG_ENOUGH + ROUND_MS;
-      const silent = { at, views: [seenBy('aaa', established), alone], unanswered: ['bbb', 'ccc'] };
-      const { found } = judge([...every(views, 0, LONG_ENOUGH), silent]);
+    it.each([1, 2, 3])('names the same one in round %i the slot owners give no view', (silentRounds) => {
+      const from = LONG_ENOUGH + ROUND_MS;
+      const until = LONG_ENOUGH + silentRounds * ROUND_MS;
+      const silent = every([seenBy('aaa', established), alone], from, until, ['bbb', 'ccc']);
+      const { found } = judge([...every(views, 0, LONG_ENOUGH), ...silent]);
 
       expect(found.map((finding) => finding.nodeId)).toEqual(['zzz']);
       expect(ids(found[0].notKnownBy)).toEqual(['aaa']);
+    });
+
+    describe('and as many peers lack one as the other', () => {
+      const lone = primary('zzz', 9, [], 0);
+      const everyone = [...established, lone];
+      const fromOwners = [seenBy('bbb', everyone), seenBy('ccc', everyone)];
+      const fromNew = [seenBy('aaa', established), seenBy('zzz', [...owners, lone])];
+      const apart = [...fromOwners, ...fromNew];
+      const named = (rounds: Round[], open: string[] = []) =>
+        judge(rounds, open).found.map((finding) => finding.nodeId);
+
+      it('names the smaller id, in each of 30 rounds', () => {
+        const rounds = every(apart, 0, 29 * ROUND_MS);
+        for (let n = 1; n <= rounds.length; n += 1) expect(named(rounds.slice(0, n))).toEqual(['aaa']);
+
+        expect(ids(judge(rounds).found[0].ownViewMissing)).toEqual(['zzz']);
+      });
+
+      it.each([
+        ['the slot owners', fromNew, ['bbb', 'ccc']],
+        ['the smaller id', [...fromOwners, fromNew[1]], ['aaa']],
+        ['the larger id', [...fromOwners, fromNew[0]], ['zzz']],
+      ])('names the same one in rounds %s give no view', (_who, answered, unanswered) => {
+        const before = every(apart, 0, LONG_ENOUGH);
+        for (let n = 1; n <= 3; n += 1) {
+          const silent = every(answered, LONG_ENOUGH + ROUND_MS, LONG_ENOUGH + n * ROUND_MS, unanswered);
+          expect(named([...before, ...silent])).toEqual(['aaa']);
+        }
+      });
+
+      describe('and one more peer lacks the larger id for a round', () => {
+        const before = every(apart, 0, LONG_ENOUGH);
+        const crossed = {
+          at: LONG_ENOUGH + ROUND_MS,
+          views: [seenBy('bbb', established), fromOwners[1], ...fromNew],
+        };
+        const back = { at: LONG_ENOUGH + 2 * ROUND_MS, views: apart };
+
+        it('keeps the pair under the smaller id while that one has an open event', () => {
+          const { found } = judge([...before, crossed], ['aaa']);
+
+          expect(found.map((finding) => finding.nodeId)).toEqual(['aaa', 'zzz']);
+          expect(ids(found[0].ownViewMissing)).toEqual(['zzz']);
+          expect(ids(found[1].notKnownBy)).toEqual(['bbb']);
+          expect(named([...before, crossed, back], ['aaa'])).toEqual(['aaa']);
+        });
+
+        it('names the larger id for that round while neither has an open event, and keeps the age', () => {
+          const { found } = judge([...before, crossed]);
+
+          expect(found.map((finding) => finding.nodeId)).toEqual(['zzz']);
+          expect(found[0]).toMatchObject({ firstSeenAt: 0 });
+          const after = judge([...before, crossed, back]).found;
+          expect(after.map((finding) => finding.nodeId)).toEqual(['aaa']);
+          expect(after[0]).toMatchObject({ confirmed: true, firstSeenAt: 0 });
+        });
+      });
     });
   });
 
