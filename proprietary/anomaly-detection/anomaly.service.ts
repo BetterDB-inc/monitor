@@ -860,18 +860,19 @@ export class AnomalyService
   private activePartialMemberships = new Map<string, Set<string>>();
   private partialMembershipEventIds = new Map<string, Map<string, string>>();
   private partialMembershipRounds = new Map<string, PartialMembershipRound>();
-  private readonly topologyEventStores: TopologyEventStore[] = [
-    {
+  private readonly topologyEventStores: Record<'divergence' | 'partial', TopologyEventStore> = {
+    divergence: {
       firstSeen: this.topologyDivergenceFirstSeen,
       active: this.activeTopologyDivergences,
       eventIds: this.topologyDivergenceEventIds,
     },
-    {
+    partial: {
       firstSeen: this.partialMembershipFirstSeen,
       active: this.activePartialMemberships,
       eventIds: this.partialMembershipEventIds,
     },
-  ];
+  };
+  private readonly allTopologyEventStores = Object.values(this.topologyEventStores);
   private topologyDivergenceAnchors = new Map<string, string>();
   private topologyDivergenceNodeTimeouts = new Map<string, { ms: number; readAt: number }>();
   private topologyDivergenceSettledSlots = new Map<string, Set<string>>();
@@ -7442,7 +7443,7 @@ export class AnomalyService
         membership: TOPOLOGY_DIVERGENCE_MEMBERSHIP_MIN_AGE_MS,
       },
     };
-    const [divergenceStore, partialStore] = this.topologyEventStores;
+    const { divergence: divergenceStore, partial: partialStore } = this.topologyEventStores;
     const eventIds = this.connectionClaims(divergenceStore.eventIds, ctx.connectionId, () => new Map<string, string>());
     const partialEventIds = this.connectionClaims(
       partialStore.eventIds,
@@ -7557,7 +7558,7 @@ export class AnomalyService
 
   private trackedTopologyEventIds(): Set<string> {
     return new Set(
-      this.topologyEventStores.flatMap((store) => [...store.eventIds.values()].flatMap((ids) => [...ids.values()])),
+      this.allTopologyEventStores.flatMap((store) => [...store.eventIds.values()].flatMap((ids) => [...ids.values()])),
     );
   }
 
@@ -7577,13 +7578,10 @@ export class AnomalyService
     const found = this.partiallyKnownNodesOf(round, eventIds);
     const sides = membershipSides(round.disagreements, found, round.at, previous?.sides);
     const switched = [...sides].filter(([key, side]) => (previous?.sides.get(key) ?? side) !== side);
-    const recounted = new Map(
-      switched.flatMap(([key]) => {
-        const entry = this.topologyDivergence.recount(clusterKey, key, round.at);
-        return entry ? [[key, entry] as const] : [];
-      }),
+    this.topologyDivergence.recount(
+      round,
+      switched.map(([key]) => key),
     );
-    round.disagreements = round.disagreements.map((entry) => recounted.get(entry.key) ?? entry);
     const counted = switched.length > 0 ? this.partiallyKnownNodesOf(round, eventIds) : found;
     this.partialMembershipRounds.set(clusterKey, { found: counted, sides });
     return counted;
@@ -7642,12 +7640,12 @@ export class AnomalyService
     const holders = new Set<string>(previous ? [previous] : []);
     for (const [peer, peerKey] of this.connectionClusterKeys) {
       if (peerKey !== clusterKey) continue;
-      if (this.topologyEventStores.some((store) => store.eventIds.has(peer))) holders.add(peer);
+      if (this.allTopologyEventStores.some((store) => store.eventIds.has(peer))) holders.add(peer);
     }
     holders.delete(connectionId);
 
     for (const holder of holders) {
-      for (const store of this.topologyEventStores) this.moveTopologyEvents(store, holder, connectionId);
+      for (const store of this.allTopologyEventStores) this.moveTopologyEvents(store, holder, connectionId);
     }
   }
 
@@ -7868,7 +7866,7 @@ export class AnomalyService
 
   private forgetTopologyDivergence(connectionId: string): void {
     this.topologyDivergence.forgetConnection(connectionId);
-    for (const store of this.topologyEventStores) {
+    for (const store of this.allTopologyEventStores) {
       store.firstSeen.delete(connectionId);
       store.active.delete(connectionId);
       store.eventIds.delete(connectionId);
@@ -10774,19 +10772,22 @@ export class AnomalyService
     const shown = <G>(
       open: Map<string, OpenDivergence<G>> | undefined,
       eventIds: Map<string, string> | undefined,
-      current?: ReadonlyMap<string, G>,
+      groupOf: (signature: string, entry: OpenDivergence<G>) => G | undefined,
     ) =>
       [...(open ?? [])].flatMap(([signature, entry]) => {
         const eventId = eventIds?.get(signature);
-        const group = current?.get(signature) ?? entry.group;
+        const group = groupOf(signature, entry);
         if (!group || eventId === undefined) return [];
         if (this.eventInMemory(eventId)?.resolved === true) return [];
         return [{ signature, eventId, group }];
       });
 
+    const tracked = groupDivergences(unclaimedByPartialMembership(round.disagreements, found));
+    const trackedBySignature = new Map(tracked.map((group) => [group.signature, group]));
     const raisedGroups = shown(
       this.topologyDivergenceOpen.get(clusterKey),
       this.topologyDivergenceEventIds.get(round.anchorConnectionId),
+      (signature, entry) => entry.group ?? trackedBySignature.get(signature),
     )
       .map((entry) => ({
         ...entry,
@@ -10797,7 +10798,7 @@ export class AnomalyService
       buildDivergenceDetail(group, round.nodes, { eventId, confirmed: true }),
     );
     const raisedSignatures = new Set(raisedGroups.map(({ signature }) => signature));
-    const counting = groupDivergences(unclaimedByPartialMembership(round.disagreements, found))
+    const counting = tracked
       .filter((group) => !raisedSignatures.has(group.signature))
       .map((group) => buildDivergenceDetail(group, round.nodes, { eventId: null, confirmed: false }));
 
@@ -10805,7 +10806,7 @@ export class AnomalyService
     const raisedFindings = shown(
       this.partialMembershipOpen.get(clusterKey),
       this.partialMembershipEventIds.get(round.anchorConnectionId),
-      seen,
+      (signature, entry) => seen.get(signature) ?? entry.group,
     );
     const raisedPartial = raisedFindings.map(({ signature, eventId, group }) =>
       seen.has(signature)

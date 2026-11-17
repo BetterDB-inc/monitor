@@ -26153,6 +26153,28 @@ describe('AnomalyService', () => {
         ]);
       });
 
+      it('lists the disagreement under its adopted event in the first round, before it is confirmed anew', async () => {
+        views.b = { a: { epoch: 9 } };
+
+        await rounds(1);
+
+        expect(divergenceEvents()).toEqual([]);
+        expect(service.getTopologyDivergence('conn-1').divergences).toMatchObject([
+          {
+            eventId: 'stored-1',
+            confirmed: true,
+            sides: [{ nodes: [{ nodeId: 'b' }] }, {}],
+            disagreements: [{ kind: 'config_epoch', rounds: 1, eventId: 'stored-1', eventType: 'topology_divergence' }],
+          },
+        ]);
+      });
+
+      it('leaves an adopted event out of the report while no view disagrees', async () => {
+        await rounds(1);
+
+        expect(service.getTopologyDivergence('conn-1').divergences).toEqual([]);
+      });
+
       it('closes an adopted event once the views have agreed for the configured rounds', async () => {
         await rounds(2);
         expect(storage.resolveAnomaly).not.toHaveBeenCalledWith('stored-1', expect.anything());
@@ -26576,6 +26598,39 @@ describe('AnomalyService', () => {
           await rounds(1);
           expect(openPartialEvents()).toHaveLength(2);
           expect(partialEvents()).toHaveLength(2);
+        } finally {
+          delete MEMBERS.m;
+        }
+      });
+
+      it('keeps the event of a node that gives no view for 3 rounds while another lacks the same peer', async () => {
+        (service as any).topologyDivergenceSettings.randomNodes = 5;
+        MEMBERS.m = { host: '10.0.0.8', epoch: 0, slots: '' };
+        const everyone = [...EVERYONE, 'm'];
+        const withoutB = everyone.filter((id) => id !== 'b');
+        knows = { a: everyone, b: everyone, c: everyone, n: withoutB, m: withoutB };
+        try {
+          await rounds(19);
+          expect(openPartialEvents()).toHaveLength(2);
+
+          silent.add('n');
+          for (let round = 0; round < 3; round++) {
+            await rounds(1);
+            expect(openPartialEvents()).toHaveLength(2);
+            expect(report().partialMembership).toMatchObject([
+              { node: { nodeId: 'm' }, confirmed: true, seen: true },
+              { node: { nodeId: 'n' }, confirmed: true, seen: true, command: null },
+            ]);
+          }
+
+          silent.delete('n');
+          await rounds(3);
+          expect(openPartialEvents()).toHaveLength(2);
+          expect(partialEvents()).toHaveLength(2);
+          expect(report().partialMembership[1]).toMatchObject({
+            node: { nodeId: 'n' },
+            command: 'CLUSTER MEET 10.0.0.7 6379',
+          });
         } finally {
           delete MEMBERS.m;
         }
