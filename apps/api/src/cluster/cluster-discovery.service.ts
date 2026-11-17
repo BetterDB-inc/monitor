@@ -1,5 +1,5 @@
 import { Injectable, Logger, NotFoundException, OnModuleDestroy } from '@nestjs/common';
-import Valkey from 'iovalkey';
+import Valkey, { type RedisOptions as ValkeyOptions } from 'iovalkey';
 import { clusterNodeState, type ClusterNodeState } from '@betterdb/shared';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { dialsDataNodes } from '../connections/data-node-reach';
@@ -22,6 +22,8 @@ export interface DiscoveredNode {
   availabilityZone?: string;
   shardId?: string;
 }
+
+type NodeToDial = Pick<DiscoveredNode, 'id' | 'address' | 'hostname'>;
 
 export interface NodeConnection {
   node: DiscoveredNode;
@@ -139,70 +141,55 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     timeoutMs: number,
     run: (client: Valkey) => Promise<T>,
   ): Promise<T> {
-    const { host, port, username, password, tls } = this.connectionRegistry
-      .get(connectionId)
-      .getClient().options;
-    return this.onShortLivedClient(
-      { host, port, username, password, tls, connectionName: 'BetterDB-Monitor-Discovery' },
-      timeoutMs,
-      run,
-    );
+    const shared = this.connectionRegistry.get(connectionId).getClient();
+    const client = new Valkey({
+      ...this.seedClientOptions(shared, 'BetterDB-Monitor-Discovery'),
+      ...this.oneShotOptions(timeoutMs),
+    });
+    client.on('error', () => undefined);
+    try {
+      await client.connect();
+      return await run(client);
+    } finally {
+      client.disconnect();
+    }
   }
 
   async onNodeClientOnce<T>(
-    connectionId: string,
-    node: Pick<ClusterNode, 'id' | 'address' | 'hostname'>,
+    node: NodeToDial,
+    connectionId: string | undefined,
     timeoutMs: number,
     run: (client: Valkey) => Promise<T>,
     signal?: AbortSignal,
   ): Promise<T> {
-    this.assertDialsDataNodes(connectionId, node.id);
+    const ownerId = connectionId || this.connectionRegistry.getDefaultId() || undefined;
+    this.assertDialsDataNodes(ownerId, node.id);
     const parsed = parseNodeAddress(node.address);
     if (!parsed) throw new Error(`Invalid node address: ${node.address}`);
-    const { username, password } = this.connectionRegistry.get(connectionId).getClient().options;
-    return this.onShortLivedClient(
-      {
-        host: parsed.host,
-        port: parsed.port,
-        username,
-        password,
-        tls: this.nodeTlsOptions(connectionId, parsed.host, node.hostname),
-        connectionName: `BetterDB-Monitor-Once-${node.id.substring(0, 8)}`,
-      },
-      timeoutMs,
-      run,
-      signal,
-    );
-  }
-
-  private async onShortLivedClient<T>(
-    target: Pick<Valkey['options'], 'host' | 'port' | 'username' | 'password' | 'tls' | 'connectionName'>,
-    timeoutMs: number,
-    run: (client: Valkey) => Promise<T>,
-    signal?: AbortSignal,
-  ): Promise<T> {
     const givenUp = () => new Error('The read was given up before the node answered');
     if (signal?.aborted) throw givenUp();
     const client = new Valkey({
-      ...target,
-      lazyConnect: true,
-      enableOfflineQueue: false,
-      maxRetriesPerRequest: 0,
-      retryStrategy: () => null,
-      enableReadyCheck: false,
-      connectTimeout: timeoutMs,
-      commandTimeout: timeoutMs,
+      ...this.nodeClientOptions(ownerId, node, parsed.host, parsed.port),
+      ...this.oneShotOptions(timeoutMs),
     });
-    client.on('error', () => undefined);
+    let refused: Error | undefined;
+    client.on('error', (err: Error) => {
+      refused ??= err;
+    });
     let onAbort: () => void = () => undefined;
     const aborted = new Promise<never>((_, reject) => {
       onAbort = () => reject(givenUp());
       signal?.addEventListener('abort', onAbort, { once: true });
     });
-    const work = client.connect().then(() => {
-      if (signal?.aborted) throw givenUp();
-      return run(client);
-    });
+    const work = client
+      .connect()
+      .catch((err: unknown) => {
+        throw refused ?? err;
+      })
+      .then(() => {
+        if (signal?.aborted) throw givenUp();
+        return run(client);
+      });
     work.catch(() => undefined);
     try {
       return await Promise.race([work, aborted]);
@@ -210,6 +197,42 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       signal?.removeEventListener('abort', onAbort);
       client.disconnect();
     }
+  }
+
+  private seedClientOptions(shared: Valkey, connectionName: string): ValkeyOptions {
+    const { host, port, username, password, tls } = shared.options;
+    return { host, port, username, password, tls, lazyConnect: true, enableOfflineQueue: false, connectionName };
+  }
+
+  private nodeClientOptions(
+    ownerId: string | undefined,
+    node: NodeToDial,
+    host: string,
+    port: number,
+    credentials?: { username: string; password: string },
+  ): ValkeyOptions {
+    const { username, password } =
+      credentials ?? this.connectionRegistry.get(ownerId).getClient().options;
+    return {
+      host,
+      port,
+      username: username || '',
+      password: password || '',
+      tls: this.nodeTlsOptions(ownerId, host, node.hostname),
+      lazyConnect: true,
+      enableOfflineQueue: false,
+      connectionName: `BetterDB-Monitor-Node-${node.id.substring(0, 8)}`,
+    };
+  }
+
+  private oneShotOptions(timeoutMs: number): ValkeyOptions {
+    return {
+      maxRetriesPerRequest: 0,
+      retryStrategy: () => null,
+      enableReadyCheck: false,
+      connectTimeout: timeoutMs,
+      commandTimeout: timeoutMs,
+    };
   }
 
   async onOwnNodeClient<T>(
@@ -266,19 +289,8 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   private openOwnNodeClient(key: string, shared: Valkey, timeoutMs: number): OwnNodeClient {
     const { host, port, username, password, tls } = shared.options;
     const client = new Valkey({
-      host,
-      port,
-      username,
-      password,
-      tls,
-      lazyConnect: true,
-      enableOfflineQueue: false,
-      maxRetriesPerRequest: 0,
-      retryStrategy: () => null,
-      enableReadyCheck: false,
-      connectTimeout: timeoutMs,
-      commandTimeout: timeoutMs,
-      connectionName: 'BetterDB-Monitor-Own-Node',
+      ...this.seedClientOptions(shared, 'BetterDB-Monitor-Own-Node'),
+      ...this.oneShotOptions(timeoutMs),
     });
     client.on('error', () => undefined);
     const own: OwnNodeClient = {
@@ -530,18 +542,9 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     ownerId: string | undefined,
     { username, password }: { username: string; password: string },
   ): Promise<Valkey> {
-    const tls = this.nodeTlsOptions(ownerId, host, node.hostname);
-
     const client = new Valkey({
-      host,
-      port,
-      username,
-      password,
-      tls,
-      lazyConnect: true,
+      ...this.nodeClientOptions(ownerId, node, host, port, { username, password }),
       connectTimeout: this.CONNECTION_TIMEOUT,
-      enableOfflineQueue: false,
-      connectionName: `BetterDB-Monitor-Node-${node.id.substring(0, 8)}`,
     });
 
     // Node clients are long-lived, so pick up rotated client cert/key material

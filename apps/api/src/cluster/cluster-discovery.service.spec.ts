@@ -1098,57 +1098,86 @@ describe('ClusterDiscoveryService', () => {
   });
 
   describe('onNodeClientOnce', () => {
-    const node = { id: 'node2-id-def456', address: '192.168.1.11:6379@16379', hostname: 'node-2.example' };
-
-    function dedicatedClient() {
+    function onceClient() {
+      const handlers: Record<string, (err: Error) => void> = {};
       const client = {
         connect: jest.fn().mockResolvedValue(undefined),
         call: jest.fn().mockResolvedValue('OK'),
         disconnect: jest.fn(),
-        on: jest.fn(),
+        on: jest.fn((event: string, handler: (err: Error) => void) => {
+          handlers[event] = handler;
+        }),
+        handlers,
       };
       jest.mocked(Valkey).mockImplementationOnce(() => client as never);
       return client;
     }
 
-    beforeEach(() => {
-      mockDbClient.getClient.mockReturnValue({
-        options: { host: 'seed.example', port: 7001, username: 'u', password: 'p' },
-        call: jest.fn(),
-      });
+    const node = (address = '10.0.0.9:7000') => ({
+      id: 'node1-id-abc123',
+      address,
+      role: 'master' as const,
+      slots: [],
+      configEpoch: 0,
+      state: 'healthy' as const,
+      flags: ['master'],
     });
+    const viewed = { id: 'node2-id-def456', address: '192.168.1.11:6379@16379', hostname: 'node-2.example' };
 
-    it('runs the work on a socket to that node, with bounded dial and commands, and closes it', async () => {
-      const client = dedicatedClient();
+    it('sends the work to the node on a socket of its own that never resends, and closes it', async () => {
+      const client = onceClient();
 
-      const reply = await service.onNodeClientOnce('test-connection', node, 2_000, (own) =>
-        own.call('CLUSTER', 'NODES'),
+      const reply = await service.onNodeClientOnce(node(), 'test-connection', 2_000, (own) =>
+        own.call('CLUSTER', 'CANCELSLOTMIGRATIONS'),
       );
 
       expect(reply).toBe('OK');
       expect(jest.mocked(Valkey)).toHaveBeenLastCalledWith(
         expect.objectContaining({
-          host: '192.168.1.11',
-          port: 6379,
-          username: 'u',
-          password: 'p',
+          host: '10.0.0.9',
+          port: 7000,
+          username: 'testuser',
+          password: 'testpass',
           connectTimeout: 2_000,
           commandTimeout: 2_000,
           enableOfflineQueue: false,
           maxRetriesPerRequest: 0,
-          retryStrategy: expect.any(Function),
         }),
       );
-      expect(client.call).toHaveBeenCalledWith('CLUSTER', 'NODES');
+      const calls = jest.mocked(Valkey).mock.calls as unknown as Array<[{ retryStrategy: () => unknown }]>;
+      const options = calls[calls.length - 1][0];
+      expect(options.retryStrategy()).toBeNull();
+      expect(client.call).toHaveBeenCalledWith('CLUSTER', 'CANCELSLOTMIGRATIONS');
       expect(client.disconnect).toHaveBeenCalledTimes(1);
     });
 
+    it('names why the node refused the connection, without running the work', async () => {
+      const client = onceClient();
+      client.connect.mockImplementation(async () => {
+        client.handlers.error(new Error('WRONGPASS invalid username-password pair'));
+        throw new Error('Connection is closed.');
+      });
+      const work = jest.fn();
+
+      await expect(
+        service.onNodeClientOnce(node(), 'test-connection', 2_000, work),
+      ).rejects.toThrow('WRONGPASS invalid username-password pair');
+      expect(work).not.toHaveBeenCalled();
+      expect(client.disconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses an address it cannot read', async () => {
+      await expect(
+        service.onNodeClientOnce(node('nope'), 'test-connection', 2_000, jest.fn()),
+      ).rejects.toThrow('Invalid node address: nope');
+    });
+
     it('closes the socket when the caller gives up while the node does not answer', async () => {
-      const client = dedicatedClient();
+      const client = onceClient();
       client.call.mockReturnValue(new Promise(() => undefined));
       const gaveUp = new AbortController();
 
-      const read = service.onNodeClientOnce('test-connection', node, 2_000, (own) => own.call('CLUSTER', 'NODES'), gaveUp.signal);
+      const read = service.onNodeClientOnce(viewed, 'test-connection', 2_000, (own) => own.call('CLUSTER', 'NODES'), gaveUp.signal);
       await new Promise((resolve) => setImmediate(resolve));
       expect(client.disconnect).not.toHaveBeenCalled();
       gaveUp.abort();
@@ -1158,11 +1187,11 @@ describe('ClusterDiscoveryService', () => {
     });
 
     it('closes the socket when the caller gives up while it is still dialling', async () => {
-      const client = dedicatedClient();
+      const client = onceClient();
       client.connect.mockReturnValue(new Promise(() => undefined));
       const gaveUp = new AbortController();
 
-      const read = service.onNodeClientOnce('test-connection', node, 2_000, (own) => own.call('PING'), gaveUp.signal);
+      const read = service.onNodeClientOnce(viewed, 'test-connection', 2_000, (own) => own.call('PING'), gaveUp.signal);
       await new Promise((resolve) => setImmediate(resolve));
       gaveUp.abort();
 
@@ -1172,12 +1201,12 @@ describe('ClusterDiscoveryService', () => {
     });
 
     it('sends nothing on a socket whose dial ends after the caller gave up', async () => {
-      const client = dedicatedClient();
+      const client = onceClient();
       let dialled: () => void = () => undefined;
       client.connect.mockReturnValue(new Promise<void>((resolve) => (dialled = resolve)));
       const gaveUp = new AbortController();
 
-      const read = service.onNodeClientOnce('test-connection', node, 2_000, (own) => own.call('PING'), gaveUp.signal);
+      const read = service.onNodeClientOnce(viewed, 'test-connection', 2_000, (own) => own.call('PING'), gaveUp.signal);
       await new Promise((resolve) => setImmediate(resolve));
       gaveUp.abort();
       dialled();
@@ -1193,16 +1222,16 @@ describe('ClusterDiscoveryService', () => {
       gaveUp.abort();
 
       await expect(
-        service.onNodeClientOnce('test-connection', node, 2_000, (own) => own.call('PING'), gaveUp.signal),
+        service.onNodeClientOnce(viewed, 'test-connection', 2_000, (own) => own.call('PING'), gaveUp.signal),
       ).rejects.toThrow('given up');
       expect(jest.mocked(Valkey)).not.toHaveBeenCalled();
     });
 
     it('leaves nothing in the shared pool', async () => {
-      dedicatedClient();
+      onceClient();
       const before = service.getConnectionPoolSize();
 
-      await service.onNodeClientOnce('test-connection', node, 2_000, (own) => own.call('PING'));
+      await service.onNodeClientOnce(viewed, 'test-connection', 2_000, (own) => own.call('PING'));
 
       expect(service.getConnectionPoolSize()).toBe(before);
       expect(service.getActiveConnections()).toEqual([]);
@@ -1212,9 +1241,9 @@ describe('ClusterDiscoveryService', () => {
       mockDbClient.getClient.mockReturnValue({
         options: { host: 'seed.example', port: 7001, tls: { servername: 'seed.example', ca: 'ca-pem' } },
       });
-      dedicatedClient();
+      onceClient();
 
-      await service.onNodeClientOnce('test-connection', node, 2_000, (own) => own.call('PING'));
+      await service.onNodeClientOnce(viewed, 'test-connection', 2_000, (own) => own.call('PING'));
 
       expect(jest.mocked(Valkey)).toHaveBeenLastCalledWith(
         expect.objectContaining({
@@ -1224,20 +1253,20 @@ describe('ClusterDiscoveryService', () => {
     });
 
     it('closes the socket when the work gives up', async () => {
-      const client = dedicatedClient();
+      const client = onceClient();
 
       await expect(
-        service.onNodeClientOnce('test-connection', node, 2_000, () => Promise.reject(new Error('deadline'))),
+        service.onNodeClientOnce(viewed, 'test-connection', 2_000, () => Promise.reject(new Error('deadline'))),
       ).rejects.toThrow('deadline');
       expect(client.disconnect).toHaveBeenCalledTimes(1);
     });
 
     it('closes the socket when the node cannot be dialed, without running the work', async () => {
-      const client = dedicatedClient();
+      const client = onceClient();
       client.connect.mockRejectedValue(new Error('connect ETIMEDOUT'));
       const work = jest.fn();
 
-      await expect(service.onNodeClientOnce('test-connection', node, 2_000, work)).rejects.toThrow(
+      await expect(service.onNodeClientOnce(viewed, 'test-connection', 2_000, work)).rejects.toThrow(
         'connect ETIMEDOUT',
       );
       expect(work).not.toHaveBeenCalled();
@@ -1248,16 +1277,10 @@ describe('ClusterDiscoveryService', () => {
       mockConnectionRegistry.getConfig.mockReturnValue({ id: 'test-connection', host: 'agent', port: 0 });
       const work = jest.fn();
 
-      await expect(service.onNodeClientOnce('test-connection', node, 2_000, work)).rejects.toThrow(
+      await expect(service.onNodeClientOnce(viewed, 'test-connection', 2_000, work)).rejects.toThrow(
         'cannot dial node2-id-def456 directly',
       );
       expect(work).not.toHaveBeenCalled();
-    });
-
-    it('refuses an address it cannot read', async () => {
-      await expect(
-        service.onNodeClientOnce('test-connection', { id: 'x', address: ':0@0' }, 2_000, jest.fn()),
-      ).rejects.toThrow('Invalid node address');
     });
   });
 

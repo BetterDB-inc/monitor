@@ -1,7 +1,10 @@
 import {
+  BadGatewayException,
   BadRequestException,
+  Body,
   ConflictException,
   Controller,
+  ForbiddenException,
   Get,
   Post,
   Query,
@@ -12,6 +15,7 @@ import {
   ServiceUnavailableException,
   UseGuards,
   NotFoundException,
+  Req,
 } from '@nestjs/common';
 import { ApiHeader, ApiOperation } from '@nestjs/swagger';
 import { AnomalyService } from './anomaly.service';
@@ -29,6 +33,8 @@ import { ReplicaDivergenceHistory } from './replication-divergence-detector';
 import { HotShardDetail } from './hot-shard-detector';
 import { TopologyDivergenceReport } from './topology-divergence-report';
 import { TopologyDisagreementReport, TopologyFullCheckView } from './topology-full-check';
+import { type RebalanceRunView, parseConfirmedMoves } from './slot-rebalance-run';
+import type { RequestWithActor } from '../../apps/api/src/auth/guards/actor.guard';
 import { LicenseGuard, RequiresFeature, Feature } from '@proprietary/licenses';
 import { ConnectionId, CONNECTION_ID_HEADER } from '../../apps/api/src/common/decorators';
 import { parseOptionalInt } from '../../apps/api/src/common/utils/parse-query-param';
@@ -177,6 +183,79 @@ export class AnomalyController {
   @ApiHeader({ name: CONNECTION_ID_HEADER, required: true, description: 'Connection ID of the cluster' })
   getHotShards(@ConnectionId({ required: true }) connectionId: string): HotShardDetail[] {
     return this.anomalyService.getHotShards(connectionId);
+  }
+
+  @Post('hot-shards/:shardId/rebalance')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
+  @ApiOperation({ summary: 'Start the suggested slot rebalance for a hot shard' })
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: true, description: 'Connection ID of the cluster' })
+  async runRebalance(
+    @ConnectionId({ required: true }) connectionId: string,
+    @Param('shardId') shardId: string,
+    @Body() body: unknown,
+    @Req() request: RequestWithActor,
+  ): Promise<RebalanceRunView> {
+    const confirmed = parseConfirmedMoves(body);
+    if (!confirmed) {
+      throw new BadRequestException('moves must list each target shard with its slot ranges');
+    }
+    const actor = request.actor;
+    const result = await this.anomalyService.runRebalance(connectionId, shardId, confirmed, {
+      userId: actor?.userId ?? null,
+      email: actor?.email ?? null,
+    });
+    switch (result.status) {
+      case 'started':
+        return result.run;
+      case 'blocked':
+        throw new ForbiddenException({ blockedBy: result.blockedBy });
+      case 'changed':
+        throw new ConflictException({ reason: result.reason, rebalance: result.rebalance });
+      case 'refused':
+        throw new BadGatewayException({ message: result.message });
+    }
+  }
+
+  @Get('slot-rebalance')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
+  @ApiOperation({ summary: 'Slot rebalances started from this monitor in the last hour' })
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: true, description: 'Connection ID of the cluster' })
+  async getRebalanceRuns(
+    @ConnectionId({ required: true }) connectionId: string,
+    @Req() request: RequestWithActor,
+  ): Promise<RebalanceRunView[]> {
+    const runs = await this.anomalyService.followRebalanceRuns(connectionId);
+    if (request.actor?.role === 'admin') return runs;
+    return runs.map((run) => ({ ...run, startedBy: { ...run.startedBy, email: null } }));
+  }
+
+  @Post('slot-rebalance/cancel')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
+  @ApiOperation({ summary: 'Cancel every slot migration on the source of a running rebalance' })
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: true, description: 'Connection ID of the cluster' })
+  async cancelRebalance(
+    @ConnectionId({ required: true }) connectionId: string,
+    @Body() body: unknown,
+  ): Promise<RebalanceRunView> {
+    const sourceShardId = (body as { sourceShardId?: unknown } | null)?.sourceShardId;
+    if (typeof sourceShardId !== 'string' || sourceShardId === '') {
+      throw new BadRequestException('sourceShardId is required');
+    }
+    const result = await this.anomalyService.cancelRebalance(connectionId, sourceShardId);
+    switch (result.status) {
+      case 'cancelling':
+        return result.run;
+      case 'blocked':
+        throw new ForbiddenException({ blockedBy: result.blockedBy });
+      case 'not_running':
+        throw new ConflictException({ reason: 'not_running' });
+      case 'refused':
+        throw new BadGatewayException({ message: result.message });
+    }
   }
 
   @Get('topology-divergence')
