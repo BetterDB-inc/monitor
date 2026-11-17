@@ -350,6 +350,14 @@ describe('partiallyKnownNodes', () => {
       expect(found[0].meet).toBeUndefined();
     });
 
+    it('counts no peer as broken once every peer that lacked the node has learned it', () => {
+      const stuck = every([view('p1'), view('p2', { n1: null }), view('p3', { n1: null })], 0, LONG_ENOUGH);
+      const { found } = judge([...stuck, { at, views: [view('p2'), view('p3')], unanswered: ['p1'] }]);
+
+      expect(ids(found[0].knownBy)).toEqual(['p2', 'p3']);
+      expect(found[0]).toMatchObject({ nodeId: 'n1', notKnownBy: [], brokenPeers: 0 });
+    });
+
     it('keeps the peers that answer and still lack the node', () => {
       const lacking = [view('p2', { n1: null }), view('p3', { n1: null })];
       const stuck = every([view('p1'), ...lacking], 0, LONG_ENOUGH);
