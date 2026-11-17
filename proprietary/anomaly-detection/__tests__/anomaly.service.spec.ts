@@ -26779,6 +26779,38 @@ describe('AnomalyService', () => {
         });
       });
 
+      describe('when one peer that lacked the node has learned it and the other gives no view', () => {
+        const membershipLines = () =>
+          [...report().partialMembership, ...report().divergences]
+            .flatMap((entry) => entry.disagreements)
+            .filter((line) => line.kind === 'membership');
+
+        beforeEach(async () => {
+          await rounds(6);
+          knows.c = EVERYONE;
+          silent.add('b');
+        });
+
+        it('lists no gap for the node once every answering view flags the silent peer as failed', async () => {
+          flagsBy = { a: { b: 'master,fail' }, c: { b: 'master,fail' }, n: { b: 'master,fail' } };
+
+          await rounds(1);
+
+          expect(report().unanswered.map((node) => node.nodeId)).toEqual(['b']);
+          expect(membershipLines()).toEqual([]);
+          expect(report().partialMembership).toEqual([]);
+        });
+
+        it('still lists the gap while one answering view does not flag the silent peer', async () => {
+          flagsBy = { a: { b: 'master,fail' }, c: { b: 'master,fail' } };
+
+          await rounds(1);
+
+          expect(membershipLines()).toHaveLength(1);
+          expect(membershipLines()[0].subject.map((node) => node.nodeId)).toEqual(['n']);
+        });
+      });
+
       it('keeps the event of a node that misses one read while another node holds the same disagreement', async () => {
         (service as any).topologyDivergenceSettings.randomNodes = 5;
         MEMBERS.m = { host: '10.0.0.8', epoch: 0, slots: '' };
