@@ -392,7 +392,7 @@ export function renamedPartialMemberships(
   answered: ReadonlySet<string>,
 ): string[] {
   const current = new Set(found.map((finding) => finding.signature));
-  const held = new Set(found.flatMap((finding) => finding.disagreementKeys));
+  const held = new Set(found.filter((finding) => finding.confirmed).flatMap((finding) => finding.disagreementKeys));
   const read = (finding: PartialMembership) =>
     [finding.nodeId, ...finding.notKnownBy.map((peer) => peer.nodeId)].every((nodeId) => answered.has(nodeId));
   const lost = (finding: PartialMembership) =>

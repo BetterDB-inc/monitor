@@ -26712,6 +26712,41 @@ describe('AnomalyService', () => {
         beforeEach(async () => {
           await rounds(19);
           flagsBy.a = { n: 'master,fail?' };
+      describe('when the finding moves to a node whose own link is younger than 90 seconds', () => {
+        beforeEach(async () => {
+          knows = { a: ['a', 'b', 'c'], b: ['a', 'b', 'c'], c: ['a', 'c'] };
+          await rounds(19);
+          knows.b = ['a', 'b'];
+          await rounds(2);
+          knows.c = ['a', 'b', 'c'];
+        });
+
+        it('leaves the event of the old name open while the new finding is not confirmed', async () => {
+          await rounds(2);
+
+          expect(openPartialEvents().map((e) => e.dedupeKey)).toEqual(['partial_membership:b']);
+          expect(report().partialMembership).toMatchObject([
+            { node: { nodeId: 'b' }, confirmed: true, seen: false },
+            { node: { nodeId: 'c' }, confirmed: false, eventId: null },
+          ]);
+        });
+
+        it('closes the event of the old name after the configured rounds', async () => {
+          await rounds(3);
+
+          expect(openPartialEvents()).toEqual([]);
+          expect(report().partialMembership).toMatchObject([{ node: { nodeId: 'c' }, eventId: null }]);
+        });
+
+        it('raises the event of the new name once its own link has lasted 90 seconds', async () => {
+          await rounds(16);
+          expect(openPartialEvents()).toEqual([]);
+
+          await rounds(1);
+          expect(openPartialEvents().map((e) => e.dedupeKey)).toEqual(['partial_membership:c']);
+        });
+      });
+
           silent.add('n');
         });
 

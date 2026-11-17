@@ -1515,6 +1515,12 @@ describe('renamedPartialMemberships', () => {
     expect(renamedPartialMemberships(open, [finding], new Set(['p9', ...lacking.slice(1)]))).toEqual([]);
   });
 
+  it('leaves a finding while the finding that now holds its disagreements is not confirmed', () => {
+    const open = new Map([[underOldName.signature, { group: underOldName }]]);
+    expect(finding.confirmed).toBe(true);
+    expect(renamedPartialMemberships(open, [{ ...finding, confirmed: false }], answered)).toEqual([]);
+  });
+
   it('leaves a finding that is still found', () => {
     const open = new Map([[finding.signature, { group: finding }]]);
     expect(renamedPartialMemberships(open, [finding], answered)).toEqual([]);
