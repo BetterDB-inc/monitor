@@ -11005,7 +11005,7 @@ export class AnomalyService
     for (const [signature, entry] of this.topologyDivergenceOpen.get(clusterKey) ?? []) {
       const eventId = eventIds?.get(signature);
       if (eventId === undefined) continue;
-      const event = this.eventInMemory(eventId);
+      const event = this.eventInMemory(eventId) ?? this.findIncidentEvent(eventId);
       if (event?.resolved === true) continue;
       const eventType = event?.metricType ?? MetricType.TOPOLOGY_DIVERGENCE;
       for (const { key } of entry.group?.disagreements ?? []) events.set(key, { eventId, eventType });

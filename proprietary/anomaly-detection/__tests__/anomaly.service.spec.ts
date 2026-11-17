@@ -27406,6 +27406,18 @@ describe('AnomalyService', () => {
         ]);
       });
 
+      it('keeps the line without an event after the resolved events are cleared', async () => {
+        views.b = { a: { epoch: 9 } };
+        await rounds(3);
+
+        expect(await service.resolveAnomaly(divergenceEvents()[0].id)).toBe(true);
+        expect(service.clearResolved()).toBe(1);
+
+        expect(service.getTopologyDisagreements('conn-1').disagreements).toMatchObject([
+          { id: 'config_epoch:a', confirmed: false, eventId: null, eventType: null },
+        ]);
+      });
+
       it('names the nodes that did not answer and does not call the round complete', async () => {
         silent.add('b');
 
