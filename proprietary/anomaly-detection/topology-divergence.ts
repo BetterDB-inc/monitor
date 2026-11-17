@@ -53,6 +53,7 @@ export interface DivergenceRound {
   unanswered: string[];
   views: number;
   members?: ReadonlyMap<string, ReadonlySet<string>>;
+  failing?: ReadonlySet<string>;
 }
 
 export interface ConfirmationRule {
@@ -355,6 +356,17 @@ export function membersByObserver(views: TopologyView[]): Map<string, Set<string
   );
 }
 
+export function failingForEveryView(views: TopologyView[]): Set<string> {
+  const flagged = new Map<string, boolean>();
+  for (const view of views) {
+    for (const node of view.nodes) {
+      if (node.id === view.observerId || !isKnownMember(node)) continue;
+      flagged.set(node.id, (flagged.get(node.id) ?? true) && isFlaggedFailing(node));
+    }
+  }
+  return new Set([...flagged].filter(([, failing]) => failing).map(([id]) => id));
+}
+
 export function lackingObservers(disagreement: TopologyDisagreement): LackingObserver[] {
   return disagreement.positions
     .filter((position) => position.value !== KNOWN_MEMBER)
@@ -389,7 +401,7 @@ export class DivergenceTracker {
       const answeringSides = entry.positions.filter((position) =>
         position.observers.some((observer) => !unanswered.has(observer)),
       ).length;
-      const unseeable = !comparable || answeringSides < 2 || this.holdsUnreadGap(entry, round.at, unanswered);
+      const unseeable = !comparable || answeringSides < 2 || this.holdsUnreadGap(entry, round, unanswered);
       if (!unseeable || round.at - entry.lastSeenAt > TOPOLOGY_DIVERGENCE_BLIND_MS) this.entries.delete(key);
       else if (entry.gapStreaks) this.entries.set(key, { ...entry, gapStreaks: this.streaksThroughHold(entry, round) });
     }
@@ -505,9 +517,10 @@ export class DivergenceTracker {
     return !!streak && at - streak.lastAnsweredAt > TOPOLOGY_DIVERGENCE_BLIND_MS;
   }
 
-  private holdsUnreadGap(entry: TrackedDisagreement, at: number, unanswered: ReadonlySet<string>): boolean {
+  private holdsUnreadGap(entry: TrackedDisagreement, round: DivergenceRound, unanswered: ReadonlySet<string>): boolean {
     return Object.entries(entry.gapStreaks ?? {}).some(
-      ([observer, streak]) => unanswered.has(observer) && !this.pastBlindLimit(streak, at),
+      ([observer, streak]) =>
+        unanswered.has(observer) && !round.failing?.has(observer) && !this.pastBlindLimit(streak, round.at),
     );
   }
 
