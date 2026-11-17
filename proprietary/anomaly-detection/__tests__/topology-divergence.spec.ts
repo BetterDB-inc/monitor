@@ -8,6 +8,7 @@ import {
   confirmedDisagreements,
   dissentOf,
   durationOf,
+  failingForEveryView,
   groupDivergences,
   lackingObservers,
   membersByObserver,
@@ -809,6 +810,62 @@ describe('DivergenceTracker', () => {
 
         tracker.observe(learned(1001 + TOPOLOGY_DIVERGENCE_BLIND_MS, ['c']));
         expect(tracker.tracked()).toEqual([]);
+      });
+    });
+
+    describe('when a node that lacked the member gives no view and another has learned the member', () => {
+      const n1 = primary('n1', 7, [], 0);
+      const dead = { p2: failing('fail') };
+      const observeViews = (tracker: DivergenceTracker, at: number, views: TopologyView[], unanswered: string[] = []) =>
+        tracker.observe({
+          at,
+          disagreements: compareTopologyViews(views),
+          unanswered,
+          views: views.length,
+          members: membersByObserver(views),
+          failing: failingForEveryView(views),
+        });
+      const lackedForAMinute = () => {
+        const tracker = new DivergenceTracker();
+        for (let at = 0; at <= 60_000; at += 5_000) {
+          observeViews(tracker, at, [view('p1', {}, [n1]), view('p2'), view('p3')]);
+        }
+        return tracker;
+      };
+      const keys = (tracker: DivergenceTracker) => tracker.tracked().map((entry) => entry.key);
+
+      it('lets go of the gap at once when every answering view flags the silent node as failed', () => {
+        const tracker = lackedForAMinute();
+
+        observeViews(tracker, 65_000, [view('p1', dead, [n1]), view('p3', dead, [n1])], ['p2']);
+
+        expect(keys(tracker)).toEqual([]);
+      });
+
+      it('holds the gap while one answering view does not flag the silent node', () => {
+        const tracker = lackedForAMinute();
+
+        observeViews(tracker, 65_000, [view('p1', dead, [n1]), view('p3', {}, [n1])], ['p2']);
+
+        expect(keys(tracker)).toEqual(['failure_flags:p2', 'membership:n1']);
+      });
+
+      it('holds the gap while no answering view lists the silent node', () => {
+        const tracker = lackedForAMinute();
+
+        observeViews(tracker, 65_000, [view('p1', { p2: null }, [n1]), view('p3', { p2: null }, [n1])], ['p2']);
+
+        expect(keys(tracker)).toEqual(['membership:n1']);
+      });
+
+      it('lets go of a held gap in the round the silent node is flagged by every answering view', () => {
+        const tracker = lackedForAMinute();
+
+        observeViews(tracker, 65_000, [view('p1', {}, [n1]), view('p3', {}, [n1])], ['p2']);
+        expect(keys(tracker)).toEqual(['membership:n1']);
+
+        observeViews(tracker, 70_000, [view('p1', dead, [n1]), view('p3', dead, [n1])], ['p2']);
+        expect(keys(tracker)).toEqual([]);
       });
     });
 

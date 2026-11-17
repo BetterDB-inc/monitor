@@ -398,6 +398,24 @@ describe('TopologyDivergenceMonitor', () => {
     ]);
   });
 
+  it('lets go of a held gap once every answering view flags the node that gives no view as failed', async () => {
+    const { poll, answers } = harness();
+    const withoutA2 = IDS.filter((id) => id !== 'a2');
+    const dead = { b1: { flags: ['master', 'fail'] } };
+    answers.set('b1', viewOf('b1', {}, withoutA2));
+    answers.set('c1', viewOf('c1', {}, withoutA2));
+
+    await poll('conn-1', 'a1', 0);
+    answers.set('b1', null);
+    answers.set('c1', viewOf('c1'));
+    const held = await poll('conn-1', 'a1', INTERVAL);
+    answers.set('c1', viewOf('c1', dead));
+    const round = await poll('conn-1', 'a1', 2 * INTERVAL, dead);
+
+    expect(held?.disagreements).toMatchObject([{ key: 'membership:a2', lastSeenAt: 0 }]);
+    expect(round?.disagreements).toEqual([]);
+  });
+
   it('counts a view that still lacks the member as an answer while the disagreement is held', async () => {
     const { poll, answers } = harness();
     const withoutA2 = IDS.filter((id) => id !== 'a2');

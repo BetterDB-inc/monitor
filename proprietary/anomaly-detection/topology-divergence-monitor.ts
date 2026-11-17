@@ -4,6 +4,7 @@ import {
   type TopologyView,
   type TrackedDisagreement,
   compareTopologyViews,
+  failingForEveryView,
   isFlaggedFailing,
   isKnownMember,
   membersByObserver,
@@ -271,6 +272,7 @@ export class TopologyDivergenceMonitor {
       unanswered: [...new Set([...unanswered, ...unasked])],
       views: views.length,
       members: membersByObserver(views),
+      failing: failingForEveryView(views),
     });
     state.accused = this.accusedBy(views);
 

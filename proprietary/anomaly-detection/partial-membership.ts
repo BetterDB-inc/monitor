@@ -326,7 +326,7 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
         .map(peer),
       notKnownBy,
       ownViewMissing,
-      brokenPeers: new Set(kept.map((link) => (link.observer === hub ? link.subject : link.observer))).size,
+      brokenPeers: new Set(lasting.map((link) => (link.observer === hub ? link.subject : link.observer))).size,
       disagreementKeys: sortedUnique(own.map((link) => link.key)),
       slotDisputeKeys: explained.filter(({ nodeIds }) => nodeIds.includes(hub)).map(({ key }) => key),
       firstSeenAt: Math.min(...history.map((entry) => entry.firstSeenAt)),
