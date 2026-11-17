@@ -871,6 +871,48 @@ describe('partiallyKnownNodes', () => {
       }
     });
 
+    describe('and the replica has not learned the empty primary either', () => {
+      const apart = view('r1', { n1: null }, [{ ...replica, flags: ['myself', 'slave'] }]);
+      const met = [view('p1', {}, [replica]), view('p3', {}, [replica])];
+      const unmet = view('p2');
+
+      it('names the replica for all three links and not the empty primary', () => {
+        const { found } = judge(every([...met, unmet, apart, spare], 0, LONG_ENOUGH));
+
+        expect(found.map((finding) => finding.nodeId)).toEqual(['r1']);
+        expect(found[0]).toMatchObject({ confirmed: true, brokenPeers: 2 });
+        expect(ids(found[0].notKnownBy)).toEqual(['n1', 'p2']);
+        expect(ids(found[0].ownViewMissing)).toEqual(['n1']);
+      });
+
+      it.each([1, 2, 3])('names the same one in round %i the slot owner that lacks it gives no view', (rounds) => {
+        const before = every([...met, unmet, apart, spare], 0, LONG_ENOUGH);
+        const silent = every([...met, apart, spare], LONG_ENOUGH + ROUND_MS, LONG_ENOUGH + rounds * ROUND_MS, ['p2']);
+        const { found } = judge([...before, ...silent]);
+
+        expect(found.map((finding) => finding.nodeId)).toEqual(['r1']);
+        expect(ids(found[0].notKnownBy)).toEqual(['n1']);
+      });
+    });
+
+    describe('and a second new node has not learned the empty primary', () => {
+      const second = primary('n2', 9, [], 0);
+      const joined = [replica, second];
+      const fromSecond = view('n2', { n1: null }, [replica, { ...second, flags: ['myself', 'master'] }]);
+      const fromReplica = view('r1', {}, [{ ...replica, flags: ['myself', 'slave'] }, second]);
+      const mixed = [...['p1', 'p2', 'p3'].map((id) => view(id, {}, joined)), fromReplica, view('n1', {}, [second])];
+
+      it('still names the replica, and files the other link under the node that is not known', () => {
+        const { found } = judge(every([...mixed, fromSecond], 0, LONG_ENOUGH));
+        const byNode = new Map(found.map((finding) => [finding.nodeId, finding]));
+
+        expect([...byNode.keys()].sort()).toEqual(['n1', 'r1']);
+        expect(ids(byNode.get('r1')?.notKnownBy ?? [])).toEqual(['n1']);
+        expect(ids(byNode.get('n1')?.notKnownBy ?? [])).toEqual(['n2']);
+        expect(byNode.get('n1')?.ownViewMissing).toEqual([]);
+      });
+    });
+
     it('still names an empty primary a peer lacks before its replica', () => {
       const lacking = [view('p1', {}, [replica]), view('p2', { n1: null }, [replica]), view('p3', {}, [replica])];
       const { found } = judge(every([...lacking, ownView, spare], 0, LONG_ENOUGH));
@@ -879,6 +921,18 @@ describe('partiallyKnownNodes', () => {
       expect(ids(found[0].notKnownBy)).toEqual(['p2']);
       expect(ids(found[0].ownViewMissing)).toEqual(['r1']);
     });
+  });
+
+  it.each([
+    ['a1', 'a1'],
+    ['r1', 'n1'],
+  ])('names the smaller id when an empty primary and new replica %s lack only each other', (replicaId, named) => {
+    const replica: ClusterNode = { ...primary(replicaId, 8, [], 0), flags: ['slave'], master: 'p1' };
+    const owners = ['p1', 'p2', 'p3'].map((id) => view(id, {}, [replica]));
+    const ownView = view(replicaId, { n1: null }, [{ ...replica, flags: ['myself', 'slave'] }]);
+    const { found } = judge(every([...owners, ownView, view('n1')], 0, LONG_ENOUGH));
+
+    expect(found.map((finding) => finding.nodeId)).toEqual([named]);
   });
 
   describe('when the views disagree about the slots of a node that gives no view', () => {
