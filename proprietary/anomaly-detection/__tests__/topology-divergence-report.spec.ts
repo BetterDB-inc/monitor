@@ -8,6 +8,7 @@ import {
   divergenceMessage,
   divergenceSeverity,
   outranksSeverity,
+  raisedDivergenceGroup,
   toDivergenceNode,
 } from '../topology-divergence-report';
 import type { PartialMembership } from '../partial-membership';
@@ -220,6 +221,55 @@ describe('buildDivergenceDetail', () => {
   });
 });
 
+describe('raisedDivergenceGroup', () => {
+  const dispute = (slots: number[][], patch: Partial<TrackedDisagreement> = {}) =>
+    tracked('slot_owner', 'a|b#0', { subjectIds: ['a', 'b'], slots, ...patch });
+
+  it('takes the disagreements of the round over those the event was last confirmed with', () => {
+    const current = group([tracked('failure_flags', 'b', { rounds: 1 })]);
+    const confirmed = group([tracked('membership', 'n', { rounds: 9 })]);
+
+    expect(raisedDivergenceGroup(current, confirmed)).toEqual(current);
+  });
+
+  it('falls back to the confirmed group when the round shows none', () => {
+    const confirmed = group([tracked('membership', 'n')]);
+
+    expect(raisedDivergenceGroup(undefined, confirmed)).toEqual(confirmed);
+    expect(raisedDivergenceGroup(undefined, undefined)).toBeUndefined();
+  });
+
+  it('takes the group of the round when none was confirmed yet', () => {
+    const current = group([tracked('config_epoch', 'a')]);
+
+    expect(raisedDivergenceGroup(current, undefined)).toEqual(current);
+  });
+
+  it('leaves out slots that have joined a confirmed dispute and are not confirmed themselves', () => {
+    const current = group([dispute([[0, 5460]], { rounds: 5 }), tracked('config_epoch', 'a')]);
+    const confirmed = group([dispute([[0, 99]], { rounds: 4 })]);
+
+    expect(raisedDivergenceGroup(current, confirmed)?.disagreements).toEqual([
+      dispute([[0, 99]], { rounds: 5 }),
+      tracked('config_epoch', 'a'),
+    ]);
+  });
+
+  it('leaves out confirmed slots the round no longer disputes', () => {
+    const current = group([dispute([[50, 199]])]);
+    const confirmed = group([dispute([[0, 99]])]);
+
+    expect(raisedDivergenceGroup(current, confirmed)?.disagreements).toEqual([dispute([[50, 99]])]);
+  });
+
+  it('lists a dispute as the round shows it when none of its slots were confirmed', () => {
+    const current = group([dispute([[200, 300]]), tracked('slot_owner', 'a|c#0', { slots: [[7, 7]] })]);
+    const confirmed = group([dispute([[0, 99]])]);
+
+    expect(raisedDivergenceGroup(current, confirmed)).toEqual(current);
+  });
+});
+
 describe('buildPartialMembershipDetail', () => {
   const membership = tracked('membership', 'n0', {
     positions: [
@@ -239,6 +289,7 @@ describe('buildPartialMembershipDetail', () => {
       { nodeId: 'c', address: '10.0.3.2:6379', status: 'missing' },
     ],
     ownViewMissing: [{ nodeId: 'c', address: '10.0.3.2:6379', status: 'noaddr' }],
+    brokenPeers: 2,
     disagreementKeys: ['membership:n0'],
     slotDisputeKeys: [],
     firstSeenAt: 85000,
@@ -333,6 +384,7 @@ describe('closingPartialMembershipDetail', () => {
     knownBy: [{ nodeId: 'a', address: '10.0.1.5:6379' }],
     notKnownBy: [{ nodeId: 'b', address: '10.0.2.7:6379', status: 'missing' }],
     ownViewMissing: [{ nodeId: 'c', address: '10.0.3.2:6379', status: 'noaddr' }],
+    brokenPeers: 2,
     disagreementKeys: ['membership:n0'],
     slotDisputeKeys: [],
     firstSeenAt: 85000,

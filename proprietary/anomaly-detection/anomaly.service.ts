@@ -282,6 +282,7 @@ import {
   divergenceMessage,
   divergenceSeverity,
   outranksSeverity,
+  raisedDivergenceGroup,
   toDivergenceNode,
 } from './topology-divergence-report';
 import { ShardLoadService } from '@app/cluster/shard-load.service';
@@ -849,28 +850,14 @@ export class AnomalyService
     minRounds: number;
     intervalMs: number;
   };
-  private topologyDivergenceFirstSeen = new Map<string, Map<string, number>>();
-  private activeTopologyDivergences = new Map<string, Set<string>>();
-  private topologyDivergenceEventIds = new Map<string, Map<string, string>>();
   private topologyDivergenceEventOwners = new Map<string, string>();
   private topologyDivergenceEventSeverity = new Map<string, AnomalySeverity>();
   private topologyDivergenceOpen = new Map<string, Map<string, OpenDivergence>>();
   private partialMembershipOpen = new Map<string, Map<string, OpenDivergence<PartialMembership>>>();
-  private partialMembershipFirstSeen = new Map<string, Map<string, number>>();
-  private activePartialMemberships = new Map<string, Set<string>>();
-  private partialMembershipEventIds = new Map<string, Map<string, string>>();
   private partialMembershipRounds = new Map<string, PartialMembershipRound>();
   private readonly topologyEventStores: Record<'divergence' | 'partial', TopologyEventStore> = {
-    divergence: {
-      firstSeen: this.topologyDivergenceFirstSeen,
-      active: this.activeTopologyDivergences,
-      eventIds: this.topologyDivergenceEventIds,
-    },
-    partial: {
-      firstSeen: this.partialMembershipFirstSeen,
-      active: this.activePartialMemberships,
-      eventIds: this.partialMembershipEventIds,
-    },
+    divergence: { firstSeen: new Map(), active: new Map(), eventIds: new Map() },
+    partial: { firstSeen: new Map(), active: new Map(), eventIds: new Map() },
   };
   private readonly allTopologyEventStores = Object.values(this.topologyEventStores);
   private topologyDivergenceAnchors = new Map<string, string>();
@@ -2738,12 +2725,12 @@ export class AnomalyService
       this.adoptTopologyDivergenceEvents(
         connectionId,
         rows(MetricType.TOPOLOGY_DIVERGENCE),
-        this.topologyDivergenceEventIds,
+        this.topologyEventStores.divergence,
       );
       this.adoptTopologyDivergenceEvents(
         connectionId,
         rows(MetricType.PARTIAL_MEMBERSHIP),
-        this.partialMembershipEventIds,
+        this.topologyEventStores.partial,
       );
       this.adoptReplicaSlotEvents(connectionId, rows(MetricType.REPLICA_SLOT_STATE));
       this.adoptSlotMigrationEvents(
@@ -7830,7 +7817,7 @@ export class AnomalyService
       metricType: MetricType.PARTIAL_MEMBERSHIP,
       anomalyType: AnomalyType.SPIKE,
       severity: AnomalySeverity.WARNING,
-      value: finding.notKnownBy.length + finding.ownViewMissing.length,
+      value: finding.brokenPeers,
       baseline: 0,
       zScore: 0,
       stdDev: 0,
@@ -7846,9 +7833,9 @@ export class AnomalyService
   private adoptTopologyDivergenceEvents(
     connectionId: string,
     open: StoredAnomalyEvent[],
-    eventIdsByConn: Map<string, Map<string, string>>,
+    store: TopologyEventStore,
   ): void {
-    const eventIds = eventIdsByConn.get(connectionId) ?? new Map<string, string>();
+    const eventIds = store.eventIds.get(connectionId) ?? new Map<string, string>();
     const tracked = new Set(eventIds.values());
     for (const event of [...open].sort((a, b) => b.timestamp - a.timestamp)) {
       if (tracked.has(event.id)) continue;
@@ -7861,7 +7848,7 @@ export class AnomalyService
       this.topologyDivergenceEventOwners.set(event.id, connectionId);
       this.topologyDivergenceEventSeverity.set(event.id, event.severity as AnomalySeverity);
     }
-    if (eventIds.size > 0) eventIdsByConn.set(connectionId, eventIds);
+    if (eventIds.size > 0) store.eventIds.set(connectionId, eventIds);
   }
 
   private forgetTopologyDivergence(connectionId: string): void {
@@ -10786,8 +10773,8 @@ export class AnomalyService
     const trackedBySignature = new Map(tracked.map((group) => [group.signature, group]));
     const raisedGroups = shown(
       this.topologyDivergenceOpen.get(clusterKey),
-      this.topologyDivergenceEventIds.get(round.anchorConnectionId),
-      (signature, entry) => entry.group ?? trackedBySignature.get(signature),
+      this.topologyEventStores.divergence.eventIds.get(round.anchorConnectionId),
+      (signature, entry) => raisedDivergenceGroup(trackedBySignature.get(signature), entry.group),
     )
       .map((entry) => ({
         ...entry,
@@ -10805,7 +10792,7 @@ export class AnomalyService
     const seen = new Map(found.map((finding) => [finding.signature, finding]));
     const raisedFindings = shown(
       this.partialMembershipOpen.get(clusterKey),
-      this.partialMembershipEventIds.get(round.anchorConnectionId),
+      this.topologyEventStores.partial.eventIds.get(round.anchorConnectionId),
       (signature, entry) => seen.get(signature) ?? entry.group,
     );
     const raisedPartial = raisedFindings.map(({ signature, eventId, group }) =>
@@ -12616,8 +12603,7 @@ export class AnomalyService
       ...(this.staleBacklogEventIds.get(connectionId) ?? []),
       ...(this.reshardSkewEventIds.get(connectionId)?.values() ?? []),
       ...(this.hotShardEventIds.get(connectionId)?.values() ?? []),
-      ...(this.topologyDivergenceEventIds.get(connectionId)?.values() ?? []),
-      ...(this.partialMembershipEventIds.get(connectionId)?.values() ?? []),
+      ...this.allTopologyEventStores.flatMap((store) => [...(store.eventIds.get(connectionId)?.values() ?? [])]),
       ...(this.replicaSlotEventIds.get(connectionId)?.values() ?? []),
       ...(this.slotMigrationEventIds.get(connectionId)?.values() ?? []),
       ...(this.stuckSlotMigrationEventIds.get(connectionId)?.values() ?? []),

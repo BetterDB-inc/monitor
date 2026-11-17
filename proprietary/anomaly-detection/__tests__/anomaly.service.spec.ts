@@ -26222,7 +26222,7 @@ describe('AnomalyService', () => {
 
       expect(service.getTopologyDivergence('conn-1').status).toBe('not_sampled');
       expect((service as any).topologyDivergenceOpen.size).toBe(0);
-      expect((service as any).topologyDivergenceEventIds.size).toBe(0);
+      expect((service as any).topologyEventStores.divergence.eventIds.size).toBe(0);
       expect((service as any).topologyDivergenceEventOwners.size).toBe(0);
       await new Promise((resolve) => setImmediate(resolve));
       expect(storage.resolveAnomaly.mock.calls.map(([eventId]) => eventId)).toContain(id);
@@ -26453,6 +26453,45 @@ describe('AnomalyService', () => {
         expect(openPartialEvents()).toHaveLength(0);
       });
 
+      describe('when the only peer that lacks it stops answering', () => {
+        beforeEach(async () => {
+          knows.b = EVERYONE;
+          await rounds(19);
+          silent.add('c');
+        });
+
+        it('closes the event after the configured rounds once every view flags that peer as failing', async () => {
+          flagsBy = { a: { c: 'master,fail' }, b: { c: 'master,fail' }, n: { c: 'master,fail' } };
+
+          await rounds(2);
+          expect(openPartialEvents()).toHaveLength(1);
+
+          await rounds(1);
+          expect(openPartialEvents()).toHaveLength(0);
+          expect(report().partialMembership).toEqual([]);
+
+        });
+
+        it('raises no cluster view divergence event for the gap that peer last showed', async () => {
+          flagsBy = { a: { c: 'master,fail' }, b: { c: 'master,fail' }, n: { c: 'master,fail' } };
+
+          await rounds(20);
+          expect(divergenceEvents()).toHaveLength(0);
+          expect(report().divergences).toMatchObject([{ confirmed: false, eventId: null }]);
+
+          await rounds(50);
+          expect(divergenceEvents()).toHaveLength(0);
+          expect(report().divergences).toEqual([]);
+        });
+
+        it('keeps the event while no view flags that peer', async () => {
+          await rounds(6);
+
+          expect(openPartialEvents()).toHaveLength(1);
+          expect(report().partialMembership).toMatchObject([{ node: { nodeId: 'n' }, seen: true }]);
+        });
+      });
+
       it('does not count a peer that could not be read as lacking the node', async () => {
         knows.b = EVERYONE;
         silent.add('c');
@@ -26561,10 +26600,11 @@ describe('AnomalyService', () => {
       it('keeps its event apart from the cluster view divergence events', async () => {
         await rounds(19);
 
-        expect([...(service as any).partialMembershipEventIds.get('conn-1').keys()]).toEqual(['partial_membership:n']);
-        expect((service as any).topologyDivergenceEventIds.get('conn-1')?.size ?? 0).toBe(0);
-        expect([...(service as any).activePartialMemberships.get('conn-1')]).toEqual(['partial_membership:n']);
-        expect((service as any).activeTopologyDivergences.get('conn-1')?.size ?? 0).toBe(0);
+        const { partial, divergence } = (service as any).topologyEventStores;
+        expect([...partial.eventIds.get('conn-1').keys()]).toEqual(['partial_membership:n']);
+        expect(divergence.eventIds.get('conn-1')?.size ?? 0).toBe(0);
+        expect([...partial.active.get('conn-1')]).toEqual(['partial_membership:n']);
+        expect(divergence.active.get('conn-1')?.size ?? 0).toBe(0);
       });
 
       it('closes the event of the old name in the round the finding moves to another node', async () => {
@@ -26732,6 +26772,21 @@ describe('AnomalyService', () => {
 
           await rounds(1);
           expect(partialEvents()).toHaveLength(1);
+        });
+
+        it('lists the open event under its id while a new disagreement from the same side is counted', async () => {
+          const [open] = divergenceEvents().filter((e) => !e.resolved);
+          flagsBy.a = { b: 'master,fail?' };
+
+          for (let round = 0; round < 2; round++) {
+            await rounds(1);
+
+            expect(divergenceEvents().filter((e) => !e.resolved).map((e) => e.id)).toEqual([open.id]);
+            expect(report().divergences).toMatchObject([
+              { eventId: open.id, confirmed: true, disagreements: [{ kind: 'failure_flags' }] },
+            ]);
+            expect(report().partialMembership).toMatchObject([{ node: { nodeId: 'n' } }]);
+          }
         });
       });
 
@@ -26935,7 +26990,8 @@ describe('AnomalyService', () => {
         }
         const [{ id }] = partialEvents();
         await rounds(6, second);
-        expect((service as any).partialMembershipEventIds.get('conn-2')?.get('partial_membership:n')).toBe(id);
+        const held = (service as any).topologyEventStores.partial.eventIds.get('conn-2');
+        expect(held?.get('partial_membership:n')).toBe(id);
 
         (service as any).onConnectionRemoved('conn-1');
         await rounds(2, second);
@@ -26967,10 +27023,10 @@ describe('AnomalyService', () => {
 
         expect((service as any).partialMembershipOpen.size).toBe(0);
         expect((service as any).partialMembershipRounds.size).toBe(0);
-        expect((service as any).partialMembershipEventIds.size).toBe(0);
-        expect((service as any).partialMembershipFirstSeen.size).toBe(0);
-        expect((service as any).activePartialMemberships.size).toBe(0);
-        expect((service as any).topologyDivergenceEventIds.size).toBe(0);
+        expect((service as any).topologyEventStores.partial.eventIds.size).toBe(0);
+        expect((service as any).topologyEventStores.partial.firstSeen.size).toBe(0);
+        expect((service as any).topologyEventStores.partial.active.size).toBe(0);
+        expect((service as any).topologyEventStores.divergence.eventIds.size).toBe(0);
         await new Promise((resolve) => setImmediate(resolve));
         expect(storage.resolveAnomaly.mock.calls.map(([eventId]) => eventId)).toContain(id);
       });

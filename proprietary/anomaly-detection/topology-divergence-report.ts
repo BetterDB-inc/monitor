@@ -4,6 +4,7 @@ import {
   type DivergenceKind,
   type TrackedDisagreement,
   durationOf,
+  intersectSlotRanges,
 } from './topology-divergence';
 import type { MembershipGap, MembershipPeer, PartialMembership } from './partial-membership';
 import { AnomalySeverity } from './types';
@@ -190,6 +191,21 @@ function toDetailDisagreement(
     since: disagreement.firstSeenAt,
     eventId: held.eventId,
     eventType: held.eventId === null ? null : held.eventType,
+  };
+}
+
+export function raisedDivergenceGroup(
+  current: DivergenceGroup | undefined,
+  confirmed: DivergenceGroup | undefined,
+): DivergenceGroup | undefined {
+  if (!current || !confirmed) return current ?? confirmed;
+  const confirmedSlots = new Map(confirmed.disagreements.map((entry) => [entry.key, entry.slots ?? []]));
+  return {
+    ...current,
+    disagreements: current.disagreements.map((entry) => {
+      const shared = intersectSlotRanges(entry.slots ?? [], confirmedSlots.get(entry.key) ?? []);
+      return shared.length > 0 ? { ...entry, slots: shared } : entry;
+    }),
   };
 }
 
