@@ -257,20 +257,27 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
   const lackers = (id: string): number => lackedBy.get(id)?.size ?? 0;
 
   const tiers = new Map<string, number>();
-  const tier = (id: string): number => {
+  const shownTier = (id: string): number => {
     const known = tiers.get(id);
     if (known !== undefined) return known;
     const own = selves.get(id);
     const seen = own ? [own] : [...(sightings.get(id) ?? []).map((sighting) => sighting.node), nodes.get(id)];
-    const shown = Math.max(...seen.map(tierOf));
-    const found = shown === TIER_NEW && lackers(id) === 0 ? TIER_REPLICA : shown;
+    const found = Math.max(...seen.map(tierOf));
     tiers.set(id, found);
     return found;
+  };
+  const tierAgainst = (id: string, other: string): number => {
+    const shown = shownTier(id);
+    if (shown !== TIER_NEW || shownTier(other) !== TIER_REPLICA) return shown;
+    const lackedByOwner = [...(lackedBy.get(id) ?? [])].some((observer) => shownTier(observer) === TIER_SLOT_OWNER);
+    return lackedByOwner ? TIER_NEW : TIER_REPLICA;
   };
 
   const newerEnd = (link: Link): string => {
     const { observer, subject } = link;
-    if (tier(observer) !== tier(subject)) return tier(observer) < tier(subject) ? observer : subject;
+    const observerTier = tierAgainst(observer, subject);
+    const subjectTier = tierAgainst(subject, observer);
+    if (observerTier !== subjectTier) return observerTier < subjectTier ? observer : subject;
     if (!lacks(subject, observer)) return subject;
     if (open.has(observer) !== open.has(subject)) return open.has(observer) ? observer : subject;
     if (lackers(observer) !== lackers(subject)) return lackers(observer) > lackers(subject) ? observer : subject;
@@ -287,7 +294,7 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
 
   const explained = slotDisputesExplainedBy(
     input.disagreements,
-    (id, owner) => tier(id) < TIER_SLOT_OWNER && lacks(id, owner),
+    (id, owner) => shownTier(id) < TIER_SLOT_OWNER && lacks(id, owner),
   );
 
   const found = [...filed].map(([hub, own]): PartialMembership => {
