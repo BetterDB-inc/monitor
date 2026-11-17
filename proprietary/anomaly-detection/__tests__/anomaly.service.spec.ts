@@ -26527,6 +26527,17 @@ describe('AnomalyService', () => {
         expect(partialEvents()).toHaveLength(2);
       });
 
+      it('gives the number of peers, not of links, as the value of a join broken in both directions', async () => {
+        knows.n = ['a', 'n'];
+
+        await rounds(19);
+
+        expect(report().partialMembership).toMatchObject([
+          { notKnownBy: [{ nodeId: 'b' }, { nodeId: 'c' }], ownViewMissing: [{ nodeId: 'b' }, { nodeId: 'c' }] },
+        ]);
+        expect(partialEvents().map((event) => event.value)).toEqual([2]);
+      });
+
       it('lists the node as still counted after its event was closed by hand', async () => {
         await rounds(19);
         await service.resolveAnomaly(partialEvents()[0].id);
