@@ -26089,6 +26089,22 @@ describe('AnomalyService', () => {
       expect(divergenceEvents()).toHaveLength(1);
     });
 
+    it('lists an open owner dispute under its event when none of its confirmed slots are left', async () => {
+      const raised = () => service.getTopologyDivergence('conn-1').divergences;
+      views.b = { a: { slots: '100-5460' }, b: { slots: '0-99 5461-10922' } };
+      await rounds(3);
+      const [{ id }] = divergenceEvents();
+
+      views.b = { a: { slots: '0-99 200-5460' }, b: { slots: '100-199 5461-10922' } };
+      for (let round = 0; round < 4; round++) {
+        await rounds(1);
+
+        expect(raised()).toMatchObject([{ eventId: id, confirmed: true }]);
+        expect(raised().flatMap((d) => d.disagreements.map((x) => x.slots))).toEqual([[[100, 199]]]);
+        expect(divergenceEvents().filter((e) => !e.resolved).map((e) => e.id)).toEqual([id]);
+      }
+    });
+
     it('hands the open event to another connection when the first one goes quiet', async () => {
       views.c = { a: { epoch: 9 } };
       const second: ConnectionContext = {
