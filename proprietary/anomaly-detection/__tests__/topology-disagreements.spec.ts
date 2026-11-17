@@ -874,6 +874,24 @@ describe('summarizeDisagreements', () => {
     ]);
   });
 
+  it('keeps the replicas of a primary that no view lists in one shard', () => {
+    const nodes = [
+      node('p1', { slots: [[0, SLOTS - 1]] }),
+      node('r1', { flags: ['slave'], master: 'gone' }),
+      node('r2', { flags: ['slave'], master: 'gone' }),
+      node('r3', { flags: ['slave'], master: '-' }),
+    ];
+
+    const summary = summarizeDisagreements(round(nodes), noEvent);
+
+    expect(summary.shards.map((shard) => [shard.shardId, shard.nodes, shard.primary])).toEqual([
+      ['p1', 1, expect.objectContaining({ nodeId: 'p1' })],
+      ['gone', 2, null],
+      ['r3', 1, null],
+    ]);
+    expect(summary.shardTotals.total).toBe(3);
+  });
+
   it('caps the listed nodes and keeps the exact counts', () => {
     const nodes = cluster(40);
     const primaries = nodes.filter((entry) => entry.flags.includes('master')).map((entry) => entry.id);
