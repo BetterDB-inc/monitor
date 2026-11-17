@@ -49,6 +49,7 @@ export interface PartialMembership {
   knownBy: MembershipPeer[];
   notKnownBy: MembershipGapPeer[];
   ownViewMissing: MembershipGapPeer[];
+  brokenPeers: number;
   disagreementKeys: string[];
   slotDisputeKeys: string[];
   firstSeenAt: number;
@@ -189,13 +190,25 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
   const memberships = input.disagreements.filter(isMembership);
   const byKey = new Map(memberships.map((disagreement) => [disagreement.key, disagreement]));
 
+  const peerSightings = (id: string): MembershipSighting[] =>
+    (sightings.get(id) ?? []).filter((sighting) => sighting.observerId !== id);
+  const failingForAll = (id: string): boolean => {
+    const seen = peerSightings(id);
+    return seen.length > 0 && seen.every((sighting) => isFlaggedFailing(sighting.node));
+  };
+
   const endpoints = new Map<string, Endpoint | null>();
   const endpointFor = (id: string): Endpoint | null => {
     if (endpoints.has(id)) return endpoints.get(id) as Endpoint | null;
-    const seen = sightings.get(id) ?? [];
-    const fromPeers = seen.filter((sighting) => sighting.observerId !== id).map((sighting) => sighting.node);
+    const fromPeers = peerSightings(id).map((sighting) => sighting.node);
+    const trusted = fromPeers.filter((node) => !isFlaggedFailing(node));
     const [own] = endpointsOf([selves.get(id)]);
-    const endpoint = mostCommon(endpointsOf(fromPeers), own) ?? own ?? endpointsOf([nodes.get(id)])[0] ?? null;
+    const endpoint =
+      mostCommon(endpointsOf(trusted), own) ??
+      own ??
+      mostCommon(endpointsOf(fromPeers), undefined) ??
+      endpointsOf([nodes.get(id)])[0] ??
+      null;
     endpoints.set(id, endpoint);
     return endpoint;
   };
@@ -203,11 +216,10 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
   const peer = (id: string): MembershipPeer => ({ nodeId: id, address: addressOf(endpointFor(id)) });
 
   const claims = (link: Link): boolean => {
-    const seen = sightings.get(link.subject) ?? [];
+    if (!selves.has(link.observer) && failingForAll(link.observer)) return false;
     if (selves.has(link.subject)) return true;
-    const others = seen.filter((sighting) => sighting.observerId !== link.subject);
-    if (others.length === 0) return open.has(link.subject) || open.has(link.observer);
-    return !others.every((sighting) => isFlaggedFailing(sighting.node));
+    if (peerSightings(link.subject).length === 0) return open.has(link.subject) || open.has(link.observer);
+    return !failingForAll(link.subject);
   };
 
   const tiers = new Map<string, number>();
@@ -278,7 +290,8 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
   const found = [...filed].map(([hub, own]): PartialMembership => {
     const knowers = (sightings.get(hub) ?? []).map((sighting) => sighting.observerId);
     const lasting = own.filter((link) => !link.gone);
-    const history = (lasting.length > 0 ? lasting : own).map((link) => {
+    const kept = lasting.length > 0 ? lasting : own;
+    const history = kept.map((link) => {
       const dispute = byKey.get(link.key) as TrackedDisagreement;
       const streak = dispute.gapStreaks?.[link.observer];
       const { firstSeenAt, rounds } = streak ?? dispute;
@@ -299,10 +312,11 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
       nodeId: hub,
       address: addressOf(endpoint),
       knownBy: sortedUnique(knowers)
-        .filter((id) => id !== hub && selves.has(id))
+        .filter((id) => id !== hub)
         .map(peer),
       notKnownBy,
       ownViewMissing,
+      brokenPeers: new Set(kept.map((link) => (link.observer === hub ? link.subject : link.observer))).size,
       disagreementKeys: sortedUnique(own.map((link) => link.key)),
       slotDisputeKeys: explained.filter(({ nodeIds }) => nodeIds.includes(hub)).map(({ key }) => key),
       firstSeenAt: Math.min(...history.map((entry) => entry.firstSeenAt)),
