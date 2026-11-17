@@ -1,15 +1,15 @@
 import { isIP } from 'net';
 import type { ClusterNode } from '@app/common/types/metrics.types';
 import {
-  FAILING_FLAGS,
   type MembershipGap,
   type TopologyDisagreement,
   type TopologyView,
   type TrackedDisagreement,
   UNASSIGNED_SLOT_OWNER,
-  UNREACHABLE_FLAGS,
   compareText,
   durationOf,
+  isFlaggedFailing,
+  isKnownMember,
   lackingObservers,
   sortedUnique,
 } from './topology-divergence';
@@ -74,6 +74,8 @@ interface Endpoint {
   busPort: number;
 }
 
+type MembershipDispute = TopologyDisagreement & Pick<Partial<TrackedDisagreement>, 'gapStreaks'>;
+
 interface Link {
   observer: string;
   subject: string;
@@ -94,14 +96,6 @@ const GAP_LABELS: Record<MembershipGap, string> = {
   noaddr: 'no address',
 };
 
-function isListed(node: ClusterNode): boolean {
-  return !node.flags.some((flag) => UNREACHABLE_FLAGS.includes(flag));
-}
-
-function isFailing(node: ClusterNode): boolean {
-  return node.flags.some((flag) => FAILING_FLAGS.includes(flag));
-}
-
 function isMembership(disagreement: TopologyDisagreement): boolean {
   return disagreement.kind === 'membership';
 }
@@ -109,7 +103,7 @@ function isMembership(disagreement: TopologyDisagreement): boolean {
 function tierOf(node: ClusterNode | undefined): number {
   if (!node) return TIER_NEW;
   if (node.slots.length > 0) return TIER_SLOT_OWNER;
-  return node.flags.includes('slave') ? TIER_REPLICA : TIER_NEW;
+  return node.flags.includes('slave') || node.flags.includes('replica') ? TIER_REPLICA : TIER_NEW;
 }
 
 function endpointOf(node: ClusterNode): Endpoint | null {
@@ -126,7 +120,7 @@ function endpointOf(node: ClusterNode): Endpoint | null {
 
 function endpointsOf(nodes: Array<ClusterNode | undefined>): Endpoint[] {
   return nodes
-    .filter((node): node is ClusterNode => !!node && isListed(node))
+    .filter((node): node is ClusterNode => !!node && isKnownMember(node))
     .map(endpointOf)
     .filter((endpoint): endpoint is Endpoint => !!endpoint);
 }
@@ -155,7 +149,7 @@ function mostCommon(endpoints: Endpoint[], own: Endpoint | undefined): Endpoint 
 
 export function membershipSightings(
   views: TopologyView[],
-  disagreements: TopologyDisagreement[],
+  disagreements: MembershipDispute[],
 ): Map<string, MembershipSighting[]> {
   const wanted = new Set(
     disagreements
@@ -163,13 +157,14 @@ export function membershipSightings(
       .flatMap((disagreement) => [
         ...disagreement.subjectIds,
         ...lackingObservers(disagreement).map(({ observer }) => observer),
+        ...Object.keys(disagreement.gapStreaks ?? {}),
       ]),
   );
   const sightings = new Map<string, MembershipSighting[]>();
   if (wanted.size === 0) return sightings;
   for (const view of views) {
     for (const node of view.nodes) {
-      if (!wanted.has(node.id) || !isListed(node)) continue;
+      if (!wanted.has(node.id) || !isKnownMember(node)) continue;
       const seen = sightings.get(node.id);
       if (seen) seen.push({ observerId: view.observerId, node });
       else sightings.set(node.id, [{ observerId: view.observerId, node }]);
@@ -198,9 +193,8 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
   const endpointFor = (id: string): Endpoint | null => {
     if (endpoints.has(id)) return endpoints.get(id) as Endpoint | null;
     const seen = sightings.get(id) ?? [];
-    const fromItself = seen.filter((sighting) => sighting.observerId === id).map((sighting) => sighting.node);
     const fromPeers = seen.filter((sighting) => sighting.observerId !== id).map((sighting) => sighting.node);
-    const [own] = endpointsOf([...fromItself, selves.get(id)]);
+    const [own] = endpointsOf([selves.get(id)]);
     const endpoint = mostCommon(endpointsOf(fromPeers), own) ?? own ?? endpointsOf([nodes.get(id)])[0] ?? null;
     endpoints.set(id, endpoint);
     return endpoint;
@@ -213,7 +207,7 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
     if (selves.has(link.subject)) return true;
     const others = seen.filter((sighting) => sighting.observerId !== link.subject);
     if (others.length === 0) return open.has(link.subject) || open.has(link.observer);
-    return !others.every((sighting) => isFailing(sighting.node));
+    return !others.every((sighting) => isFlaggedFailing(sighting.node));
   };
 
   const tiers = new Map<string, number>();
@@ -225,33 +219,46 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
     return found;
   };
 
-  const lists = (observer: string, subject: string): boolean =>
-    !!sightings.get(subject)?.some((sighting) => sighting.observerId === observer);
-
   const links = memberships
     .flatMap((disagreement): Link[] => {
       const [subject] = disagreement.subjectIds;
       const streaks = disagreement.gapStreaks;
-      return lackingObservers(disagreement).map(({ observer, status }) => {
-        const gone = (!!streaks && !streaks[observer]) || (selves.has(observer) && lists(observer, subject));
-        return { observer, subject, status, key: disagreement.key, answered: selves.has(observer) && !gone, gone };
+      const shown = new Map(lackingObservers(disagreement).map(({ observer, status }) => [observer, status]));
+      return sortedUnique([...shown.keys(), ...Object.keys(streaks ?? {})]).map((observer) => {
+        const status = shown.get(observer);
+        const gone = !!streaks && !streaks[observer];
+        return {
+          observer,
+          subject,
+          status: status ?? 'missing',
+          key: disagreement.key,
+          answered: !!status && !gone && selves.has(observer),
+          gone,
+        };
       });
     })
     .filter(claims);
 
   const lacked = new Map<string, Set<string>>();
-  for (const link of links) {
-    const subjects = lacked.get(link.observer);
-    if (subjects) subjects.add(link.subject);
-    else lacked.set(link.observer, new Set([link.subject]));
+  const lackedBy = new Map<string, Set<string>>();
+  const note = (pairs: Map<string, Set<string>>, from: string, to: string): void => {
+    const ends = pairs.get(from);
+    if (ends) ends.add(to);
+    else pairs.set(from, new Set([to]));
+  };
+  for (const link of links.filter((link) => !link.gone)) {
+    note(lacked, link.observer, link.subject);
+    note(lackedBy, link.subject, link.observer);
   }
   const lacks = (observer: string, subject: string): boolean => !!lacked.get(observer)?.has(subject);
+  const lackers = (id: string): number => lackedBy.get(id)?.size ?? 0;
 
   const newerEnd = (link: Link): string => {
     const { observer, subject } = link;
     if (tier(observer) !== tier(subject)) return tier(observer) < tier(subject) ? observer : subject;
     if (!lacks(subject, observer)) return subject;
     if (open.has(observer) !== open.has(subject)) return open.has(observer) ? observer : subject;
+    if (lackers(observer) !== lackers(subject)) return lackers(observer) > lackers(subject) ? observer : subject;
     return compareText(observer, subject) < 0 ? observer : subject;
   };
 
@@ -273,8 +280,9 @@ export function partiallyKnownNodes(input: PartialMembershipInput): PartialMembe
     const lasting = own.filter((link) => !link.gone);
     const history = (lasting.length > 0 ? lasting : own).map((link) => {
       const dispute = byKey.get(link.key) as TrackedDisagreement;
-      const { firstSeenAt, rounds } = dispute.gapStreaks?.[link.observer] ?? dispute;
-      return { firstSeenAt, rounds, seen: dispute.lastSeenAt >= at };
+      const streak = dispute.gapStreaks?.[link.observer];
+      const { firstSeenAt, rounds } = streak ?? dispute;
+      return { firstSeenAt, rounds, seen: dispute.lastSeenAt >= at && (streak?.lastAnsweredAt ?? at) >= at };
     });
     const read = own.filter((link) => link.answered);
     const gapPeers = (ids: Link[], end: 'observer' | 'subject'): MembershipGapPeer[] =>
