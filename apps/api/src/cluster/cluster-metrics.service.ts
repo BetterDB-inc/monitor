@@ -215,6 +215,7 @@ export interface FailedSlotMigration {
 export interface SlotMigrationReport extends SlotMigrationCheck {
   failed: FailedSlotMigration[];
   finishedJobs: string[];
+  cancelledJobs?: string[];
   jobViews: SlotMigration[];
   readNodeIds: string[];
   jobsReadNodeIds: string[];
@@ -940,6 +941,7 @@ export class ClusterMetricsService {
         migrations: [],
         failed: [],
         finishedJobs: [],
+        cancelledJobs: [],
         jobViews: [],
         readNodeIds: [],
         jobsReadNodeIds: [],
@@ -969,6 +971,7 @@ export class ClusterMetricsService {
     const atomicJobs = new Map<string, SlotMigration>();
     const failedJobs = new Map<string, FailedSlotMigration>();
     const finishedJobs = new Set<string>();
+    const cancelledJobs = new Set<string>();
     const jobViews: SlotMigration[] = [];
     const readNodeIds = new Set<string>();
     const jobsReadNodeIds = new Set<string>();
@@ -1130,6 +1133,7 @@ export class ClusterMetricsService {
           if (!task.id || (task.state === FAILED_REDIS_MIGRATION_STATE && !isImport)) continue;
           if (FINISHED_REDIS_MIGRATION_STATES.has(task.state)) {
             finishedJobs.add(task.id);
+            if (task.state === 'canceled') cancelledJobs.add(task.id);
             continue;
           }
           const retries = parseInt(task.retries ?? '', 10);
@@ -1148,6 +1152,7 @@ export class ClusterMetricsService {
         const isImport = job.operation?.toUpperCase() === 'IMPORT';
         if (FINISHED_MIGRATION_STATES.has(job.state)) {
           finishedJobs.add(job.name);
+          if (job.state === 'cancelled') cancelledJobs.add(job.name);
           if (job.state !== 'failed') continue;
         }
         if (job.state === 'failed') {
@@ -1240,6 +1245,7 @@ export class ClusterMetricsService {
       migrations: [...legacy.values(), ...atomicJobs.values()],
       failed: [...failedJobs.values()],
       finishedJobs: [...finishedJobs],
+      cancelledJobs: [...cancelledJobs],
       jobViews,
       readNodeIds: [...readNodeIds],
       jobsReadNodeIds: [...jobsReadNodeIds],
