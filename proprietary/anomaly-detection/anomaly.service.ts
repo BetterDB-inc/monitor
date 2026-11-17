@@ -267,6 +267,7 @@ import {
 import {
   type PartialMembership,
   type PartialMembershipRound,
+  inheritedPartialMemberships,
   membershipSides,
   partialMembershipMessage,
   partialMembershipNodeId,
@@ -7483,7 +7484,10 @@ export class AnomalyService
       open: openPartial,
       confirmed: confirmedPartial,
       observed: partial,
-      pendingSignatures: new Set(partial.map((finding) => finding.signature)),
+      pendingSignatures: new Set([
+        ...partial.map((finding) => finding.signature),
+        ...inheritedPartialMemberships(openPartial, partial),
+      ]),
       superseded: renamed,
       metricType: MetricType.PARTIAL_MEMBERSHIP,
       buildEvent: (finding) => this.buildPartialMembershipEvent(ctx, timestamp, round, finding),

@@ -400,6 +400,17 @@ export function renamedPartialMemberships(
   return [...open].filter(([, entry]) => entry.group && lost(entry.group)).map(([signature]) => signature);
 }
 
+export function inheritedPartialMemberships(
+  open: ReadonlyMap<string, { group?: PartialMembership }>,
+  found: PartialMembership[],
+): string[] {
+  const current = new Set(found.map((finding) => finding.signature));
+  const counted = new Set(found.filter((finding) => !finding.confirmed).flatMap((finding) => finding.disagreementKeys));
+  const waits = (finding: PartialMembership) =>
+    !current.has(finding.signature) && finding.disagreementKeys.some((key) => counted.has(key));
+  return [...open].filter(([, entry]) => entry.group && waits(entry.group)).map(([signature]) => signature);
+}
+
 export function unclaimedByPartialMembership<T extends { key: string }>(
   disagreements: T[],
   found: PartialMembership[],

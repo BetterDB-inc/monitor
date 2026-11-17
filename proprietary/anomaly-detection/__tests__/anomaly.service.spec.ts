@@ -26721,29 +26721,61 @@ describe('AnomalyService', () => {
           knows.c = ['a', 'b', 'c'];
         });
 
-        it('leaves the event of the old name open while the new finding is not confirmed', async () => {
-          await rounds(2);
+        const openNames = () => openPartialEvents().map((e) => e.dedupeKey);
+        const closedNames = () =>
+          partialEvents()
+            .filter((e) => e.resolved)
+            .map((e) => e.dedupeKey);
 
-          expect(openPartialEvents().map((e) => e.dedupeKey)).toEqual(['partial_membership:b']);
-          expect(report().partialMembership).toMatchObject([
-            { node: { nodeId: 'b' }, confirmed: true, seen: false },
-            { node: { nodeId: 'c' }, confirmed: false, eventId: null },
-          ]);
-        });
+        it('keeps the event of the old name open until the event of the new name is raised', async () => {
+          for (let round = 0; round < 16; round++) {
+            await rounds(1);
 
-        it('closes the event of the old name after the configured rounds', async () => {
-          await rounds(3);
-
-          expect(openPartialEvents()).toEqual([]);
-          expect(report().partialMembership).toMatchObject([{ node: { nodeId: 'c' }, eventId: null }]);
-        });
-
-        it('raises the event of the new name once its own link has lasted 90 seconds', async () => {
-          await rounds(16);
-          expect(openPartialEvents()).toEqual([]);
+            expect(openNames()).toEqual(['partial_membership:b']);
+            expect(closedNames()).toEqual([]);
+          }
 
           await rounds(1);
-          expect(openPartialEvents().map((e) => e.dedupeKey)).toEqual(['partial_membership:c']);
+          expect(openNames()).toEqual(['partial_membership:c']);
+          expect(closedNames()).toEqual(['partial_membership:b']);
+        });
+
+        it('lists the old name with its event and the new one as counted in between', async () => {
+          const [{ id }] = openPartialEvents();
+          await rounds(5);
+
+          expect(report().partialMembership).toMatchObject([
+            { node: { nodeId: 'b' }, eventId: id, confirmed: true, seen: false, disagreements: [] },
+            { node: { nodeId: 'c' }, eventId: null, confirmed: false, seen: true, disagreements: [{ eventId: null }] },
+          ]);
+          const entries = [...report().partialMembership, ...report().divergences];
+          const lines = entries.flatMap((entry) => entry.disagreements);
+          expect(lines.filter((line) => line.kind === 'membership')).toHaveLength(1);
+        });
+
+        it('closes the event of the old name after the configured rounds once no finding holds it', async () => {
+          await rounds(2);
+          knows.b = ['a', 'b', 'c'];
+
+          await rounds(2);
+          expect(openNames()).toEqual(['partial_membership:b']);
+
+          await rounds(1);
+          expect(openNames()).toEqual([]);
+          expect(partialEvents()).toHaveLength(1);
+          expect(report().partialMembership).toEqual([]);
+        });
+
+        it('keeps the event of the old name for 5 minutes at most while the new finding is not read', async () => {
+          await rounds(2);
+          silent.add('b');
+
+          await rounds(60);
+          expect(openNames()).toEqual(['partial_membership:b']);
+
+          await rounds(4);
+          expect(openNames()).toEqual([]);
+          expect(partialEvents()).toHaveLength(1);
         });
       });
 
