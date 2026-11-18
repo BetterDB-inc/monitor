@@ -74,8 +74,11 @@ export class ClusterNodeConnectService {
     const occupant = this.connectionRegistry.findIdByHostPort(address.host, address.port);
     if (occupant) {
       const name = this.connectionRegistry.getConfig(occupant)?.name ?? occupant;
+      const reason = this.connectionRegistry.isOutsideCluster(occupant)
+        ? 'which is not part of a cluster'
+        : 'which reads another node there';
       throw new ConflictException(
-        `${address.host}:${address.port} is already registered as '${name}', which reads another node there. Remove that connection first.`,
+        `${address.host}:${address.port} is already registered as '${name}', ${reason}. Remove that connection first.`,
       );
     }
     try {

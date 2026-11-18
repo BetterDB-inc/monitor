@@ -24,6 +24,7 @@ function build(
     nodes?: DiscoveredNode[] | Error;
     dial?: Promise<void>;
     seenReading?: Record<string, string>;
+    outsideCluster?: string[];
   } = {},
 ) {
   const seenReading = options.seenReading ?? {};
@@ -36,6 +37,7 @@ function build(
       return found?.id ?? null;
     }),
     getObservedNodeId: jest.fn((id: string) => seenReading[id]),
+    isOutsideCluster: jest.fn((id: string) => (options.outsideCluster ?? []).includes(id)),
     findIdObservingNode: jest.fn(
       (nodeId: string) => Object.keys(seenReading).find((id) => seenReading[id] === nodeId) ?? null,
     ),
@@ -295,6 +297,19 @@ describe('ClusterNodeConnectService', () => {
 
     await expect(service.connect('cluster', 'n2')).rejects.toThrow(ConflictException);
 
+    expect(registry.addNodeConnection).not.toHaveBeenCalled();
+  });
+
+  it('refuses when the connection at the address answers as an instance outside a cluster', async () => {
+    const { service, registry } = build({
+      configs: [connection('cluster'), connection('hand-made', { host: '10.0.0.2', port: 7002 })],
+      outsideCluster: ['hand-made'],
+    });
+
+    const failure = service.connect('cluster', 'n2');
+
+    await expect(failure).rejects.toThrow(ConflictException);
+    await expect(failure).rejects.toThrow("'hand-made', which is not part of a cluster");
     expect(registry.addNodeConnection).not.toHaveBeenCalled();
   });
 
