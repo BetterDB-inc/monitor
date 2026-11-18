@@ -1,6 +1,7 @@
-import { beforeEach, describe, it, expect, vi } from 'vitest';
-import { render, screen, within, fireEvent } from '@testing-library/react';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+import { act, render, screen, within, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import { ApiError } from '@/api/client';
 import { ClusterDisagreements } from './ClusterDisagreements';
 import type {
   DisagreementLine,
@@ -506,5 +507,109 @@ describe('ClusterDisagreements full check', () => {
     rerender(view(reportOf(doneCheck(Date.now() - 90_000)), { connectionId: 'conn-2' }));
 
     expect(screen.getByRole('article', { name: SAMPLED_TEXT })).toBeInTheDocument();
+  });
+
+  describe('wait after a check', () => {
+    const TOO_SOON = 'The last full check finished less than 30 seconds ago';
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    function pass(ms: number) {
+      act(() => {
+        vi.advanceTimersByTime(ms);
+      });
+    }
+
+    it('does not offer a check until the wait after the last one is over', () => {
+      const onAskEveryNode = vi.fn();
+      render(view(reportOf(doneCheck(Date.now() - 10_000)), { onAskEveryNode }));
+      const button = screen.getByRole('button', { name: 'Ask every node' });
+
+      expect(button).toBeDisabled();
+      fireEvent.click(button);
+      expect(onAskEveryNode).not.toHaveBeenCalled();
+
+      pass(19_000);
+      expect(button).toBeDisabled();
+
+      pass(1_000);
+      expect(button).toBeEnabled();
+    });
+
+    it('offers a check when the wait is already over', () => {
+      render(view(reportOf(doneCheck(Date.now() - 31_000))));
+
+      expect(screen.getByRole('button', { name: 'Ask every node' })).toBeEnabled();
+    });
+
+    it('waits after a check that failed too', () => {
+      const failedAt = Date.now() - 5_000;
+      render(
+        view(
+          reportOf(
+            checkOf({ retryAt: failedAt + 30_000, lastFailure: { at: failedAt, reason: 'boom' } }),
+          ),
+        ),
+      );
+
+      expect(screen.getByRole('button', { name: 'Ask every node' })).toBeDisabled();
+
+      pass(25_000);
+
+      expect(screen.getByRole('button', { name: 'Ask every node' })).toBeEnabled();
+    });
+
+    it('drops the refusal for asking too soon when the wait is over', () => {
+      const askError = new ApiError(TOO_SOON, 429, { retryAt: Date.now() + 12_000 });
+      render(view(reportOf(checkOf()), { askError }));
+
+      expect(screen.getByRole('alert')).toHaveTextContent(TOO_SOON);
+      expect(screen.getByRole('button', { name: 'Ask every node' })).toBeDisabled();
+
+      pass(12_000);
+
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Ask every node' })).toBeEnabled();
+    });
+
+    it('drops the refusal with the wait the report gives when the refusal names none', () => {
+      const finishedAt = Date.now() - 20_000;
+      render(view(reportOf(doneCheck(finishedAt)), { askError: new ApiError(TOO_SOON, 429) }));
+
+      expect(screen.getByText(TOO_SOON)).toBeInTheDocument();
+
+      pass(10_000);
+
+      expect(screen.queryByText(TOO_SOON)).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Ask every node' })).toBeEnabled();
+    });
+
+    it('keeps another error on screen after the wait', () => {
+      const askError = new ApiError('The node list of the cluster could not be read', 503);
+      render(view(reportOf(doneCheck(Date.now() - 20_000)), { askError }));
+
+      pass(10_000);
+
+      expect(screen.getByRole('alert')).toHaveTextContent(
+        'The node list of the cluster could not be read',
+      );
+    });
+
+    it('waits again when a newer check finishes', () => {
+      const { rerender } = render(view(reportOf(doneCheck(Date.now() - 40_000))));
+      expect(screen.getByRole('button', { name: 'Ask every node' })).toBeEnabled();
+
+      rerender(view(reportOf(doneCheck(Date.now()))));
+      expect(screen.getByRole('button', { name: 'Ask every node' })).toBeDisabled();
+
+      pass(30_000);
+      expect(screen.getByRole('button', { name: 'Ask every node' })).toBeEnabled();
+    });
   });
 });

@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { INCIDENT_LOOKBACK_MS, incidentEventPath } from '@betterdb/shared';
+import { ApiError } from '@/api/client';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -39,6 +40,7 @@ const EVENTS_PATH = '/anomalies';
 const FULL_CHECK_FRESH_MS = 60_000;
 const MINUTE_MS = 60_000;
 const CLOCK_TICK_MS = 10_000;
+const TOO_MANY_REQUESTS = 429;
 
 type ResultShown = 'sampled' | 'full';
 
@@ -402,15 +404,36 @@ function failureText(check: TopologyFullCheck, failure: FullCheckFailure): strin
   return `${failed} The full check on offer is the one before it, taken ${earlier}.`;
 }
 
+function isTooSoon(error: Error | null | undefined): error is ApiError {
+  return error instanceof ApiError && error.status === TOO_MANY_REQUESTS;
+}
+
+function retryAtOf(error: ApiError): number {
+  const retryAt = (error.payload as { retryAt?: unknown } | null)?.retryAt;
+  return typeof retryAt === 'number' ? retryAt : 0;
+}
+
+function useWaitingUntil(until: number): boolean {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (now >= until) return;
+    const timer = setTimeout(() => setNow(Date.now()), Math.max(0, until - Date.now()));
+    return () => clearTimeout(timer);
+  }, [until, now]);
+  return now < until;
+}
+
 function AskEveryNode({
   check,
   canAsk,
   asking,
+  waiting,
   onAsk,
 }: {
   check: TopologyFullCheck;
   canAsk: boolean;
   asking: boolean;
+  waiting: boolean;
   onAsk: () => void;
 }) {
   if (check.unavailable) {
@@ -425,7 +448,7 @@ function AskEveryNode({
     <Button
       size="sm"
       variant="outline"
-      disabled={asking || check.state === 'running'}
+      disabled={asking || waiting || check.state === 'running'}
       onClick={onAsk}
     >
       Ask every node
@@ -440,6 +463,7 @@ function FullCheckBar({
   onAsk,
   canAsk,
   asking,
+  waiting,
   askError,
 }: {
   check: TopologyFullCheck;
@@ -448,6 +472,7 @@ function FullCheckBar({
   onAsk: () => void;
   canAsk: boolean;
   asking: boolean;
+  waiting: boolean;
   askError?: Error | null;
 }) {
   const result = check.state === 'done' ? check.summary : undefined;
@@ -477,7 +502,13 @@ function FullCheckBar({
         ) : (
           <span />
         )}
-        <AskEveryNode check={check} canAsk={canAsk} asking={asking} onAsk={onAsk} />
+        <AskEveryNode
+          check={check}
+          canAsk={canAsk}
+          asking={asking}
+          waiting={waiting}
+          onAsk={onAsk}
+        />
       </div>
       {check.state === 'running' && (
         <p role="status" aria-label="Full check progress" className="text-sm text-muted-foreground">
@@ -638,6 +669,10 @@ function ConnectionDisagreements({
   const finishedAt = check?.state === 'done' ? check.finishedAt : null;
   const failedAt = check?.lastFailure?.at ?? null;
   const full = check?.state === 'done' ? check.summary : undefined;
+  const tooSoon = isTooSoon(askError);
+  const retryAt = Math.max(check?.retryAt ?? 0, tooSoon ? retryAtOf(askError) : 0);
+  const waiting = useWaitingUntil(retryAt);
+  const waitIsOver = retryAt > 0 && !waiting;
 
   if (awaited && askError && askError !== awaited.error) {
     setAwaited(null);
@@ -680,7 +715,8 @@ function ConnectionDisagreements({
           onAsk={ask}
           canAsk={canAsk}
           asking={asking}
-          askError={askError}
+          waiting={waiting}
+          askError={tooSoon && waitIsOver ? null : askError}
         />
       )}
       {shown === 'full' && full ? (
