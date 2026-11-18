@@ -907,6 +907,32 @@ describe('matchDivergence', () => {
     expect(matchDivergence([raised], epoch('x', ['r7'], ['a', 'd']))).toBeUndefined();
   });
 
+  it('takes the group that was confirmed last when two cover a line alike, in whatever order they come', () => {
+    const outgoing = { ...raisedFor('e1', epoch('x', ['b'])), confirmedAt: 1000 };
+    const current = { ...raisedFor('e2', epoch('x', ['b', 'c'])), confirmedAt: 2000 };
+    const line = epoch('x', ['b', 'c']);
+
+    expect(matchDivergence([outgoing, current], line)?.id).toBe('e2');
+    expect(matchDivergence([current, outgoing], line)?.id).toBe('e2');
+  });
+
+  it('takes an event that is open before one that was resolved by hand', () => {
+    const resolved = { ...raisedFor('e1', epoch('x', ['b'])), confirmedAt: 3000, resolvedByHand: true };
+    const open = { ...raisedFor('e2', epoch('x', ['b', 'c'])), confirmedAt: 2000 };
+    const line = epoch('x', ['b', 'c']);
+
+    expect(matchDivergence([resolved, open], line)?.id).toBe('e2');
+    expect(matchDivergence([open, resolved], line)?.id).toBe('e2');
+    expect(matchDivergence([resolved], line)?.id).toBe('e1');
+  });
+
+  it('takes an open event that shares fewer slots before one that was resolved by hand', () => {
+    const resolved = { ...raisedFor('e1', dispute('slot_owner:A|B', [[0, 100]], ['b'])), resolvedByHand: true };
+    const open = raisedFor('e2', dispute('slot_owner:A|B#2', [[50, 50]], ['b']));
+
+    expect(matchDivergence([resolved, open], dispute('slot_owner:A|B', [[0, 100]], ['b']))?.id).toBe('e2');
+  });
+
   it('takes the event that shares the most slots', () => {
     const small = raisedFor('e1', dispute('slot_owner:A|B', [[0, 9]], ['b']));
     const large = raisedFor('e2', dispute('slot_owner:A|B#2', [[10, 99]], ['b']));

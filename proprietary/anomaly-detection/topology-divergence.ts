@@ -523,17 +523,30 @@ function sharedWithGroup(group: DivergenceGroup, disagreement: TopologyDisagreem
   );
 }
 
-export function matchDivergence<T extends { group: DivergenceGroup }>(
+export interface DivergenceCandidate {
+  group: DivergenceGroup;
+  resolvedByHand?: boolean;
+  confirmedAt?: number;
+}
+
+function comesBefore(ranks: number[], best: number[]): boolean {
+  const at = ranks.findIndex((rank, index) => rank !== best[index]);
+  return at < 0 || ranks[at] > best[at];
+}
+
+export function matchDivergence<T extends DivergenceCandidate>(
   raised: readonly T[],
   disagreement: TopologyDisagreement,
 ): T | undefined {
   let match: T | undefined;
-  let most = 0;
+  let best: number[] = [];
   for (const candidate of raised) {
     const shared = sharedWithGroup(candidate.group, disagreement);
-    if (shared <= most) continue;
+    if (shared === 0) continue;
+    const ranks = [candidate.resolvedByHand ? 0 : 1, shared, candidate.confirmedAt ?? 0];
+    if (match && !comesBefore(ranks, best)) continue;
     match = candidate;
-    most = shared;
+    best = ranks;
   }
   return match;
 }
