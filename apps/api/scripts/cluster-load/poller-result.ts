@@ -1,4 +1,5 @@
 import { percentile } from '../../src/monitor/cross-reference.engine';
+import type { PassTotals } from './pass-recorder';
 
 export interface PollerResult {
   intervalMs: number;
@@ -14,11 +15,12 @@ export interface PollerResult {
 export const round = (value: number, digits = 1): number => Number(value.toFixed(digits));
 
 export function pollerResult(
-  durations: number[],
+  passes: PassTotals,
   intervalMs: number,
   commands: number,
   windowSeconds: number,
 ): PollerResult {
+  const { durations } = passes;
   return {
     intervalMs,
     ticks: durations.length,
@@ -26,7 +28,7 @@ export function pollerResult(
     p50Ms: round(percentile(durations, 0.5)),
     p95Ms: round(percentile(durations, 0.95)),
     maxMs: round(durations.length ? Math.max(...durations) : 0),
-    commandsPerTick: durations.length ? round(commands / durations.length) : 0,
+    commandsPerTick: durations.length ? round(passes.commands / durations.length) : 0,
     commandsPerSecond: round(commands / windowSeconds),
   };
 }

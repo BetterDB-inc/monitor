@@ -49,6 +49,14 @@ describe('cluster load test, flags', () => {
     expect(rejected(['--out', '--force'])).toContain('--out needs a directory');
   });
 
+  it('prints the usage text when --out is followed by the short help flag', () => {
+    expect(rejected(['--out', '-h'])).toContain('--out needs a directory');
+  });
+
+  it('takes a directory whose name starts with a dash behind ./', () => {
+    expect(parseArgs(['--out', './-h']).out).toBe('./-h');
+  });
+
   it('takes one hung node next to a failover in a cluster of four', () => {
     const options = parseArgs(['--nodes', '4', '--replicas', '1', '--hang', '1', '--failover']);
     expect(options).toMatchObject({ nodes: [4], hang: 1, failover: true });

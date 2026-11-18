@@ -93,7 +93,7 @@ function listOf<T>(flag: string, value: string, parse: (item: string) => T): T[]
 }
 
 function directory(value: string): string {
-  if (value.trim() === '' || value.startsWith('--')) reject('--out needs a directory.');
+  if (value.trim() === '' || value.startsWith('-')) reject('--out needs a directory.');
   return value;
 }
 

@@ -1,6 +1,7 @@
 jest.mock('fs', () => {
   const actual = jest.requireActual('fs');
-  const isEnvFile = (path: unknown) => String(path).endsWith('/.env');
+  const { basename } = jest.requireActual('path');
+  const isEnvFile = (path: unknown) => basename(String(path)) === '.env';
   return {
     ...actual,
     existsSync: (path: string) => isEnvFile(path) || actual.existsSync(path),
@@ -21,15 +22,21 @@ const loadConfig = async (prepare: 'as the load test does' | 'as the app does'):
 };
 
 describe('cluster load test, repo env file', () => {
-  const jestWorkerId = process.env.JEST_WORKER_ID;
+  const VARIABLES = ['JEST_WORKER_ID', 'CLUSTER_LOAD_PROBE'];
+  const kept = new Map<string, string | undefined>();
 
   beforeEach(() => {
-    delete process.env.JEST_WORKER_ID;
+    for (const name of VARIABLES) {
+      kept.set(name, process.env[name]);
+      delete process.env[name];
+    }
   });
 
   afterEach(() => {
-    process.env.JEST_WORKER_ID = jestWorkerId;
-    delete process.env.CLUSTER_LOAD_PROBE;
+    for (const [name, value] of kept) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
   });
 
   it('would read the repo env file like the app does', async () => {

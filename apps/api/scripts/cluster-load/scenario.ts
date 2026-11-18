@@ -6,8 +6,11 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import Valkey from 'iovalkey';
 import type { ReplyProfile } from '../../test/load/fake-cluster';
+import { callSite } from './call-site';
 import { ignoreEnvFile } from './env-file';
 import { FAILOVER_SHARD, downOutsideHung, pickHungNodes } from './hung-nodes';
+import { PassRecorder, type Pass } from './pass-recorder';
+import { pauseChecking, sleep } from './pause';
 import { pollerResult, round, type PollerResult } from './poller-result';
 import { PORTS_EXHAUSTED, portPressure, portsHeld } from './ports';
 import { ProcessLoadMeter, type ProcessLoad } from './process-load';
@@ -72,26 +75,7 @@ const PLACEHOLDER_LICENSE_KEY = 'cluster-load-test-placeholder-not-a-license';
 
 export class InvalidRunError extends Error {}
 const FAILOVER_REQUESTED = 'cluster.failover (before the license check)';
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 const mb = (bytes: number): number => round(bytes / 1024 / 1024);
-
-const APP_FRAME = /at (?:async )?(\S+) \(.*?\/(?:apps\/api\/src|proprietary)\/(.*?)\.ts:\d+:\d+\)/;
-
-function callSite(): string {
-  const limit = Error.stackTraceLimit;
-  Error.stackTraceLimit = 50;
-  const stack = new Error().stack ?? '';
-  Error.stackTraceLimit = limit;
-  const frames: string[] = [];
-  for (const line of stack.split('\n')) {
-    const match = APP_FRAME.exec(line);
-    if (!match || match[2].includes('database/adapters/')) continue;
-    const frame = `${match[2].split('/').pop()}: ${match[1]}`;
-    if (!frames.includes(frame)) frames.push(frame);
-    if (frames.length === 2) break;
-  }
-  return frames.length ? frames.join(' < ') : 'unknown';
-}
 
 function watchForPortExhaustion(onExhausted: () => void): void {
   const prototype = Socket.prototype as unknown as { destroy: (error?: Error) => unknown };
@@ -217,7 +201,7 @@ async function measure(options: ScenarioOptions, cluster: RemoteCluster, dataDir
   const entitlementUrl = options.license === 'community' ? null : await startEntitlementStub(options.license);
   applyEnvironment(options, cluster.nodes[0], entitlementUrl, dataDir);
 
-  const context = new AsyncLocalStorage<string>();
+  const context = new AsyncLocalStorage<Pass>();
   const clientCommands = new Map<string, number>();
   const clusterNodesCallers = new Map<string, number>();
   const counted = new WeakSet<object>();
@@ -227,7 +211,9 @@ async function measure(options: ScenarioOptions, cluster: RemoteCluster, dataDir
     const command = args[0] as { name?: string; args?: unknown[] } | undefined;
     if (command && !counted.has(command)) {
       counted.add(command);
-      const owner = context.getStore() ?? BACKGROUND;
+      const pass = context.getStore();
+      if (pass) pass.commands += 1;
+      const owner = pass?.name ?? BACKGROUND;
       clientCommands.set(owner, (clientCommands.get(owner) ?? 0) + 1);
       if (command.name?.toLowerCase() === 'cluster' && String(command.args?.[0]).toLowerCase() === 'nodes') {
         const key = `${owner}\n${options.callSites ? callSite() : ''}`;
@@ -248,17 +234,14 @@ async function measure(options: ScenarioOptions, cluster: RemoteCluster, dataDir
   watchForPortExhaustion(() => {
     logger.portsExhausted = true;
   });
-  const pause = async (ms: number): Promise<void> => {
-    const until = Date.now() + ms;
-    while (Date.now() < until) {
+  const pause = (ms: number): Promise<void> =>
+    pauseChecking(ms, () => {
       if (logger.portsExhausted) throw new InvalidRunError(PORTS_EXHAUSTED);
-      await sleep(Math.min(250, until - Date.now()));
-    }
-  };
+    });
   const app = await NestFactory.create(AppModule, new FastifyAdapter(), { logger });
   let licenseTier = (): string => 'unknown';
 
-  const tickDurations = new Map<string, number[]>();
+  const passes = new PassRecorder();
   const intervals = new Map<string, number>();
   const webhookEvents = new Map<string, number>();
   const seen = new Set<unknown>();
@@ -273,17 +256,18 @@ async function measure(options: ScenarioOptions, cluster: RemoteCluster, dataDir
       if (instance instanceof MultiConnectionPoller) {
         const name = instance.constructor.name;
         const tick = instance.tick.bind(instance);
-        tickDurations.set(name, []);
+        passes.track(name);
         intervals.set(name, instance.getIntervalMs());
-        instance.tick = () =>
-          context.run(name, async () => {
-            const started = performance.now();
+        instance.tick = () => {
+          const pass = passes.begin(name, performance.now());
+          return context.run(pass, async () => {
             try {
               await tick();
             } finally {
-              tickDurations.get(name)?.push(performance.now() - started);
+              passes.end(pass, performance.now());
             }
           });
+        };
       }
       if (typeof instance.dispatchClusterFailover === 'function') {
         const dispatchClusterFailover = instance.dispatchClusterFailover.bind(instance);
@@ -331,9 +315,9 @@ async function measure(options: ScenarioOptions, cluster: RemoteCluster, dataDir
   clusterNodesCallers.clear();
   webhookEvents.clear();
   logger.reset();
-  for (const durations of tickDurations.values()) durations.length = 0;
   load.start();
   const startedAt = performance.now();
+  passes.startWindow(startedAt);
 
   if (options.failover) {
     await pause(options.measureMs / 2);
@@ -346,8 +330,7 @@ async function measure(options: ScenarioOptions, cluster: RemoteCluster, dataDir
   const windowSeconds = (performance.now() - startedAt) / 1000;
   const processLoad = load.read();
   load.stop();
-  const stats = await cluster.stats();
-  const passes = new Map([...tickDurations].map(([name, durations]) => [name, [...durations]]));
+  const passTotals = passes.totals();
   const commandsByOwner = new Map(clientCommands);
   const nodesCallers = [...clusterNodesCallers]
     .map(([key, count]) => {
@@ -356,14 +339,22 @@ async function measure(options: ScenarioOptions, cluster: RemoteCluster, dataDir
     })
     .sort((left, right) => right.perSecond - left.perSecond);
   const connections = registry.list() as Array<{ host: string; port: number; isConnected: boolean }>;
+  const events = Object.fromEntries(webhookEvents);
+  const log = { warn: logger.warnCount, error: logger.errorCount, top: logger.top(8) };
+  const stats = await cluster.stats();
   (global as { gc?: () => void }).gc?.();
   const memory = process.memoryUsage();
 
   const pollers: Record<string, PollerResult> = {};
-  for (const [name, durations] of passes) {
-    pollers[name] = pollerResult(durations, intervals.get(name) ?? 0, commandsByOwner.get(name) ?? 0, windowSeconds);
+  for (const [name, totals] of passTotals) {
+    pollers[name] = pollerResult(totals, intervals.get(name) ?? 0, commandsByOwner.get(name) ?? 0, windowSeconds);
   }
-  pollers[BACKGROUND] = pollerResult([], 0, commandsByOwner.get(BACKGROUND) ?? 0, windowSeconds);
+  pollers[BACKGROUND] = pollerResult(
+    { durations: [], commands: 0 },
+    0,
+    commandsByOwner.get(BACKGROUND) ?? 0,
+    windowSeconds,
+  );
 
   const connected = connections.filter((connection) => connection.isConnected).length;
   const socketsOpenedPerSecond = stats.connectionsOpened / windowSeconds;
@@ -414,9 +405,9 @@ async function measure(options: ScenarioOptions, cluster: RemoteCluster, dataDir
     clientCommandsPerSecond: round([...commandsByOwner.values()].reduce((sum, count) => sum + count, 0) / windowSeconds),
     process: { ...processLoad, heapUsedMb: mb(memory.heapUsed), rssAfterGcMb: mb(memory.rss) },
     fakeCluster: stats.load,
-    webhookEvents: Object.fromEntries(webhookEvents),
+    webhookEvents: events,
     clusterNodesCallers: nodesCallers,
-    log: { warn: logger.warnCount, error: logger.errorCount, top: logger.top(8) },
+    log,
   };
 
   await Promise.race([app.close().catch(() => undefined), sleep(5000)]);

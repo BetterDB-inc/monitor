@@ -158,6 +158,8 @@ range.
   poller skipped work. A poller starts its next pass one interval after the
   previous one ended, so a pass that takes 150 ms on a 1 s interval gives about
   104 passes in two minutes, not 120.
+  Only passes that began and ended inside the window are counted, and
+  **Commands per tick** divides the commands of those passes by their number.
 - **KB/s received** is dominated by `CLUSTER NODES` on large clusters. Its
   reply grows with the number of nodes, and so does the number of nodes it is
   read from.
@@ -215,6 +217,10 @@ A poller starts its next pass one interval after the previous one ended. The
 number of passes in the window is therefore about 120 s / (interval + pass
 time). Fewer passes mean the cluster is sampled less often, not that work was
 skipped.
+
+The tables were measured when a pass that began in the warm-up and ended inside
+the window was still counted, so a pass count here can be one higher than the
+test would print now.
 
 ### One registered connection
 

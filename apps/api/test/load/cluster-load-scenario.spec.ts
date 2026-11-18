@@ -1,4 +1,7 @@
+import { appFrame } from '../../scripts/cluster-load/call-site';
 import { downOutsideHung, hangLimit, pickHungNodes } from '../../scripts/cluster-load/hung-nodes';
+import { PassRecorder } from '../../scripts/cluster-load/pass-recorder';
+import { pauseChecking } from '../../scripts/cluster-load/pause';
 import { pollerResult } from '../../scripts/cluster-load/poller-result';
 
 const HOST = '127.0.0.1';
@@ -70,7 +73,7 @@ describe('cluster load test, connections down at the end', () => {
 });
 
 describe('cluster load test, pass times', () => {
-  const pass = (durations: number[]) => pollerResult(durations, 1000, 0, 120);
+  const pass = (durations: number[]) => pollerResult({ durations, commands: 0 }, 1000, 0, 120);
 
   it('reads p50 of two passes between them', () => {
     expect(pass([200, 100]).p50Ms).toBe(150);
@@ -84,7 +87,7 @@ describe('cluster load test, pass times', () => {
   });
 
   it('reports the passes done, the passes an idle poller would do and the commands', () => {
-    expect(pollerResult([100, 100, 100, 100], 1000, 480, 120)).toEqual({
+    expect(pollerResult({ durations: [100, 100, 100, 100], commands: 480 }, 1000, 480, 120)).toEqual({
       intervalMs: 1000,
       ticks: 4,
       expectedTicks: 120,
@@ -97,7 +100,7 @@ describe('cluster load test, pass times', () => {
   });
 
   it('reports zeros for a poller without a pass', () => {
-    expect(pollerResult([], 0, 0, 120)).toEqual({
+    expect(pollerResult({ durations: [], commands: 0 }, 0, 0, 120)).toEqual({
       intervalMs: 0,
       ticks: 0,
       expectedTicks: 0,
@@ -107,5 +110,117 @@ describe('cluster load test, pass times', () => {
       commandsPerTick: 0,
       commandsPerSecond: 0,
     });
+  });
+});
+
+describe('cluster load test, passes in the window', () => {
+  const POLLER = 'AnomalyService';
+  let recorder: PassRecorder;
+
+  beforeEach(() => {
+    recorder = new PassRecorder();
+    recorder.track(POLLER);
+  });
+
+  it('leaves out a pass that began before the window', () => {
+    const early = recorder.begin(POLLER, 100);
+    early.commands += 5;
+    recorder.startWindow(200);
+    early.commands += 3;
+    recorder.end(early, 9200);
+    const inside = recorder.begin(POLLER, 9300);
+    inside.commands += 7;
+    recorder.end(inside, 9550);
+    expect(recorder.totals().get(POLLER)).toEqual({ durations: [250], commands: 7 });
+  });
+
+  it('leaves out a pass that has not ended', () => {
+    recorder.startWindow(200);
+    const done = recorder.begin(POLLER, 300);
+    done.commands += 4;
+    recorder.end(done, 400);
+    recorder.begin(POLLER, 500).commands += 9;
+    expect(recorder.totals().get(POLLER)).toEqual({ durations: [100], commands: 4 });
+  });
+
+  it('counts the commands a pass sends after it ended', () => {
+    recorder.startWindow(200);
+    const pass = recorder.begin(POLLER, 300);
+    pass.commands += 4;
+    recorder.end(pass, 400);
+    pass.commands += 2;
+    expect(recorder.totals().get(POLLER)).toEqual({ durations: [100], commands: 6 });
+  });
+
+  it('forgets the passes of the warm-up', () => {
+    const warmup = recorder.begin(POLLER, 100);
+    recorder.end(warmup, 150);
+    recorder.startWindow(200);
+    expect(recorder.totals().get(POLLER)).toEqual({ durations: [], commands: 0 });
+  });
+
+  it('divides the commands of the counted passes by those passes', () => {
+    const result = pollerResult({ durations: [100, 100], commands: 60 }, 1000, 90, 10);
+    expect(result.commandsPerTick).toBe(30);
+    expect(result.commandsPerSecond).toBe(9);
+  });
+});
+
+describe('cluster load test, pauses', () => {
+  it('waits for the time given', async () => {
+    const started = Date.now();
+    await pauseChecking(40, () => undefined);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(39);
+  });
+
+  it('fails at once when the check already fails', async () => {
+    const started = Date.now();
+    const check = (): void => {
+      throw new Error('out of ports');
+    };
+    await expect(pauseChecking(5000, check)).rejects.toThrow('out of ports');
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  it('fails when the check starts to fail during the last sleep', async () => {
+    let failing = false;
+    setTimeout(() => {
+      failing = true;
+    }, 10);
+    const check = (): void => {
+      if (failing) throw new Error('out of ports');
+    };
+    await expect(pauseChecking(60, check)).rejects.toThrow('out of ports');
+  });
+});
+
+describe('cluster load test, call sites', () => {
+  const FRAME = 'cluster-discovery.service: ClusterDiscoveryService.readNodes';
+
+  it('names the file and function of an app frame', () => {
+    const line = '    at ClusterDiscoveryService.readNodes (/repo/apps/api/src/cluster/cluster-discovery.service.ts:41:17)';
+    expect(appFrame(line)).toBe(FRAME);
+  });
+
+  it('names an async frame of the proprietary code', () => {
+    const line = '    at async AnomalyService.pollConnection (/repo/proprietary/anomaly/anomaly.service.ts:9:3)';
+    expect(appFrame(line)).toBe('anomaly.service: AnomalyService.pollConnection');
+  });
+
+  it('reads a frame with Windows separators', () => {
+    const line =
+      '    at ClusterDiscoveryService.readNodes (C:\\repo\\apps\\api\\src\\cluster\\cluster-discovery.service.ts:41:17)';
+    expect(appFrame(line)).toBe(FRAME);
+  });
+
+  it('skips the database adapters on either separator', () => {
+    const posix = '    at ValkeyAdapter.call (/repo/apps/api/src/database/adapters/valkey.adapter.ts:5:1)';
+    const windows = '    at ValkeyAdapter.call (C:\\repo\\apps\\api\\src\\database\\adapters\\valkey.adapter.ts:5:1)';
+    expect(appFrame(posix)).toBeNull();
+    expect(appFrame(windows)).toBeNull();
+  });
+
+  it('skips frames outside the app', () => {
+    expect(appFrame('    at Valkey.sendCommand (/repo/node_modules/iovalkey/built/Redis.js:1:1)')).toBeNull();
   });
 });
