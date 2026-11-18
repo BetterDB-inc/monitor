@@ -22317,17 +22317,23 @@ describe('AnomalyService', () => {
       const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
 
       it('drops the connection of a replica whose read hangs and reads it afresh next time', async () => {
-        replica.info.mockReturnValueOnce(new Promise(() => undefined));
-        (service as any).crossCheckDeadline.set('conn-1', Date.now() + 600);
+        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+        try {
+          replica.info.mockReturnValueOnce(new Promise(() => undefined));
+          (service as any).crossCheckDeadline.set('conn-1', Date.now() + 600);
 
-        const first = await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
-        await settle();
-        (service as any).crossCheckDeadline.set('conn-1', null);
-        const second = await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
+          const reading = (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
+          await jest.advanceTimersByTimeAsync(2_100);
+          const first = await reading;
+          (service as any).crossCheckDeadline.set('conn-1', null);
+          const second = await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
 
-        expect(first.get(ADDR)).toMatchObject({ status: 'unreachable' });
-        expect(replica.disconnect).toHaveBeenCalledTimes(1);
-        expect(second.get(ADDR)).toMatchObject({ status: 'ok' });
+          expect(first.get(ADDR)).toMatchObject({ status: 'unreachable' });
+          expect(replica.disconnect).toHaveBeenCalledTimes(1);
+          expect(second.get(ADDR)).toMatchObject({ status: 'ok' });
+        } finally {
+          jest.useRealTimers();
+        }
       });
 
       it('keeps the connection when the replica refuses the read', async () => {
@@ -22409,6 +22415,103 @@ describe('AnomalyService', () => {
 
         expect(replica.info).not.toHaveBeenCalled();
         expect(replica.disconnect).not.toHaveBeenCalled();
+      });
+
+      const healthyReply = () => new Promise<string>((resolve) => setTimeout(() => resolve(replicaReply(0)), 5));
+
+      const holdClock = (deadlineMs: number) => {
+        const start = Date.now();
+        const clock = jest.spyOn(Date, 'now').mockReturnValue(start);
+        (service as any).crossCheckDeadline.set('conn-1', start + deadlineMs);
+        return { start, clock };
+      };
+
+      it('keeps the connection when it arrives after the read timed out with a millisecond left', async () => {
+        let connect!: (client: typeof replica) => void;
+        getReplicaConnection.mockReturnValueOnce(new Promise((resolve) => (connect = resolve)));
+        replica.info.mockImplementation(healthyReply);
+        const { start, clock } = holdClock(600);
+        await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
+        clock.mockReturnValue(start + 99);
+        connect(replica);
+        await settle();
+        clock.mockRestore();
+        (service as any).crossCheckDeadline.set('conn-1', null);
+
+        const second = await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
+
+        expect(second.get(ADDR)).toMatchObject({ status: 'ok' });
+        expect(replica.disconnect).not.toHaveBeenCalled();
+      });
+
+      it('reads a replica whose dial lands with 30 ms of the read left', async () => {
+        const { start, clock } = holdClock(600);
+        getReplicaConnection.mockImplementationOnce(async () => {
+          clock.mockReturnValue(start + 70);
+          return replica;
+        });
+        replica.info.mockImplementation(healthyReply);
+        try {
+          const samples = await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
+
+          expect(samples.get(ADDR)).toMatchObject({ status: 'ok' });
+          expect(replica.info).toHaveBeenCalledTimes(1);
+        } finally {
+          clock.mockRestore();
+        }
+      });
+
+      it('keeps a healthy connection whose reply lands after the read gave up', async () => {
+        const { start, clock } = holdClock(600);
+        getReplicaConnection.mockImplementationOnce(
+          () =>
+            new Promise((resolve) =>
+              setTimeout(() => {
+                clock.mockReturnValue(start + 45);
+                resolve(replica);
+              }, 45),
+            ),
+        );
+        replica.info.mockImplementation(
+          () => new Promise((resolve) => setTimeout(() => resolve(replicaReply(0)), 60)),
+        );
+        let first;
+        try {
+          first = await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
+          await new Promise((resolve) => setTimeout(resolve, 60));
+        } finally {
+          clock.mockRestore();
+        }
+        (service as any).crossCheckDeadline.set('conn-1', null);
+        const second = await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
+
+        expect(first.get(ADDR)).toMatchObject({ status: 'unreachable' });
+        expect(replica.disconnect).not.toHaveBeenCalled();
+        expect(second.get(ADDR)).toMatchObject({ status: 'ok' });
+      });
+
+      it('does not dial a replica with 49 ms of the read left', async () => {
+        const { clock } = holdClock(549);
+        try {
+          const samples = await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
+
+          expect(samples.get(ADDR)).toMatchObject({ status: 'unreachable' });
+          expect(getReplicaConnection).not.toHaveBeenCalled();
+        } finally {
+          clock.mockRestore();
+        }
+      });
+
+      it('reads a replica with 50 ms of the read left', async () => {
+        const { clock } = holdClock(550);
+        try {
+          const samples = await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
+
+          expect(samples.get(ADDR)).toMatchObject({ status: 'ok' });
+          expect(replica.info).toHaveBeenCalledTimes(1);
+        } finally {
+          clock.mockRestore();
+        }
       });
 
       it('does not dial a hostname that resolves away from every connected replica', async () => {

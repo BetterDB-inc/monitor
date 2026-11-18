@@ -8484,6 +8484,7 @@ export class AnomalyService
    */
   private static readonly FANOUT_COMMAND_TIMEOUT_MS = 2_000;
   private static readonly PRIMARY_REREAD_RESERVE_MS = 500;
+  private static readonly REPLICA_READ_MIN_MS = 50;
   private static readonly REPLICA_READ_TIMED_OUT = 'Reading the replica timed out';
   private static readonly FANOUT_NODE_EVENT_LIMIT = 8;
 
@@ -11728,6 +11729,7 @@ export class AnomalyService
     const inFlight = `${ctx.connectionId}:${replicaAddr}:${reader.via}`;
     try {
       const budget = this.crossCheckBudget(ctx.connectionId, AnomalyService.PRIMARY_REREAD_RESERVE_MS);
+      if (budget < AnomalyService.REPLICA_READ_MIN_MS) throw new Error('too little time left to read the replica');
       if (this.replicaReadsInFlight.has(inFlight)) throw new Error('the previous read has not returned');
       this.replicaReadsInFlight.add(inFlight);
       const pending = reader.read(Date.now() + budget);
@@ -11779,10 +11781,13 @@ export class AnomalyService
       deadline: number,
     ) => {
       const client = await pending;
-      const remainingMs = deadline - Date.now();
-      if (remainingMs <= 0) throw new Error('no time left to read the replica');
+      if (deadline <= Date.now()) throw new Error('no time left to read the replica');
       try {
-        const reply = await withTimeout(client.info('replication'), remainingMs, AnomalyService.REPLICA_READ_TIMED_OUT);
+        const reply = await withTimeout(
+          client.info('replication'),
+          AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
+          AnomalyService.REPLICA_READ_TIMED_OUT,
+        );
         return this.convertInfoToRecord(InfoParser.parse(reply));
       } catch (err) {
         if (err instanceof Error && err.message === AnomalyService.REPLICA_READ_TIMED_OUT) client.disconnect();
