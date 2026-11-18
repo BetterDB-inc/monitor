@@ -19,8 +19,14 @@ function connection(id: string, extra: Partial<DatabaseConnectionConfig> = {}): 
 }
 
 function build(
-  options: { configs?: DatabaseConnectionConfig[]; nodes?: DiscoveredNode[] | Error; dial?: Promise<void> } = {},
+  options: {
+    configs?: DatabaseConnectionConfig[];
+    nodes?: DiscoveredNode[] | Error;
+    dial?: Promise<void>;
+    seenReading?: Record<string, string>;
+  } = {},
 ) {
+  const seenReading = options.seenReading ?? {};
   const configs = new Map((options.configs ?? [connection('cluster')]).map((config) => [config.id, config]));
   const order: string[] = [];
   const registry = {
@@ -29,6 +35,10 @@ function build(
       const found = [...configs.values()].find((config) => config.host === host && config.port === port);
       return found?.id ?? null;
     }),
+    getObservedNodeId: jest.fn((id: string) => seenReading[id]),
+    findIdObservingNode: jest.fn(
+      (nodeId: string) => Object.keys(seenReading).find((id) => seenReading[id] === nodeId) ?? null,
+    ),
     withSeedLock: jest.fn(async (id: string, fn: () => Promise<unknown>) => {
       order.push(`lock:${id}`);
       const result = await fn();
@@ -247,6 +257,44 @@ describe('ClusterNodeConnectService', () => {
 
     await expect(failure).rejects.toThrow(ConflictException);
     await expect(failure).rejects.toThrow('which reads another node there');
+    expect(registry.addNodeConnection).not.toHaveBeenCalled();
+  });
+
+  it('returns the connection seen reading the node when its saved node is the one that was replaced', async () => {
+    const child = connection('child', {
+      host: '10.0.0.2',
+      port: 7002,
+      membership: { seedId: 'cluster', nodeId: 'node-that-was-replaced', origin: 'auto', source: 'cluster' },
+    });
+    const { service, registry } = build({
+      configs: [connection('cluster'), child],
+      seenReading: { child: 'n2' },
+    });
+
+    await expect(service.connect('cluster', 'n2')).resolves.toEqual({ id: 'child', created: false });
+
+    expect(registry.addNodeConnection).not.toHaveBeenCalled();
+  });
+
+  it('returns the connection seen reading the node through another address', async () => {
+    const { service, registry } = build({
+      configs: [connection('cluster'), connection('behind-nat', { host: 'node-2.example.internal', port: 7002 })],
+      seenReading: { 'behind-nat': 'n2' },
+    });
+
+    await expect(service.connect('cluster', 'n2')).resolves.toEqual({ id: 'behind-nat', created: false });
+
+    expect(registry.addNodeConnection).not.toHaveBeenCalled();
+  });
+
+  it('refuses when a hand-added connection at the address was seen reading another node', async () => {
+    const { service, registry } = build({
+      configs: [connection('cluster'), connection('hand-made', { host: '10.0.0.2', port: 7002 })],
+      seenReading: { 'hand-made': 'node-that-took-the-address' },
+    });
+
+    await expect(service.connect('cluster', 'n2')).rejects.toThrow(ConflictException);
+
     expect(registry.addNodeConnection).not.toHaveBeenCalled();
   });
 

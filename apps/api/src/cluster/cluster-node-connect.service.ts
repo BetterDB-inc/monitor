@@ -4,7 +4,7 @@ import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { dialsDataNodes } from '../connections/data-node-reach';
 import { parseNodeAddress } from '../topology/membership-diff';
 import { ClusterDiscoveryService, type DiscoveredNode } from './cluster-discovery.service';
-import { collectionOf } from './node-collection';
+import { collectionAmong } from './node-collection';
 
 export interface ConnectedClusterNode {
   id: string;
@@ -67,12 +67,7 @@ export class ClusterNodeConnectService {
     if (!address) {
       throw new BadRequestException(`Node '${nodeId}' has no address in the cluster view yet.`);
     }
-    const collection = collectionOf(
-      node,
-      connectionId,
-      (host, port) => this.connectionRegistry.findIdByHostPort(host, port),
-      (id) => this.connectionRegistry.getConfig(id)?.membership?.nodeId,
-    );
+    const collection = collectionAmong(node, connectionId, this.connectionRegistry);
     if (collection.collected && collection.connectionId) {
       return { id: collection.connectionId, created: false };
     }
