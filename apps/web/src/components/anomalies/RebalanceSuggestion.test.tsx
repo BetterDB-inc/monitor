@@ -8,17 +8,24 @@ import type {
   RebalanceVerdict,
 } from '../../types/anomaly';
 
-const { getAnomalyEvents, getHotShards, copyToClipboard } = vi.hoisted(() => ({
-  getAnomalyEvents: vi.fn(),
-  getHotShards: vi.fn(),
-  copyToClipboard: vi.fn(),
-}));
+const { getAnomalyEvents, getHotShards, runRebalance, copyToClipboard, canMutate } = vi.hoisted(
+  () => ({
+    getAnomalyEvents: vi.fn(),
+    getHotShards: vi.fn(),
+    runRebalance: vi.fn(),
+    copyToClipboard: vi.fn(),
+    canMutate: vi.fn(() => true),
+  }),
+);
 
 vi.mock('../../api/metrics', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../api/metrics')>();
-  return { ...actual, metricsApi: { getAnomalyEvents, getHotShards } };
+  return { ...actual, metricsApi: { getAnomalyEvents, getHotShards, runRebalance } };
 });
 vi.mock('../../lib/clipboard', () => ({ copyToClipboard }));
+vi.mock('../../hooks/useCanMutate', () => ({ useCanMutate: canMutate }));
+
+import { ApiError } from '../../api/client';
 
 import { RebalanceSuggestion } from './RebalanceSuggestion';
 
@@ -109,7 +116,7 @@ function hotShard(
 async function show(
   hotShards: HotShardDetail[] | Error,
   { events = [EVENT] as unknown[], connected = true } = {},
-): Promise<void> {
+): Promise<QueryClient> {
   getAnomalyEvents.mockResolvedValue(events);
   if (hotShards instanceof Error) getHotShards.mockRejectedValue(hotShards);
   else getHotShards.mockResolvedValue(hotShards);
@@ -122,6 +129,7 @@ async function show(
   await act(async () => {
     await client.invalidateQueries();
   });
+  return client;
 }
 
 const panel = () => screen.findByRole('region', { name: /hot shard 3f2a9c1e/i });
@@ -130,6 +138,246 @@ describe('RebalanceSuggestion', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     copyToClipboard.mockResolvedValue(true);
+    canMutate.mockReturnValue(true);
+  });
+
+  describe('running the plan', () => {
+    const runnable = () => plan({ execution: { available: true } });
+
+    it('starts the confirmed moves after the admin confirms', async () => {
+      runRebalance.mockResolvedValue({});
+      await show([hotShard(runnable())]);
+      const region = await panel();
+      expect(region).toHaveTextContent('Or start it from BetterDB below.');
+
+      fireEvent.click(within(region).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+      expect(dialog).toHaveTextContent('BetterDB sends one CLUSTER MIGRATESLOTS to the hot shard at 10.0.0.1:6379.');
+      expect(dialog).toHaveTextContent('Cancel stops every slot migration on the hot shard');
+      expect(dialog).toHaveTextContent('The hot shard forks to send the slots');
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Start the migration' }));
+
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      expect(runRebalance).toHaveBeenCalledWith(SOURCE, [
+        { targetShardId: TARGET, ranges: [[2000, 2410]] },
+      ]);
+    });
+
+    const replaced = () =>
+      plan({
+        execution: { available: true },
+        moves: [{ ...plan().moves[0], ranges: [[5000, 6000]] }],
+      });
+
+    it('holds the start back until the admin reviews a plan that changed while the dialog is open', async () => {
+      runRebalance.mockResolvedValue({});
+      const client = await show([hotShard(runnable())]);
+      fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+
+      getHotShards.mockResolvedValue([hotShard(replaced())]);
+      await act(async () => {
+        await client.invalidateQueries();
+      });
+      await waitFor(() =>
+        expect(within(dialog).getByRole('button', { name: 'Start the migration' })).toBeDisabled(),
+      );
+      expect(dialog).toHaveTextContent('2000');
+      expect(dialog).not.toHaveTextContent('5000');
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Review the new plan' }));
+      const reviewed = await screen.findByRole('dialog');
+      expect(reviewed).toHaveTextContent('5000');
+      expect(reviewed).not.toHaveTextContent('2000');
+      fireEvent.click(within(reviewed).getByRole('button', { name: 'Start the migration' }));
+
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      expect(runRebalance).toHaveBeenCalledTimes(1);
+      expect(runRebalance).toHaveBeenCalledWith(SOURCE, [
+        { targetShardId: TARGET, ranges: [[5000, 6000]] },
+      ]);
+    });
+
+    it('offers the new plan once the server says the plan changed', async () => {
+      runRebalance.mockRejectedValue(new ApiError('Conflict', 409, { reason: 'plan_changed' }));
+      await show([hotShard(runnable())]);
+      fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+
+      getHotShards.mockResolvedValue([hotShard(replaced())]);
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Start the migration' }));
+
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+        'The suggestion changed since you opened it. Review the new one.',
+      );
+      expect(runRebalance).toHaveBeenCalledWith(SOURCE, [
+        { targetShardId: TARGET, ranges: [[2000, 2410]] },
+      ]);
+      await waitFor(() =>
+        expect(within(dialog).getByRole('button', { name: 'Start the migration' })).toBeDisabled(),
+      );
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Review the new plan' }));
+      const reviewed = await screen.findByRole('dialog');
+      expect(reviewed).toHaveTextContent('5000');
+      expect(within(reviewed).queryByRole('alert')).toBeNull();
+      expect(within(reviewed).getByRole('button', { name: 'Start the migration' })).toBeEnabled();
+    });
+
+    it('says why the monitor refused and keeps the dialog open', async () => {
+      runRebalance.mockRejectedValue(new ApiError('Conflict', 409, { reason: 'slots_moved' }));
+      await show([hotShard(runnable())]);
+      fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Start the migration' }));
+
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+        'The hot shard no longer owns these slots. A new suggestion follows.',
+      );
+    });
+
+    it('shows the server error when MIGRATESLOTS fails', async () => {
+      runRebalance.mockRejectedValue(
+        new ApiError('Bad Gateway', 502, { message: 'NOPERM this user has no permissions' }),
+      );
+      await show([hotShard(runnable())]);
+      fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+
+      getHotShards.mockResolvedValue([
+        hotShard(plan({ execution: { available: false, blockedBy: 'server_refused' } })),
+      ]);
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Start the migration' }));
+
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+        'NOPERM this user has no permissions',
+      );
+      await waitFor(() =>
+        expect(within(dialog).getByRole('button', { name: 'Start the migration' })).toBeDisabled(),
+      );
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Keep the plan' }));
+
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      const region = await panel();
+      expect(within(region).queryByRole('button', { name: 'Run this plan' })).toBeNull();
+      expect(region).toHaveTextContent('The server refused the last start of this plan.');
+    });
+
+    it('keeps the dialog and its error when the suggestion turns into no plan', async () => {
+      runRebalance.mockRejectedValue(
+        new ApiError('Bad Gateway', 502, {
+          message: 'CLUSTER MIGRATESLOTS did not answer within 2000ms; the migration may still have started',
+        }),
+      );
+      const client = await show([hotShard(runnable())]);
+      fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+
+      getHotShards.mockResolvedValue([hotShard(noPlan('migration_running'))]);
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Start the migration' }));
+
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+        'the migration may still have started',
+      );
+      await act(async () => {
+        await client.invalidateQueries();
+      });
+      expect(screen.getByRole('dialog')).toHaveTextContent('the migration may still have started');
+      expect(within(dialog).getByRole('button', { name: 'Start the migration' })).toBeDisabled();
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Keep the plan' }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    });
+
+    it('says why Start is off when the plan is held back while the dialog is open', async () => {
+      const client = await show([hotShard(runnable())]);
+      fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+
+      getHotShards.mockResolvedValue([
+        hotShard(plan({ execution: { available: false, blockedBy: 'migration_running' } })),
+      ]);
+      await act(async () => {
+        await client.invalidateQueries();
+      });
+
+      await waitFor(() =>
+        expect(dialog).toHaveTextContent('A slot migration is running. A plan can run once it ends.'),
+      );
+      expect(within(dialog).getByRole('button', { name: 'Start the migration' })).toBeDisabled();
+    });
+
+    it('says there is nothing to run once the suggestion is gone', async () => {
+      const client = await show([hotShard(runnable())]);
+      fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+
+      getHotShards.mockResolvedValue([hotShard(noPlan('settling'))]);
+      await act(async () => {
+        await client.invalidateQueries();
+      });
+
+      await waitFor(() => expect(dialog).toHaveTextContent('There is no suggestion to run any more.'));
+      expect(within(dialog).getByRole('button', { name: 'Start the migration' })).toBeDisabled();
+    });
+
+    it('keeps the suggestion and its Start through a failed poll', async () => {
+      const client = await show([hotShard(runnable())]);
+      fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+
+      getHotShards.mockRejectedValue(new Error('socket hang up'));
+      await act(async () => {
+        await client.invalidateQueries();
+      });
+
+      expect(
+        await screen.findByRole('region', { name: /hot shard 3f2a9c1e/i, hidden: true }),
+      ).toHaveTextContent('2000');
+      expect(dialog).not.toHaveTextContent('There is no suggestion to run any more.');
+      expect(within(dialog).getByRole('button', { name: 'Start the migration' })).toBeEnabled();
+    });
+
+    it('says a running migration holds the plan back', async () => {
+      await show([hotShard(plan({ execution: { available: false, blockedBy: 'migration_running' } }))]);
+
+      const region = await panel();
+      expect(within(region).queryByRole('button', { name: 'Run this plan' })).toBeNull();
+      expect(region).toHaveTextContent('A slot migration is running. A plan can run once it ends.');
+    });
+
+    it('offers no run to a read-only member', async () => {
+      canMutate.mockReturnValue(false);
+      await show([hotShard(runnable())]);
+
+      const region = await panel();
+      expect(within(region).queryByRole('button', { name: 'Run this plan' })).toBeNull();
+      expect(region).toHaveTextContent('BetterDB does not run it.');
+    });
+
+    it('says how to turn running on for a Valkey 9 plan', async () => {
+      await show([hotShard(plan({ execution: { available: false, blockedBy: 'flag_off' } }))]);
+
+      const region = await panel();
+      expect(within(region).queryByRole('button', { name: 'Run this plan' })).toBeNull();
+      expect(region).toHaveTextContent('BETTERDB_SLOT_MIGRATION=true');
+    });
+
+    it('says nothing more for a plan without a Valkey 9 command', async () => {
+      await show([
+        hotShard(
+          plan({
+            support: 'none',
+            commands: [],
+            execution: { available: false, blockedBy: 'flag_off' },
+          }),
+        ),
+      ]);
+
+      expect(await panel()).not.toHaveTextContent('BETTERDB_SLOT_MIGRATION');
+    });
   });
 
   it('says which slots to move and where', async () => {

@@ -20,6 +20,7 @@ import { RaftHealthBanner } from '../components/anomalies/RaftHealthBanner';
 import { ReplicaSlotStateBanner } from '../components/anomalies/ReplicaSlotStateBanner';
 import { FanoutCoverageNotice } from '../components/anomalies/FanoutCoverageNotice';
 import { HotShardCaptureNotice } from '../components/anomalies/HotShardCaptureNotice';
+import { RebalanceRuns } from '../components/anomalies/RebalanceRuns';
 import { RebalanceSuggestion } from '../components/anomalies/RebalanceSuggestion';
 import { ReplicationDivergencePanel } from '../components/anomalies/ReplicationDivergencePanel';
 import { formatValue } from '../lib/formatters';
@@ -331,6 +332,7 @@ export function AnomalyDashboard() {
       <RaftHealthBanner events={raftHealthEvents ?? undefined} />
       <ReplicaSlotStateBanner events={replicaSlotStateEvents ?? undefined} />
       <HotShardCaptureNotice connectionId={currentConnection?.id} />
+      <RebalanceRuns connectionId={currentConnection?.id} />
       <RebalanceSuggestion connectionId={currentConnection?.id} />
       <FanoutCoverageNotice
         coverage={fanoutCoverage?.find((c) => c.connectionId === currentConnection?.id)}

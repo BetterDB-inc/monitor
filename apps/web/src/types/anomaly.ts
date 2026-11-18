@@ -193,6 +193,56 @@ export interface RebalancePlan {
   plannedAfter: string[];
   support?: RebalanceSupport;
   commands?: RebalanceCommand[];
+  execution?: RebalanceExecution;
+}
+
+export type RebalanceExecutionBlocker =
+  | 'flag_off'
+  | 'not_dialed'
+  | 'provider_managed'
+  | 'unsupported_server'
+  | 'migration_running'
+  | 'plan_outdated'
+  | 'server_refused';
+
+export interface RebalanceExecution {
+  available: boolean;
+  blockedBy?: RebalanceExecutionBlocker;
+}
+
+export type RebalanceRecheckFailure = 'slots_moved' | 'source_unhealthy' | 'target_unhealthy';
+
+export type RebalanceJobState =
+  | 'starting'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled'
+  | 'unknown';
+
+export interface RebalanceRunJob {
+  targetShardId: string;
+  targetAddr: string;
+  ranges: Array<[number, number]>;
+  state: RebalanceJobState;
+  jobName?: string;
+  phase?: string;
+  message?: string;
+}
+
+export type RebalanceRunState = 'running' | 'succeeded' | 'failed' | 'cancelled' | 'unknown';
+
+export interface RebalanceRun {
+  sourceShardId: string;
+  sourceAddr: string;
+  startedBy: { userId: string | null; email: string | null };
+  startedAt: number;
+  projectedRatio: number;
+  jobs: RebalanceRunJob[];
+  state: RebalanceRunState;
+  endedAt?: number;
+  outcome?: { projectedRatio: number; actualRatio: number; measuredAt: number };
+  outcomeUnavailable?: boolean;
 }
 
 export interface RebalanceNoPlan {

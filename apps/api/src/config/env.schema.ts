@@ -263,6 +263,12 @@ export const envSchema = z
       .transform((v) => v === 'true')
       .describe('Allow all CLI commands'),
 
+    BETTERDB_SLOT_MIGRATION: z
+      .string()
+      .default('false')
+      .transform((v) => v === 'true')
+      .describe('Allow admins to run a suggested slot rebalance on Valkey 9.0+ clusters'),
+
     // Version check configuration
     VERSION_CHECK_INTERVAL_MS: z.coerce.number().int().min(60000).default(3600000),
 

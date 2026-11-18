@@ -4,8 +4,13 @@ import {
   type TopologyView,
   type TrackedDisagreement,
   compareTopologyViews,
+  failingForEveryView,
+  isFlaggedFailing,
+  isKnownMember,
+  membersByObserver,
 } from './topology-divergence';
 import { selectObservers } from './topology-observers';
+import { type MembershipSighting, membershipSightings } from './partial-membership';
 
 export const TOPOLOGY_DIVERGENCE_DEFAULTS = {
   nodesPerZone: 1,
@@ -21,9 +26,6 @@ export const TOPOLOGY_DIVERGENCE_MAX_OBSERVERS = 12;
 export const TOPOLOGY_DIVERGENCE_MAX_ACCUSED = 2;
 export const TOPOLOGY_DIVERGENCE_IDLE_ROUNDS = 3;
 export const TOPOLOGY_DIVERGENCE_BACKOFF_MAX_ROUNDS = 8;
-
-const FAILING_FLAGS = ['fail', 'fail?'];
-const UNREACHABLE_FLAGS = ['handshake', 'noaddr'];
 
 export interface DivergencePoll {
   clusterKey: string;
@@ -47,6 +49,7 @@ export interface DivergenceRoundResult {
   disagreements: TrackedDisagreement[];
   nodes: Map<string, ClusterNode>;
   selves: Map<string, ClusterNode>;
+  sightings: Map<string, MembershipSighting[]>;
 }
 
 interface ReadBackoff {
@@ -76,10 +79,7 @@ function myselfOf(nodes: ClusterNode[]): ClusterNode | undefined {
 }
 
 function isAccused(node: ClusterNode): boolean {
-  return (
-    node.flags.some((flag) => FAILING_FLAGS.includes(flag)) &&
-    !node.flags.some((flag) => UNREACHABLE_FLAGS.includes(flag))
-  );
+  return isFlaggedFailing(node) && isKnownMember(node);
 }
 
 export class TopologyDivergenceMonitor {
@@ -176,6 +176,7 @@ export class TopologyDivergenceMonitor {
       disagreements: state.tracker.tracked(),
       nodes: new Map(input.nodes.map((node) => [node.id, node])),
       selves: new Map([[self.id, self]]),
+      sightings: new Map(),
     };
     return state.last;
   }
@@ -194,7 +195,12 @@ export class TopologyDivergenceMonitor {
     }
 
     const tracked = state.tracker.tracked();
-    const frozen = new Set(tracked.flatMap((entry) => entry.positions.flatMap((position) => position.observers)));
+    const frozen = new Set(
+      tracked.flatMap((entry) => [
+        ...entry.positions.flatMap((position) => position.observers),
+        ...Object.keys(entry.gapStreaks ?? {}),
+      ]),
+    );
     const selection = selectObservers({
       nodes: input.nodes,
       anchorId: self.id,
@@ -251,6 +257,8 @@ export class TopologyDivergenceMonitor {
       disagreements: compareTopologyViews(views),
       unanswered: [...new Set([...unanswered, ...unasked])],
       views: views.length,
+      members: membersByObserver(views),
+      failing: failingForEveryView(views),
     });
     state.accused = this.accusedBy(views);
 
@@ -263,6 +271,7 @@ export class TopologyDivergenceMonitor {
       }
     }
 
+    const disagreements = state.tracker.tracked();
     return {
       clusterKey: input.clusterKey,
       anchorConnectionId: input.connectionId,
@@ -270,9 +279,10 @@ export class TopologyDivergenceMonitor {
       status: views.length >= 2 ? 'ok' : 'insufficient_views',
       observers: selection.observers,
       unanswered: [...unanswered].sort(),
-      disagreements: state.tracker.tracked(),
+      disagreements,
       nodes,
       selves,
+      sightings: membershipSightings(views, disagreements),
     };
   }
 

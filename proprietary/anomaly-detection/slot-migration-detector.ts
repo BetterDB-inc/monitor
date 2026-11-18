@@ -406,6 +406,7 @@ export function judgeSlotMigrations(
     failed.push({
       kind: 'failed',
       signature: `failed:${job.jobName}`,
+      jobName: job.jobName,
       atomic: true,
       slots: job.slotRange,
       sourceNodeId: job.sourceNodeId,
