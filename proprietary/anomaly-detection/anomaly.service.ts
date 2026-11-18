@@ -1769,6 +1769,7 @@ export class AnomalyService
       const clusterKeyUnknown = !this.connectionClusterKeys.has(ctx.connectionId);
       if (info['cluster_enabled'] === '1') {
         this.clusterNodeViews.rememberOwnRole(ctx.connectionId, nodeRoleOfInfo(info['role']), timestamp);
+        this.connectionRegistry.noteOutsideCluster(ctx.connectionId, false);
       }
       const anotherRun =
         info['cluster_enabled'] === '1' &&
@@ -1780,8 +1781,9 @@ export class AnomalyService
       }
       if (live && info['cluster_enabled'] !== '1') {
         this.forgetClusterKey(ctx.connectionId);
-        this.clusterNodeViews.leaveCluster(ctx.connectionId);
+        this.clusterNodeViews.forget(ctx.connectionId);
         this.connectionRegistry.noteObservedNodeId(ctx.connectionId, undefined);
+        this.connectionRegistry.noteOutsideCluster(ctx.connectionId, true);
       }
       await this.adoptOpenEvents(ctx, timestamp);
       replicationSample = this.replicationStream.observe(ctx.connectionId, info, timestamp);
@@ -9522,11 +9524,13 @@ export class AnomalyService
     );
     const ownNodeId = ownNodeIdOf(nodes);
     if (ownNodeId) this.connectionRegistry.noteObservedNodeId(connectionId, ownNodeId);
+    this.connectionRegistry.noteOutsideCluster(connectionId, false);
   }
 
   private forgetClusterNodes(connectionId: string): void {
     this.clusterNodeViews.forget(connectionId);
     this.connectionRegistry.noteObservedNodeId(connectionId, undefined);
+    this.connectionRegistry.noteOutsideCluster(connectionId, false);
   }
 
   private async addAnomaly(
@@ -10790,7 +10794,7 @@ export class AnomalyService
   private connectionAtAddressOf(node: ClusterNodeRef, eventConnectionId: string | undefined): string | undefined {
     const address = splitHostPort(node.address);
     const found = address ? this.connectionRegistry.findIdByHostPort(address.host, address.port) : null;
-    if (!found || this.clusterNodeViews.isOutsideCluster(found)) return undefined;
+    if (!found || this.connectionRegistry.isOutsideCluster(found)) return undefined;
     const readNodeId =
       this.connectionRegistry.getObservedNodeId(found) ??
       this.connectionRegistry.getConfig(found)?.membership?.nodeId ??

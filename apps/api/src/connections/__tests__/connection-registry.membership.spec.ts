@@ -577,6 +577,57 @@ describe('ConnectionRegistry membership', () => {
     expect(registry.getConfig(id)).toEqual(expect.objectContaining({ username: 'app', password: 'p' }));
   });
 
+  describe('a connection that answers outside the cluster', () => {
+    const child = {
+      id: 'child',
+      host: '10.0.0.2',
+      port: 7002,
+      membership: { seedId: 'seed', nodeId: 'node-n', origin: 'auto' as const, source: 'cluster' as const },
+    };
+    const byHand = { id: 'by-hand', host: '10.0.0.3', port: 7003 };
+    const failedN = { id: 'node-n', address: '10.0.0.2:7002@17002', flags: ['master', 'fail'] };
+    const failedK = { id: 'node-k', address: '10.0.0.3:7003@17003', flags: ['master', 'fail'] };
+    const registered = () => {
+      const { registry } = build();
+      put(registry, seed);
+      put(registry, child);
+      put(registry, byHand);
+      return registry;
+    };
+
+    it('is not marked until a poll says so', () => {
+      expect(registered().isOutsideCluster('child')).toBe(false);
+    });
+
+    it('is not counted for a failed node the cluster still lists at its address', () => {
+      const registry = registered();
+
+      registry.noteOutsideCluster('child', true);
+      registry.noteOutsideCluster('by-hand', true);
+
+      expect(collectionAmong(failedN, 'seed', registry)).toEqual({ collected: false });
+      expect(collectionAmong(failedK, 'seed', registry)).toEqual({ collected: false });
+    });
+
+    it('is counted again once it answers as a node of the cluster', () => {
+      const registry = registered();
+      registry.noteOutsideCluster('child', true);
+
+      registry.noteOutsideCluster('child', false);
+
+      expect(collectionAmong(failedN, 'seed', registry)).toEqual({ collected: true, connectionId: 'child' });
+    });
+
+    it('forgets the mark when the connection is removed', async () => {
+      const registry = registered();
+      registry.noteOutsideCluster('by-hand', true);
+
+      await registry.removeConnection('by-hand');
+
+      expect(registry.isOutsideCluster('by-hand')).toBe(false);
+    });
+  });
+
   describe('sentinelDataNodeCredentials', () => {
     it('returns only the data node credentials the seed configures', () => {
       const { registry } = build();

@@ -73,6 +73,7 @@ describe('ClusterDiscoveryService', () => {
       getNodeAvailabilityZones: jest.fn().mockReturnValue(undefined),
       getObservedNodeId: jest.fn().mockReturnValue(undefined),
       findIdObservingNode: jest.fn().mockReturnValue(null),
+      isOutsideCluster: jest.fn().mockReturnValue(false),
       list: jest.fn().mockReturnValue([{
         id: 'test-connection',
         name: 'Test Connection',
@@ -153,6 +154,15 @@ describe('ClusterDiscoveryService', () => {
       };
 
       const replica = await replicaCollectedBy('moved');
+
+      expect(replica?.collected).toBe(false);
+      expect(replica?.connectionId).toBeUndefined();
+    });
+
+    it('does not count a connection whose last poll found an instance outside a cluster', async () => {
+      mockConnectionRegistry.isOutsideCluster = jest.fn((id: string) => id === 'same-cluster');
+
+      const replica = await replicaCollectedBy('same-cluster');
 
       expect(replica?.collected).toBe(false);
       expect(replica?.connectionId).toBeUndefined();

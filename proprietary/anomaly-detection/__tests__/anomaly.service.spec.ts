@@ -184,6 +184,7 @@ describe('AnomalyService', () => {
     };
 
     const observedNodeIds = new Map<string, string>();
+    const outsideCluster = new Set<string>();
     const isListed = jest.fn().mockReturnValue(true);
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -206,6 +207,11 @@ describe('AnomalyService', () => {
               else observedNodeIds.delete(id);
             }),
             getObservedNodeId: jest.fn((id: string) => observedNodeIds.get(id)),
+            noteOutsideCluster: jest.fn((id: string, outside: boolean) => {
+              if (outside) outsideCluster.add(id);
+              else outsideCluster.delete(id);
+            }),
+            isOutsideCluster: jest.fn((id: string) => outsideCluster.has(id)),
             findIdObservingNode: jest.fn(
               (nodeId: string) =>
                 [...observedNodeIds].find(([id, observed]) => observed === nodeId && isListed(id))?.[0] ?? null,
@@ -13638,6 +13644,38 @@ describe('AnomalyService', () => {
           await poll();
 
           expect(registry().noteObservedNodeId).toHaveBeenLastCalledWith('conn-1', undefined);
+          expect(registry().isOutsideCluster('conn-1')).toBe(true);
+        });
+
+        it('tells the connection list when the connection answers as a cluster node again', async () => {
+          (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+            ...clusterInfoResponse,
+            stats: { ...clusterInfoResponse.stats, cluster_enabled: '0' },
+          });
+          await poll();
+          (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(clusterInfoResponse);
+          await poll();
+
+          expect(registry().isOutsideCluster('conn-1')).toBe(false);
+        });
+
+        it('does not say a connection is outside a cluster while it cannot be read', async () => {
+          await poll();
+          (dbClient.getInfoParsed as jest.Mock).mockRejectedValue(new Error('down'));
+          await poll().catch(() => undefined);
+
+          expect(registry().isOutsideCluster('conn-1')).toBe(false);
+        });
+
+        it('forgets that a removed connection was outside a cluster', async () => {
+          (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+            ...clusterInfoResponse,
+            stats: { ...clusterInfoResponse.stats, cluster_enabled: '0' },
+          });
+          await poll();
+          (service as any).onConnectionRemoved('conn-1');
+
+          expect(registry().isOutsideCluster('conn-1')).toBe(false);
         });
       });
 
@@ -16980,6 +17018,8 @@ describe('AnomalyService', () => {
               getConfig: jest.fn(),
               noteObservedNodeId: jest.fn(),
               getObservedNodeId: jest.fn(),
+              noteOutsideCluster: jest.fn(),
+              isOutsideCluster: jest.fn().mockReturnValue(false),
               findIdObservingNode: jest.fn().mockReturnValue(null),
             },
           },

@@ -75,7 +75,6 @@ export class ClusterNodeViews {
   private readonly viewKeys = new Map<string, string>();
   private readonly ownRoles = new Map<string, OwnNodeRole>();
   private readonly runIds = new Map<string, string>();
-  private readonly outsideCluster = new Set<string>();
 
   remember(
     connectionId: string,
@@ -85,7 +84,6 @@ export class ClusterNodeViews {
     describe: () => readonly ClusterNode[] = () => nodes,
     shardsRead = true,
   ): void {
-    this.outsideCluster.delete(connectionId);
     if (this.viewKeys.get(connectionId) !== viewKey) {
       this.leaveView(connectionId);
       this.viewKeys.set(connectionId, viewKey);
@@ -106,7 +104,6 @@ export class ClusterNodeViews {
   }
 
   rememberOwnRole(connectionId: string, role: ClusterNodeRef['role'] | undefined, readAt: number): void {
-    this.outsideCluster.delete(connectionId);
     if (role) {
       this.ownRoles.set(connectionId, { role, readAt });
     } else {
@@ -125,16 +122,6 @@ export class ClusterNodeViews {
     this.leaveView(connectionId);
     this.ownRoles.delete(connectionId);
     this.runIds.delete(connectionId);
-    this.outsideCluster.delete(connectionId);
-  }
-
-  leaveCluster(connectionId: string): void {
-    this.forget(connectionId);
-    this.outsideCluster.add(connectionId);
-  }
-
-  isOutsideCluster(connectionId: string): boolean {
-    return this.outsideCluster.has(connectionId);
   }
 
   view(viewKey: string): ClusterNodeView | undefined {
