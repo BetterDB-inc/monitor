@@ -248,7 +248,7 @@ import {
   parseSlotMigrationJobs,
 } from '@app/cluster/cluster-metrics.service';
 import { withConfiguredZones, withShardMetadata } from '@app/cluster/shard-metadata';
-import { ClusterNodeViews, nodeOfEvent } from './event-node';
+import { ClusterNodeViews, nodeOfEvent, nodeRoleOfInfo } from './event-node';
 import {
   type DivergenceGroup,
   type OpenDivergence,
@@ -1759,6 +1759,9 @@ export class AnomalyService
       const sentinelMode = isSentinelMode(info);
       const timestamp = Date.now();
       const clusterKeyUnknown = !this.connectionClusterKeys.has(ctx.connectionId);
+      if (info['cluster_enabled'] === '1') {
+        this.clusterNodeViews.rememberOwnRole(ctx.connectionId, nodeRoleOfInfo(info['role']), timestamp);
+      }
       if (live && info['cluster_enabled'] === '1' && clusterKeyUnknown) {
         await this.learnClusterKey(ctx, timestamp);
       }
@@ -9448,8 +9451,20 @@ export class AnomalyService
 
   private nodeInClusterView(anomaly: AnomalyEvent, connectionId: string): ClusterNodeRef | undefined {
     const view = this.clusterNodeViews.view(this.nodeViewKeyOf(connectionId));
-    const roleKnown = !view || Math.abs(anomaly.timestamp - view.readAt) <= this.nodeViewStaleMs();
-    return nodeOfEvent(anomaly, view?.directory, this.clusterNodeViews.ownNodeId(connectionId), roleKnown);
+    const staleMs = this.nodeViewStaleMs();
+    const roleKnown = !view || Math.abs(anomaly.timestamp - view.readAt) <= staleMs;
+    const own = this.clusterNodeViews.ownRole(connectionId);
+    const ownRoleIsCurrent =
+      own !== undefined &&
+      (!view || own.readAt >= view.readAt) &&
+      Math.abs(anomaly.timestamp - own.readAt) <= staleMs;
+    return nodeOfEvent(
+      anomaly,
+      view?.directory,
+      this.clusterNodeViews.ownNodeId(connectionId),
+      roleKnown,
+      ownRoleIsCurrent ? own.role : undefined,
+    );
   }
 
   private nodeViewStaleMs(): number {

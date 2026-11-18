@@ -6797,6 +6797,7 @@ describe('AnomalyService', () => {
     });
 
     it('emits a WARNING once the orphaned replica persists past the grace window', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({ ...clusterInfoResponse, server: { role: 'slave' } });
       dbClient.getClusterNodes = jest.fn().mockResolvedValue(orphanedNodes);
       await poll(); // t0: within grace, no alert
       expect(topoEvents()).toHaveLength(0);
@@ -12620,6 +12621,69 @@ describe('AnomalyService', () => {
         const event = await raisedDuring('detectOrphanedSlotKeys');
 
         expect(event?.node).toEqual(PRIMARY_NODE);
+      });
+    });
+
+    describe('in the poll that sees a failover', () => {
+      const infoWithRole = (role: string) => ({ ...clusterInfoResponse, server: { role } });
+      const promoted = (nodes: ClusterNode[]): ClusterNode[] =>
+        nodes.map((node) =>
+          node.id === 'repB'
+            ? { ...node, flags: node.flags.map((flag) => (flag === 'slave' ? 'master' : flag)), master: '-' }
+            : { ...node, flags: node.flags.map((flag) => (flag === 'master' ? 'slave' : flag)), master: 'repB' },
+        );
+      const raisedEarly = async (overrides: Partial<AnomalyEvent> = {}) => {
+        let event: AnomalyEvent | undefined;
+        jest.spyOn(service as any, 'adoptOpenEvents').mockImplementation(async () => {
+          event = await raise(overrides);
+        });
+        await poll();
+        return event;
+      };
+
+      it('gives a promoted node its new role on an event raised before the cluster is read', async () => {
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWithRole('slave'));
+        dbClient.getClusterNodes = jest.fn().mockResolvedValue(viewOf('repB'));
+        await poll();
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWithRole('master'));
+        dbClient.getClusterNodes = jest.fn().mockResolvedValue(promoted(viewOf('repB')));
+
+        const event = await raisedEarly({ metricType: MetricType.CONNECTIONS });
+
+        expect(event?.node).toMatchObject({ nodeId: 'repB', role: 'primary' });
+      });
+
+      it('gives a demoted node its new role on an event raised before the cluster is read', async () => {
+        await poll();
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWithRole('slave'));
+        dbClient.getClusterNodes = jest.fn().mockResolvedValue(promoted(viewOf('primA')));
+
+        const event = await raisedEarly({ metricType: MetricType.CONNECTIONS });
+
+        expect(event?.node).toMatchObject({ nodeId: 'primA', role: 'replica' });
+      });
+
+      it('keeps the role of another node the event is about', async () => {
+        await poll();
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWithRole('slave'));
+
+        const event = await raisedEarly({ metricType: MetricType.CLUSTER_TOPOLOGY, nodeSubject: { nodeId: 'repB' } });
+
+        expect(event?.node).toMatchObject({ nodeId: 'repB', role: 'replica' });
+      });
+
+      it('follows a newer read of the cluster by another connection over its own older role', async () => {
+        const READ_AT = 1_700_000_000_000;
+        const now = jest.spyOn(Date, 'now').mockReturnValue(READ_AT);
+        await poll();
+        now.mockReturnValue(READ_AT + 10_000);
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWithRole('master'));
+        dbClient.getClusterNodes = jest.fn().mockResolvedValue(promoted(viewOf('repB')));
+        await poll({ ...mockCtx, connectionId: 'conn-2', port: 6380 });
+
+        const event = await raise({ timestamp: READ_AT + 10_000 });
+
+        expect(event.node).toMatchObject({ nodeId: 'primA', role: 'replica' });
       });
     });
 
