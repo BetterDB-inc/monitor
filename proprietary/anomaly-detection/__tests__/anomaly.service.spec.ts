@@ -12887,6 +12887,20 @@ describe('AnomalyService', () => {
 
         expect(event.node).toMatchObject({ nodeId: 'primA', role: 'replica' });
       });
+
+      it('keeps the role of its own INFO on an event stamped with the time of that INFO', async () => {
+        const READ_AT = 1_700_000_000_000;
+        const now = jest.spyOn(Date, 'now').mockReturnValue(READ_AT);
+        await poll();
+        now.mockReturnValue(READ_AT + 10_000);
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWithRole('master'));
+        dbClient.getClusterNodes = jest.fn().mockResolvedValue(promoted(viewOf('repB')));
+        await poll({ ...mockCtx, connectionId: 'conn-2', port: 6380 });
+
+        const event = await raise({ timestamp: READ_AT });
+
+        expect(event.node).toMatchObject({ nodeId: 'primA', role: 'primary' });
+      });
     });
 
     describe('when the connection answers from another node than before', () => {
@@ -12972,7 +12986,7 @@ describe('AnomalyService', () => {
         const promotions = service
           .getRecentEvents()
           .filter((event) => event.metricType === MetricType.REPLICATION_ROLE);
-        expect(otherEvent?.node).toMatchObject({ nodeId: 'repB', role: 'replica' });
+        expect(otherEvent?.node).toMatchObject({ nodeId: 'repB', role: 'primary' });
         expect(promotions.map((event) => [event.connectionId, event.timestamp, event.node])).toEqual([
           ['conn-1', promotedAt, expect.objectContaining({ nodeId: 'repB', role: 'primary' })],
         ]);
