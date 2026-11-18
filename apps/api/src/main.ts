@@ -30,6 +30,13 @@ async function bootstrap(): Promise<void> {
     );
   }
 
+  if (process.env.BETTERDB_SLOT_MIGRATION === 'true') {
+    new Logger('SlotMigration').warn(
+      'Slot rebalance execution enabled. Admins can start CLUSTER MIGRATESLOTS ' +
+        'on Valkey 9.0+ clusters from the Anomalies page.',
+    );
+  }
+
   const isProduction = process.env.NODE_ENV === 'production';
 
   const fastifyAdapter = new FastifyAdapter(fastifyAdapterOptions(process.env));

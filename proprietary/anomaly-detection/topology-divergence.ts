@@ -289,7 +289,7 @@ function countSlots(ranges: number[][]): number {
   return ranges.reduce((total, [start, end = start]) => total + end - start + 1, 0);
 }
 
-function mergeSlotRanges(ranges: number[][]): number[][] {
+export function mergeSlotRanges(ranges: ReadonlyArray<ReadonlyArray<number>>): number[][] {
   const merged: number[][] = [];
   for (const [start, end = start] of [...ranges].sort((x, y) => x[0] - y[0])) {
     const last = merged[merged.length - 1];
@@ -314,7 +314,7 @@ function subtractSlotRanges(from: number[][], taken: number[][]): number[][] {
   return left;
 }
 
-function parseSlotRangeList(text: string | undefined): number[][] {
+export function parseSlotRangeList(text: string | undefined): number[][] {
   return (text ?? '')
     .split(/\s+/)
     .filter(Boolean)
