@@ -1218,6 +1218,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         credentialStatus: config.credentialStatus,
         credentialError: config.credentialError,
         connectionType: config.host === 'agent' ? 'agent' : (config.connectionType ?? 'direct'),
+        dialsDataNodes: dialsDataNodes(this.zoneMapOwner(config)),
         autoRegisterNodes: config.autoRegisterNodes,
         membership: config.membership,
         nodeAvailabilityZones: this.zoneMapOwner(config).nodeAvailabilityZones,

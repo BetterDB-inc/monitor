@@ -22,14 +22,6 @@ interface ConnectedFromHere {
 
 const DOCS_URL = 'https://docs.betterdb.com/cluster-auto-registration.html';
 
-function dialsNodes(connection: ClusterConnectionRef): boolean {
-  return (
-    connection.host !== 'agent' &&
-    connection.connectionType !== 'agent' &&
-    connection.connectionType !== 'external'
-  );
-}
-
 function failureText(address: string, error: unknown): string {
   const reason = error instanceof Error ? error.message : String(error);
   return reason.includes(address) ? reason : `${address} was not connected. ${reason}`;
@@ -96,7 +88,7 @@ export function NodeCollectionNotice({
         {address} is not registered as its own connection. BetterDB only reads it through the
         cluster connection, so its slow log, client list and per-node metrics are missing.
       </p>
-      {!dialsNodes(clusterConnection) ? (
+      {clusterConnection.dialsDataNodes === false ? (
         <p className="text-muted-foreground">
           BetterDB does not open connections to the nodes of this cluster itself, because the
           cluster is read through an agent or OTLP push, so this node cannot be connected from

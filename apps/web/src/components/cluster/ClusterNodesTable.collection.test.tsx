@@ -35,7 +35,7 @@ const other = clusterNode({
   flags: ['master'],
   slots: [[8192, 16383]],
 });
-const CLUSTER_CONNECTION = { id: 'conn-1', host: '10.0.0.1', connectionType: 'direct' as const };
+const CLUSTER_CONNECTION = { id: 'conn-1', dialsDataNodes: true };
 
 function row(address: string): HTMLElement {
   return screen.getByText(address).closest('tr') as HTMLElement;

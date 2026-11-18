@@ -242,6 +242,13 @@ export class ConnectionStatusDto implements ConnectionStatus {
   capabilities?: ConnectionCapabilities;
 
   @ApiPropertyOptional({
+    description:
+      'Whether BetterDB opens its own connections to the data nodes this connection reports; false when it is read through an agent or from pushed metrics. A cluster member answers for its seed',
+    example: true,
+  })
+  dialsDataNodes?: boolean;
+
+  @ApiPropertyOptional({
     description: 'Auto-register discovered nodes (cluster or Sentinel); undefined/null follows CLUSTER_AUTO_REGISTER_NODES or SENTINEL_AUTO_REGISTER_NODES',
     example: true,
   })

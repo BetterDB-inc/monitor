@@ -550,6 +550,31 @@ describe('ConnectionRegistry membership', () => {
     expect(registry.list()[0]).toMatchObject({ autoRegisterNodes: true });
   });
 
+  it.each([
+    ['a direct connection', { ...seed }, true],
+    ['an agent connection', { ...seed, host: 'agent' }, false],
+    ['a connection fed by pushed metrics', { ...seed, connectionType: 'external' as const }, false],
+  ])('says in list() whether %s opens its own connections to data nodes', (_what, config, dials) => {
+    const { registry } = build();
+    put(registry, config);
+    expect(registry.list()[0]).toMatchObject({ dialsDataNodes: dials });
+  });
+
+  it.each([
+    ['dials', { ...seed }, true],
+    ['does not dial', { ...seed, connectionType: 'external' as const }, false],
+  ])('answers for a cluster node by its seed, which %s', (_what, seedConfig, dials) => {
+    const { registry } = build();
+    put(registry, seedConfig);
+    put(registry, {
+      id: 'child',
+      host: '10.0.0.2',
+      port: 7002,
+      membership: { seedId: 'seed', nodeId: 'n2', origin: 'auto', source: 'cluster' },
+    });
+    expect(registry.list().find((status) => status.id === 'child')).toMatchObject({ dialsDataNodes: dials });
+  });
+
   it('reads the auto-register env default as a boolean flag', () => {
     expect(build({ CLUSTER_AUTO_REGISTER_NODES: 'true' }).registry.getAutoRegisterNodesDefault()).toBe(true);
     expect(build({ CLUSTER_AUTO_REGISTER_NODES: 'false' }).registry.getAutoRegisterNodesDefault()).toBe(false);

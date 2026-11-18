@@ -28,7 +28,7 @@ function renderNotice(overrides: Partial<Props> = {}) {
         nodeId={NODE_ID}
         address="10.0.0.2:6379"
         collection={{ collected: false }}
-        clusterConnection={{ id: 'conn-1', host: '10.0.0.1', connectionType: 'direct' }}
+        clusterConnection={{ id: 'conn-1', dialsDataNodes: true }}
         onConnected={onConnected}
         {...overrides}
       />
@@ -120,11 +120,8 @@ describe('NodeCollectionNotice', () => {
     );
   });
 
-  it.each([
-    ['an agent', { id: 'conn-1', host: 'agent', connectionType: 'agent' as const }],
-    ['OTLP push', { id: 'conn-1', host: 'otlp', connectionType: 'external' as const }],
-  ])('offers no button when the cluster is read through %s', (_how, clusterConnection) => {
-    renderNotice({ clusterConnection });
+  it('offers no button when the server says it does not open connections to the nodes', () => {
+    renderNotice({ clusterConnection: { id: 'conn-1', dialsDataNodes: false } });
 
     expect(screen.queryByRole('button', { name: BUTTON })).not.toBeInTheDocument();
     expect(
@@ -134,6 +131,19 @@ describe('NodeCollectionNotice', () => {
       'href',
       'https://docs.betterdb.com/cluster-auto-registration.html',
     );
+  });
+
+  it('offers the button when the server says it opens connections to the nodes, whatever the connection looks like', () => {
+    renderNotice({
+      clusterConnection: {
+        id: 'conn-1',
+        host: '10.0.0.1',
+        connectionType: 'agent',
+        dialsDataNodes: true,
+      } as Props['clusterConnection'],
+    });
+
+    expect(screen.getByRole('button', { name: BUTTON })).toBeEnabled();
   });
 
   it('offers no button to a user who cannot change connections', () => {
@@ -155,7 +165,7 @@ describe('NodeCollectionNotice', () => {
   });
 
   describe('after the node was connected from here', () => {
-    const clusterConnection = { id: 'conn-1', host: '10.0.0.1', connectionType: 'direct' as const };
+    const clusterConnection = { id: 'conn-1', dialsDataNodes: true };
 
     function notice(overrides: Partial<Props> = {}) {
       return (
@@ -248,7 +258,7 @@ describe('NodeCollectionNotice', () => {
           nodeId={NODE_ID}
           address="10.0.0.1:6379"
           collection={{ collected: true, connectionId: 'conn-1' }}
-          clusterConnection={{ id: 'conn-1', host: '10.0.0.1', connectionType: 'direct' }}
+          clusterConnection={{ id: 'conn-1', dialsDataNodes: true }}
         />
       </MemoryRouter>,
     );

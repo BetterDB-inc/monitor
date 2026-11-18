@@ -19,4 +19,4 @@ export function nodeCollectionOf(
   return collection;
 }
 
-export type ClusterConnectionRef = Pick<Connection, 'id' | 'host' | 'connectionType'>;
+export type ClusterConnectionRef = Pick<Connection, 'id' | 'dialsDataNodes'>;
