@@ -50,7 +50,9 @@ describe('cluster load test, flags', () => {
   });
 
   it('prints the usage text when --out is followed by the short help flag', () => {
-    expect(rejected(['--out', '-h'])).toContain('--out needs a directory');
+    const output = rejected(['--out', '-h']);
+    expect(output).toContain('--out needs a directory');
+    expect(output).toContain('Usage: pnpm load:cluster');
   });
 
   it('takes a directory whose name starts with a dash behind ./', () => {

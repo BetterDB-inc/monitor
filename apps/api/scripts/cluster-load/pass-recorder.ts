@@ -1,3 +1,5 @@
+import type { AsyncLocalStorage } from 'async_hooks';
+
 export interface Pass {
   name: string;
   startedAt: number;
@@ -42,4 +44,30 @@ export class PassRecorder {
       ]),
     );
   }
+}
+
+interface Poller {
+  tick: () => Promise<void>;
+  isPollingBusy: () => boolean;
+}
+
+export function recordPasses(
+  poller: Poller,
+  name: string,
+  passes: PassRecorder,
+  context: AsyncLocalStorage<Pass>,
+): void {
+  const tick = poller.tick.bind(poller);
+  passes.track(name);
+  poller.tick = () => {
+    if (poller.isPollingBusy()) return tick();
+    const pass = passes.begin(name, performance.now());
+    return context.run(pass, async () => {
+      try {
+        await tick();
+      } finally {
+        passes.end(pass, performance.now());
+      }
+    });
+  };
 }

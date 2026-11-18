@@ -1,6 +1,7 @@
+import { AsyncLocalStorage } from 'async_hooks';
 import { appFrame } from '../../scripts/cluster-load/call-site';
 import { downOutsideHung, hangLimit, pickHungNodes } from '../../scripts/cluster-load/hung-nodes';
-import { PassRecorder } from '../../scripts/cluster-load/pass-recorder';
+import { PassRecorder, recordPasses, type Pass } from '../../scripts/cluster-load/pass-recorder';
 import { pauseChecking } from '../../scripts/cluster-load/pause';
 import { pollerResult } from '../../scripts/cluster-load/poller-result';
 
@@ -166,7 +167,90 @@ describe('cluster load test, passes in the window', () => {
   });
 });
 
+describe('cluster load test, recorded passes', () => {
+  const POLLER = 'AnomalyService';
+
+  class FakePoller {
+    private polling = false;
+    private finish: () => void = () => undefined;
+    polls = 0;
+
+    async tick(): Promise<void> {
+      if (this.polling) return;
+      this.polling = true;
+      this.polls += 1;
+      await new Promise<void>((resolve) => {
+        this.finish = resolve;
+      });
+      this.polling = false;
+    }
+
+    isPollingBusy(): boolean {
+      return this.polling;
+    }
+
+    finishPoll(): void {
+      this.finish();
+    }
+  }
+
+  let recorder: PassRecorder;
+  let context: AsyncLocalStorage<Pass>;
+  let poller: FakePoller;
+
+  beforeEach(() => {
+    recorder = new PassRecorder();
+    context = new AsyncLocalStorage<Pass>();
+    poller = new FakePoller();
+    recordPasses(poller, POLLER, recorder, context);
+    recorder.startWindow(0);
+  });
+
+  it('records a pass that ran', async () => {
+    const tick = poller.tick();
+    poller.finishPoll();
+    await tick;
+    expect(recorder.totals().get(POLLER)?.durations).toHaveLength(1);
+  });
+
+  it('runs the poll with its pass as the context', async () => {
+    const sender = {
+      tick: async (): Promise<void> => {
+        const pass = context.getStore();
+        if (pass) pass.commands += 3;
+      },
+      isPollingBusy: (): boolean => false,
+    };
+    recordPasses(sender, 'Sender', recorder, context);
+    await sender.tick();
+    expect(recorder.totals().get('Sender')).toMatchObject({ commands: 3 });
+    expect(recorder.totals().get('Sender')?.durations).toHaveLength(1);
+  });
+
+  it('does not record a call that finds the poller busy', async () => {
+    const first = poller.tick();
+    await poller.tick();
+    poller.finishPoll();
+    await first;
+    expect(poller.polls).toBe(1);
+    expect(recorder.totals().get(POLLER)?.durations).toHaveLength(1);
+  });
+});
+
 describe('cluster load test, pauses', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('waits the time given when the wall clock jumps ahead', async () => {
+    const started = performance.now();
+    const realNow = Date.now.bind(Date);
+    let calls = 0;
+    jest.spyOn(Date, 'now').mockImplementation(() => realNow() + (calls++ === 0 ? 0 : 3_600_000));
+    await pauseChecking(40, () => undefined);
+    expect(performance.now() - started).toBeGreaterThanOrEqual(39);
+  });
+
   it('waits for the time given', async () => {
     const started = Date.now();
     await pauseChecking(40, () => undefined);

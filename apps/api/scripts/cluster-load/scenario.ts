@@ -9,7 +9,7 @@ import type { ReplyProfile } from '../../test/load/fake-cluster';
 import { callSite } from './call-site';
 import { ignoreEnvFile } from './env-file';
 import { FAILOVER_SHARD, downOutsideHung, pickHungNodes } from './hung-nodes';
-import { PassRecorder, type Pass } from './pass-recorder';
+import { PassRecorder, recordPasses, type Pass } from './pass-recorder';
 import { pauseChecking, sleep } from './pause';
 import { pollerResult, round, type PollerResult } from './poller-result';
 import { PORTS_EXHAUSTED, portPressure, portsHeld } from './ports';
@@ -255,19 +255,8 @@ async function measure(options: ScenarioOptions, cluster: RemoteCluster, dataDir
       }
       if (instance instanceof MultiConnectionPoller) {
         const name = instance.constructor.name;
-        const tick = instance.tick.bind(instance);
-        passes.track(name);
+        recordPasses(instance, name, passes, context);
         intervals.set(name, instance.getIntervalMs());
-        instance.tick = () => {
-          const pass = passes.begin(name, performance.now());
-          return context.run(pass, async () => {
-            try {
-              await tick();
-            } finally {
-              passes.end(pass, performance.now());
-            }
-          });
-        };
       }
       if (typeof instance.dispatchClusterFailover === 'function') {
         const dispatchClusterFailover = instance.dispatchClusterFailover.bind(instance);
