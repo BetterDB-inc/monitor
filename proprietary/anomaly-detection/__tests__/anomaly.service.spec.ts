@@ -14749,6 +14749,52 @@ describe('AnomalyService', () => {
           expect(registry().getObservedNodeId('conn-1')).toBeUndefined();
         });
 
+        describe('when topology sync points the connection at another node while its nodes are read', () => {
+          const savedAs = (nodeId: string) => (id: string) =>
+            id === 'conn-1' ? { membership: { seedId: 'seed', nodeId, origin: 'auto' } } : null;
+          const refreshedWhileRead = async () => {
+            registry().noteObservedNodeId('conn-1', undefined);
+            registry().getConfig.mockImplementation(savedAs('primC'));
+            return viewOf('primA');
+          };
+
+          beforeEach(() => {
+            registry().getConfig.mockImplementation(savedAs('primA'));
+          });
+
+          it('does not tell the connection list the node that read answered with', async () => {
+            await poll();
+            dbClient.getClusterNodes = jest.fn().mockImplementation(refreshedWhileRead);
+
+            await poll();
+
+            expect(dbClient.getClusterNodes).toHaveBeenCalledTimes(1);
+            expect(registry().getObservedNodeId('conn-1')).toBeUndefined();
+          });
+
+          it('does not tell it either when the read is the early one of a connection not seen reading yet', async () => {
+            dbClient.getClusterNodes = jest
+              .fn()
+              .mockImplementationOnce(refreshedWhileRead)
+              .mockRejectedValue(new Error('down'));
+
+            await poll();
+
+            expect(registry().getObservedNodeId('conn-1')).toBeUndefined();
+          });
+
+          it('tells it the node of a read that started after the change', async () => {
+            await poll();
+            dbClient.getClusterNodes = jest.fn().mockImplementation(refreshedWhileRead);
+            await poll();
+            dbClient.getClusterNodes = jest.fn().mockResolvedValue(viewOf('repB'));
+
+            await poll();
+
+            expect(registry().getObservedNodeId('conn-1')).toBe('repB');
+          });
+        });
+
         it('tells the connection list when the connection stops being a cluster', async () => {
           await poll();
           (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
