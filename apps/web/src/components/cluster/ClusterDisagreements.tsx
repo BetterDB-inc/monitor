@@ -17,7 +17,6 @@ import {
 } from '@/components/ui/table';
 import { useCanMutate } from '@/hooks/useCanMutate';
 import { useNow } from '@/hooks/useNow';
-import { isOpenDisagreement } from '@/lib/clusterDisagreements';
 import { nodeHref } from '@/lib/clusterNodeHref';
 import { formatSlotRanges } from '@/types/cluster';
 import type {
@@ -158,6 +157,15 @@ function LineStanding({
       <Link to={eventHref(line, asOf, connectionId)} className="text-xs underline">
         Open event
       </Link>
+    );
+  }
+  if (line.resolvedByHand) {
+    return (
+      <span className="text-xs text-muted-foreground">
+        {line.stale
+          ? 'Event resolved by hand'
+          : 'Event resolved by hand, the disagreement is still seen'}
+      </span>
     );
   }
   if (line.tracked === false || line.rounds === undefined) {
@@ -523,8 +531,8 @@ function Result({
 
   const { coverage, shards } = summary;
   const compared = summary.status === 'ok';
-  const disagreements = summary.disagreements.filter(isOpenDisagreement);
-  const unconfirmed = summary.disagreements.filter((line) => !isOpenDisagreement(line));
+  const disagreements = summary.disagreements.filter((line) => line.open);
+  const unconfirmed = summary.disagreements.filter((line) => !line.open);
   const oneOff = takenAt !== null;
 
   return (
@@ -574,7 +582,9 @@ function Result({
           )}
           {compared && disagreements.length === 0 && (
             <p className="text-sm">
-              No disagreements among the {plural(coverage.answered, 'view')} compared.
+              {unconfirmed.length > 0
+                ? 'No disagreements confirmed this round.'
+                : `No disagreements among the ${plural(coverage.answered, 'view')} compared.`}
             </p>
           )}
           {disagreements.map((line) => (

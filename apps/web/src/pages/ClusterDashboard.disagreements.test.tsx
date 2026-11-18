@@ -82,7 +82,9 @@ function summaryWith(lines: number): TopologyDisagreementSummary {
       id: `failure_flags:n${at}`,
       kind: 'failure_flags' as const,
       severity: 'warning' as const,
+      open: true,
       confirmed: false,
+      resolvedByHand: false,
       eventId: null,
       eventType: null,
       eventAt: null,
@@ -144,7 +146,12 @@ describe('ClusterDashboard disagreements tab', () => {
 
   it('leaves a disagreement the last round could not check out of the count on the tab', () => {
     const summary = summaryWith(2);
-    summary.disagreements[1] = { ...summary.disagreements[1], stale: true, positions: [] };
+    summary.disagreements[1] = {
+      ...summary.disagreements[1],
+      open: false,
+      stale: true,
+      positions: [],
+    };
     state.summary = summary;
 
     open('/cluster');
@@ -154,12 +161,29 @@ describe('ClusterDashboard disagreements tab', () => {
 
   it('shows no count when nothing was confirmed in the last round', () => {
     const summary = summaryWith(1);
-    summary.disagreements[0] = { ...summary.disagreements[0], stale: true, positions: [] };
+    summary.disagreements[0] = {
+      ...summary.disagreements[0],
+      open: false,
+      stale: true,
+      positions: [],
+    };
     state.summary = summary;
 
     open('/cluster');
 
     expect(screen.getByRole('tab', { name: 'Disagreements' })).toBeInTheDocument();
+  });
+
+  it('counts the lines the server calls open', () => {
+    const summary = summaryWith(3);
+    summary.disagreements[0] = { ...summary.disagreements[0], open: false };
+    summary.disagreements[1] = { ...summary.disagreements[1], stale: true, positions: [] };
+    summary.disagreements[2] = { ...summary.disagreements[2], stale: true, positions: [] };
+    state.summary = summary;
+
+    open('/cluster');
+
+    expect(screen.getByRole('tab', { name: 'Disagreements, 2 open' })).toBeInTheDocument();
   });
 
   it('keeps counting a disagreement with an open event that the last round could not check', () => {

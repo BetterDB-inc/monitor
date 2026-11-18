@@ -48,7 +48,9 @@ function slotLine(patch: Partial<DisagreementLine> = {}): DisagreementLine {
     id: 'slot_owner:s000p|s001p',
     kind: 'slot_owner',
     severity: 'critical',
+    open: true,
     confirmed: true,
+    resolvedByHand: false,
     eventId: 'event-1',
     eventType: 'topology_divergence',
     eventAt: AT - 20_000,
@@ -88,7 +90,9 @@ function flagsLine(patch: Partial<DisagreementLine> = {}): DisagreementLine {
     id: 'failure_flags:s002r',
     kind: 'failure_flags',
     severity: 'warning',
+    open: true,
     confirmed: false,
+    resolvedByHand: false,
     eventId: null,
     eventType: null,
     eventAt: null,
@@ -469,6 +473,7 @@ describe('ClusterDisagreements', () => {
 
   it('keeps a disagreement the last round could not check apart, without counts', () => {
     const stale = slotLine({
+      open: false,
       confirmed: false,
       eventId: null,
       eventType: null,
@@ -516,6 +521,103 @@ describe('ClusterDisagreements', () => {
     expect(within(card).getByRole('link', { name: 'Open event' })).toBeInTheDocument();
   });
 
+  it('takes from the server which lines are open', () => {
+    const counted = flagsLine({
+      id: 'failure_flags:s001r',
+      stale: true,
+      open: true,
+      positions: [],
+    });
+    const held = flagsLine({ open: false });
+    show(summaryOf({ disagreements: [counted, held] }));
+
+    expect(screen.getByText('Disagreements (1)')).toBeInTheDocument();
+    const region = screen.getByRole('region', { name: 'Not confirmed this round' });
+    expect(within(region).getAllByRole('article')).toHaveLength(1);
+    expect(within(region).getByRole('article', { name: held.text })).toHaveAttribute(
+      'id',
+      `disagreement-${held.id}`,
+    );
+  });
+
+  it('keeps the shards of a stale line with an open event disputed', () => {
+    const stale = slotLine({
+      stale: true,
+      lastSeenAt: AT - 60_000,
+      positions: [],
+      text: 'Slots 0-9: views differed on the owner (s000p.internal:6379, s001p.internal:6379).',
+    });
+    show(
+      summaryOf({
+        disagreements: [stale],
+        shards: [
+          shard(0, { state: 'disputed', disagreementIds: [stale.id] }),
+          shard(1, { state: 'disputed', disagreementIds: [stale.id] }),
+          shard(2),
+        ],
+      }),
+    );
+
+    expect(screen.getByText('Disagreements (1)')).toBeInTheDocument();
+    expect(
+      within(lineOf(stale.text)).getByRole('link', { name: 'Open event' }),
+    ).toBeInTheDocument();
+    const rows = shardRows();
+    for (const row of rows.slice(0, 2)) {
+      expect(within(row).getByText('Disputed')).toBeInTheDocument();
+      expect(within(row).getByRole('link', { name: '1 disagreement' })).toHaveAttribute(
+        'href',
+        `#disagreement-${stale.id}`,
+      );
+    }
+    expect(screen.queryByRole('link', { name: /unconfirmed/ })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('switch', { name: 'Only disputed' }));
+
+    expect(shardRows()).toHaveLength(2);
+    expect(screen.getByText('Shards (2 of 3)')).toBeInTheDocument();
+  });
+
+  it('does not give the all-clear while an earlier disagreement could not be checked again', () => {
+    const stale = slotLine({
+      open: false,
+      confirmed: false,
+      eventId: null,
+      eventType: null,
+      eventAt: null,
+      eventConnectionId: null,
+      stale: true,
+      positions: [],
+    });
+    show(summaryOf({ disagreements: [stale] }));
+
+    expect(screen.getByText('Disagreements (0)')).toBeInTheDocument();
+    expect(screen.getByText('No disagreements confirmed this round.')).toBeInTheDocument();
+    expect(screen.queryByText(/^No disagreements among/)).not.toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Not confirmed this round' })).toBeInTheDocument();
+  });
+
+  it('says that the event of a line was resolved by hand and the disagreement is still seen', () => {
+    const line = flagsLine({ resolvedByHand: true, rounds: 9 });
+    show(summaryOf({ disagreements: [line] }));
+
+    const card = lineOf(line.text);
+    expect(
+      within(card).getByText('Event resolved by hand, the disagreement is still seen'),
+    ).toBeInTheDocument();
+    expect(within(card).queryByText(/Not confirmed yet/)).not.toBeInTheDocument();
+    expect(within(card).queryByRole('link', { name: 'Open event' })).not.toBeInTheDocument();
+  });
+
+  it('says that the event of a line that was not seen again was resolved by hand', () => {
+    const line = flagsLine({ resolvedByHand: true, open: false, stale: true, positions: [] });
+    show(summaryOf({ disagreements: [line] }));
+
+    const card = lineOf(line.text);
+    expect(within(card).getByText('Event resolved by hand')).toBeInTheDocument();
+    expect(within(card).queryByText(/Not confirmed yet/)).not.toBeInTheDocument();
+  });
+
   it('names the nodes of a merged side and counts the ones it does not list apart from the views', () => {
     const line = flagsLine({
       id: 'failure_flags:s001p+3',
@@ -538,6 +640,7 @@ describe('ClusterDisagreements', () => {
 
   it('shows what was seen before without counts when the views could not be compared', () => {
     const stale = flagsLine({
+      open: false,
       stale: true,
       lastSeenAt: AT - 5000,
       positions: [],
@@ -614,6 +717,7 @@ describe('ClusterDisagreements', () => {
 
   it('links a shard that only an unconfirmed disagreement touches to that disagreement', () => {
     const stale = slotLine({
+      open: false,
       confirmed: false,
       eventId: null,
       eventType: null,

@@ -298,7 +298,8 @@ import {
   toDivergenceNode,
 } from './topology-divergence-report';
 import {
-  type DisagreementEvent,
+  type RaisedDivergence,
+  eventOfRaised,
   summarizeDisagreements,
 } from './topology-disagreements';
 import {
@@ -11017,10 +11018,7 @@ export class AnomalyService
   getTopologyDisagreements(connectionId: string): TopologyDisagreementReport {
     const clusterKey = this.connectionClusterKeys.get(connectionId);
     const round = clusterKey ? this.topologyDivergence.lastRound(clusterKey) : undefined;
-    const events = clusterKey
-      ? this.topologyDisagreementEvents(clusterKey, connectionId)
-      : new Map<string, DisagreementEvent>();
-    const eventOf = (key: string) => events.get(key);
+    const eventOf = eventOfRaised(clusterKey ? this.topologyDisagreementEvents(clusterKey, connectionId) : []);
     const check = clusterKey ? this.topologyFullChecks.state(clusterKey, Date.now()) : ({ state: 'none' } as const);
     return {
       ...summarizeDisagreements(round, eventOf),
@@ -11058,28 +11056,30 @@ export class AnomalyService
     return started;
   }
 
-  private topologyDisagreementEvents(clusterKey: string, connectionId: string): Map<string, DisagreementEvent> {
-    const events = new Map<string, DisagreementEvent>();
+  private topologyDisagreementEvents(clusterKey: string, connectionId: string): RaisedDivergence[] {
+    const raised: RaisedDivergence[] = [];
     const anchor = this.topologyDivergence.lastRound(clusterKey)?.anchorConnectionId;
     const eventIds = anchor === undefined ? undefined : this.topologyDivergenceEventIds.get(anchor);
     const reachable = new Set(this.scopeConnectionIds(connectionId));
-    for (const [signature, entry] of this.topologyDivergenceOpen.get(clusterKey) ?? []) {
+    for (const [signature, { group }] of this.topologyDivergenceOpen.get(clusterKey) ?? []) {
       const eventId = eventIds?.get(signature);
-      if (eventId === undefined) continue;
+      if (eventId === undefined || !group) continue;
       const event = this.eventInMemory(eventId) ?? this.findIncidentEvent(eventId);
-      if (event?.resolved === true) continue;
       const eventType = event?.metricType ?? MetricType.TOPOLOGY_DIVERGENCE;
       const eventAt = this.topologyDivergenceEventAt.get(eventId) ?? event?.timestamp ?? null;
       const holder = this.topologyDivergenceEventOwners.get(eventId) ?? anchor ?? connectionId;
-      const disagreementEvent = {
-        eventId,
-        eventType,
-        eventAt,
-        connectionId: reachable.has(holder) ? connectionId : holder,
-      };
-      for (const { key } of entry.group?.disagreements ?? []) events.set(key, disagreementEvent);
+      raised.push({
+        group,
+        event: {
+          eventId,
+          eventType,
+          eventAt,
+          connectionId: reachable.has(holder) ? connectionId : holder,
+          resolvedByHand: event?.resolved === true,
+        },
+      });
     }
-    return events;
+    return raised;
   }
 
   private topologyFullCheckBlocker(connectionId: string): FullCheckBlocker | null {

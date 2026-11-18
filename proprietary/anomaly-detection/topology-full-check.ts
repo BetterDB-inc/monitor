@@ -4,7 +4,7 @@ import { compareTopologyViews, type TopologyDisagreement, type TopologyView } fr
 import type { FailureFlagViews } from './topology-divergence-monitor';
 import {
   summarizeDisagreements,
-  type DisagreementEvent,
+  type DisagreementEventOf,
   type TopologyDisagreementSummary,
 } from './topology-disagreements';
 
@@ -107,7 +107,7 @@ export type TopologyFullCheckStart =
 export function fullCheckView(
   check: FullCheckState,
   blocker: FullCheckBlocker | null,
-  eventOf: (key: string) => DisagreementEvent | undefined,
+  eventOf: DisagreementEventOf,
   minIntervalMs: number = FULL_CHECK_DEFAULTS.minIntervalMs,
 ): TopologyFullCheckView {
   const unavailable = blocker ? { reason: blocker, text: FULL_CHECK_BLOCKER_TEXT[blocker] } : null;

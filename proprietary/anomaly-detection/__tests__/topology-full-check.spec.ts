@@ -652,7 +652,7 @@ describe('fullCheckView', () => {
     const view = fullCheckView(
       { state: 'done', startedAt: AT, finishedAt: AT + 900, asked: 500, total: 500, outcome },
       null,
-      (key) =>
+      ({ key }) =>
         key.startsWith('slot_owner:')
           ? { eventId: 'e1', eventType: MetricType.TOPOLOGY_DIVERGENCE, eventAt: AT - 60_000, connectionId: 'c1' }
           : undefined,

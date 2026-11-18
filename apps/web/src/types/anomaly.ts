@@ -382,7 +382,9 @@ export interface DisagreementLine {
   id: string;
   kind: DivergenceKind;
   severity: AnomalySeverity;
+  open: boolean;
   confirmed: boolean;
+  resolvedByHand: boolean;
   eventId: string | null;
   eventType: string | null;
   eventAt: number | null;
