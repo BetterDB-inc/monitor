@@ -255,7 +255,13 @@ async function measure(options: ScenarioOptions, cluster: RemoteCluster, dataDir
       }
       if (instance instanceof MultiConnectionPoller) {
         const name = instance.constructor.name;
-        recordPasses(instance, name, passes, context);
+        instance['tick'] = recordPasses(
+          instance['tick'].bind(instance),
+          () => instance['isPollingBusy'](),
+          name,
+          passes,
+          context,
+        );
         intervals.set(name, instance.getIntervalMs());
       }
       if (typeof instance.dispatchClusterFailover === 'function') {

@@ -46,21 +46,16 @@ export class PassRecorder {
   }
 }
 
-interface Poller {
-  tick: () => Promise<void>;
-  isPollingBusy: () => boolean;
-}
-
 export function recordPasses(
-  poller: Poller,
+  tick: () => Promise<void>,
+  isBusy: () => boolean,
   name: string,
   passes: PassRecorder,
   context: AsyncLocalStorage<Pass>,
-): void {
-  const tick = poller.tick.bind(poller);
+): () => Promise<void> {
   passes.track(name);
-  poller.tick = () => {
-    if (poller.isPollingBusy()) return tick();
+  return () => {
+    if (isBusy()) return tick();
     const pass = passes.begin(name, performance.now());
     return context.run(pass, async () => {
       try {

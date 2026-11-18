@@ -202,7 +202,13 @@ describe('cluster load test, recorded passes', () => {
     recorder = new PassRecorder();
     context = new AsyncLocalStorage<Pass>();
     poller = new FakePoller();
-    recordPasses(poller, POLLER, recorder, context);
+    poller.tick = recordPasses(
+      poller.tick.bind(poller),
+      () => poller.isPollingBusy(),
+      POLLER,
+      recorder,
+      context,
+    );
     recorder.startWindow(0);
   });
 
@@ -214,15 +220,12 @@ describe('cluster load test, recorded passes', () => {
   });
 
   it('runs the poll with its pass as the context', async () => {
-    const sender = {
-      tick: async (): Promise<void> => {
-        const pass = context.getStore();
-        if (pass) pass.commands += 3;
-      },
-      isPollingBusy: (): boolean => false,
+    const send = async (): Promise<void> => {
+      const pass = context.getStore();
+      if (pass) pass.commands += 3;
     };
-    recordPasses(sender, 'Sender', recorder, context);
-    await sender.tick();
+    const tick = recordPasses(send, () => false, 'Sender', recorder, context);
+    await tick();
     expect(recorder.totals().get('Sender')).toMatchObject({ commands: 3 });
     expect(recorder.totals().get('Sender')?.durations).toHaveLength(1);
   });
