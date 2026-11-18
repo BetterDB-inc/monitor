@@ -12918,7 +12918,18 @@ describe('AnomalyService', () => {
 
         const event = await raisedEarly();
 
+        expect(event).toBeDefined();
         expect(event?.node).toBeUndefined();
+      });
+
+      it('reads its node early again on the poll after one in which it could not be read', async () => {
+        dbClient.getClusterNodes = jest.fn().mockRejectedValue(new Error('down'));
+        await poll();
+        dbClient.getClusterNodes = jest.fn().mockResolvedValue(viewOf('repB'));
+
+        const event = await raisedEarly();
+
+        expect(event?.node).toEqual(REPLICA_NODE);
       });
 
       it('keeps the node on such an event when the same node only restarted', async () => {

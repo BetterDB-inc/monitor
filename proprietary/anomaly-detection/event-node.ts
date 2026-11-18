@@ -19,10 +19,16 @@ const REPLICA_SUBJECT_METRICS: ReadonlySet<MetricType> = new Set([
 
 const METRICS_WITHOUT_OWN_NODE: ReadonlySet<MetricType> = new Set([MetricType.TOPOLOGY_DIVERGENCE]);
 
+interface ShardRead {
+  read: () => readonly ClusterNode[];
+  readAt: number;
+}
+
 interface NodeView {
   read: () => readonly ClusterNode[];
   readAt: number;
-  shardsRead: boolean;
+  own: () => readonly ClusterNode[];
+  shards?: ShardRead;
   directory?: NodeDirectory;
 }
 
@@ -40,10 +46,15 @@ function withShardDataOf(nodes: readonly ClusterNode[], source: readonly Cluster
   });
 }
 
-function borrowingShards(view: NodeView, source: NodeView): NodeView {
-  if (view.shardsRead || !source.shardsRead) return view;
-  const nodes = withShardDataOf(view.read(), source.read());
-  return { read: () => nodes, readAt: view.readAt, shardsRead: true };
+function laterShardRead(held: ShardRead | undefined, read: ShardRead | undefined): ShardRead | undefined {
+  if (!held || !read) return held ?? read;
+  return read.readAt >= held.readAt ? read : held;
+}
+
+function withShardsOf(view: NodeView, shards: ShardRead | undefined): NodeView {
+  if (!shards || shards === view.shards) return view;
+  const nodes = withShardDataOf(view.own(), shards.read());
+  return { read: () => nodes, readAt: view.readAt, own: view.own, shards };
 }
 
 export interface ClusterNodeView {
@@ -76,15 +87,19 @@ export class ClusterNodeViews {
       this.leaveView(connectionId);
       this.viewKeys.set(connectionId, viewKey);
     }
-    const read: NodeView = { read: describe, readAt, shardsRead };
+    const read: NodeView = {
+      read: describe,
+      readAt,
+      own: describe,
+      ...(shardsRead ? { shards: { read: describe, readAt } } : {}),
+    };
     const held = this.views.get(viewKey);
     if (!held) {
       this.views.set(viewKey, read);
-    } else if (held.readAt > readAt) {
-      this.views.set(viewKey, borrowingShards(held, read));
-    } else {
-      this.views.set(viewKey, borrowingShards(read, held));
+      return;
     }
+    const latest = held.readAt > readAt ? held : read;
+    this.views.set(viewKey, withShardsOf(latest, laterShardRead(held.shards, read.shards)));
   }
 
   rememberOwnRole(connectionId: string, role: ClusterNodeRef['role'] | undefined, readAt: number): void {
