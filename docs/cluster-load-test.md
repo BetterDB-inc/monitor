@@ -23,7 +23,9 @@ the pollers send and how long they take.
 - **The API.** The real application, pointed at the first node. Every poller
   runs its real code on its normal interval. Three things around it are stand-ins:
   storage is the in-memory adapter, the cluster is the fake one, and the license
-  server is a local stand-in that answers "Pro" (see below).
+  server is a local stand-in that answers "Pro" (see below). The `.env` file of
+  the repository is not read, so the settings a developer keeps there cannot
+  change what is measured. Variables exported in the shell still apply.
 
 ### License
 
@@ -104,11 +106,12 @@ pnpm load:cluster --nodes 500 --modes seed
 | `--warmup 30` | `30` | Seconds before measuring starts |
 | `--measure 120` | `120` | Seconds measured |
 | `--settle 300` | `300` | Longest wait for auto-registration to finish, seconds |
-| `--hang 2` | `0` | Nodes that stop answering when the window starts, fewer than the cluster size |
-| `--failover` | off | Promote a replica of shard 1 halfway through the window; needs two shards and a replica |
+| `--hang 2` | `0` | Nodes that stop answering, from one warm-up before the window. Never the first node |
+| `--failover` | off | Promote a replica of shard 1 halfway through the window; needs two shards and a replica. `--hang` then leaves shard 1 alone, so at most nodes - replicas - 2 nodes can hang |
 | `--license pro` | `pro` | `pro` or `enterprise` = licensed features on, `community` = no license |
 | `--profile realistic` | `realistic` | `realistic` or `empty` replies, see above |
 | `--reply-delay-ms 1` | `0` | Hold every reply back this long, to stand in for a network |
+| `--call-sites` | off | Also name the function behind every `CLUSTER NODES` read, see "Reading the output" |
 | `--out <dir>` | none | Also write one JSON file per run, failed and skipped runs included, and `report.md` |
 | `--force` | off | Run a size even when it does not fit the local port range |
 
@@ -143,8 +146,8 @@ range.
   the ports held pass half of the local port range.
 - **No numbers.** The run is listed with its reason and left out of the tables.
   That happens when it ran out of local ports, when not every node was
-  registered before the settle time ran out, when more registered connections
-  were down at the end of the window than nodes were made to hang, when the
+  registered before the settle time ran out, when a registered connection to a
+  node that was not made to hang was down at the end of the window, when the
   license did not come up as asked, when the run did not finish in time, or
   when it crashed. A crash is listed with its signal and error line, so a run
   that ran out of memory reads "killed by SIGABRT" with the heap limit message.
@@ -158,8 +161,15 @@ range.
 - **KB/s received** is dominated by `CLUSTER NODES` on large clusters. Its
   reply grows with the number of nodes, and so does the number of nodes it is
   read from.
-- **CLUSTER NODES sent by** names the poller and the function that sent each
-  read, so the cost of the cluster map can be traced to its callers.
+- **CLUSTER NODES sent by** names the poller that sent each read. With
+  `--call-sites` it also names the function, so the cost of the cluster map can
+  be traced to its callers. That reads the call stack for every read, which
+  costs CPU in the process being measured. Use it in a run of its own and do
+  not read CPU, loop delay or pass times from that run.
+- **Hung nodes** stop answering before the window, not inside it: the test
+  hangs them, waits one more warm-up and then starts measuring. The figures
+  show the cost of nodes that stay silent. The reconnects and events of the
+  moment they stop are not in them, and the run takes one warm-up longer.
 - **Commands per poller** are counted inside BetterDB; the totals at the top
   are counted by the fake cluster and are the ones to trust. A poller is
   charged for everything that starts inside one of its passes. That includes
@@ -291,7 +301,9 @@ Two nodes accept TCP and stop replying (`--hang 2`):
 - Two silent nodes stretch one anomaly pass to 4 to 9 s, so the whole cluster
   is sampled every 5 to 6 s instead of about every 1.1 s.
 - With every node registered the two hung connections were still listed as
-  connected at the end of the window and no `instance.down` was dispatched.
+  connected at the end of the window and no `instance.down` was dispatched in
+  the window. The nodes stopped answering 30 seconds before it started, so an
+  event from that moment would not be counted.
   The log has 38 "Failed to poll metrics" errors and 51 "still running,
   skipping" warnings.
 
