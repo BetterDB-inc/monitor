@@ -250,7 +250,13 @@ import {
 } from '@app/cluster/cluster-metrics.service';
 import { withConfiguredZones, withShardMetadata } from '@app/cluster/shard-metadata';
 import { resolveNodeRef, type NodeSubject } from '@app/cluster/node-ref';
-import { ClusterNodeViews, nodeOfEvent, nodeRoleOfInfo, type EventNodeSource } from './event-node';
+import {
+  ClusterNodeViews,
+  nodeOfEvent,
+  nodeRoleOfInfo,
+  ownNodeIdOf,
+  type EventNodeSource,
+} from './event-node';
 import {
   type DivergenceGroup,
   type OpenDivergence,
@@ -1767,6 +1773,7 @@ export class AnomalyService
       const anotherRun =
         info['cluster_enabled'] === '1' &&
         this.clusterNodeViews.answersFromAnotherRun(ctx.connectionId, info['run_id'] || undefined);
+      if (anotherRun) this.connectionRegistry.noteObservedNodeId(ctx.connectionId, undefined);
       if (live && info['cluster_enabled'] === '1' && (clusterKeyUnknown || anotherRun)) {
         await this.learnClusterKey(ctx, timestamp);
       }
@@ -9477,7 +9484,7 @@ export class AnomalyService
     return nodeOfEvent(
       anomaly,
       view?.directory,
-      this.clusterNodeViews.ownNodeId(connectionId),
+      this.connectionRegistry.getObservedNodeId(connectionId),
       roleKnown,
       ownRoleIsCurrent ? own.role : undefined,
     );
@@ -9510,7 +9517,8 @@ export class AnomalyService
       () => withConfiguredZones(withShardMetadata(nodes, shards), zones),
       shardsRead,
     );
-    this.connectionRegistry.noteObservedNodeId(connectionId, this.clusterNodeViews.ownNodeId(connectionId));
+    const ownNodeId = ownNodeIdOf(nodes);
+    if (ownNodeId) this.connectionRegistry.noteObservedNodeId(connectionId, ownNodeId);
   }
 
   private forgetClusterNodes(connectionId: string): void {
@@ -10761,7 +10769,7 @@ export class AnomalyService
 
   private servedNode(node: ClusterNodeRef, eventConnectionId: string | undefined): ServedClusterNodeRef {
     const connectionId =
-      this.clusterNodeViews.connectionsOfNode(node.nodeId).find((id) => this.connectionRegistry.isListed(id)) ??
+      this.connectionRegistry.findIdObservingNode(node.nodeId) ??
       this.connectionAtAddressOf(node, eventConnectionId);
     return connectionId ? { ...node, collected: true, connectionId } : { ...node, collected: false };
   }
@@ -10780,7 +10788,7 @@ export class AnomalyService
     const address = splitHostPort(node.address);
     const found = address ? this.connectionRegistry.findIdByHostPort(address.host, address.port) : null;
     if (!found || this.clusterNodeViews.isOutsideCluster(found)) return undefined;
-    const readsAnotherNode = (this.clusterNodeViews.ownNodeId(found) ?? node.nodeId) !== node.nodeId;
+    const readsAnotherNode = (this.connectionRegistry.getObservedNodeId(found) ?? node.nodeId) !== node.nodeId;
     if (readsAnotherNode) return undefined;
     if (found === eventConnectionId) return found;
     const clusterKey =

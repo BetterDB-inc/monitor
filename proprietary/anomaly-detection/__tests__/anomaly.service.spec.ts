@@ -183,6 +183,8 @@ describe('AnomalyService', () => {
       port: 6379,
     };
 
+    const observedNodeIds = new Map<string, string>();
+    const isListed = jest.fn().mockReturnValue(true);
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AnomalyService,
@@ -197,9 +199,17 @@ describe('AnomalyService', () => {
             listMembers: jest.fn().mockReturnValue([]),
             sentinelDataNodeCredentials: jest.fn().mockReturnValue(null),
             findIdByHostPort: jest.fn().mockReturnValue(null),
-            isListed: jest.fn().mockReturnValue(true),
+            isListed,
             getNodeAvailabilityZones: jest.fn().mockReturnValue(undefined),
-            noteObservedNodeId: jest.fn(),
+            noteObservedNodeId: jest.fn((id: string, nodeId: string | undefined) => {
+              if (nodeId) observedNodeIds.set(id, nodeId);
+              else observedNodeIds.delete(id);
+            }),
+            getObservedNodeId: jest.fn((id: string) => observedNodeIds.get(id)),
+            findIdObservingNode: jest.fn(
+              (nodeId: string) =>
+                [...observedNodeIds].find(([id, observed]) => observed === nodeId && isListed(id))?.[0] ?? null,
+            ),
           },
         },
         { provide: 'STORAGE_CLIENT', useValue: storage },
@@ -13093,6 +13103,26 @@ describe('AnomalyService', () => {
         expect(await nodeRead(event.id)).toEqual({ ...PRIMARY_NODE, collected: true, connectionId: 'conn-1' });
       });
 
+      it('agrees with the connection list once topology sync points a connection at another node', async () => {
+        registeredAt('10.0.0.2:6380', 'conn-r');
+        await poll();
+        await poll({
+          ...mockCtx,
+          connectionId: 'conn-r',
+          port: 6380,
+          client: { ...dbClient, getClusterNodes: jest.fn().mockResolvedValue(viewOf('repB')) },
+        } as ConnectionContext);
+        const added = { nodeId: 'newC', address: '10.0.0.3:6381', role: 'replica' as const };
+        const aboutOld = await replicaEvent();
+        const aboutNew = await raise({ node: added });
+
+        registry().noteObservedNodeId('conn-r', undefined);
+        registeredAt('10.0.0.3:6381', 'conn-r');
+
+        expect(await nodeRead(aboutOld.id)).toEqual({ ...REPLICA_NODE, collected: false });
+        expect(await nodeRead(aboutNew.id)).toEqual({ ...added, collected: true, connectionId: 'conn-r' });
+      });
+
       it('does not count the event connection when it reads another node at the address', async () => {
         registeredAt('10.0.0.1:6379', 'conn-1');
         await poll();
@@ -13443,6 +13473,25 @@ describe('AnomalyService', () => {
           await poll();
 
           expect(registry().noteObservedNodeId).toHaveBeenLastCalledWith('conn-1', 'primA');
+        });
+
+        it('keeps the node of a connection whose later read marks none as its own', async () => {
+          await poll();
+          dbClient.getClusterNodes = jest.fn().mockResolvedValue(viewOf('none'));
+          await poll();
+
+          expect(registry().getObservedNodeId('conn-1')).toBe('primA');
+        });
+
+        it('forgets the node when the connection answers from another run and cannot be read', async () => {
+          const infoOf = (runId: string) => ({ ...clusterInfoResponse, server: { role: 'master', run_id: runId } });
+          (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoOf('run-a'));
+          await poll();
+          (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoOf('run-b'));
+          dbClient.getClusterNodes = jest.fn().mockRejectedValue(new Error('down'));
+          await poll();
+
+          expect(registry().getObservedNodeId('conn-1')).toBeUndefined();
         });
 
         it('tells the connection list when the connection stops being a cluster', async () => {
@@ -16795,6 +16844,8 @@ describe('AnomalyService', () => {
               get: jest.fn(),
               getConfig: jest.fn(),
               noteObservedNodeId: jest.fn(),
+              getObservedNodeId: jest.fn(),
+              findIdObservingNode: jest.fn().mockReturnValue(null),
             },
           },
           { provide: 'STORAGE_CLIENT', useValue: storage },

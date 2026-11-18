@@ -59,7 +59,6 @@ export interface OwnNodeRole {
 export class ClusterNodeViews {
   private readonly views = new Map<string, NodeView>();
   private readonly viewKeys = new Map<string, string>();
-  private readonly ownNodeIds = new Map<string, string>();
   private readonly ownRoles = new Map<string, OwnNodeRole>();
   private readonly runIds = new Map<string, string>();
   private readonly outsideCluster = new Set<string>();
@@ -72,8 +71,6 @@ export class ClusterNodeViews {
     describe: () => readonly ClusterNode[] = () => nodes,
     shardsRead = true,
   ): void {
-    const ownNodeId = nodes.find((node) => node.flags.includes('myself'))?.id;
-    if (ownNodeId) this.ownNodeIds.set(connectionId, ownNodeId);
     this.outsideCluster.delete(connectionId);
     if (this.viewKeys.get(connectionId) !== viewKey) {
       this.leaveView(connectionId);
@@ -103,14 +100,11 @@ export class ClusterNodeViews {
     if (!runId) return false;
     const last = this.runIds.get(connectionId);
     this.runIds.set(connectionId, runId);
-    if (last === undefined || last === runId) return false;
-    this.ownNodeIds.delete(connectionId);
-    return true;
+    return last !== undefined && last !== runId;
   }
 
   forget(connectionId: string): void {
     this.leaveView(connectionId);
-    this.ownNodeIds.delete(connectionId);
     this.ownRoles.delete(connectionId);
     this.runIds.delete(connectionId);
     this.outsideCluster.delete(connectionId);
@@ -136,16 +130,8 @@ export class ClusterNodeViews {
     return this.viewKeys.get(connectionId);
   }
 
-  ownNodeId(connectionId: string): string | undefined {
-    return this.ownNodeIds.get(connectionId);
-  }
-
   ownRole(connectionId: string): OwnNodeRole | undefined {
     return this.ownRoles.get(connectionId);
-  }
-
-  connectionsOfNode(nodeId: string): string[] {
-    return [...this.ownNodeIds].filter(([, own]) => own === nodeId).map(([connectionId]) => connectionId);
   }
 
   private leaveView(connectionId: string): void {
@@ -176,6 +162,10 @@ export type EventNodeSource = Pick<
 
 function roleChangedTo(value: number): ClusterNodeRef['role'] {
   return value === 1 ? 'primary' : 'replica';
+}
+
+export function ownNodeIdOf(nodes: readonly ClusterNode[]): string | undefined {
+  return nodes.find((node) => node.flags.includes('myself'))?.id;
 }
 
 export function nodeRoleOfInfo(role: string | undefined): ClusterNodeRef['role'] | undefined {
