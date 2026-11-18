@@ -33,3 +33,24 @@ export function collectionOf(
     (node.flags.includes('myself') ? viewingConnectionId : null);
   return connectionId ? { collected: true, connectionId } : { collected: false };
 }
+
+interface ConnectionLookup {
+  findIdByHostPort(host: string, port: number): string | null;
+  findIdObservingNode(nodeId: string): string | null;
+  getObservedNodeId(connectionId: string): string | undefined;
+  getConfig(connectionId: string): { membership?: { nodeId?: string } } | null | undefined;
+}
+
+export function collectionAmong(
+  node: CollectableNode,
+  viewingConnectionId: string | null,
+  connections: ConnectionLookup,
+): NodeCollection {
+  return collectionOf(
+    node,
+    viewingConnectionId,
+    (host, port) => connections.findIdByHostPort(host, port),
+    (id) => connections.getObservedNodeId(id) ?? connections.getConfig(id)?.membership?.nodeId,
+    (nodeId) => connections.findIdObservingNode(nodeId),
+  );
+}

@@ -1,4 +1,4 @@
-import { collectionOf } from './node-collection';
+import { collectionAmong, collectionOf } from './node-collection';
 
 describe('collectionOf', () => {
   const registered = (known: Record<string, string>) => (host: string, port: number) =>
@@ -140,5 +140,32 @@ describe('collectionOf with the node each connection was seen reading', () => {
       collected: true,
       connectionId: 'conn-2',
     });
+  });
+});
+
+describe('collectionAmong', () => {
+  const node = { id: 'node-2', address: '10.0.0.2:6379', flags: ['master'] };
+  const connections = (seenReading: Record<string, string>, saved: Record<string, string>) => ({
+    findIdByHostPort: (host: string, port: number) => (`${host}:${port}` === '10.0.0.2:6379' ? 'conn-2' : null),
+    findIdObservingNode: (nodeId: string) =>
+      Object.keys(seenReading).find((id) => seenReading[id] === nodeId) ?? null,
+    getObservedNodeId: (id: string) => seenReading[id],
+    getConfig: (id: string) => (saved[id] ? { membership: { nodeId: saved[id] } } : null),
+  });
+
+  it('trusts the node a connection was seen reading over the one saved for it', () => {
+    expect(collectionAmong(node, 'seed', connections({ 'conn-2': 'node-2' }, { 'conn-2': 'node-old' }))).toEqual({
+      collected: true,
+      connectionId: 'conn-2',
+    });
+    expect(collectionAmong(node, 'seed', connections({ 'conn-2': 'node-new' }, { 'conn-2': 'node-2' }))).toEqual({
+      collected: false,
+    });
+  });
+
+  it('falls back to the saved node of a connection that was not seen reading yet', () => {
+    expect(collectionAmong(node, 'seed', connections({}, { 'conn-2': 'node-2' })).collected).toBe(true);
+    expect(collectionAmong(node, 'seed', connections({}, { 'conn-2': 'node-9' })).collected).toBe(false);
+    expect(collectionAmong(node, 'seed', connections({}, {})).collected).toBe(true);
   });
 });
