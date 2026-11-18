@@ -199,9 +199,14 @@ range.
 
 ## Results
 
-Measured on 2026-11-16 with version 0.55.0 on an 18-core Mac, one run at a
+Measured on 2026-11-18 with version 0.55.0 on an 18-core Mac, one run at a
 time, with the defaults: 120 second window, 30 second warm-up, one replica per
-shard, Pro license, realistic replies, no reply delay.
+shard, Pro license, realistic replies, no reply delay. The tables were measured
+without `--call-sites`; the split by caller comes from separate runs with it.
+
+The machine was in normal desktop use, with a load average of 4 to 8 when a run
+started. Runs of the same size that were repeated differed by up to about 7 %
+in pass time.
 
 MB is 10^6 bytes and KB is 10^3 bytes, worked out from the byte counts in the
 JSON files. The KB/s columns the test prints divide by 1,024.
@@ -215,29 +220,32 @@ skipped.
 
 | Nodes | Sockets | Commands/s | Replies MB/s | Anomaly pass p50 / p95 ms | Anomaly passes | Loop delay p99 ms | CPU % | Heap MB | RSS peak MB |
 |---|---|---|---|---|---|---|---|---|---|
-| 100 | 101 | 368 | 5.1 | 86 / 105 | 111 | 22 | 11 | 149 | 588 |
-| 250 | 251 | 526 | 9.6 | 138 / 164 | 105 | 32 | 16 | 158 | 659 |
-| 500 | 501 | 698 | 22.0 | 221 / 299 | 98 | 68 | 23 | 160 | 721 |
+| 100 | 101 | 365 | 5.0 | 94 / 113 | 110 | 26 | 13 | 133 | 601 |
+| 250 | 252 | 529 | 9.6 | 134 / 163 | 106 | 33 | 16 | 138 | 606 |
+| 500 | 501 | 709 | 22.5 | 209 / 260 | 99 | 56 | 22 | 143 | 644 |
 
-The fake cluster used 1.3 to 2.4 % CPU and ran at most 1.4 ms late at p99, so
-it was not the limit. The command count inside BetterDB equals the count of the
-fake cluster in all three runs.
+The fake cluster used 1.5 to 2.6 % CPU and ran at most 2.1 ms late at p99, so
+it was not the limit. The command count inside BetterDB matches the count of
+the fake cluster within 0.1 % in all three runs.
 
-`CLUSTER NODES` reads per second, by caller:
+`CLUSTER NODES` reads per second, by caller, from three runs with
+`--call-sites`. Those runs pass a little slower, so their totals are a little
+lower than in the runs above, which read the map 71.5, 144.3 and 277.5 times
+per second:
 
 | Caller | 100 nodes | 250 nodes | 500 nodes |
 |---|---|---|---|
-| Replica slot check | 46.3 | 110.4 | 202.1 |
-| Fan-out to unregistered primaries | 22.8 | 28.6 | 26.4 |
+| Replica slot check | 45.4 | 109.4 | 202.1 |
+| Fan-out to unregistered primaries | 22.4 | 28.1 | 26.4 |
 | Slot migration read | 1.7 | 4.2 | 41.7 (8.3 without the effect below) |
 | The connection's own poll | 0.9 | 0.9 | 0.8 |
 | Prometheus | 0.2 | 0.2 | 0.2 |
-| Total | 71.9 | 144.3 | 271.2 |
+| Total | 70.6 | 142.7 | 271.2 |
 | Reply size of one read, KB | 12.6 | 31.6 | 63.5 |
-| Replies for the map, MB/s | 0.9 | 4.6 | 17.2 |
+| Replies for the map, MB/s | 0.9 | 4.5 | 17.2 |
 
-- At 500 nodes the cluster map is 17.2 of the 22.0 MB/s of replies, and the
-  replica slot check sends 75 % of the reads.
+- At 500 nodes the cluster map is 17.6 of the 22.5 MB/s of replies in the run
+  without `--call-sites`, and the replica slot check sends 75 % of the reads.
 - The fan-out stays level from 250 nodes on. It is held by its limit of 64
   primaries per pass.
 - The slot migration figure at 500 nodes is an effect of the fake cluster. The
@@ -255,25 +263,24 @@ fake cluster in all three runs.
 
 | Nodes | Sockets | Ports held | Commands/s | Replies MB/s | Anomaly pass p50 / p95 ms | Anomaly passes | Loop delay p99 ms | CPU % | RSS peak MB | `CLUSTER NODES`/s | Warnings |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| 30 | 930 | 1,102 | 618 | 3.9 | 89 / 115 | 110 | 19 | 12 | 841 | 434 | 78 |
-| 50 | 2,549 | 2,985 | 1,344 | 10.0 | 237 / 328 | 96 | 74 | 24 | 1,042 | 1,033 | 2,882 |
-| 80 | 6,479 | 7,479 | 2,448 | 24.4 | 677 / 796 | 71 | 303 | 46 | 1,337 | 1,937 | 6,939 |
-| 100 (suspect) | 10,099 | 11,575 | 2,931 | 34.2 | 1,221 / 1,565 | 54 | 652 | 60 | 1,645 | 2,296 | 10,559 |
+| 30 | 930 | 1,103 | 628 | 4.0 | 78 / 97 | 112 | 11 | 12 | 756 | 442 | 79 |
+| 50 | 2,549 | 2,973 | 1,424 | 10.6 | 171 / 197 | 102 | 34 | 20 | 936 | 1,096 | 2,770 |
+| 80 | 6,479 | 7,463 | 2,802 | 28.3 | 455 / 507 | 83 | 171 | 38 | 1,271 | 2,261 | 6,971 |
+| 100 (suspect) | 10,099 | 11,601 | 3,476 | 41.4 | 833 / 914 | 66 | 352 | 50 | 1,499 | 2,794 | 10,714 |
 
-- Sockets are nodes x nodes + nodes at every size.
+- Sockets are nodes x nodes + nodes at every size, give or take one.
 - From 50 nodes the limit of 512 pooled node connections is reached all the
   time ("Connection limit reached", "Closing oldest connection"), and it does
   not keep the socket count down: 2,549 open sockets at 50 nodes, about 50 of
   them the registered connections' own. The test counts open sockets, not the
   entries of the pool.
-- The replica slot check sends 92 to 97 % of the `CLUSTER NODES` reads: 399,
-  980, 1,870 and 2,228 per second.
+- The replica slot check sends 92 to 98 % of the `CLUSTER NODES` reads, in
+  four more runs with `--call-sites`.
 - `connection.spike` events in the window: 15, 25, 40 and 50.
-- At 100 nodes one anomaly pass takes 1.2 to 1.6 s, so the cluster is sampled
-  about every 2.2 s instead of every 1.1 s. 5,505 connections were opened in
-  the window, and the run raised 99 `cpu_utilization` anomalies although the
-  fake's CPU counters grow at a constant rate.
-- The 100-node run is suspect for local ports only: 11,575 of 16,384 were
+- At 100 nodes one anomaly pass takes 0.8 to 0.9 s, so the cluster is sampled
+  about every 1.8 s instead of every 1.1 s. 5,622 connections were opened in
+  the window.
+- The 100-node run is suspect for local ports only: 11,601 of 16,384 were
   held, and it was run with `--force`. All 100 connections were up at the end.
 - 250 and 500 nodes with every node registered need 62,500 and 250,000 local
   ports and were not run.
@@ -284,7 +291,7 @@ One replica promoted halfway through the window:
 
 | Run | `cluster.failover` events | Other |
 |---|---|---|
-| 100 nodes, one connection | 1 | Pass time unchanged (92 / 110 ms) |
+| 100 nodes, one connection | 1 | Pass time unchanged (91 / 109 ms) |
 | 30 nodes, every node registered | 30 | Plus one `failover.started` and one `failover.completed` |
 
 One failover gives one event per registered connection.
@@ -295,8 +302,8 @@ Two nodes accept TCP and stop replying (`--hang 2`):
 
 | Run | Anomaly pass p50 / p95 ms | Anomaly passes | Prometheus pass p50 / p95 ms | Commands/s |
 |---|---|---|---|---|
-| 100 nodes, one connection | 4,014 / 9,033 | 24 | 31 / 4,009 | 94 (368 without) |
-| 30 nodes, every node registered | 5,001 / 7,026 | 19 | 5,001 / 5,002 | 116 (618 without) |
+| 100 nodes, one connection | 4,023 / 9,038 | 24 | 37 / 4,012 | 94 (365 without) |
+| 30 nodes, every node registered | 5,003 / 5,207 | 19 | 5,002 / 5,003 | 116 (628 without) |
 
 - Two silent nodes stretch one anomaly pass to 4 to 9 s, so the whole cluster
   is sampled every 5 to 6 s instead of about every 1.1 s.
