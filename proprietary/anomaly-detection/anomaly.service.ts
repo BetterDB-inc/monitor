@@ -1765,7 +1765,8 @@ export class AnomalyService
       const anotherRun =
         info['cluster_enabled'] === '1' &&
         this.clusterNodeViews.answersFromAnotherRun(ctx.connectionId, info['run_id'] || undefined);
-      if (live && info['cluster_enabled'] === '1' && (clusterKeyUnknown || anotherRun)) {
+      const ownNodeUnknown = this.clusterNodeViews.ownNodeId(ctx.connectionId) === undefined;
+      if (live && info['cluster_enabled'] === '1' && (clusterKeyUnknown || anotherRun || ownNodeUnknown)) {
         await this.learnClusterKey(ctx, timestamp);
       }
       if (live && info['cluster_enabled'] !== '1') {
