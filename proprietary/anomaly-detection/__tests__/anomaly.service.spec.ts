@@ -13211,6 +13211,53 @@ describe('AnomalyService', () => {
         expect(await nodeRead(aboutNew.id)).toEqual({ ...added, collected: true, connectionId: 'conn-r' });
       });
 
+      describe('when topology sync refreshed the connection at the address to a new node there', () => {
+        const replacement = { nodeId: 'newB', address: '10.0.0.2:6380', role: 'replica' as const };
+        const refreshToReplacement = () => {
+          registry().noteObservedNodeId('conn-r', undefined);
+          registry().getConfig.mockImplementation((id: string) =>
+            id === 'conn-r' ? { membership: { nodeId: replacement.nodeId } } : null,
+          );
+        };
+
+        beforeEach(async () => {
+          registeredAt('10.0.0.2:6380', 'conn-r');
+          await poll();
+          await poll({
+            ...mockCtx,
+            connectionId: 'conn-r',
+            port: 6380,
+            client: { ...dbClient, getClusterNodes: jest.fn().mockResolvedValue(viewOf('repB')) },
+          } as ConnectionContext);
+        });
+
+        it('does not count the connection for the node it read before', async () => {
+          const event = await replicaEvent();
+
+          refreshToReplacement();
+
+          expect(await nodeRead(event.id)).toEqual({ ...REPLICA_NODE, collected: false });
+        });
+
+        it('sends an event about the node it read before as not collected', async () => {
+          refreshToReplacement();
+
+          const event = await replicaEvent();
+
+          expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledWith(
+            expect.objectContaining({ id: event.id, node: { ...REPLICA_NODE, collected: false } }),
+          );
+        });
+
+        it('counts the connection for the new node', async () => {
+          const event = await raise({ node: replacement });
+
+          refreshToReplacement();
+
+          expect(await nodeRead(event.id)).toEqual({ ...replacement, collected: true, connectionId: 'conn-r' });
+        });
+      });
+
       it('does not count the event connection when it reads another node at the address', async () => {
         registeredAt('10.0.0.1:6379', 'conn-1');
         await poll();

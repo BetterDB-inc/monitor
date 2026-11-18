@@ -10791,8 +10791,11 @@ export class AnomalyService
     const address = splitHostPort(node.address);
     const found = address ? this.connectionRegistry.findIdByHostPort(address.host, address.port) : null;
     if (!found || this.clusterNodeViews.isOutsideCluster(found)) return undefined;
-    const readsAnotherNode = (this.connectionRegistry.getObservedNodeId(found) ?? node.nodeId) !== node.nodeId;
-    if (readsAnotherNode) return undefined;
+    const readNodeId =
+      this.connectionRegistry.getObservedNodeId(found) ??
+      this.connectionRegistry.getConfig(found)?.membership?.nodeId ??
+      node.nodeId;
+    if (readNodeId !== node.nodeId) return undefined;
     if (found === eventConnectionId) return found;
     const clusterKey =
       this.clusterKeyByNode.get(node.nodeId) ??
