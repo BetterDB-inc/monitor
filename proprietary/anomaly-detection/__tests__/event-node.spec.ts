@@ -67,7 +67,7 @@ describe('nodeOfEvent', () => {
     });
   });
 
-  it.each([MetricType.REPLICATION_ROLE, MetricType.CONNECTIONS, MetricType.MEMORY_USED])(
+  it.each([MetricType.CONNECTIONS, MetricType.MEMORY_USED])(
     'gives the own node the role the connection read for it on a %s event',
     (metricType) => {
       const demoted = nodeOfEvent(event({ metricType }), directory, ownNodeId, true, 'replica');
@@ -77,6 +77,24 @@ describe('nodeOfEvent', () => {
       expect(promoted).toMatchObject({ nodeId: 'primary-a', role: 'primary' });
     },
   );
+
+  it.each([
+    ['a promotion', 1, 'primary'],
+    ['a demotion', 0, 'replica'],
+  ])('gives the own node of %s the role it changed to, with no own read and a view too old to say', (_what, value, role) => {
+    const change = event({ metricType: MetricType.REPLICATION_ROLE, value });
+
+    expect(nodeOfEvent(change, directory, ownNodeId, false)).toMatchObject({ nodeId: 'primary-a', role });
+  });
+
+  it('gives the own node of a role change the role it changed to over an own read that says otherwise', () => {
+    const promotion = event({ metricType: MetricType.REPLICATION_ROLE, value: 1 });
+
+    expect(nodeOfEvent(promotion, directory, ownNodeId, true, 'replica')).toMatchObject({
+      nodeId: 'primary-a',
+      role: 'primary',
+    });
+  });
 
   it('keeps the role of the view for a node that is not the own node', () => {
     const about = event({ metricType: MetricType.CLUSTER_TOPOLOGY, nodeSubject: { nodeId: 'replica-a' } });

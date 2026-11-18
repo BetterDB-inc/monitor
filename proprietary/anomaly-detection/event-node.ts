@@ -119,7 +119,12 @@ function subjectOfDetector(
 export type EventNodeSource = Pick<
   AnomalyEvent,
   'node' | 'metricType' | 'nodeSubject' | 'replicaAddr' | 'nodeAddr'
->;
+> &
+  Partial<Pick<AnomalyEvent, 'value'>>;
+
+function roleChangedTo(value: number): ClusterNodeRef['role'] {
+  return value === 1 ? 'primary' : 'replica';
+}
 
 export function nodeRoleOfInfo(role: string | undefined): ClusterNodeRef['role'] | undefined {
   if (role === 'master') return 'primary';
@@ -136,7 +141,13 @@ export function nodeOfEvent(
   if (event.node) return event.node;
   const node = nodeInView(event, directory, ownNodeId);
   if (!node) return undefined;
-  if (ownRole && node.nodeId === ownNodeId) return { ...node, role: ownRole };
+  if (node.nodeId === ownNodeId) {
+    const role =
+      event.metricType === MetricType.REPLICATION_ROLE && event.value !== undefined
+        ? roleChangedTo(event.value)
+        : ownRole;
+    if (role) return { ...node, role };
+  }
   return roleKnown ? node : { ...node, role: 'unknown' };
 }
 
