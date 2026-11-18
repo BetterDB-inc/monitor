@@ -628,6 +628,31 @@ describe('ConnectionRegistry membership', () => {
     });
   });
 
+  describe('an agent connection that is removed', () => {
+    const agent = { id: 'agent-token-1', host: 'agent', port: 0 };
+
+    it('forgets the node it was seen reading', () => {
+      const { registry } = build();
+      put(registry, agent);
+      registry.noteObservedNodeId('agent-token-1', 'node-n');
+
+      registry.removeAgentConnection('agent-token-1');
+
+      expect(registry.getObservedNodeId('agent-token-1')).toBeUndefined();
+      expect(registry.findIdObservingNode('node-n')).toBeNull();
+    });
+
+    it('forgets that it answered outside a cluster', () => {
+      const { registry } = build();
+      put(registry, agent);
+      registry.noteOutsideCluster('agent-token-1', true);
+
+      registry.removeAgentConnection('agent-token-1');
+
+      expect(registry.isOutsideCluster('agent-token-1')).toBe(false);
+    });
+  });
+
   describe('sentinelDataNodeCredentials', () => {
     it('returns only the data node credentials the seed configures', () => {
       const { registry } = build();

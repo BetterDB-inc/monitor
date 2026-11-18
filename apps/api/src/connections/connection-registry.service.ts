@@ -1367,6 +1367,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     this.connections.delete(id);
     this.configs.delete(id);
     this.serverlessAgentIds.delete(id);
+    this.observedNodeIds.delete(id);
+    this.outsideCluster.delete(id);
     this.runtimeCapabilityTracker.removeConnection(id);
 
     if (this.defaultId === id) {
