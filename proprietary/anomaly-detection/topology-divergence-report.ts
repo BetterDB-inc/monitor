@@ -1,3 +1,5 @@
+import type { ClusterNodeRef } from '@betterdb/shared';
+import { toClusterNodeRef } from '@app/cluster/node-ref';
 import type { ClusterNode } from '@app/common/types/metrics.types';
 import {
   type DivergenceGroup,
@@ -7,13 +9,7 @@ import {
 } from './topology-divergence';
 import { AnomalySeverity } from './types';
 
-export interface DivergenceNode {
-  nodeId: string;
-  address: string;
-  role: 'primary' | 'replica' | 'unknown';
-  shardId?: string;
-  availabilityZone?: string;
-}
+export type DivergenceNode = ClusterNodeRef;
 
 export interface DivergenceDetailPosition {
   value: string;
@@ -59,14 +55,7 @@ const SHORT_ID_LENGTH = 8;
 
 export function toDivergenceNode(nodeId: string, nodes: ReadonlyMap<string, ClusterNode>): DivergenceNode {
   const node = nodes.get(nodeId);
-  if (!node) return { nodeId, address: '', role: 'unknown' };
-  return {
-    nodeId,
-    address: node.address.split('@')[0],
-    role: node.flags.includes('master') ? 'primary' : 'replica',
-    ...(node.shardId ? { shardId: node.shardId } : {}),
-    ...(node.availabilityZone ? { availabilityZone: node.availabilityZone } : {}),
-  };
+  return node ? { ...toClusterNodeRef(node), nodeId } : { nodeId, address: '', role: 'unknown' };
 }
 
 function nameOf(nodeId: string, nodes: ReadonlyMap<string, ClusterNode>): string {

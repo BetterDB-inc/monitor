@@ -849,6 +849,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!anomalyEventInfo.some((col) => col.name === 'node_addr')) {
       this.db.exec('ALTER TABLE anomaly_events ADD COLUMN node_addr TEXT');
     }
+    if (!anomalyEventInfo.some((col) => col.name === 'node')) {
+      this.db.exec('ALTER TABLE anomaly_events ADD COLUMN node TEXT');
+    }
     if (!anomalyEventInfo.some((col) => col.name === 'dedupe_key')) {
       this.db.exec('ALTER TABLE anomaly_events ADD COLUMN dedupe_key TEXT');
     }
@@ -2006,6 +2009,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         related_metrics TEXT,
         replica_addr TEXT,
         node_addr TEXT,
+        node TEXT,
         dedupe_key TEXT,
         commands TEXT,
         event_sequence INTEGER,
@@ -2905,16 +2909,17 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       INSERT INTO anomaly_events (
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics, replica_addr, node_addr, dedupe_key, commands, event_sequence,
+        message, correlation_id, related_metrics, replica_addr, node_addr, node, dedupe_key, commands, event_sequence,
         kind, retry_trigger, resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id, scope_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         correlation_id = COALESCE(excluded.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(excluded.related_metrics, anomaly_events.related_metrics),
         scope_id = COALESCE(anomaly_events.scope_id, excluded.scope_id),
         replica_addr = COALESCE(excluded.replica_addr, anomaly_events.replica_addr),
         node_addr = COALESCE(excluded.node_addr, anomaly_events.node_addr),
+        node = COALESCE(anomaly_events.node, excluded.node),
         dedupe_key = COALESCE(excluded.dedupe_key, anomaly_events.dedupe_key),
         commands = COALESCE(anomaly_events.commands, excluded.commands),
         event_sequence = COALESCE(anomaly_events.event_sequence, excluded.event_sequence),
@@ -2941,6 +2946,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       event.relatedMetrics ? JSON.stringify(event.relatedMetrics) : null,
       event.replicaAddr ?? null,
       event.nodeAddr ?? null,
+      event.node ? JSON.stringify(event.node) : null,
       event.dedupeKey ?? null,
       event.commands ? JSON.stringify(event.commands) : null,
       event.eventSequence ?? null,
@@ -2965,16 +2971,17 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       INSERT INTO anomaly_events (
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics, replica_addr, node_addr, dedupe_key, commands, event_sequence,
+        message, correlation_id, related_metrics, replica_addr, node_addr, node, dedupe_key, commands, event_sequence,
         kind, retry_trigger, resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id, scope_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         correlation_id = COALESCE(excluded.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(excluded.related_metrics, anomaly_events.related_metrics),
         scope_id = COALESCE(anomaly_events.scope_id, excluded.scope_id),
         replica_addr = COALESCE(excluded.replica_addr, anomaly_events.replica_addr),
         node_addr = COALESCE(excluded.node_addr, anomaly_events.node_addr),
+        node = COALESCE(anomaly_events.node, excluded.node),
         dedupe_key = COALESCE(excluded.dedupe_key, anomaly_events.dedupe_key),
         commands = COALESCE(anomaly_events.commands, excluded.commands),
         event_sequence = COALESCE(anomaly_events.event_sequence, excluded.event_sequence),
@@ -3003,6 +3010,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
           event.relatedMetrics ? JSON.stringify(event.relatedMetrics) : null,
           event.replicaAddr ?? null,
           event.nodeAddr ?? null,
+          event.node ? JSON.stringify(event.node) : null,
           event.dedupeKey ?? null,
           event.commands ? JSON.stringify(event.commands) : null,
           event.eventSequence ?? null,
