@@ -32,12 +32,15 @@ interface NodeView {
   directory?: NodeDirectory;
 }
 
+function shardHolderOf(node: ClusterNode): string {
+  return node.master && node.master !== '-' ? node.master : node.id;
+}
+
 function withShardDataOf(nodes: readonly ClusterNode[], source: readonly ClusterNode[]): ClusterNode[] {
   const known = new Map(source.map((node) => [node.id, node]));
   return nodes.map((node) => {
-    const from = known.get(node.id);
-    const shardId = node.shardId ?? from?.shardId;
-    const availabilityZone = node.availabilityZone ?? from?.availabilityZone;
+    const shardId = node.shardId ?? known.get(shardHolderOf(node))?.shardId;
+    const availabilityZone = node.availabilityZone ?? known.get(node.id)?.availabilityZone;
     return {
       ...node,
       ...(shardId ? { shardId } : {}),
