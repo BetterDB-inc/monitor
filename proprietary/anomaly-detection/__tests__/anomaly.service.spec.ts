@@ -12723,6 +12723,45 @@ describe('AnomalyService', () => {
       });
     });
 
+    describe('when another connection reads the cluster between the INFO read and a role change event', () => {
+      const READ_AT = 1_700_000_000_000;
+      const infoWithRole = (role: string) => ({ ...clusterInfoResponse, server: { role } });
+
+      it('stores the role the node changed to, not the one the newer view still shows', async () => {
+        const now = jest.spyOn(Date, 'now').mockReturnValue(READ_AT);
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWithRole('slave'));
+        dbClient.getClusterNodes = jest.fn().mockResolvedValue(viewOf('repB'));
+        await poll();
+
+        const promotedAt = READ_AT + 10_000;
+        now.mockReturnValue(promotedAt);
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWithRole('master'));
+        let event: AnomalyEvent | undefined;
+        let otherEvent: AnomalyEvent | undefined;
+        let between = false;
+        jest.spyOn(service as any, 'adoptOpenEvents').mockImplementation(async () => {
+          if (between) return;
+          between = true;
+          now.mockReturnValue(promotedAt + 2_000);
+          (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWithRole('master'));
+          dbClient.getClusterNodes = jest.fn().mockResolvedValue(viewOf('primA'));
+          await poll({ ...mockCtx, connectionId: 'conn-2', port: 6380 });
+          dbClient.getClusterNodes = jest.fn().mockResolvedValue(viewOf('repB'));
+          event = await raise({
+            metricType: MetricType.REPLICATION_ROLE,
+            value: 1,
+            baseline: 0,
+            timestamp: promotedAt,
+          });
+          otherEvent = await raise({ metricType: MetricType.CONNECTIONS, timestamp: promotedAt });
+        });
+        await poll();
+
+        expect(otherEvent?.node).toMatchObject({ nodeId: 'repB', role: 'replica' });
+        expect(event?.node).toMatchObject({ nodeId: 'repB', role: 'primary' });
+      });
+    });
+
     describe('when the connection stops being a cluster', () => {
       const standalone = {
         ...clusterInfoResponse,
