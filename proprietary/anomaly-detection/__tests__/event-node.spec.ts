@@ -244,6 +244,53 @@ describe('ClusterNodeViews', () => {
     expect(views.view('cluster-1')?.directory.byId.has('new')).toBe(true);
   });
 
+  describe('when a read did not ask for the shards', () => {
+    const withoutShards = (nodes: ClusterNode[]): ClusterNode[] =>
+      nodes.map(({ shardId, availabilityZone, ...rest }) => rest);
+    const movedToShardB = (nodes: ClusterNode[]): ClusterNode[] =>
+      nodes.map((n) => (n.id === 'replica-a' ? { ...n, master: 'primary-b', shardId: 'shard-b' } : n));
+    const shardOf = (views: ClusterNodeViews, id: string) =>
+      views.view('cluster-1')?.directory.byId.get(id)?.shardId;
+
+    it('takes the shards of a shard read that arrives later with an older time', () => {
+      const views = new ClusterNodeViews();
+      views.remember('conn-a', 'cluster-1', seenFrom(PRIMARY_A), 1_000);
+      views.remember('conn-b', 'cluster-1', withoutShards(seenFrom(PRIMARY_B)), 3_000, undefined, false);
+      views.remember('conn-a', 'cluster-1', movedToShardB(seenFrom(PRIMARY_A)), 2_000);
+
+      expect(views.view('cluster-1')).toMatchObject({ readAt: 3_000 });
+      expect(shardOf(views, 'replica-a')).toBe('shard-b');
+    });
+
+    it('keeps the shards it has when the shard read that arrives is older than theirs', () => {
+      const views = new ClusterNodeViews();
+      views.remember('conn-a', 'cluster-1', movedToShardB(seenFrom(PRIMARY_A)), 2_000);
+      views.remember('conn-b', 'cluster-1', withoutShards(seenFrom(PRIMARY_B)), 3_000, undefined, false);
+      views.remember('conn-a', 'cluster-1', seenFrom(PRIMARY_A), 1_000);
+
+      expect(shardOf(views, 'replica-a')).toBe('shard-b');
+    });
+
+    it('keeps the shards of the last shard read over several reads without them', () => {
+      const views = new ClusterNodeViews();
+      views.remember('conn-a', 'cluster-1', seenFrom(PRIMARY_A), 1_000);
+      views.remember('conn-b', 'cluster-1', withoutShards(seenFrom(PRIMARY_B)), 2_000, undefined, false);
+      views.remember('conn-a', 'cluster-1', withoutShards(seenFrom(PRIMARY_A)), 3_000, undefined, false);
+
+      expect(views.view('cluster-1')).toMatchObject({ readAt: 3_000 });
+      expect(shardOf(views, 'replica-a')).toBe('shard-a');
+    });
+
+    it('has no shard for a node the last shard read did not list', () => {
+      const views = new ClusterNodeViews();
+      views.remember('conn-a', 'cluster-1', seenFrom(PRIMARY_A), 1_000);
+      views.remember('conn-b', 'cluster-1', withoutShards(withNewNode), 2_000, undefined, false);
+
+      expect(views.view('cluster-1')?.directory.byId.has('new')).toBe(true);
+      expect(shardOf(views, 'new')).toBeUndefined();
+    });
+  });
+
   it('builds the directory only when it is asked for, once per read', () => {
     const views = new ClusterNodeViews();
     const describe = jest.fn(() => seenFrom(PRIMARY_B));
