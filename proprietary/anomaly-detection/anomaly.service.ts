@@ -277,6 +277,7 @@ import {
   type TrackedDisagreement,
   confirmedDisagreements,
   groupDivergences,
+  isMember,
   migrationTouchesSlots,
   settleOpenDivergences,
 } from './topology-divergence';
@@ -305,11 +306,13 @@ import {
 import {
   FULL_CHECK_BLOCKER_TEXT,
   TopologyFullChecks,
+  fullCheckResult,
   fullCheckView,
   runFullCheck,
   type FullCheckBlocker,
   type TopologyDisagreementReport,
   type TopologyFullCheckStart,
+  type TopologyFullCheckView,
 } from './topology-full-check';
 import { ShardLoadService } from '@app/cluster/shard-load.service';
 import type { ShardLoadSample, SlotLoadRate } from '@app/cluster/shard-load';
@@ -8506,7 +8509,6 @@ export class AnomalyService
    * Matches the spirit of healthCheckNode's 2s ping race.
    */
   private static readonly FANOUT_COMMAND_TIMEOUT_MS = 2_000;
-  private static readonly FULL_CHECK_UNASKABLE_FLAGS = ['handshake', 'noaddr'];
   private static readonly PRIMARY_REREAD_RESERVE_MS = 500;
   private static readonly REPLICA_READ_TIMED_OUT = 'Reading the replica timed out';
   private static readonly FANOUT_NODE_EVENT_LIMIT = 8;
@@ -11019,11 +11021,13 @@ export class AnomalyService
     const clusterKey = this.connectionClusterKeys.get(connectionId);
     const round = clusterKey ? this.topologyDivergence.lastRound(clusterKey) : undefined;
     const eventOf = eventOfRaised(clusterKey ? this.topologyDisagreementEvents(clusterKey, connectionId) : []);
+    return { ...summarizeDisagreements(round, eventOf), fullCheck: this.getTopologyFullCheck(connectionId) };
+  }
+
+  getTopologyFullCheck(connectionId: string): TopologyFullCheckView {
+    const clusterKey = this.connectionClusterKeys.get(connectionId);
     const check = clusterKey ? this.topologyFullChecks.state(clusterKey, Date.now()) : ({ state: 'none' } as const);
-    return {
-      ...summarizeDisagreements(round, eventOf),
-      fullCheck: fullCheckView(check, this.topologyFullCheckBlocker(connectionId), eventOf),
-    };
+    return fullCheckView(check, this.topologyFullCheckBlocker(connectionId));
   }
 
   async startTopologyFullCheck(connectionId: string): Promise<TopologyFullCheckStart> {
@@ -11043,15 +11047,18 @@ export class AnomalyService
       );
       return { result: 'view_unreadable' };
     }
+    if (!this.connectionRegistry.getConfig(connectionId)) return { result: 'unknown_connection' };
+    if (this.connectionClusterKeys.get(connectionId) !== clusterKey) return { result: 'view_unreadable' };
 
-    const started = this.topologyFullChecks.start(clusterKey, Date.now(), nodes.length, (onProgress) =>
-      runFullCheck({
+    const started = this.topologyFullChecks.start(clusterKey, Date.now(), nodes.length, async (onProgress) => {
+      const outcome = await runFullCheck({
         nodes,
         readView: (node, signal) => this.readTopologyViewOnce(connectionId, node, signal),
         now: () => Date.now(),
         onProgress,
-      }),
-    );
+      });
+      return fullCheckResult(outcome, eventOfRaised(this.topologyDisagreementEvents(clusterKey, connectionId)));
+    });
     if (started.result === 'started') this.topologyFullCheckOwners.set(clusterKey, connectionId);
     return started;
   }
@@ -11102,7 +11109,7 @@ export class AnomalyService
     return withConfiguredZones(
       withShardMetadata(nodes, shards),
       this.connectionRegistry.getNodeAvailabilityZones(connectionId),
-    ).filter((node) => !node.flags.some((flag) => AnomalyService.FULL_CHECK_UNASKABLE_FLAGS.includes(flag)));
+    ).filter(isMember);
   }
 
   private readTopologyViewOnce(connectionId: string, node: ClusterNode, signal: AbortSignal): Promise<ClusterNode[]> {

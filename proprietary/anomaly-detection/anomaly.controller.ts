@@ -321,7 +321,7 @@ export class AnomalyController {
     if (started.result === 'view_unreadable') {
       throw new ServiceUnavailableException('The node list of the cluster could not be read');
     }
-    return this.anomalyService.getTopologyDisagreements(connectionId).fullCheck;
+    return this.anomalyService.getTopologyFullCheck(connectionId);
   }
 
   @Post('events/:id/resolve')

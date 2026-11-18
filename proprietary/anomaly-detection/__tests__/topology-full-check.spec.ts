@@ -1,11 +1,15 @@
 import type { ClusterNode } from '@app/common/types/metrics.types';
 import { MetricType } from '../types';
+import { DivergenceTracker, compareTopologyViews, groupDivergences } from '../topology-divergence';
+import { eventOfRaised, type RaisedDivergence } from '../topology-disagreements';
 import {
   FULL_CHECK_DEFAULTS,
   TopologyFullChecks,
+  fullCheckResult,
   fullCheckView,
   runFullCheck,
   type FullCheckOutcome,
+  type FullCheckResult,
   type FullCheckRun,
 } from '../topology-full-check';
 
@@ -58,6 +62,8 @@ function check(nodes: ClusterNode[], patch: Partial<FullCheckRun> = {}): Promise
     ...patch,
   });
 }
+
+const noEvent = () => undefined;
 
 function sides(outcome: FullCheckOutcome, key: string): Array<[string, string[]]> {
   const found = outcome.round.disagreements.find((entry) => entry.key === key);
@@ -223,7 +229,7 @@ describe('runFullCheck', () => {
     expect(outcome.asked).toBe(80);
   });
 
-  it('stops asking at the time limit and counts the rest as unanswered', async () => {
+  it('stops asking at the time limit and lists only the nodes it asked', async () => {
     const nodes = cluster(40);
     let clock = AT;
     const outcome = await check(nodes, {
@@ -238,10 +244,37 @@ describe('runFullCheck', () => {
 
     expect(outcome.asked).toBeGreaterThanOrEqual(10);
     expect(outcome.asked).toBeLessThan(20);
-    expect(outcome.round.observers).toHaveLength(80);
-    expect(outcome.round.unanswered).toHaveLength(80 - outcome.asked);
+    expect(outcome.total).toBe(80);
+    expect(outcome.round.observers).toHaveLength(outcome.asked);
+    expect(outcome.round.unanswered).toEqual([]);
     expect(outcome.finishedAt).toBeGreaterThanOrEqual(AT + 1000);
     expect(outcome.round.disagreements).toEqual([]);
+  });
+
+  it('reports the nodes the time limit kept it from asking as not asked', async () => {
+    const nodes = cluster(5);
+    let clock = AT;
+    const outcome = await check(nodes, {
+      concurrency: 1,
+      deadlineMs: 300,
+      now: () => clock,
+      readView: async (entry) => {
+        clock += 100;
+        return entry.id === 's001p' ? null : viewOf(nodes, entry.id);
+      },
+    });
+
+    expect(outcome).toMatchObject({ asked: 3, total: 10 });
+    expect(outcome.round.observers).toEqual(['s000p', 's000r', 's001p']);
+    expect(outcome.round.unanswered).toEqual(['s001p']);
+    expect(fullCheckResult(outcome, noEvent).summary.coverage).toMatchObject({
+      nodes: 10,
+      asked: 3,
+      answered: 2,
+      complete: false,
+      unanswered: [{ nodeId: 's001p' }],
+      unansweredCount: 1,
+    });
   });
 
   describe('sockets', () => {
@@ -293,7 +326,8 @@ describe('runFullCheck', () => {
       expect(reads.most()).toBe(16);
       expect(reads.opened).toHaveLength(16);
       expect(outcome.asked).toBe(16);
-      expect(outcome.round.unanswered).toHaveLength(80);
+      expect(outcome.round.observers).toHaveLength(16);
+      expect(outcome.round.unanswered).toHaveLength(16);
       expect(outcome.finishedAt - outcome.startedAt).toBeLessThan(5_000);
     });
 
@@ -346,30 +380,83 @@ describe('runFullCheck', () => {
     expect(outcome.round.nodes.get('s000p')?.shardId).toBe('s000');
   });
 
-  it('gets through 500 nodes that all say something different within the time budget', async () => {
+  describe('comparing 500 nodes that all say something different', () => {
     const nodes = cluster(250);
     const edit: Edit = (entry, observerId) => (entry.id === observerId ? { ...entry, configEpoch: 7 } : entry);
-    await check(cluster(3));
+    const readView: FullCheckRun['readView'] = async (entry) => viewOf(nodes, entry.id, edit);
 
-    const startedAt = performance.now();
-    const outcome = await check(nodes, { readView: async (entry) => viewOf(nodes, entry.id, edit) });
-    const elapsed = performance.now() - startedAt;
+    it('works in slices and rests between them', async () => {
+      let readings = 0;
+      let rests = 0;
+      let sinceRest = 0;
+      let longest = 0;
+      let restedBeforeTheEnd = false;
 
-    expect(outcome.distinctViews).toBe(500);
-    expect(outcome.round.disagreements).toHaveLength(500);
-    expect(sides(outcome, 'config_epoch:s000p').map(([value, observers]) => [value, observers.length])).toEqual([
-      ['1', 499],
-      ['7', 1],
-    ]);
-    expect(elapsed).toBeLessThan(5000);
+      const outcome = await check(nodes, {
+        readView,
+        now: () => {
+          restedBeforeTheEnd = sinceRest === 0;
+          return AT;
+        },
+        pace: {
+          sliceMs: 25,
+          clock: () => {
+            sinceRest += 1;
+            longest = Math.max(longest, sinceRest);
+            return readings++;
+          },
+          rest: async () => {
+            rests += 1;
+            sinceRest = 0;
+            await new Promise((resolve) => setImmediate(resolve));
+          },
+        },
+      });
+
+      expect(outcome.distinctViews).toBe(500);
+      expect(outcome.round.disagreements).toHaveLength(500);
+      expect(sides(outcome, 'config_epoch:s000p').map(([value, observers]) => [value, observers.length])).toEqual([
+        ['1', 499],
+        ['7', 1],
+      ]);
+      expect(rests).toBeGreaterThanOrEqual(60);
+      expect(longest).toBeLessThanOrEqual(27);
+      expect(restedBeforeTheEnd).toBe(true);
+    });
+
+    it('finds the same as a comparison in one go', async () => {
+      const sliced = await check(nodes, { readView });
+      const atOnce = await check(nodes, {
+        readView,
+        pace: { sliceMs: Infinity, clock: () => 0, rest: async () => undefined },
+      });
+
+      expect(sliced.round).toEqual(atOnce.round);
+    });
+
+    it('lets other work run while it compares', async () => {
+      let turns = 0;
+      let watching = true;
+      const turn = () => {
+        turns += 1;
+        if (watching) setImmediate(turn);
+      };
+
+      const running = check(nodes, { readView });
+      setImmediate(turn);
+      await running;
+      watching = false;
+
+      expect(turns).toBeGreaterThan(1);
+    });
   });
 });
 
 describe('TopologyFullChecks', () => {
   function deferred() {
-    let finish: (outcome: FullCheckOutcome) => void = () => undefined;
+    let finish: (result: FullCheckResult) => void = () => undefined;
     let fail: (error: Error) => void = () => undefined;
-    const promise = new Promise<FullCheckOutcome>((resolve, reject) => {
+    const promise = new Promise<FullCheckResult>((resolve, reject) => {
       finish = resolve;
       fail = reject;
     });
@@ -380,9 +467,8 @@ describe('TopologyFullChecks', () => {
     return new Promise((resolve) => setImmediate(resolve));
   }
 
-  async function outcomeAt(finishedAt: number): Promise<FullCheckOutcome> {
-    const outcome = await check(cluster(2));
-    return { ...outcome, finishedAt };
+  async function resultAt(finishedAt: number): Promise<FullCheckResult> {
+    return { ...fullCheckResult(await check(cluster(2)), noEvent), finishedAt };
   }
 
   it('has nothing for a cluster that was never checked', () => {
@@ -401,18 +487,11 @@ describe('TopologyFullChecks', () => {
     expect(started).toEqual({ result: 'started' });
     expect(checks.state('c1', AT + 100)).toEqual({ state: 'running', startedAt: AT, asked: 3, total: 4 });
 
-    const outcome = await outcomeAt(AT + 500);
-    run.finish(outcome);
+    const result = await resultAt(AT + 500);
+    run.finish(result);
     await settled();
 
-    expect(checks.state('c1', AT + 600)).toEqual({
-      state: 'done',
-      startedAt: AT,
-      finishedAt: AT + 500,
-      asked: 4,
-      total: 4,
-      outcome,
-    });
+    expect(checks.state('c1', AT + 600)).toEqual({ state: 'done', result });
   });
 
   it('joins the running check instead of starting a second one', () => {
@@ -428,10 +507,10 @@ describe('TopologyFullChecks', () => {
 
   it('refuses a new check within 30 seconds of the last one and says when to retry', async () => {
     const checks = new TopologyFullChecks();
-    const outcome = await outcomeAt(AT + 500);
-    checks.start('c1', AT, 4, () => Promise.resolve(outcome));
+    const result = await resultAt(AT + 500);
+    checks.start('c1', AT, 4, () => Promise.resolve(result));
     await settled();
-    const runs = jest.fn(() => Promise.resolve(outcome));
+    const runs = jest.fn(() => Promise.resolve(result));
 
     expect(FULL_CHECK_DEFAULTS.minIntervalMs).toBe(30_000);
     expect(checks.start('c1', AT + 30_499, 4, runs)).toEqual({ result: 'too_soon', retryAt: AT + 30_500 });
@@ -441,8 +520,8 @@ describe('TopologyFullChecks', () => {
 
   it('drops a result after 10 minutes', async () => {
     const checks = new TopologyFullChecks();
-    const outcome = await outcomeAt(AT + 500);
-    checks.start('c1', AT, 4, () => Promise.resolve(outcome));
+    const result = await resultAt(AT + 500);
+    checks.start('c1', AT, 4, () => Promise.resolve(result));
     await settled();
 
     expect(FULL_CHECK_DEFAULTS.keepMs).toBe(600_000);
@@ -464,29 +543,47 @@ describe('TopologyFullChecks', () => {
     checks.start('c1', AT, 4, () => run.promise);
 
     checks.forget('c1');
-    run.finish(await outcomeAt(AT + 500));
+    run.finish(await resultAt(AT + 500));
     await settled();
 
     expect(checks.state('c1', AT + 600)).toEqual({ state: 'none' });
   });
 
-  it('records that a check broke, and lets the next one start', async () => {
+  it('records that a check broke, and makes the next one wait as long as after a result', async () => {
     const checks = new TopologyFullChecks(FULL_CHECK_DEFAULTS, () => AT + 5);
     const run = deferred();
     checks.start('c1', AT, 4, () => run.promise);
 
     run.fail(new Error('boom'));
     await settled();
+    const runs = jest.fn(() => deferred().promise);
 
     expect(checks.state('c1', AT + 10)).toEqual({ state: 'none', failure: { at: AT + 5, reason: 'boom' } });
-    expect(checks.start('c1', AT + 20, 4, () => deferred().promise)).toEqual({ result: 'started' });
+    expect(checks.blocked('c1', AT + 20)).toEqual({ result: 'too_soon', retryAt: AT + 30_005 });
+    expect(checks.start('c1', AT + 30_004, 4, runs)).toEqual({ result: 'too_soon', retryAt: AT + 30_005 });
+    expect(runs).not.toHaveBeenCalled();
+    expect(checks.start('c1', AT + 30_005, 4, runs)).toEqual({ result: 'started' });
+  });
+
+  it('waits from the later of a result and a failure', async () => {
+    let clock = AT;
+    const checks = new TopologyFullChecks(FULL_CHECK_DEFAULTS, () => clock);
+    const result = await resultAt(AT + 500);
+    checks.start('c1', AT, 4, () => Promise.resolve(result));
+    await settled();
+    clock = AT + 40_100;
+    checks.start('c1', AT + 40_000, 4, () => Promise.reject(new Error('boom')));
+    await settled();
+
+    expect(checks.blocked('c1', AT + 50_000)).toEqual({ result: 'too_soon', retryAt: AT + 70_100 });
+    expect(checks.blocked('c1', AT + 70_100)).toBeNull();
   });
 
   it('keeps the earlier result and says that the newer check broke', async () => {
     let clock = AT;
     const checks = new TopologyFullChecks(FULL_CHECK_DEFAULTS, () => clock);
-    const outcome = await outcomeAt(AT + 500);
-    checks.start('c1', AT, 4, () => Promise.resolve(outcome));
+    const result = await resultAt(AT + 500);
+    checks.start('c1', AT, 4, () => Promise.resolve(result));
     await settled();
     const run = deferred();
     checks.start('c1', AT + 40_000, 4, () => run.promise);
@@ -497,11 +594,7 @@ describe('TopologyFullChecks', () => {
 
     expect(checks.state('c1', AT + 40_200)).toEqual({
       state: 'done',
-      startedAt: outcome.startedAt,
-      finishedAt: AT + 500,
-      asked: outcome.asked,
-      total: outcome.total,
-      outcome,
+      result,
       failure: { at: AT + 40_100, reason: 'boom' },
     });
   });
@@ -510,20 +603,20 @@ describe('TopologyFullChecks', () => {
     const checks = new TopologyFullChecks(FULL_CHECK_DEFAULTS, () => AT + 5);
     checks.start('c1', AT, 4, () => Promise.reject(new Error('boom')));
     await settled();
-    const outcome = await outcomeAt(AT + 500);
+    const result = await resultAt(AT + 500);
 
-    checks.start('c1', AT + 100, 4, () => Promise.resolve(outcome));
-    expect(checks.state('c1', AT + 110)).toMatchObject({ state: 'running' });
+    checks.start('c1', AT + 30_100, 4, () => Promise.resolve(result));
+    expect(checks.state('c1', AT + 30_110)).toMatchObject({ state: 'running' });
     await settled();
 
-    expect(checks.state('c1', AT + 600)).not.toHaveProperty('failure');
+    expect(checks.state('c1', AT + 30_600)).not.toHaveProperty('failure');
   });
 
   it('drops a failure after 10 minutes, apart from the result it sits beside', async () => {
     let clock = AT;
     const checks = new TopologyFullChecks(FULL_CHECK_DEFAULTS, () => clock);
-    const outcome = await outcomeAt(AT + 500);
-    checks.start('c1', AT, 4, () => Promise.resolve(outcome));
+    const result = await resultAt(AT + 500);
+    checks.start('c1', AT, 4, () => Promise.resolve(result));
     await settled();
     clock = AT + 300_000;
     checks.start('c1', AT + 299_000, 4, () => Promise.reject(new Error('boom')));
@@ -556,7 +649,7 @@ describe('TopologyFullChecks', () => {
     checks.start('c1', AT, 4, () => run.promise);
     expect(checks.blocked('c1', AT + 10)).toEqual({ result: 'running' });
 
-    run.finish(await outcomeAt(AT + 500));
+    run.finish(await resultAt(AT + 500));
     await settled();
 
     expect(checks.blocked('c1', AT + 600)).toEqual({
@@ -568,10 +661,8 @@ describe('TopologyFullChecks', () => {
 });
 
 describe('fullCheckView', () => {
-  const noEvent = () => undefined;
-
   it('is empty when no check was run', () => {
-    expect(fullCheckView({ state: 'none' }, null, noEvent)).toEqual({
+    expect(fullCheckView({ state: 'none' }, null)).toEqual({
       state: 'none',
       unavailable: null,
       startedAt: null,
@@ -585,45 +676,48 @@ describe('fullCheckView', () => {
 
   it('says that the last check failed, with or without an earlier result', async () => {
     const failure = { at: AT + 40_100, reason: 'boom' };
-    const outcome = { ...(await check(cluster(2))), finishedAt: AT + 500 };
+    const result = { ...fullCheckResult(await check(cluster(2)), noEvent), finishedAt: AT + 500 };
 
-    expect(fullCheckView({ state: 'none', failure }, null, noEvent)).toMatchObject({
+    expect(fullCheckView({ state: 'none', failure }, null)).toMatchObject({
       state: 'none',
       finishedAt: null,
+      retryAt: AT + 70_100,
       lastFailure: failure,
     });
-    expect(
-      fullCheckView(
-        {
-          state: 'done',
-          startedAt: outcome.startedAt,
-          finishedAt: outcome.finishedAt,
-          asked: outcome.asked,
-          total: outcome.total,
-          outcome,
-          failure,
-        },
-        null,
-        noEvent,
-      ),
-    ).toMatchObject({ state: 'done', finishedAt: AT + 500, retryAt: AT + 30_500, lastFailure: failure });
+    expect(fullCheckView({ state: 'done', result, failure }, null)).toMatchObject({
+      state: 'done',
+      finishedAt: AT + 500,
+      retryAt: AT + 70_100,
+      lastFailure: failure,
+    });
+    expect(fullCheckView({ state: 'done', result }, null)).toMatchObject({ retryAt: AT + 30_500, lastFailure: null });
+  });
+
+  it('hands out the summary that was built when the check finished', async () => {
+    const result = fullCheckResult(await check(cluster(2)), noEvent);
+
+    const first = fullCheckView({ state: 'done', result }, null);
+    const second = fullCheckView({ state: 'done', result }, null);
+
+    expect(first.summary).toBe(result.summary);
+    expect(second.summary).toBe(first.summary);
   });
 
   it('says why a check cannot be run', () => {
-    expect(fullCheckView({ state: 'none' }, 'raft_cluster', noEvent).unavailable).toEqual({
+    expect(fullCheckView({ state: 'none' }, 'raft_cluster').unavailable).toEqual({
       reason: 'raft_cluster',
       text: 'The nodes of a Raft cluster share one agreed view, so there is nothing to compare.',
     });
-    expect(fullCheckView({ state: 'none' }, 'no_direct_access', noEvent).unavailable?.reason).toBe('no_direct_access');
-    expect(fullCheckView({ state: 'none' }, 'no_cluster_view', noEvent).unavailable?.reason).toBe('no_cluster_view');
-    expect(fullCheckView({ state: 'none' }, 'ssh_tunnel', noEvent).unavailable).toEqual({
+    expect(fullCheckView({ state: 'none' }, 'no_direct_access').unavailable?.reason).toBe('no_direct_access');
+    expect(fullCheckView({ state: 'none' }, 'no_cluster_view').unavailable?.reason).toBe('no_cluster_view');
+    expect(fullCheckView({ state: 'none' }, 'ssh_tunnel').unavailable).toEqual({
       reason: 'ssh_tunnel',
       text: 'This connection goes through an SSH tunnel, so the monitor cannot reach every node.',
     });
   });
 
   it('shows how far a running check is', () => {
-    expect(fullCheckView({ state: 'running', startedAt: AT, asked: 312, total: 500 }, null, noEvent)).toEqual({
+    expect(fullCheckView({ state: 'running', startedAt: AT, asked: 312, total: 500 }, null)).toEqual({
       state: 'running',
       unavailable: null,
       startedAt: AT,
@@ -649,18 +743,16 @@ describe('fullCheckView', () => {
       now: () => AT + 900,
     });
 
-    const view = fullCheckView(
-      { state: 'done', startedAt: AT, finishedAt: AT + 900, asked: 500, total: 500, outcome },
-      null,
-      ({ key }) =>
-        key.startsWith('slot_owner:')
-          ? { eventId: 'e1', eventType: MetricType.TOPOLOGY_DIVERGENCE, eventAt: AT - 60_000, connectionId: 'c1' }
-          : undefined,
+    const result = fullCheckResult(outcome, ({ key }) =>
+      key.startsWith('slot_owner:')
+        ? { eventId: 'e1', eventType: MetricType.TOPOLOGY_DIVERGENCE, eventAt: AT - 60_000, connectionId: 'c1' }
+        : undefined,
     );
+    const view = fullCheckView({ state: 'done', result }, null);
 
     expect(view).toMatchObject({
       state: 'done',
-      startedAt: AT,
+      startedAt: AT + 900,
       finishedAt: AT + 900,
       asked: 500,
       total: 500,
@@ -686,12 +778,82 @@ describe('fullCheckView', () => {
       readView: async (asked) => (asked.id === 's001r' ? null : viewOf(nodes, asked.id)),
     });
 
-    const view = fullCheckView(
-      { state: 'done', startedAt: AT, finishedAt: AT, asked: 6, total: 6, outcome },
-      null,
-      noEvent,
-    );
+    const view = fullCheckView({ state: 'done', result: fullCheckResult(outcome, noEvent) }, null);
 
     expect(view.summary?.coverage).toMatchObject({ nodes: 6, asked: 6, answered: 5, complete: false, unansweredCount: 1 });
+  });
+});
+
+describe('event of a full check line', () => {
+  const nodes = cluster(3);
+  const HIGH = [9000, 9100];
+  const LOW = [5000, 5100];
+
+  function moved(observerId: string, entry: ClusterNode, sees: { high: boolean; low: boolean }): ClusterNode {
+    const high = sees.high && observerId === 's002r';
+    const low = sees.low && observerId === 's002p';
+    if (entry.id === 's000p') {
+      if (high) return { ...entry, slots: [...entry.slots, HIGH] };
+      if (low) return { ...entry, slots: [[0, 4999], [5101, 5460]] };
+    }
+    if (entry.id === 's001p') {
+      if (high) return { ...entry, slots: [[5461, 8999], [9101, 10921]] };
+      if (low) return { ...entry, slots: [LOW, ...entry.slots] };
+    }
+    return entry;
+  }
+
+  function viewsWith(sees: { high: boolean; low: boolean }) {
+    return nodes.map((asked) => ({
+      observerId: asked.id,
+      nodes: viewOf(nodes, asked.id, (entry, observerId) => moved(observerId, entry, sees)),
+    }));
+  }
+
+  function raisedBy(tracker: DivergenceTracker): RaisedDivergence[] {
+    return groupDivergences(tracker.tracked()).map((group) => ({
+      group,
+      event: {
+        eventId: `event-${group.disagreements[0].slots?.[0][0]}`,
+        eventType: MetricType.TOPOLOGY_DIVERGENCE,
+        eventAt: AT,
+        connectionId: 'c1',
+      },
+    }));
+  }
+
+  async function linked(sees: { high: boolean; low: boolean }, raised: RaisedDivergence[]) {
+    const outcome = await check(nodes, {
+      readView: async (asked) => viewOf(nodes, asked.id, (entry, observerId) => moved(observerId, entry, sees)),
+    });
+    return fullCheckResult(outcome, eventOfRaised(raised)).summary.disagreements.map((line) => [
+      line.id,
+      line.slots,
+      line.eventId,
+    ]);
+  }
+
+  it('is the event of the same slots, however the tracker numbered two disputes of one pair of owners', async () => {
+    const tracker = new DivergenceTracker();
+    const observe = (sees: { high: boolean; low: boolean }, at: number) =>
+      tracker.observe({ at, disagreements: compareTopologyViews(viewsWith(sees)), unanswered: [], views: 6 });
+    observe({ high: true, low: false }, AT);
+    observe({ high: true, low: true }, AT + 1);
+
+    expect(tracker.tracked().map((entry) => [entry.key, entry.slots])).toEqual([
+      ['slot_owner:s000p|s001p', [HIGH]],
+      ['slot_owner:s000p|s001p#2', [LOW]],
+    ]);
+    expect(await linked({ high: true, low: true }, raisedBy(tracker))).toEqual([
+      ['slot_owner:s000p|s001p', [LOW], 'event-5000'],
+      ['slot_owner:s000p|s001p#2', [HIGH], 'event-9000'],
+    ]);
+
+    observe({ high: false, low: true }, AT + 2);
+
+    expect(tracker.tracked().map((entry) => entry.key)).toEqual(['slot_owner:s000p|s001p#2']);
+    expect(await linked({ high: false, low: true }, raisedBy(tracker))).toEqual([
+      ['slot_owner:s000p|s001p', [LOW], 'event-5000'],
+    ]);
   });
 });

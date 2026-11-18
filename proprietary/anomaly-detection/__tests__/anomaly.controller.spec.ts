@@ -263,7 +263,8 @@ describe('AnomalyController.startTopologyFullCheck', () => {
   };
   const service = {
     startTopologyFullCheck: jest.fn(),
-    getTopologyDisagreements: jest.fn().mockReturnValue({ status: 'ok', fullCheck }),
+    getTopologyFullCheck: jest.fn().mockReturnValue(fullCheck),
+    getTopologyDisagreements: jest.fn(),
   };
   const controller = new AnomalyController(service as unknown as AnomalyService);
 
@@ -283,7 +284,15 @@ describe('AnomalyController.startTopologyFullCheck', () => {
 
     await expect(controller.startTopologyFullCheck('c1')).resolves.toEqual(fullCheck);
     expect(service.startTopologyFullCheck).toHaveBeenCalledWith('c1');
-    expect(service.getTopologyDisagreements).toHaveBeenCalledWith('c1');
+    expect(service.getTopologyFullCheck).toHaveBeenCalledWith('c1');
+  });
+
+  it('does not build the report of the sampled rounds to answer', async () => {
+    service.startTopologyFullCheck.mockResolvedValue({ result: 'started' });
+
+    await controller.startTopologyFullCheck('c1');
+
+    expect(service.getTopologyDisagreements).not.toHaveBeenCalled();
   });
 
   it('answers 409 with the reason when the check cannot be run on the connection', async () => {

@@ -1,6 +1,14 @@
 import { createHash } from 'crypto';
 import type { ClusterNode } from '@app/common/types/metrics.types';
-import { compareTopologyViews, type TopologyDisagreement, type TopologyView } from './topology-divergence';
+import {
+  FAILING_FLAGS,
+  compareText,
+  compareTopologyViewsInSteps,
+  isMember,
+  type Steps,
+  type TopologyDisagreement,
+  type TopologyView,
+} from './topology-divergence';
 import type { FailureFlagViews } from './topology-divergence-monitor';
 import {
   summarizeDisagreements,
@@ -14,13 +22,24 @@ export const FULL_CHECK_DEFAULTS = {
   readTimeoutMs: 5_000,
   minIntervalMs: 30_000,
   keepMs: 10 * 60_000,
+  sliceMs: 20,
 };
 
 const MAX_FAILURE_REASON_LENGTH = 200;
 
 const KEPT_FLAGS = ['master', 'slave', 'fail', 'fail?', 'handshake', 'noaddr'];
-const FAILING_FLAGS = ['fail', 'fail?'];
-const UNREACHABLE_FLAGS = ['handshake', 'noaddr'];
+
+export interface FullCheckPace {
+  sliceMs: number;
+  clock: () => number;
+  rest: () => Promise<void>;
+}
+
+const STEADY_PACE: FullCheckPace = {
+  sliceMs: FULL_CHECK_DEFAULTS.sliceMs,
+  clock: () => performance.now(),
+  rest: () => new Promise((resolve) => setImmediate(resolve)),
+};
 
 export interface FullCheckRun {
   nodes: ClusterNode[];
@@ -30,6 +49,7 @@ export interface FullCheckRun {
   deadlineMs?: number;
   readTimeoutMs?: number;
   onProgress?: (asked: number) => void;
+  pace?: FullCheckPace;
 }
 
 export interface FullCheckRound {
@@ -56,18 +76,18 @@ export interface FullCheckFailure {
   reason: string;
 }
 
+export interface FullCheckResult {
+  startedAt: number;
+  finishedAt: number;
+  total: number;
+  asked: number;
+  summary: TopologyDisagreementSummary;
+}
+
 export type FullCheckState =
   | { state: 'none'; failure?: FullCheckFailure }
   | { state: 'running'; startedAt: number; asked: number; total: number }
-  | {
-      state: 'done';
-      startedAt: number;
-      finishedAt: number;
-      asked: number;
-      total: number;
-      outcome: FullCheckOutcome;
-      failure?: FullCheckFailure;
-    };
+  | { state: 'done'; result: FullCheckResult; failure?: FullCheckFailure };
 
 export type FullCheckRefusal = { result: 'running' } | { result: 'too_soon'; retryAt: number };
 
@@ -104,10 +124,28 @@ export type TopologyFullCheckStart =
   | { result: 'unknown_connection' }
   | { result: 'view_unreadable' };
 
+export function fullCheckResult(outcome: FullCheckOutcome, eventOf: DisagreementEventOf): FullCheckResult {
+  return {
+    startedAt: outcome.startedAt,
+    finishedAt: outcome.finishedAt,
+    total: outcome.total,
+    asked: outcome.asked,
+    summary: summarizeDisagreements(outcome.round, eventOf),
+  };
+}
+
+function retryAfter(
+  result: FullCheckResult | undefined,
+  failure: FullCheckFailure | undefined,
+  minIntervalMs: number,
+): number | null {
+  const last = Math.max(result?.finishedAt ?? -Infinity, failure?.at ?? -Infinity);
+  return Number.isFinite(last) ? last + minIntervalMs : null;
+}
+
 export function fullCheckView(
   check: FullCheckState,
   blocker: FullCheckBlocker | null,
-  eventOf: DisagreementEventOf,
   minIntervalMs: number = FULL_CHECK_DEFAULTS.minIntervalMs,
 ): TopologyFullCheckView {
   const unavailable = blocker ? { reason: blocker, text: FULL_CHECK_BLOCKER_TEXT[blocker] } : null;
@@ -119,7 +157,7 @@ export function fullCheckView(
       finishedAt: null,
       asked: 0,
       total: 0,
-      retryAt: null,
+      retryAt: retryAfter(undefined, check.failure, minIntervalMs),
       lastFailure: check.failure ?? null,
     };
   }
@@ -135,27 +173,23 @@ export function fullCheckView(
       lastFailure: null,
     };
   }
+  const { result } = check;
   return {
     state: 'done',
     unavailable,
-    startedAt: check.startedAt,
-    finishedAt: check.finishedAt,
-    asked: check.asked,
-    total: check.total,
-    retryAt: check.finishedAt + minIntervalMs,
+    startedAt: result.startedAt,
+    finishedAt: result.finishedAt,
+    asked: result.asked,
+    total: result.total,
+    retryAt: retryAfter(result, check.failure, minIntervalMs),
     lastFailure: check.failure ?? null,
-    summary: summarizeDisagreements(check.outcome.round, eventOf),
+    summary: result.summary,
   };
 }
 
 interface DistinctView {
   nodes: ClusterNode[];
   members: string[];
-}
-
-function compareText(a: string, b: string): number {
-  if (a < b) return -1;
-  return a > b ? 1 : 0;
 }
 
 function reduced(node: ClusterNode): ClusterNode {
@@ -185,10 +219,7 @@ function fingerprint(nodes: ClusterNode[]): string {
 }
 
 function isAccused(node: ClusterNode): boolean {
-  return (
-    node.flags.some((flag) => FAILING_FLAGS.includes(flag)) &&
-    !node.flags.some((flag) => UNREACHABLE_FLAGS.includes(flag))
-  );
+  return isMember(node) && node.flags.some((flag) => FAILING_FLAGS.includes(flag));
 }
 
 function readWithin(
@@ -231,7 +262,7 @@ function expand(
   };
 }
 
-function failureFlagsOf(distinct: DistinctView[]): Map<string, FailureFlagViews> {
+function* failureFlagsOf(distinct: DistinctView[]): Steps<Map<string, FailureFlagViews>> {
   const flagged = new Map<string, FailureFlagViews>();
   for (const view of distinct) {
     for (const node of view.nodes) {
@@ -242,18 +273,62 @@ function failureFlagsOf(distinct: DistinctView[]): Map<string, FailureFlagViews>
       (node.flags.includes('fail') ? entry.failed : entry.suspected).push(...accusers);
       flagged.set(node.id, entry);
     }
+    yield;
   }
   for (const entry of flagged.values()) {
     entry.suspected.sort(compareText);
     entry.failed.sort(compareText);
+    yield;
   }
   return new Map([...flagged].sort((a, b) => compareText(a[0], b[0])));
+}
+
+interface Compared {
+  disagreements: TopologyDisagreement[];
+  nodes: Map<string, ClusterNode>;
+  failureFlags: Map<string, FailureFlagViews>;
+}
+
+function* compareDistinct(asked: ClusterNode[], groups: DistinctView[]): Steps<Compared> {
+  const views: TopologyView[] = [];
+  const membersOf = new Map<string, string[]>();
+  const nodes = new Map(asked.map((node) => [node.id, node]));
+  for (const group of groups) {
+    group.members.sort(compareText);
+    for (const speaker of group.members.slice(0, 2)) {
+      views.push({ observerId: speaker, nodes: group.nodes });
+      membersOf.set(speaker, group.members);
+    }
+    for (const node of group.nodes) {
+      if (!nodes.has(node.id)) nodes.set(node.id, node);
+    }
+    yield;
+  }
+
+  const disagreements: TopologyDisagreement[] = [];
+  for (const disagreement of yield* compareTopologyViewsInSteps(views)) {
+    disagreements.push(expand(disagreement, membersOf));
+    yield;
+  }
+  return { disagreements, nodes, failureFlags: yield* failureFlagsOf(groups) };
+}
+
+async function inSlices<T>(steps: Steps<T>, pace: FullCheckPace): Promise<T> {
+  let since = pace.clock();
+  for (;;) {
+    const step = steps.next();
+    if (step.done) return step.value;
+    if (pace.clock() - since < pace.sliceMs) continue;
+    await pace.rest();
+    since = pace.clock();
+  }
 }
 
 export async function runFullCheck(input: FullCheckRun): Promise<FullCheckOutcome> {
   const concurrency = input.concurrency ?? FULL_CHECK_DEFAULTS.concurrency;
   const deadlineMs = input.deadlineMs ?? FULL_CHECK_DEFAULTS.deadlineMs;
   const readTimeoutMs = input.readTimeoutMs ?? FULL_CHECK_DEFAULTS.readTimeoutMs;
+  const pace = input.pace ?? STEADY_PACE;
   const startedAt = input.now();
   const queue = [...input.nodes].sort((a, b) => compareText(a.id, b.id));
   const distinct = new Map<string, DistinctView>();
@@ -291,22 +366,9 @@ export async function runFullCheck(input: FullCheckRun): Promise<FullCheckOutcom
   }
 
   const groups = [...distinct.values()];
-  const views: TopologyView[] = [];
-  const membersOf = new Map<string, string[]>();
-  for (const group of groups) {
-    group.members.sort(compareText);
-    for (const speaker of group.members.slice(0, 2)) {
-      views.push({ observerId: speaker, nodes: group.nodes });
-      membersOf.set(speaker, group.members);
-    }
-  }
-
-  const nodes = new Map(input.nodes.map((node) => [node.id, node]));
-  for (const group of groups) {
-    for (const node of group.nodes) {
-      if (!nodes.has(node.id)) nodes.set(node.id, node);
-    }
-  }
+  const contacted = queue.slice(0, next).map((node) => node.id);
+  const compared = await inSlices(compareDistinct(input.nodes, groups), pace);
+  await pace.rest();
 
   const finishedAt = input.now();
   return {
@@ -318,11 +380,9 @@ export async function runFullCheck(input: FullCheckRun): Promise<FullCheckOutcom
     round: {
       status: answered.size >= 2 ? 'ok' : 'insufficient_views',
       at: finishedAt,
-      observers: queue.map((node) => node.id),
-      unanswered: queue.map((node) => node.id).filter((id) => !answered.has(id)),
-      disagreements: compareTopologyViews(views).map((disagreement) => expand(disagreement, membersOf)),
-      nodes,
-      failureFlags: failureFlagsOf(groups),
+      observers: contacted,
+      unanswered: contacted.filter((id) => !answered.has(id)),
+      ...compared,
     },
   };
 }
@@ -330,7 +390,7 @@ export async function runFullCheck(input: FullCheckRun): Promise<FullCheckOutcom
 interface ClusterCheck {
   token: number;
   running?: { startedAt: number; asked: number; total: number };
-  done?: FullCheckOutcome;
+  done?: FullCheckResult;
   failed?: FullCheckFailure;
 }
 
@@ -352,7 +412,7 @@ export class TopologyFullChecks {
     clusterKey: string,
     at: number,
     total: number,
-    run: (onProgress: (asked: number) => void) => Promise<FullCheckOutcome>,
+    run: (onProgress: (asked: number) => void) => Promise<FullCheckResult>,
   ): FullCheckStart {
     const refusal = this.blocked(clusterKey, at);
     if (refusal) return refusal;
@@ -365,11 +425,11 @@ export class TopologyFullChecks {
     const onProgress = (asked: number) => {
       running.asked = asked;
     };
-    new Promise<FullCheckOutcome>((resolve) => resolve(run(onProgress))).then(
-      (outcome) => {
+    new Promise<FullCheckResult>((resolve) => resolve(run(onProgress))).then(
+      (result) => {
         if (!isCurrent()) return;
         entry.running = undefined;
-        entry.done = outcome;
+        entry.done = result;
       },
       (error) => {
         if (!isCurrent()) return;
@@ -383,8 +443,8 @@ export class TopologyFullChecks {
   blocked(clusterKey: string, at: number): FullCheckRefusal | null {
     const current = this.clusters.get(clusterKey);
     if (current?.running) return { result: 'running' };
-    const retryAt = (current?.done?.finishedAt ?? -Infinity) + this.limits.minIntervalMs;
-    return at < retryAt ? { result: 'too_soon', retryAt } : null;
+    const retryAt = retryAfter(current?.done, current?.failed, this.limits.minIntervalMs);
+    return retryAt !== null && at < retryAt ? { result: 'too_soon', retryAt } : null;
   }
 
   state(clusterKey: string, at: number): FullCheckState {
@@ -393,21 +453,12 @@ export class TopologyFullChecks {
     if (entry.running) return { state: 'running', ...entry.running };
     if (entry.done && at - entry.done.finishedAt >= this.limits.keepMs) entry.done = undefined;
     if (entry.failed && at - entry.failed.at >= this.limits.keepMs) entry.failed = undefined;
-    const outcome = entry.done;
     const failure = entry.failed ? { failure: entry.failed } : {};
-    if (!outcome) {
+    if (!entry.done) {
       if (!entry.failed) this.clusters.delete(clusterKey);
       return { state: 'none', ...failure };
     }
-    return {
-      state: 'done',
-      startedAt: outcome.startedAt,
-      finishedAt: outcome.finishedAt,
-      asked: outcome.asked,
-      total: outcome.total,
-      outcome,
-      ...failure,
-    };
+    return { state: 'done', result: entry.done, ...failure };
   }
 
   forget(clusterKey: string): void {

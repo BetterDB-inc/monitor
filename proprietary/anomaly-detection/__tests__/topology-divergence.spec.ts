@@ -5,6 +5,7 @@ import {
   type TopologyDisagreement,
   type TopologyView,
   compareTopologyViews,
+  compareTopologyViewsInSteps,
   confirmedDisagreements,
   dissentOf,
   groupDivergences,
@@ -12,6 +13,7 @@ import {
   migrationTouchesSlots,
   type OpenDivergence,
   settleOpenDivergences,
+  slotRangesOverlap,
 } from '../topology-divergence';
 
 type NodePatch = Partial<ClusterNode> | null;
@@ -62,6 +64,37 @@ function byKey(disagreements: TopologyDisagreement[], key: string): TopologyDisa
   if (!found) throw new Error(`no disagreement ${key} in ${disagreements.map((d) => d.key).join(', ')}`);
   return found;
 }
+
+describe('slotRangesOverlap', () => {
+  it.each([
+    [[[0, 10]], [[10, 20]], true],
+    [[[0, 9]], [[10, 20]], false],
+    [[[0, 5], [100, 200]], [[50, 60], [150, 150]], true],
+    [[[7]], [[0, 10]], true],
+    [[[7]], [[8]], false],
+    [[], [[0, 16383]], false],
+  ])('says whether %j and %j share a slot', (a, b, shared) => {
+    expect(slotRangesOverlap(a, b)).toBe(shared);
+    expect(slotRangesOverlap(b, a)).toBe(shared);
+  });
+});
+
+describe('compareTopologyViewsInSteps', () => {
+  it('finds what the comparison in one go finds, and can be left between steps', () => {
+    const views = [view('p1', { p3: failing(), p2: { configEpoch: 9 } }), view('p2'), view('p3'), view('r1')];
+    const steps = compareTopologyViewsInSteps(views);
+    let pauses = 0;
+    let step = steps.next();
+    while (!step.done) {
+      pauses += 1;
+      step = steps.next();
+    }
+
+    expect(step.value).toEqual(compareTopologyViews(views));
+    expect(step.value.length).toBeGreaterThan(0);
+    expect(pauses).toBeGreaterThan(views.length);
+  });
+});
 
 describe('compareTopologyViews', () => {
   it('reports nothing when every view agrees', () => {

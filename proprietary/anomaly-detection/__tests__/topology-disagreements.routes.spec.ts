@@ -82,7 +82,11 @@ function summaryOf(connectionId: string) {
 describe('topology disagreement routes', () => {
   let app: NestFastifyApplication;
   let licensed: boolean;
-  const service = { getTopologyDisagreements: jest.fn(reportOf), startTopologyFullCheck: jest.fn() };
+  const service = {
+    getTopologyDisagreements: jest.fn(reportOf),
+    getTopologyFullCheck: jest.fn((connectionId: string) => reportOf(connectionId).fullCheck),
+    startTopologyFullCheck: jest.fn(),
+  };
   const registry = {
     get: jest.fn((id: string) => {
       if (id !== 'conn-1') throw new NotFoundException(`Connection ${id} not found`);

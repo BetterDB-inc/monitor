@@ -3,9 +3,9 @@ import {
   UNASSIGNED_SLOT_OWNER,
   compareText,
   countSlots,
-  intersectSlotRanges,
   isMember,
   matchDivergence,
+  slotRangesOverlap,
   type DivergenceGroup,
   type DivergenceKind,
   type DivergencePosition,
@@ -321,7 +321,7 @@ export function summarizeDisagreements(
     }
     if (slots) {
       for (const shard of shards) {
-        if (intersectSlotRanges(shard.slots, slots).length > 0) touched.add(shard.shardId);
+        if (slotRangesOverlap(shard.slots, slots)) touched.add(shard.shardId);
       }
     }
     return [...touched].sort(compareText);
