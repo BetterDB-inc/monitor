@@ -101,3 +101,44 @@ describe('collectionOf with the node each connection reads', () => {
     });
   });
 });
+
+describe('collectionOf with the node each connection was seen reading', () => {
+  const registered = (known: Record<string, string>) => (host: string, port: number) =>
+    known[`${host}:${port}`] ?? null;
+  const ownNodeIds = (known: Record<string, string>) => (connectionId: string) => known[connectionId];
+  const readers = (known: Record<string, string>) => (nodeId: string) => known[nodeId] ?? null;
+  const node = { id: 'node-2', address: '10.0.0.2:6379', flags: ['master'] };
+
+  it('counts a connection that reads the node through another address', () => {
+    expect(collectionOf(node, 'seed', registered({}), ownNodeIds({}), readers({ 'node-2': 'conn-nat' }))).toEqual({
+      collected: true,
+      connectionId: 'conn-nat',
+    });
+  });
+
+  it('prefers the connection that reads the node over one that only shares its address', () => {
+    const collection = collectionOf(
+      node,
+      'seed',
+      registered({ '10.0.0.2:6379': 'conn-at-address' }),
+      ownNodeIds({}),
+      readers({ 'node-2': 'conn-reader' }),
+    );
+
+    expect(collection.connectionId).toBe('conn-reader');
+  });
+
+  it('does not count a dead node that shares the address of the node a connection reads', () => {
+    const dead = { id: 'node-dead', address: '10.0.0.2:6379', flags: ['master', 'fail'] };
+    const at = registered({ '10.0.0.2:6379': 'conn-2' });
+    const reads = { 'conn-2': 'node-2' };
+
+    expect(collectionOf(dead, 'seed', at, ownNodeIds(reads), readers({ 'node-2': 'conn-2' }))).toEqual({
+      collected: false,
+    });
+    expect(collectionOf(node, 'seed', at, ownNodeIds(reads), readers({ 'node-2': 'conn-2' }))).toEqual({
+      collected: true,
+      connectionId: 'conn-2',
+    });
+  });
+});

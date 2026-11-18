@@ -199,6 +199,7 @@ describe('AnomalyService', () => {
             findIdByHostPort: jest.fn().mockReturnValue(null),
             isListed: jest.fn().mockReturnValue(true),
             getNodeAvailabilityZones: jest.fn().mockReturnValue(undefined),
+            noteObservedNodeId: jest.fn(),
           },
         },
         { provide: 'STORAGE_CLIENT', useValue: storage },
@@ -13122,6 +13123,27 @@ describe('AnomalyService', () => {
         expect(recovered.mock.calls[0][0]).not.toHaveProperty('node');
       });
 
+      describe('the node a connection reads, as the connection list sees it', () => {
+        const registry = () => (service as any).connectionRegistry;
+
+        it('tells the connection list which node the connection reads', async () => {
+          await poll();
+
+          expect(registry().noteObservedNodeId).toHaveBeenLastCalledWith('conn-1', 'primA');
+        });
+
+        it('tells the connection list when the connection stops being a cluster', async () => {
+          await poll();
+          (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+            ...clusterInfoResponse,
+            stats: { ...clusterInfoResponse.stats, cluster_enabled: '0' },
+          });
+          await poll();
+
+          expect(registry().noteObservedNodeId).toHaveBeenLastCalledWith('conn-1', undefined);
+        });
+      });
+
       it('gives a dedicated webhook the node of its event', async () => {
         await poll();
         const event = await raise();
@@ -16455,7 +16477,12 @@ describe('AnomalyService', () => {
           AnomalyService,
           {
             provide: ConnectionRegistry,
-            useValue: { list: jest.fn().mockReturnValue([]), get: jest.fn(), getConfig: jest.fn() },
+            useValue: {
+              list: jest.fn().mockReturnValue([]),
+              get: jest.fn(),
+              getConfig: jest.fn(),
+              noteObservedNodeId: jest.fn(),
+            },
           },
           { provide: 'STORAGE_CLIENT', useValue: storage },
           {

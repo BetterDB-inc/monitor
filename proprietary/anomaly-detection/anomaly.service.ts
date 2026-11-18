@@ -1523,7 +1523,7 @@ export class AnomalyService
       this.reshardNodeSelves.delete(key);
     }
     this.forgetClusterKey(connectionId);
-    this.clusterNodeViews.forget(connectionId);
+    this.forgetClusterNodes(connectionId);
     this.forgetTopologyDivergence(connectionId);
     this.reshardSkewFirstSeen.delete(connectionId);
     this.activeReshardSkews.delete(connectionId);
@@ -1769,7 +1769,7 @@ export class AnomalyService
       }
       if (live && info['cluster_enabled'] !== '1') {
         this.forgetClusterKey(ctx.connectionId);
-        this.clusterNodeViews.forget(ctx.connectionId);
+        this.forgetClusterNodes(ctx.connectionId);
       }
       await this.adoptOpenEvents(ctx, timestamp);
       replicationSample = this.replicationStream.observe(ctx.connectionId, info, timestamp);
@@ -9494,6 +9494,12 @@ export class AnomalyService
     this.clusterNodeViews.remember(connectionId, viewKey, nodes, readAt, () =>
       withConfiguredZones(withShardMetadata(nodes, shards), zones),
     );
+    this.connectionRegistry.noteObservedNodeId(connectionId, this.clusterNodeViews.ownNodeId(connectionId));
+  }
+
+  private forgetClusterNodes(connectionId: string): void {
+    this.clusterNodeViews.forget(connectionId);
+    this.connectionRegistry.noteObservedNodeId(connectionId, undefined);
   }
 
   private async addAnomaly(

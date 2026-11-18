@@ -10,6 +10,8 @@ function discoveryReporting(flags: string[], connectionAt: string | null = null)
     findIdByHostPort: jest.fn().mockReturnValue(connectionAt),
     getConfig: jest.fn().mockReturnValue(undefined),
     getNodeAvailabilityZones: jest.fn().mockReturnValue(undefined),
+    getObservedNodeId: jest.fn().mockReturnValue(undefined),
+    findIdObservingNode: jest.fn().mockReturnValue(null),
     get: jest.fn().mockReturnValue({
       getClusterNodes: jest.fn().mockResolvedValue([
         {
