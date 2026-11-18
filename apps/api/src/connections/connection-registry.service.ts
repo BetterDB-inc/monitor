@@ -137,6 +137,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   private readonly encryption: EnvelopeEncryptionService | null;
   private startupConnectionErrors: Array<{ name: string; host: string; port: number; error: string }> = [];
   private readonly seedLocks = new Map<string, Promise<unknown>>();
+  private readonly observedNodeIds = new Map<string, string>();
+  private readonly outsideCluster = new Set<string>();
   private readonly removalListeners = new Set<ConnectionRemovalListener>();
   // Connections whose in-memory secrets came from the environment because the
   // stored (encrypted) record could not be decrypted and no cipher is available.
@@ -1016,6 +1018,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
     this.connections.delete(id);
     this.configs.delete(id);
+    this.observedNodeIds.delete(id);
+    this.outsideCluster.delete(id);
     this.runtimeCapabilityTracker.removeConnection(id);
     this.externalMetricsStore.clear(id);
     await this.storage.deleteConnection(id);
@@ -1398,6 +1402,37 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     return config !== undefined && !isRetiredAuto(config);
   }
 
+  noteObservedNodeId(id: string, nodeId: string | undefined): void {
+    if (nodeId) {
+      this.observedNodeIds.set(id, nodeId);
+    } else {
+      this.observedNodeIds.delete(id);
+    }
+  }
+
+  getObservedNodeId(id: string): string | undefined {
+    return this.observedNodeIds.get(id);
+  }
+
+  noteOutsideCluster(id: string, outside: boolean): void {
+    if (outside) {
+      this.outsideCluster.add(id);
+    } else {
+      this.outsideCluster.delete(id);
+    }
+  }
+
+  isOutsideCluster(id: string): boolean {
+    return this.outsideCluster.has(id);
+  }
+
+  findIdObservingNode(nodeId: string): string | null {
+    for (const [id, observed] of this.observedNodeIds) {
+      if (observed === nodeId && this.isListed(id)) return id;
+    }
+    return null;
+  }
+
   /** True when `id` was registered automatically from a cluster or Sentinel seed. */
   isAutoRegistered(id: string): boolean {
     return this.configs.get(id)?.membership?.origin === 'auto';
@@ -1529,6 +1564,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
   async refreshChild(id: string, node: DesiredNode): Promise<void> {
     const previous = this.requireMembership(id);
+    if (this.observedNodeIds.get(id) !== node.nodeId) this.observedNodeIds.delete(id);
     const { seedId, origin, retiredAt, hostname } = previous;
     const membershipOf = (target: DesiredNode): TopologyMembership => ({
       seedId,
@@ -1555,6 +1591,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
   async retireChild(id: string): Promise<void> {
     const membership = this.requireMembership(id);
+    this.observedNodeIds.delete(id);
     if (membership.origin === 'auto') {
       const adapter = this.connections.get(id);
       try {
@@ -1572,6 +1609,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
   async reactivateChild(id: string, node: DesiredNode): Promise<void> {
     const membership = this.requireMembership(id);
+    this.observedNodeIds.delete(id);
     const config = this.configs.get(id)!;
     if (membership.origin === 'auto') {
       const adapter = this.createAdapter({ ...config, membership: { ...membership, hostname: node.hostname } });

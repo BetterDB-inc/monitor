@@ -183,6 +183,9 @@ describe('AnomalyService', () => {
       port: 6379,
     };
 
+    const observedNodeIds = new Map<string, string>();
+    const outsideCluster = new Set<string>();
+    const isListed = jest.fn().mockReturnValue(true);
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AnomalyService,
@@ -197,8 +200,22 @@ describe('AnomalyService', () => {
             listMembers: jest.fn().mockReturnValue([]),
             sentinelDataNodeCredentials: jest.fn().mockReturnValue(null),
             findIdByHostPort: jest.fn().mockReturnValue(null),
-            isListed: jest.fn().mockReturnValue(true),
+            isListed,
             getNodeAvailabilityZones: jest.fn().mockReturnValue(undefined),
+            noteObservedNodeId: jest.fn((id: string, nodeId: string | undefined) => {
+              if (nodeId) observedNodeIds.set(id, nodeId);
+              else observedNodeIds.delete(id);
+            }),
+            getObservedNodeId: jest.fn((id: string) => observedNodeIds.get(id)),
+            noteOutsideCluster: jest.fn((id: string, outside: boolean) => {
+              if (outside) outsideCluster.add(id);
+              else outsideCluster.delete(id);
+            }),
+            isOutsideCluster: jest.fn((id: string) => outsideCluster.has(id)),
+            findIdObservingNode: jest.fn(
+              (nodeId: string) =>
+                [...observedNodeIds].find(([id, observed]) => observed === nodeId && isListed(id))?.[0] ?? null,
+            ),
           },
         },
         { provide: 'STORAGE_CLIENT', useValue: storage },
@@ -2187,9 +2204,44 @@ describe('AnomalyService', () => {
               { slot: 1, shareOfShard: 0.25 },
             ],
           },
+          node: {
+            nodeId: IDS[0],
+            address: ADDRS[0],
+            role: 'primary',
+            collected: true,
+            connectionId: 'conn-a',
+          },
         },
       ]);
       expect(service.getHotShards('conn-other')).toEqual([]);
+    });
+
+    it('says a hot primary the monitor does not connect to is not collected', async () => {
+      await step([100_000, 900_000, 100_000], 6);
+
+      expect(service.getHotShards('conn-a')[0].node).toEqual({
+        nodeId: IDS[1],
+        address: ADDRS[1],
+        role: 'primary',
+        collected: false,
+      });
+    });
+
+    it('names no node for a hot shard whose address another node has taken since', async () => {
+      await step([100_000, 900_000, 100_000], 6);
+      const taken = clusterNodes().map((node, i) => (i === 1 ? { ...node, id: 'd0000000' } : node));
+      (service as any).clusterNodeViews.remember('conn-a', (service as any).nodeViewKeyOf('conn-a'), taken, clock);
+
+      expect(service.getHotShards('conn-a')[0].shardId).toBe(IDS[1]);
+      expect(service.getHotShards('conn-a')[0].node).toBeUndefined();
+    });
+
+    it('names the hot primary at the address it has now', async () => {
+      await step([100_000, 900_000, 100_000], 6);
+      const moved = clusterNodes().map((node, i) => (i === 1 ? { ...node, address: '10.0.0.9:6379@16379' } : node));
+      (service as any).clusterNodeViews.remember('conn-a', (service as any).nodeViewKeyOf('conn-a'), moved, clock);
+
+      expect(service.getHotShards('conn-a')[0].node).toMatchObject({ nodeId: IDS[1], address: '10.0.0.9:6379' });
     });
 
     it('keeps the event open between the release and the raise factor, then resolves it', async () => {
@@ -14259,6 +14311,73 @@ describe('AnomalyService', () => {
         expect(await nodeRead(event.id)).toEqual({ ...PRIMARY_NODE, collected: true, connectionId: 'conn-1' });
       });
 
+      it('agrees with the connection list once topology sync points a connection at another node', async () => {
+        registeredAt('10.0.0.2:6380', 'conn-r');
+        await poll();
+        await poll({
+          ...mockCtx,
+          connectionId: 'conn-r',
+          port: 6380,
+          client: { ...dbClient, getClusterNodes: jest.fn().mockResolvedValue(viewOf('repB')) },
+        } as ConnectionContext);
+        const added = { nodeId: 'newC', address: '10.0.0.3:6381', role: 'replica' as const };
+        const aboutOld = await replicaEvent();
+        const aboutNew = await raise({ node: added });
+
+        registry().noteObservedNodeId('conn-r', undefined);
+        registeredAt('10.0.0.3:6381', 'conn-r');
+
+        expect(await nodeRead(aboutOld.id)).toEqual({ ...REPLICA_NODE, collected: false });
+        expect(await nodeRead(aboutNew.id)).toEqual({ ...added, collected: true, connectionId: 'conn-r' });
+      });
+
+      describe('when topology sync refreshed the connection at the address to a new node there', () => {
+        const replacement = { nodeId: 'newB', address: '10.0.0.2:6380', role: 'replica' as const };
+        const refreshToReplacement = () => {
+          registry().noteObservedNodeId('conn-r', undefined);
+          registry().getConfig.mockImplementation((id: string) =>
+            id === 'conn-r' ? { membership: { nodeId: replacement.nodeId } } : null,
+          );
+        };
+
+        beforeEach(async () => {
+          registeredAt('10.0.0.2:6380', 'conn-r');
+          await poll();
+          await poll({
+            ...mockCtx,
+            connectionId: 'conn-r',
+            port: 6380,
+            client: { ...dbClient, getClusterNodes: jest.fn().mockResolvedValue(viewOf('repB')) },
+          } as ConnectionContext);
+        });
+
+        it('does not count the connection for the node it read before', async () => {
+          const event = await replicaEvent();
+
+          refreshToReplacement();
+
+          expect(await nodeRead(event.id)).toEqual({ ...REPLICA_NODE, collected: false });
+        });
+
+        it('sends an event about the node it read before as not collected', async () => {
+          refreshToReplacement();
+
+          const event = await replicaEvent();
+
+          expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledWith(
+            expect.objectContaining({ id: event.id, node: { ...REPLICA_NODE, collected: false } }),
+          );
+        });
+
+        it('counts the connection for the new node', async () => {
+          const event = await raise({ node: replacement });
+
+          refreshToReplacement();
+
+          expect(await nodeRead(event.id)).toEqual({ ...replacement, collected: true, connectionId: 'conn-r' });
+        });
+      });
+
       it('does not count the event connection when it reads another node at the address', async () => {
         registeredAt('10.0.0.1:6379', 'conn-1');
         await poll();
@@ -14421,6 +14540,267 @@ describe('AnomalyService', () => {
 
         expect(prometheusService.updateActiveIncidents).toHaveBeenCalled();
         expect(served).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('when the webhook is sent', () => {
+      it('says whether the node is collected', async () => {
+        await poll();
+
+        const event = await raise();
+
+        expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledWith(
+          expect.objectContaining({
+            id: event.id,
+            node: { ...PRIMARY_NODE, collected: true, connectionId: 'conn-1' },
+          }),
+        );
+      });
+
+      it('sends an event without a node as it is', async () => {
+        const event = await raise();
+
+        const [sent] = anomalyWebhookSink.dispatchAnomalyWebhook.mock.calls.find(([e]) => e.id === event.id)!;
+
+        expect(sent).not.toHaveProperty('node');
+      });
+
+      const becomes = (role: 'master' | 'replica') => {
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({ ...clusterInfoResponse, server: { role } });
+        dbClient.getClusterNodes = jest
+          .fn()
+          .mockResolvedValue(
+            role === 'master'
+              ? viewOf('primA')
+              : [
+                  clusterNode('primA', '10.0.0.1:6379@16379', ['myself', 'slave'], 'repB'),
+                  clusterNode('repB', '10.0.0.2:6380@16380', ['master']),
+                ],
+          );
+      };
+
+      it('names the demoted node on failover.started', async () => {
+        await poll();
+        becomes('replica');
+        await poll();
+
+        expect(webhookEventsProService.dispatchFailoverStarted).toHaveBeenCalledWith(
+          expect.objectContaining({
+            node: expect.objectContaining({ nodeId: 'primA', role: 'replica', collected: true, connectionId: 'conn-1' }),
+          }),
+        );
+      });
+
+      it('names the promoted node on failover.completed', async () => {
+        becomes('replica');
+        await poll();
+        becomes('master');
+        await poll();
+
+        expect(webhookEventsProService.dispatchFailoverCompleted).toHaveBeenCalledWith(
+          expect.objectContaining({
+            node: expect.objectContaining({ nodeId: 'primA', role: 'primary', collected: true }),
+          }),
+        );
+      });
+
+      it('names the replica on replication.recovered', async () => {
+        const recovered = jest.fn().mockResolvedValue(undefined);
+        (webhookEventsProService as any).dispatchReplicationRecovered = recovered;
+        await poll();
+
+        await (service as any).resolveReplicationDivergence(
+          { replicas: new Map([['10.0.0.2:6380', { announced: true, windows: [] }]]) },
+          { kind: 'recovered', addr: '10.0.0.2:6380', gapBytes: 0 },
+          mockCtx,
+          Date.now(),
+        );
+
+        expect(recovered).toHaveBeenCalledWith(
+          expect.objectContaining({ replica: '10.0.0.2:6380', node: { ...REPLICA_NODE, collected: false } }),
+        );
+      });
+
+      it('sends replication.recovered without a node outside a cluster', async () => {
+        const recovered = jest.fn().mockResolvedValue(undefined);
+        (webhookEventsProService as any).dispatchReplicationRecovered = recovered;
+
+        await (service as any).resolveReplicationDivergence(
+          { replicas: new Map([['10.0.0.2:6380', { announced: true, windows: [] }]]) },
+          { kind: 'recovered', addr: '10.0.0.2:6380', gapBytes: 0 },
+          mockCtx,
+          Date.now(),
+        );
+
+        expect(recovered.mock.calls[0][0]).not.toHaveProperty('node');
+      });
+
+      describe('replication.recovered after the cluster changed', () => {
+        const replica = '10.0.0.2:6380';
+        const recoveredNode = async (recovery: object, timestamp = Date.now()) => {
+          const recovered = jest.fn().mockResolvedValue(undefined);
+          (webhookEventsProService as any).dispatchReplicationRecovered = recovered;
+          await (service as any).resolveReplicationDivergence(
+            { replicas: new Map([[replica, { announced: true, windows: [] }]]) },
+            { kind: 'recovered', addr: replica, gapBytes: 0, ...recovery },
+            mockCtx,
+            timestamp,
+            'conn-1',
+          );
+          return recovered.mock.calls[0][0].node;
+        };
+        const anotherNodeTakesTheAddress = async () => {
+          dbClient.getClusterNodes = jest
+            .fn()
+            .mockResolvedValue([
+              clusterNode('primA', '10.0.0.1:6379@16379', ['myself', 'master']),
+              clusterNode('newC', '10.0.0.2:6380@16380', ['master']),
+            ]);
+          dbClient.getClusterShards = jest.fn().mockResolvedValue([]);
+          await poll();
+        };
+
+        it('names the node of the divergence event it closes when another node took the address', async () => {
+          await poll();
+          const divergence = await raise({ metricType: MetricType.REPLICATION_DIVERGENCE, replicaAddr: replica });
+          await anotherNodeTakesTheAddress();
+
+          expect(await recoveredNode({ eventId: divergence.id })).toEqual({ ...REPLICA_NODE, collected: false });
+        });
+
+        it('names the node of an event that left the recent list', async () => {
+          await poll();
+          const divergence = await raise({ metricType: MetricType.REPLICATION_DIVERGENCE, replicaAddr: replica });
+          (service as any).recentAnomalies.length = 0;
+          (service as any).incidentEventsById.set(divergence.id, divergence);
+          await anotherNodeTakesTheAddress();
+
+          expect(await recoveredNode({ eventId: divergence.id })).toEqual({ ...REPLICA_NODE, collected: false });
+        });
+
+        it('leaves the role unknown when no event is known and the cluster was read long ago', async () => {
+          await poll();
+
+          expect(await recoveredNode({}, Date.now() + 60 * 60_000)).toEqual({
+            ...REPLICA_NODE,
+            role: 'unknown',
+            collected: false,
+          });
+        });
+
+        it('names the node of the event a restart left open', async () => {
+          await poll();
+          await anotherNodeTakesTheAddress();
+          const recovered = jest.fn().mockResolvedValue(undefined);
+          (webhookEventsProService as any).dispatchReplicationRecovered = recovered;
+          storage.getAnomalyEvents.mockResolvedValueOnce([
+            raised({
+              id: 'left-open',
+              metricType: MetricType.REPLICATION_DIVERGENCE,
+              replicaAddr: replica,
+              node: REPLICA_NODE as AnomalyEvent['node'],
+            }),
+          ]);
+          storage.resolveOpenAnomaly.mockResolvedValueOnce(true);
+          const windows = [0, 30_000].map((start) => ({ start, end: start + 30_000, gapBytes: 0, secondsBehind: 0 }));
+          const state = {
+            replicas: new Map([[replica, { level: 'none', windows, eventId: null, disagreeEventId: null }]]),
+            observed: new Set([replica]),
+            windowStart: 60_000,
+            lastWindowEnd: 60_000,
+            closedWindowCount: 2,
+          };
+
+          await (service as any).collectOrphanedDivergenceEvents(state, mockCtx, 'restart-key', undefined);
+          await (service as any).settleOrphanedDivergenceEvents(state, mockCtx, 'restart-key');
+
+          expect(recovered.mock.calls[0]?.[0]).toMatchObject({
+            reason: 'resolved_after_restart',
+            node: { ...REPLICA_NODE, collected: false },
+          });
+        });
+      });
+
+      describe('the node a connection reads, as the connection list sees it', () => {
+        const registry = () => (service as any).connectionRegistry;
+
+        it('tells the connection list which node the connection reads', async () => {
+          await poll();
+
+          expect(registry().noteObservedNodeId).toHaveBeenLastCalledWith('conn-1', 'primA');
+        });
+
+        it('keeps the node of a connection whose later read marks none as its own', async () => {
+          await poll();
+          dbClient.getClusterNodes = jest.fn().mockResolvedValue(viewOf('none'));
+          await poll();
+
+          expect(registry().getObservedNodeId('conn-1')).toBe('primA');
+        });
+
+        it('forgets the node when the connection answers from another run and cannot be read', async () => {
+          const infoOf = (runId: string) => ({ ...clusterInfoResponse, server: { role: 'master', run_id: runId } });
+          (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoOf('run-a'));
+          await poll();
+          (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoOf('run-b'));
+          dbClient.getClusterNodes = jest.fn().mockRejectedValue(new Error('down'));
+          await poll();
+
+          expect(registry().getObservedNodeId('conn-1')).toBeUndefined();
+        });
+
+        it('tells the connection list when the connection stops being a cluster', async () => {
+          await poll();
+          (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+            ...clusterInfoResponse,
+            stats: { ...clusterInfoResponse.stats, cluster_enabled: '0' },
+          });
+          await poll();
+
+          expect(registry().noteObservedNodeId).toHaveBeenLastCalledWith('conn-1', undefined);
+          expect(registry().isOutsideCluster('conn-1')).toBe(true);
+        });
+
+        it('tells the connection list when the connection answers as a cluster node again', async () => {
+          (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+            ...clusterInfoResponse,
+            stats: { ...clusterInfoResponse.stats, cluster_enabled: '0' },
+          });
+          await poll();
+          (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(clusterInfoResponse);
+          await poll();
+
+          expect(registry().isOutsideCluster('conn-1')).toBe(false);
+        });
+
+        it('does not say a connection is outside a cluster while it cannot be read', async () => {
+          await poll();
+          (dbClient.getInfoParsed as jest.Mock).mockRejectedValue(new Error('down'));
+          await poll().catch(() => undefined);
+
+          expect(registry().isOutsideCluster('conn-1')).toBe(false);
+        });
+
+        it('forgets that a removed connection was outside a cluster', async () => {
+          (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+            ...clusterInfoResponse,
+            stats: { ...clusterInfoResponse.stats, cluster_enabled: '0' },
+          });
+          await poll();
+          (service as any).onConnectionRemoved('conn-1');
+
+          expect(registry().isOutsideCluster('conn-1')).toBe(false);
+        });
+      });
+
+      it('gives a dedicated webhook the node of its event', async () => {
+        await poll();
+        const event = await raise();
+
+        expect((service as any).webhookNodeOf(event)).toEqual({
+          node: { ...PRIMARY_NODE, collected: true, connectionId: 'conn-1' },
+        });
+        expect((service as any).webhookNodeOf(raised())).toEqual({});
       });
     });
   });
@@ -17746,7 +18126,16 @@ describe('AnomalyService', () => {
           AnomalyService,
           {
             provide: ConnectionRegistry,
-            useValue: { list: jest.fn().mockReturnValue([]), get: jest.fn(), getConfig: jest.fn() },
+            useValue: {
+              list: jest.fn().mockReturnValue([]),
+              get: jest.fn(),
+              getConfig: jest.fn(),
+              noteObservedNodeId: jest.fn(),
+              getObservedNodeId: jest.fn(),
+              noteOutsideCluster: jest.fn(),
+              isOutsideCluster: jest.fn().mockReturnValue(false),
+              findIdObservingNode: jest.fn().mockReturnValue(null),
+            },
           },
           { provide: 'STORAGE_CLIENT', useValue: storage },
           {
@@ -17876,6 +18265,23 @@ describe('AnomalyService', () => {
         expect(group.correlationId).toBe(
           storage.saveCorrelatedGroup.mock.calls[0][0].correlationId,
         );
+      });
+
+      it('says whether the node of each event in the alert is collected', async () => {
+        const now = Date.now();
+        const node = { nodeId: 'primA', address: '10.0.0.1:6379', role: 'primary' as const };
+        useRules(rule);
+        (service as any).recentAnomalies.push(
+          anomaly({ id: 'a', timestamp: now - 2 * MIN, node }),
+          anomaly({ id: 'b', timestamp: now - MIN, metricType: MetricType.MEMORY_USED }),
+        );
+
+        await (service as any).tickIncidentTimelines(now);
+
+        const [group] = anomalyWebhookSink.dispatchSequenceWebhook.mock.calls[0];
+        expect(group.anomalies[0].node).toEqual({ ...node, collected: false });
+        expect(group.anomalies[1]).not.toHaveProperty('node');
+        expect((service as any).recentAnomalies[0].node).toEqual(node);
       });
 
       it('alerts only once the sequence group is stored', async () => {

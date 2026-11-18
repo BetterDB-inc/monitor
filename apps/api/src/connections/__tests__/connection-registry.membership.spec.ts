@@ -5,6 +5,7 @@ import type { DatabaseConnectionConfig } from '@betterdb/shared';
 import { CHILD_CONNECT_TIMEOUT_MS, ConnectionRegistry } from '../connection-registry.service';
 import { UnifiedDatabaseAdapter } from '../../database/adapters/unified.adapter';
 import { ExternalMetricsStore } from '../../external-metrics/external-metrics-store';
+import { collectionAmong } from '../../cluster/node-collection';
 
 function build(env: Record<string, string> = {}) {
   const storage = {
@@ -425,6 +426,112 @@ describe('ConnectionRegistry membership', () => {
     ]);
   });
 
+  describe('the node a connection was seen reading', () => {
+    it('remembers the node a connection was seen reading', () => {
+      const { registry } = build();
+      put(registry, seed);
+
+      registry.noteObservedNodeId('seed', 'node-a');
+
+      expect(registry.getObservedNodeId('seed')).toBe('node-a');
+      expect(registry.getObservedNodeId('another')).toBeUndefined();
+    });
+
+    it('forgets the node when the connection is seen reading none', () => {
+      const { registry } = build();
+      put(registry, seed);
+      registry.noteObservedNodeId('seed', 'node-a');
+
+      registry.noteObservedNodeId('seed', undefined);
+
+      expect(registry.getObservedNodeId('seed')).toBeUndefined();
+    });
+
+    it('forgets the node when the connection is removed', async () => {
+      const { registry } = build();
+      put(registry, seed);
+      registry.noteObservedNodeId('seed', 'node-a');
+
+      await registry.removeConnection('seed');
+
+      expect(registry.getObservedNodeId('seed')).toBeUndefined();
+      expect(registry.findIdObservingNode('node-a')).toBeNull();
+    });
+
+    describe('when topology sync changes the child', () => {
+      const child = { id: 'child', host: '10.0.0.2', port: 7002 };
+      const membershipOf = (nodeId: string) => ({ seedId: 'seed', nodeId, origin: 'auto' as const, source: 'cluster' as const });
+      const nodeAt = (id: string, flags: string[]) => ({ id, address: '10.0.0.2:7002@17002', flags });
+      const desired = (nodeId: string) => ({ host: '10.0.0.2', port: 7002, nodeId, source: 'cluster' as const });
+
+      it('forgets the node of a child that is retired', async () => {
+        const { registry } = build();
+        put(registry, seed);
+        put(registry, { ...child, membership: membershipOf('node-n') });
+        registry.noteObservedNodeId('child', 'node-n');
+
+        await registry.retireChild('child');
+
+        expect(registry.getObservedNodeId('child')).toBeUndefined();
+      });
+
+      it('counts a child reactivated for a new node at its address as reading that node at once', async () => {
+        const { registry } = build();
+        put(registry, seed);
+        put(registry, { ...child, membership: { ...membershipOf('node-n'), retiredAt: 5 } });
+        registry.noteObservedNodeId('child', 'node-n');
+
+        await registry.reactivateChild('child', desired('node-m'));
+
+        expect(registry.getObservedNodeId('child')).toBeUndefined();
+        expect(collectionAmong(nodeAt('node-m', ['master']), 'seed', registry)).toEqual({
+          collected: true,
+          connectionId: 'child',
+        });
+        expect(collectionAmong(nodeAt('node-n', ['master', 'fail']), 'seed', registry)).toEqual({ collected: false });
+      });
+
+      it('forgets the node of a child refreshed to another node', async () => {
+        const { registry } = build();
+        put(registry, seed);
+        put(registry, { ...child, membership: membershipOf('node-n') });
+        registry.noteObservedNodeId('child', 'node-n');
+
+        await registry.refreshChild('child', desired('node-m'));
+
+        expect(registry.getObservedNodeId('child')).toBeUndefined();
+        expect(collectionAmong(nodeAt('node-m', ['master']), 'seed', registry)).toEqual({
+          collected: true,
+          connectionId: 'child',
+        });
+        expect(collectionAmong(nodeAt('node-n', ['master', 'fail']), 'seed', registry)).toEqual({ collected: false });
+      });
+
+      it('keeps the node of a child refreshed for the same node', async () => {
+        const { registry } = build();
+        put(registry, seed);
+        put(registry, { ...child, membership: membershipOf('node-n') });
+        registry.noteObservedNodeId('child', 'node-n');
+
+        await registry.refreshChild('child', { ...desired('node-n'), role: 'replica' });
+
+        expect(registry.getObservedNodeId('child')).toBe('node-n');
+      });
+    });
+
+    it('finds the listed connection that was seen reading a node', () => {
+      const { registry } = build();
+      put(registry, seed);
+      put(registry, { id: 'retired', membership: { seedId: 'seed', nodeId: 'b', origin: 'auto', source: 'cluster', retiredAt: 5 } });
+      registry.noteObservedNodeId('seed', 'node-a');
+      registry.noteObservedNodeId('retired', 'node-b');
+
+      expect(registry.findIdObservingNode('node-a')).toBe('seed');
+      expect(registry.findIdObservingNode('node-b')).toBeNull();
+      expect(registry.findIdObservingNode('node-c')).toBeNull();
+    });
+  });
+
   it('uses data node credentials for children when the seed has them', async () => {
     const { registry, storage } = build();
     const seedId = await registry.addConnection({ name: 's', host: 's1', port: 26379, username: 'sentinel-user', password: 'sentinel-pass', nodeUsername: 'app', nodePassword: 'secret' });
@@ -468,6 +575,57 @@ describe('ConnectionRegistry membership', () => {
     expect(config?.credentialStatus).not.toBe('decryption_failed');
     const id = await registry.addManagedChild('seed', { host: 'h', port: 6379, nodeId: 'n', source: 'sentinel' });
     expect(registry.getConfig(id)).toEqual(expect.objectContaining({ username: 'app', password: 'p' }));
+  });
+
+  describe('a connection that answers outside the cluster', () => {
+    const child = {
+      id: 'child',
+      host: '10.0.0.2',
+      port: 7002,
+      membership: { seedId: 'seed', nodeId: 'node-n', origin: 'auto' as const, source: 'cluster' as const },
+    };
+    const byHand = { id: 'by-hand', host: '10.0.0.3', port: 7003 };
+    const failedN = { id: 'node-n', address: '10.0.0.2:7002@17002', flags: ['master', 'fail'] };
+    const failedK = { id: 'node-k', address: '10.0.0.3:7003@17003', flags: ['master', 'fail'] };
+    const registered = () => {
+      const { registry } = build();
+      put(registry, seed);
+      put(registry, child);
+      put(registry, byHand);
+      return registry;
+    };
+
+    it('is not marked until a poll says so', () => {
+      expect(registered().isOutsideCluster('child')).toBe(false);
+    });
+
+    it('is not counted for a failed node the cluster still lists at its address', () => {
+      const registry = registered();
+
+      registry.noteOutsideCluster('child', true);
+      registry.noteOutsideCluster('by-hand', true);
+
+      expect(collectionAmong(failedN, 'seed', registry)).toEqual({ collected: false });
+      expect(collectionAmong(failedK, 'seed', registry)).toEqual({ collected: false });
+    });
+
+    it('is counted again once it answers as a node of the cluster', () => {
+      const registry = registered();
+      registry.noteOutsideCluster('child', true);
+
+      registry.noteOutsideCluster('child', false);
+
+      expect(collectionAmong(failedN, 'seed', registry)).toEqual({ collected: true, connectionId: 'child' });
+    });
+
+    it('forgets the mark when the connection is removed', async () => {
+      const registry = registered();
+      registry.noteOutsideCluster('by-hand', true);
+
+      await registry.removeConnection('by-hand');
+
+      expect(registry.isOutsideCluster('by-hand')).toBe(false);
+    });
   });
 
   describe('sentinelDataNodeCredentials', () => {

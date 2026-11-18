@@ -73,10 +73,8 @@ export interface OwnNodeRole {
 export class ClusterNodeViews {
   private readonly views = new Map<string, NodeView>();
   private readonly viewKeys = new Map<string, string>();
-  private readonly ownNodeIds = new Map<string, string>();
   private readonly ownRoles = new Map<string, OwnNodeRole>();
   private readonly runIds = new Map<string, string>();
-  private readonly outsideCluster = new Set<string>();
 
   remember(
     connectionId: string,
@@ -86,9 +84,6 @@ export class ClusterNodeViews {
     describe: () => readonly ClusterNode[] = () => nodes,
     shardsRead = true,
   ): void {
-    const ownNodeId = nodes.find((node) => node.flags.includes('myself'))?.id;
-    if (ownNodeId) this.ownNodeIds.set(connectionId, ownNodeId);
-    this.outsideCluster.delete(connectionId);
     if (this.viewKeys.get(connectionId) !== viewKey) {
       this.leaveView(connectionId);
       this.viewKeys.set(connectionId, viewKey);
@@ -109,7 +104,6 @@ export class ClusterNodeViews {
   }
 
   rememberOwnRole(connectionId: string, role: ClusterNodeRef['role'] | undefined, readAt: number): void {
-    this.outsideCluster.delete(connectionId);
     if (role) {
       this.ownRoles.set(connectionId, { role, readAt });
     } else {
@@ -121,26 +115,13 @@ export class ClusterNodeViews {
     if (!runId) return false;
     const last = this.runIds.get(connectionId);
     this.runIds.set(connectionId, runId);
-    if (last === undefined || last === runId) return false;
-    this.ownNodeIds.delete(connectionId);
-    return true;
+    return last !== undefined && last !== runId;
   }
 
   forget(connectionId: string): void {
     this.leaveView(connectionId);
-    this.ownNodeIds.delete(connectionId);
     this.ownRoles.delete(connectionId);
     this.runIds.delete(connectionId);
-    this.outsideCluster.delete(connectionId);
-  }
-
-  leaveCluster(connectionId: string): void {
-    this.forget(connectionId);
-    this.outsideCluster.add(connectionId);
-  }
-
-  isOutsideCluster(connectionId: string): boolean {
-    return this.outsideCluster.has(connectionId);
   }
 
   view(viewKey: string): ClusterNodeView | undefined {
@@ -154,16 +135,8 @@ export class ClusterNodeViews {
     return this.viewKeys.get(connectionId);
   }
 
-  ownNodeId(connectionId: string): string | undefined {
-    return this.ownNodeIds.get(connectionId);
-  }
-
   ownRole(connectionId: string): OwnNodeRole | undefined {
     return this.ownRoles.get(connectionId);
-  }
-
-  connectionsOfNode(nodeId: string): string[] {
-    return [...this.ownNodeIds].filter(([, own]) => own === nodeId).map(([connectionId]) => connectionId);
   }
 
   private leaveView(connectionId: string): void {
@@ -186,8 +159,18 @@ function subjectOfDetector(
   return { nodeId: subject.nodeId, address: subject.address.split('@')[0], role: 'unknown' };
 }
 
-function roleChangedTo(event: AnomalyEvent): ClusterNodeRef['role'] {
-  return event.value === 1 ? 'primary' : 'replica';
+export type EventNodeSource = Pick<
+  AnomalyEvent,
+  'node' | 'metricType' | 'nodeSubject' | 'replicaAddr' | 'nodeAddr'
+> &
+  Partial<Pick<AnomalyEvent, 'value'>>;
+
+function roleChangedTo(value: number): ClusterNodeRef['role'] {
+  return value === 1 ? 'primary' : 'replica';
+}
+
+export function ownNodeIdOf(nodes: readonly ClusterNode[]): string | undefined {
+  return nodes.find((node) => node.flags.includes('myself'))?.id;
 }
 
 export function nodeRoleOfInfo(role: string | undefined): ClusterNodeRef['role'] | undefined {
@@ -196,7 +179,7 @@ export function nodeRoleOfInfo(role: string | undefined): ClusterNodeRef['role']
 }
 
 export function nodeOfEvent(
-  event: AnomalyEvent,
+  event: EventNodeSource,
   directory: NodeDirectory | undefined,
   ownNodeId: string | undefined,
   roleKnown = true,
@@ -206,14 +189,17 @@ export function nodeOfEvent(
   const node = nodeInView(event, directory, ownNodeId);
   if (!node) return undefined;
   if (node.nodeId === ownNodeId) {
-    const role = event.metricType === MetricType.REPLICATION_ROLE ? roleChangedTo(event) : ownRole;
+    const role =
+      event.metricType === MetricType.REPLICATION_ROLE && event.value !== undefined
+        ? roleChangedTo(event.value)
+        : ownRole;
     if (role) return { ...node, role };
   }
   return roleKnown ? node : { ...node, role: 'unknown' };
 }
 
 function nodeInView(
-  event: AnomalyEvent,
+  event: EventNodeSource,
   directory: NodeDirectory | undefined,
   ownNodeId: string | undefined,
 ): ClusterNodeRef | undefined {

@@ -93,6 +93,7 @@ import {
   HOT_SHARD_RAISE_FACTOR,
   HOT_SHARD_TOP_SLOTS,
   HotShardDetail,
+  ServedHotShardDetail,
   HotShardFinding,
   HotShardSlot,
   describeHotShard,
@@ -272,7 +273,14 @@ import {
   parseSlotMigrationJobs,
 } from '@app/cluster/cluster-metrics.service';
 import { withConfiguredZones, withShardMetadata } from '@app/cluster/shard-metadata';
-import { ClusterNodeViews, nodeOfEvent, nodeRoleOfInfo } from './event-node';
+import { resolveNodeRef, type NodeSubject } from '@app/cluster/node-ref';
+import {
+  ClusterNodeViews,
+  nodeOfEvent,
+  nodeRoleOfInfo,
+  ownNodeIdOf,
+  type EventNodeSource,
+} from './event-node';
 import {
   type DivergenceGroup,
   type OpenDivergence,
@@ -1558,7 +1566,7 @@ export class AnomalyService
       this.reshardNodeSelves.delete(key);
     }
     this.forgetClusterKey(connectionId);
-    this.clusterNodeViews.forget(connectionId);
+    this.forgetClusterNodes(connectionId);
     this.forgetTopologyDivergence(connectionId);
     this.reshardSkewFirstSeen.delete(connectionId);
     this.activeReshardSkews.delete(connectionId);
@@ -1802,17 +1810,21 @@ export class AnomalyService
       const clusterKeyUnknown = !this.connectionClusterKeys.has(ctx.connectionId);
       if (info['cluster_enabled'] === '1') {
         this.clusterNodeViews.rememberOwnRole(ctx.connectionId, nodeRoleOfInfo(info['role']), timestamp);
+        this.connectionRegistry.noteOutsideCluster(ctx.connectionId, false);
       }
       const anotherRun =
         info['cluster_enabled'] === '1' &&
         this.clusterNodeViews.answersFromAnotherRun(ctx.connectionId, info['run_id'] || undefined);
-      const ownNodeUnknown = this.clusterNodeViews.ownNodeId(ctx.connectionId) === undefined;
+      if (anotherRun) this.connectionRegistry.noteObservedNodeId(ctx.connectionId, undefined);
+      const ownNodeUnknown = this.connectionRegistry.getObservedNodeId(ctx.connectionId) === undefined;
       if (live && info['cluster_enabled'] === '1' && (clusterKeyUnknown || anotherRun || ownNodeUnknown)) {
         await this.learnClusterKey(ctx, timestamp);
       }
       if (live && info['cluster_enabled'] !== '1') {
         this.forgetClusterKey(ctx.connectionId);
-        this.clusterNodeViews.leaveCluster(ctx.connectionId);
+        this.clusterNodeViews.forget(ctx.connectionId);
+        this.connectionRegistry.noteObservedNodeId(ctx.connectionId, undefined);
+        this.connectionRegistry.noteOutsideCluster(ctx.connectionId, true);
       }
       await this.adoptOpenEvents(ctx, timestamp);
       replicationSample = this.replicationStream.observe(ctx.connectionId, info, timestamp);
@@ -2065,6 +2077,7 @@ export class AnomalyService
                     timestamp: Date.now(),
                     instance: { host: ctx.host, port: ctx.port },
                     connectionId: ctx.connectionId,
+                    ...this.webhookNodeOf(failoverEvent),
                   })
                   .catch((err) => {
                     this.logger.error('Failed to dispatch failover.started webhook', err);
@@ -2101,6 +2114,7 @@ export class AnomalyService
                     timestamp: Date.now(),
                     instance: { host: ctx.host, port: ctx.port },
                     connectionId: ctx.connectionId,
+                    ...this.webhookNodeOf(promotionEvent),
                   })
                   .catch((err) => {
                     this.logger.error('Failed to dispatch failover.completed webhook', err);
@@ -2208,6 +2222,7 @@ export class AnomalyService
                   timestamp: Date.now(),
                   instance: { host: ctx.host, port: ctx.port },
                   connectionId: ctx.connectionId,
+                  ...this.webhookNodeOf(dataLossEvent),
                 })
                 .catch((err) => {
                   this.logger.error('Failed to dispatch data.loss.detected webhook', err);
@@ -4854,6 +4869,7 @@ export class AnomalyService
           timestamp: event.timestamp,
           instance: { host: ctx.host, port: ctx.port },
           connectionId: ctx.connectionId,
+          ...this.webhookNodeOf(event),
         })
         .catch((err) => {
           this.logger.error('Failed to dispatch retry_amplification.detected webhook', err);
@@ -9569,7 +9585,10 @@ export class AnomalyService
     delete anomaly.nodeSubject;
   }
 
-  private nodeInClusterView(anomaly: AnomalyEvent, connectionId: string): ClusterNodeRef | undefined {
+  private nodeInClusterView(
+    anomaly: EventNodeSource & Pick<AnomalyEvent, 'timestamp'>,
+    connectionId: string,
+  ): ClusterNodeRef | undefined {
     const view = this.clusterNodeViews.view(this.nodeViewKeyOf(connectionId));
     const staleMs = this.nodeViewStaleMs();
     const roleKnown = !view || Math.abs(anomaly.timestamp - view.readAt) <= staleMs;
@@ -9581,7 +9600,7 @@ export class AnomalyService
     return nodeOfEvent(
       anomaly,
       view?.directory,
-      this.clusterNodeViews.ownNodeId(connectionId),
+      this.connectionRegistry.getObservedNodeId(connectionId),
       roleKnown,
       ownRoleIsCurrent ? own.role : undefined,
     );
@@ -9614,6 +9633,15 @@ export class AnomalyService
       () => withConfiguredZones(withShardMetadata(nodes, shards), zones),
       shardsRead,
     );
+    const ownNodeId = ownNodeIdOf(nodes);
+    if (ownNodeId) this.connectionRegistry.noteObservedNodeId(connectionId, ownNodeId);
+    this.connectionRegistry.noteOutsideCluster(connectionId, false);
+  }
+
+  private forgetClusterNodes(connectionId: string): void {
+    this.clusterNodeViews.forget(connectionId);
+    this.connectionRegistry.noteObservedNodeId(connectionId, undefined);
+    this.connectionRegistry.noteOutsideCluster(connectionId, false);
   }
 
   private async addAnomaly(
@@ -9701,7 +9729,7 @@ export class AnomalyService
       dedicatedHook?.();
       this.announceSaved(anomaly, { ...stored, connectionId });
       if (!dedicatedHook) {
-        this.anomalyWebhookSink?.dispatchAnomalyWebhook(stored).catch((err) => {
+        this.anomalyWebhookSink?.dispatchAnomalyWebhook(this.withServedNode(stored)).catch((err) => {
           this.logger.error(`Failed to dispatch webhook for anomaly ${anomaly.id}`, err);
         });
       }
@@ -10201,7 +10229,8 @@ export class AnomalyService
           );
           continue;
         }
-        this.anomalyWebhookSink?.dispatchSequenceWebhook(group).catch((err) => {
+        const served = { ...group, anomalies: group.anomalies.map((a) => this.withServedNode(a)) };
+        this.anomalyWebhookSink?.dispatchSequenceWebhook(served).catch((err) => {
           this.logger.error(`Failed to dispatch webhook for sequence ${match.pattern}`, err);
         });
       }
@@ -10757,7 +10786,7 @@ export class AnomalyService
 
   // Public API methods
 
-  getHotShards(connectionId: string): HotShardDetail[] {
+  getHotShards(connectionId: string): ServedHotShardDetail[] {
     const eventIds = this.hotShardEventIds.get(connectionId);
     const resolvedByHand = (signature: string) => {
       const eventId = eventIds?.get(signature);
@@ -10765,7 +10794,10 @@ export class AnomalyService
     };
     return [...(this.hotShardDetails.get(connectionId) ?? [])]
       .filter(([signature]) => !resolvedByHand(signature))
-      .map(([, detail]) => this.withExecution(connectionId, detail))
+      .map(([, detail]) => ({
+        ...this.withExecution(connectionId, detail),
+        ...this.servedNodeOf(connectionId, { nodeId: detail.shardId }),
+      }))
       .sort((a, b) => b.cpu.ratio - a.cpu.ratio);
   }
 
@@ -11175,17 +11207,30 @@ export class AnomalyService
 
   private servedNode(node: ClusterNodeRef, eventConnectionId: string | undefined): ServedClusterNodeRef {
     const connectionId =
-      this.clusterNodeViews.connectionsOfNode(node.nodeId).find((id) => this.connectionRegistry.isListed(id)) ??
+      this.connectionRegistry.findIdObservingNode(node.nodeId) ??
       this.connectionAtAddressOf(node, eventConnectionId);
     return connectionId ? { ...node, collected: true, connectionId } : { ...node, collected: false };
+  }
+
+  private webhookNodeOf(event: { node?: ClusterNodeRef; connectionId?: string }): { node?: ServedClusterNodeRef } {
+    return event.node ? { node: this.servedNode(event.node, event.connectionId) } : {};
+  }
+
+  private servedNodeOf(connectionId: string, subject: NodeSubject): { node?: ServedClusterNodeRef } {
+    const directory = this.clusterNodeViews.view(this.nodeViewKeyOf(connectionId))?.directory;
+    const node = resolveNodeRef(directory, subject);
+    return node ? { node: this.servedNode(node, connectionId) } : {};
   }
 
   private connectionAtAddressOf(node: ClusterNodeRef, eventConnectionId: string | undefined): string | undefined {
     const address = splitHostPort(node.address);
     const found = address ? this.connectionRegistry.findIdByHostPort(address.host, address.port) : null;
-    if (!found || this.clusterNodeViews.isOutsideCluster(found)) return undefined;
-    const readsAnotherNode = (this.clusterNodeViews.ownNodeId(found) ?? node.nodeId) !== node.nodeId;
-    if (readsAnotherNode) return undefined;
+    if (!found || this.connectionRegistry.isOutsideCluster(found)) return undefined;
+    const readNodeId =
+      this.connectionRegistry.getObservedNodeId(found) ??
+      this.connectionRegistry.getConfig(found)?.membership?.nodeId ??
+      node.nodeId;
+    if (readNodeId !== node.nodeId) return undefined;
     if (found === eventConnectionId) return found;
     const clusterKey =
       this.clusterKeyByNode.get(node.nodeId) ??
@@ -12647,6 +12692,7 @@ export class AnomalyService
           claimed: false,
         };
         orphan.eventIds.add(event.id);
+        orphan.node ??= event.node;
         orphans.set(replica, orphan);
         this.divergenceOrphans.set(key, orphans);
       }
@@ -12725,6 +12771,7 @@ export class AnomalyService
           claimed: false,
         };
         orphan.eventIds.add(event.id);
+        orphan.node ??= event.node;
         orphans.set(replica, orphan);
       }
       if (orphans.size > 0) this.divergenceOrphans.set(key, orphans);
@@ -12771,7 +12818,7 @@ export class AnomalyService
       }
       orphans.delete(replica);
       if (orphan.claimed && assessment === 'caught_up' && !orphan.notified) {
-        this.dispatchOrphanRecovered(replica, ctx);
+        this.dispatchOrphanRecovered(replica, ctx, orphan.node);
       }
     }
     if (orphans.size === 0) this.divergenceOrphans.delete(key);
@@ -12785,14 +12832,18 @@ export class AnomalyService
     }
   }
 
-  private dispatchOrphanRecovered(replica: string, ctx: ConnectionContext): void {
-    this.dispatchReplicationRecovered(ctx, {
-      replica,
-      reason: 'resolved_after_restart',
-      gapBytes: null,
-      message: `Divergence on replica ${replica} was left open by a restart and has been resolved.`,
-      timestamp: Date.now(),
-    });
+  private dispatchOrphanRecovered(replica: string, ctx: ConnectionContext, node?: ClusterNodeRef): void {
+    this.dispatchReplicationRecovered(
+      ctx,
+      {
+        replica,
+        reason: 'resolved_after_restart',
+        gapBytes: null,
+        message: `Divergence on replica ${replica} was left open by a restart and has been resolved.`,
+        timestamp: Date.now(),
+      },
+      node,
+    );
   }
 
   private async pruneDivergenceWindows(ctx: ConnectionContext, now: number): Promise<void> {
@@ -13066,6 +13117,7 @@ export class AnomalyService
           timestamp,
           instance: { host: ctx.host, port: ctx.port },
           connectionId: ctx.connectionId,
+          ...this.webhookNodeOf(event),
         })
         .catch((err) => {
           this.logger.error('Failed to dispatch replication.divergence webhook', err);
@@ -13137,6 +13189,7 @@ export class AnomalyService
   ): Promise<void> {
     const { eventId } = recovery;
     const announced = state.replicas.get(recovery.addr)?.announced ?? false;
+    const raisedNode = eventId ? (this.eventInMemory(eventId) ?? this.findIncidentEvent(eventId))?.node : undefined;
     if (eventId) {
       await this.resolveAnomalyOutcome(eventId, () => {
         this.retryDroppedDivergenceClose(key, recovery.addr, eventId);
@@ -13145,27 +13198,39 @@ export class AnomalyService
     acknowledgeRecovery(state, recovery.addr);
 
     if (recovery.kind !== 'cleared' && announced) {
-      this.dispatchReplicationRecovered(ctx, {
-        replica: recovery.addr,
-        reason: 'caught_up',
-        gapBytes: recovery.gapBytes ?? 0,
-        message: `Replica ${recovery.addr} is back under the alert thresholds.`,
-        timestamp,
-      });
+      this.dispatchReplicationRecovered(
+        ctx,
+        {
+          replica: recovery.addr,
+          reason: 'caught_up',
+          gapBytes: recovery.gapBytes ?? 0,
+          message: `Replica ${recovery.addr} is back under the alert thresholds.`,
+          timestamp,
+        },
+        raisedNode,
+      );
     }
     this.webhookEventsProService?.endReplicationStall(ctx.connectionId, recovery.addr);
   }
 
   private dispatchReplicationRecovered(
     ctx: ConnectionContext,
-    data: Omit<ReplicationRecoveredData, 'instance' | 'connectionId'>,
+    data: Omit<ReplicationRecoveredData, 'instance' | 'connectionId' | 'node'>,
+    raisedNode?: ClusterNodeRef,
   ): void {
+    const node =
+      raisedNode ??
+      this.nodeInClusterView(
+        { metricType: MetricType.REPLICATION_DIVERGENCE, replicaAddr: data.replica, timestamp: data.timestamp },
+        ctx.connectionId,
+      );
     this.logger.log(`Replication recovered for ${ctx.connectionName}: ${data.message}`);
     this.webhookEventsProService
       ?.dispatchReplicationRecovered({
         ...data,
         instance: { host: ctx.host, port: ctx.port },
         connectionId: ctx.connectionId,
+        ...this.webhookNodeOf({ node, connectionId: ctx.connectionId }),
       })
       .catch((err) => {
         this.logger.error('Failed to dispatch replication.recovered webhook', err);

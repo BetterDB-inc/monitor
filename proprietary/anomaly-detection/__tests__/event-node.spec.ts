@@ -1,5 +1,5 @@
 import type { ClusterNode } from '@app/common/types/metrics.types';
-import { ClusterNodeViews, nodeOfEvent, nodeRoleOfInfo } from '../event-node';
+import { ClusterNodeViews, nodeOfEvent, nodeRoleOfInfo, ownNodeIdOf } from '../event-node';
 import { AnomalySeverity, AnomalyType, MetricType, type AnomalyEvent } from '../types';
 
 function node(overrides: Partial<ClusterNode> & Pick<ClusterNode, 'id' | 'address'>): ClusterNode {
@@ -55,7 +55,7 @@ describe('nodeOfEvent', () => {
   const views = new ClusterNodeViews();
   views.remember('conn-a', 'cluster-1', seenFrom(PRIMARY_A), 1_000);
   const directory = views.view('cluster-1')?.directory;
-  const ownNodeId = views.ownNodeId('conn-a');
+  const ownNodeId = ownNodeIdOf(seenFrom(PRIMARY_A));
   const resolve = (overrides: Partial<AnomalyEvent>) => nodeOfEvent(event(overrides), directory, ownNodeId);
 
   it('names the connection own node for an event about the node that was read', () => {
@@ -354,22 +354,9 @@ describe('ClusterNodeViews', () => {
     expect(views.view('cluster-1')?.directory.byId.get('primary-a')?.availabilityZone).toBe('zone-x');
   });
 
-  it('keeps each connection own node apart from the shared view', () => {
-    const views = new ClusterNodeViews();
-    views.remember('conn-a', 'cluster-1', seenFrom(PRIMARY_A), 1_000);
-    views.remember('conn-b', 'cluster-1', seenFrom(PRIMARY_B), 2_000);
-
-    const node = nodeOfEvent(event(), views.view('cluster-1')?.directory, views.ownNodeId('conn-a'));
-
-    expect(node?.nodeId).toBe('primary-a');
-  });
-
-  it('keeps the own node of a connection whose later read marks none', () => {
-    const views = new ClusterNodeViews();
-    views.remember('conn-a', 'cluster-1', seenFrom(PRIMARY_A), 1_000);
-    views.remember('conn-a', 'cluster-1', [PRIMARY_A, REPLICA_A], 2_000);
-
-    expect(views.ownNodeId('conn-a')).toBe('primary-a');
+  it('reads the node a connection answers from off the line the node reports as itself', () => {
+    expect(ownNodeIdOf(seenFrom(PRIMARY_B))).toBe(PRIMARY_B.id);
+    expect(ownNodeIdOf([PRIMARY_A, PRIMARY_B])).toBeUndefined();
   });
 
   it('moves a connection to the view of its cluster once the cluster is known', () => {
@@ -396,7 +383,6 @@ describe('ClusterNodeViews', () => {
     views.forget('conn-b');
 
     expect(views.view('cluster-1')).toBeDefined();
-    expect(views.ownNodeId('conn-b')).toBeUndefined();
   });
 
   it('forgets the view with the last connection of the cluster', () => {
@@ -405,8 +391,6 @@ describe('ClusterNodeViews', () => {
     views.forget('conn-a');
 
     expect(views.view('cluster-1')).toBeUndefined();
-    expect(views.ownNodeId('conn-a')).toBeUndefined();
-    expect(views.connectionsOfNode('primary-a')).toEqual([]);
   });
 
   it('keeps the role each connection read for its own node, with when it was read', () => {
@@ -434,13 +418,4 @@ describe('ClusterNodeViews', () => {
     expect(views.ownRole('conn-a')).toBeUndefined();
   });
 
-  it('answers with the connections that read a node as their own', () => {
-    const views = new ClusterNodeViews();
-    views.remember('conn-a', 'cluster-1', seenFrom(PRIMARY_A), 1_000);
-    views.remember('conn-a2', 'cluster-1', seenFrom(PRIMARY_A), 1_000);
-    views.remember('conn-b', 'cluster-1', seenFrom(PRIMARY_B), 1_000);
-
-    expect(views.connectionsOfNode('primary-a')).toEqual(['conn-a', 'conn-a2']);
-    expect(views.connectionsOfNode('replica-a')).toEqual([]);
-  });
 });
