@@ -12802,6 +12802,33 @@ describe('AnomalyService', () => {
         expect(event.node).toEqual(PRIMARY_NODE);
       });
 
+      it('gives a replica that changed its master the shard of that master after a shard read that failed', async () => {
+        const withPrimC = (nodes: ClusterNode[]): ClusterNode[] => [
+          ...nodes,
+          clusterNode('primC', '10.0.0.3:6381@16381', ['master']),
+        ];
+        const now = jest.spyOn(Date, 'now').mockReturnValue(READ_AT);
+        dbClient.getClusterNodes = jest.fn().mockResolvedValue(withPrimC(viewOf('primA')));
+        dbClient.getClusterShards = jest.fn().mockResolvedValue([
+          ...shards,
+          { shardId: 'shard-2', slots: [], nodes: [{ id: 'primC', role: 'master', availabilityZone: 'eu-west-1c' }] },
+        ]);
+        await poll();
+        now.mockReturnValue(READ_AT + 10_000);
+        const moved = withPrimC(viewOf('primA')).map((n) => (n.id === 'repB' ? { ...n, master: 'primC' } : n));
+        dbClient.getClusterNodes = jest.fn().mockResolvedValue(moved);
+        dbClient.getClusterShards = jest.fn().mockRejectedValue(new Error('timeout'));
+        await poll();
+
+        const event = await raise({
+          timestamp: READ_AT + 10_000,
+          metricType: MetricType.CLUSTER_TOPOLOGY,
+          nodeSubject: { nodeId: 'repB' },
+        });
+
+        expect(event.node).toEqual({ ...REPLICA_NODE, shardId: 'shard-2' });
+      });
+
       it('has no shard once the cluster is read as a Raft cluster', async () => {
         const now = jest.spyOn(Date, 'now').mockReturnValue(READ_AT);
         await poll();
