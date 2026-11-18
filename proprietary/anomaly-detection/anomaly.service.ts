@@ -9482,7 +9482,7 @@ export class AnomalyService
     const own = this.clusterNodeViews.ownRole(connectionId);
     const ownRoleIsCurrent =
       own !== undefined &&
-      (!view || own.readAt >= view.readAt) &&
+      (!view || own.readAt >= view.readAt || own.readAt === anomaly.timestamp) &&
       Math.abs(anomaly.timestamp - own.readAt) <= staleMs;
     return nodeOfEvent(
       anomaly,
