@@ -57,6 +57,24 @@ describe('NodeLink', () => {
     expect(screen.queryByText(/primary|replica|unknown|shard/)).not.toBeInTheDocument();
   });
 
+  it('nests validly in a paragraph when the node has no connection of its own', () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      render(
+        <MemoryRouter>
+          <p>
+            <NodeLink node={node({ collected: false, connectionId: undefined })} />
+          </p>
+        </MemoryRouter>,
+      );
+
+      expect(screen.getByText('Not collected')).toBeInTheDocument();
+      expect(logged).not.toHaveBeenCalled();
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
   it('marks a node that has no connection of its own', () => {
     renderLink(node({ collected: false, connectionId: undefined }));
 

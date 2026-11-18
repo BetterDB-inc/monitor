@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom';
 import { clusterNodePath, type ServedClusterNodeRef } from '@betterdb/shared';
-import { Badge } from '../ui/badge';
+import { badgeVariants } from '../ui/badge';
 import { cn } from '../../lib/utils';
 
 interface NodeLinkProps {
@@ -33,13 +33,12 @@ export function NodeLink({ node, connectionId, className }: NodeLinkProps) {
       </Link>
       {details && <span className="text-muted-foreground">{details}</span>}
       {!node.collected && (
-        <Badge
-          variant="outline"
-          className="text-[10px]"
+        <span
+          className={cn(badgeVariants({ variant: 'outline' }), 'text-[10px]')}
           title="BetterDB has no connection of its own to this node. Open the node to connect to it."
         >
           Not collected
-        </Badge>
+        </span>
       )}
     </span>
   );
