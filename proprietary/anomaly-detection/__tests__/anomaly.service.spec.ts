@@ -12777,14 +12777,50 @@ describe('AnomalyService', () => {
         expect(event?.node).toEqual(PRIMARY_NODE);
       });
 
-      it('still has no shard after a shard read that failed', async () => {
+      it('keeps them on an event of a connection after the shard read of another connection failed', async () => {
         const now = jest.spyOn(Date, 'now').mockReturnValue(READ_AT);
         await poll();
         now.mockReturnValue(READ_AT + 10_000);
-        dbClient.getClusterShards = jest.fn().mockRejectedValue(new Error('unknown subcommand'));
+        const other = joining();
+        other.client.getClusterShards = jest.fn().mockRejectedValue(new Error('timeout'));
+        await poll(other);
+
+        const event = await raise({ timestamp: READ_AT + 10_000 });
+
+        expect(event.node).toEqual(PRIMARY_NODE);
+      });
+
+      it('keeps them after an own shard read that failed', async () => {
+        const now = jest.spyOn(Date, 'now').mockReturnValue(READ_AT);
+        await poll();
+        now.mockReturnValue(READ_AT + 10_000);
+        dbClient.getClusterShards = jest.fn().mockRejectedValue(new Error('timeout'));
         await poll();
 
         const event = await raise({ timestamp: READ_AT + 10_000 });
+
+        expect(event.node).toEqual(PRIMARY_NODE);
+      });
+
+      it('has no shard once the cluster is read as a Raft cluster', async () => {
+        const now = jest.spyOn(Date, 'now').mockReturnValue(READ_AT);
+        await poll();
+        now.mockReturnValue(READ_AT + 10_000);
+        dbClient.getClusterInfo = jest.fn().mockResolvedValue({ cluster_state: 'ok', cluster_raft_role: 'leader' });
+        await poll();
+
+        const event = await raise({ timestamp: READ_AT + 10_000 });
+
+        expect(event.node).toEqual({ nodeId: 'primA', address: '10.0.0.1:6379', role: 'primary' });
+      });
+
+      it('has no shard when no connection of the cluster has read the shards', async () => {
+        jest.spyOn(Date, 'now').mockReturnValue(READ_AT);
+        dbClient.getClusterShards = jest.fn().mockRejectedValue(new Error('unknown subcommand'));
+        await poll();
+        await poll(joining());
+
+        const event = await raise({ timestamp: READ_AT });
 
         expect(event.node).toEqual({ nodeId: 'primA', address: '10.0.0.1:6379', role: 'primary' });
       });
