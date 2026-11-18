@@ -32,12 +32,15 @@ interface NodeView {
   directory?: NodeDirectory;
 }
 
+function shardHolderOf(node: ClusterNode): string {
+  return node.master && node.master !== '-' ? node.master : node.id;
+}
+
 function withShardDataOf(nodes: readonly ClusterNode[], source: readonly ClusterNode[]): ClusterNode[] {
   const known = new Map(source.map((node) => [node.id, node]));
   return nodes.map((node) => {
-    const from = known.get(node.id);
-    const shardId = node.shardId ?? from?.shardId;
-    const availabilityZone = node.availabilityZone ?? from?.availabilityZone;
+    const shardId = node.shardId ?? known.get(shardHolderOf(node))?.shardId;
+    const availabilityZone = node.availabilityZone ?? known.get(node.id)?.availabilityZone;
     return {
       ...node,
       ...(shardId ? { shardId } : {}),
@@ -72,7 +75,6 @@ export class ClusterNodeViews {
   private readonly viewKeys = new Map<string, string>();
   private readonly ownRoles = new Map<string, OwnNodeRole>();
   private readonly runIds = new Map<string, string>();
-  private readonly outsideCluster = new Set<string>();
 
   remember(
     connectionId: string,
@@ -82,7 +84,6 @@ export class ClusterNodeViews {
     describe: () => readonly ClusterNode[] = () => nodes,
     shardsRead = true,
   ): void {
-    this.outsideCluster.delete(connectionId);
     if (this.viewKeys.get(connectionId) !== viewKey) {
       this.leaveView(connectionId);
       this.viewKeys.set(connectionId, viewKey);
@@ -103,7 +104,6 @@ export class ClusterNodeViews {
   }
 
   rememberOwnRole(connectionId: string, role: ClusterNodeRef['role'] | undefined, readAt: number): void {
-    this.outsideCluster.delete(connectionId);
     if (role) {
       this.ownRoles.set(connectionId, { role, readAt });
     } else {
@@ -122,16 +122,6 @@ export class ClusterNodeViews {
     this.leaveView(connectionId);
     this.ownRoles.delete(connectionId);
     this.runIds.delete(connectionId);
-    this.outsideCluster.delete(connectionId);
-  }
-
-  leaveCluster(connectionId: string): void {
-    this.forget(connectionId);
-    this.outsideCluster.add(connectionId);
-  }
-
-  isOutsideCluster(connectionId: string): boolean {
-    return this.outsideCluster.has(connectionId);
   }
 
   view(viewKey: string): ClusterNodeView | undefined {

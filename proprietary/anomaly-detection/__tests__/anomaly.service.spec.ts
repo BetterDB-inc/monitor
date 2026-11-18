@@ -184,6 +184,7 @@ describe('AnomalyService', () => {
     };
 
     const observedNodeIds = new Map<string, string>();
+    const outsideCluster = new Set<string>();
     const isListed = jest.fn().mockReturnValue(true);
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -206,6 +207,11 @@ describe('AnomalyService', () => {
               else observedNodeIds.delete(id);
             }),
             getObservedNodeId: jest.fn((id: string) => observedNodeIds.get(id)),
+            noteOutsideCluster: jest.fn((id: string, outside: boolean) => {
+              if (outside) outsideCluster.add(id);
+              else outsideCluster.delete(id);
+            }),
+            isOutsideCluster: jest.fn((id: string) => outsideCluster.has(id)),
             findIdObservingNode: jest.fn(
               (nodeId: string) =>
                 [...observedNodeIds].find(([id, observed]) => observed === nodeId && isListed(id))?.[0] ?? null,
@@ -12802,6 +12808,33 @@ describe('AnomalyService', () => {
         expect(event.node).toEqual(PRIMARY_NODE);
       });
 
+      it('gives a replica that changed its master the shard of that master after a shard read that failed', async () => {
+        const withPrimC = (nodes: ClusterNode[]): ClusterNode[] => [
+          ...nodes,
+          clusterNode('primC', '10.0.0.3:6381@16381', ['master']),
+        ];
+        const now = jest.spyOn(Date, 'now').mockReturnValue(READ_AT);
+        dbClient.getClusterNodes = jest.fn().mockResolvedValue(withPrimC(viewOf('primA')));
+        dbClient.getClusterShards = jest.fn().mockResolvedValue([
+          ...shards,
+          { shardId: 'shard-2', slots: [], nodes: [{ id: 'primC', role: 'master', availabilityZone: 'eu-west-1c' }] },
+        ]);
+        await poll();
+        now.mockReturnValue(READ_AT + 10_000);
+        const moved = withPrimC(viewOf('primA')).map((n) => (n.id === 'repB' ? { ...n, master: 'primC' } : n));
+        dbClient.getClusterNodes = jest.fn().mockResolvedValue(moved);
+        dbClient.getClusterShards = jest.fn().mockRejectedValue(new Error('timeout'));
+        await poll();
+
+        const event = await raise({
+          timestamp: READ_AT + 10_000,
+          metricType: MetricType.CLUSTER_TOPOLOGY,
+          nodeSubject: { nodeId: 'repB' },
+        });
+
+        expect(event.node).toEqual({ ...REPLICA_NODE, shardId: 'shard-2' });
+      });
+
       it('has no shard once the cluster is read as a Raft cluster', async () => {
         const now = jest.spyOn(Date, 'now').mockReturnValue(READ_AT);
         await poll();
@@ -13184,6 +13217,53 @@ describe('AnomalyService', () => {
         expect(await nodeRead(aboutNew.id)).toEqual({ ...added, collected: true, connectionId: 'conn-r' });
       });
 
+      describe('when topology sync refreshed the connection at the address to a new node there', () => {
+        const replacement = { nodeId: 'newB', address: '10.0.0.2:6380', role: 'replica' as const };
+        const refreshToReplacement = () => {
+          registry().noteObservedNodeId('conn-r', undefined);
+          registry().getConfig.mockImplementation((id: string) =>
+            id === 'conn-r' ? { membership: { nodeId: replacement.nodeId } } : null,
+          );
+        };
+
+        beforeEach(async () => {
+          registeredAt('10.0.0.2:6380', 'conn-r');
+          await poll();
+          await poll({
+            ...mockCtx,
+            connectionId: 'conn-r',
+            port: 6380,
+            client: { ...dbClient, getClusterNodes: jest.fn().mockResolvedValue(viewOf('repB')) },
+          } as ConnectionContext);
+        });
+
+        it('does not count the connection for the node it read before', async () => {
+          const event = await replicaEvent();
+
+          refreshToReplacement();
+
+          expect(await nodeRead(event.id)).toEqual({ ...REPLICA_NODE, collected: false });
+        });
+
+        it('sends an event about the node it read before as not collected', async () => {
+          refreshToReplacement();
+
+          const event = await replicaEvent();
+
+          expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledWith(
+            expect.objectContaining({ id: event.id, node: { ...REPLICA_NODE, collected: false } }),
+          );
+        });
+
+        it('counts the connection for the new node', async () => {
+          const event = await raise({ node: replacement });
+
+          refreshToReplacement();
+
+          expect(await nodeRead(event.id)).toEqual({ ...replacement, collected: true, connectionId: 'conn-r' });
+        });
+      });
+
       it('does not count the event connection when it reads another node at the address', async () => {
         registeredAt('10.0.0.1:6379', 'conn-1');
         await poll();
@@ -13564,6 +13644,38 @@ describe('AnomalyService', () => {
           await poll();
 
           expect(registry().noteObservedNodeId).toHaveBeenLastCalledWith('conn-1', undefined);
+          expect(registry().isOutsideCluster('conn-1')).toBe(true);
+        });
+
+        it('tells the connection list when the connection answers as a cluster node again', async () => {
+          (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+            ...clusterInfoResponse,
+            stats: { ...clusterInfoResponse.stats, cluster_enabled: '0' },
+          });
+          await poll();
+          (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(clusterInfoResponse);
+          await poll();
+
+          expect(registry().isOutsideCluster('conn-1')).toBe(false);
+        });
+
+        it('does not say a connection is outside a cluster while it cannot be read', async () => {
+          await poll();
+          (dbClient.getInfoParsed as jest.Mock).mockRejectedValue(new Error('down'));
+          await poll().catch(() => undefined);
+
+          expect(registry().isOutsideCluster('conn-1')).toBe(false);
+        });
+
+        it('forgets that a removed connection was outside a cluster', async () => {
+          (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+            ...clusterInfoResponse,
+            stats: { ...clusterInfoResponse.stats, cluster_enabled: '0' },
+          });
+          await poll();
+          (service as any).onConnectionRemoved('conn-1');
+
+          expect(registry().isOutsideCluster('conn-1')).toBe(false);
         });
       });
 
@@ -16906,6 +17018,8 @@ describe('AnomalyService', () => {
               getConfig: jest.fn(),
               noteObservedNodeId: jest.fn(),
               getObservedNodeId: jest.fn(),
+              noteOutsideCluster: jest.fn(),
+              isOutsideCluster: jest.fn().mockReturnValue(false),
               findIdObservingNode: jest.fn().mockReturnValue(null),
             },
           },

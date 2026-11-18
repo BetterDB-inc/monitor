@@ -145,7 +145,12 @@ describe('collectionOf with the node each connection was seen reading', () => {
 
 describe('collectionAmong', () => {
   const node = { id: 'node-2', address: '10.0.0.2:6379', flags: ['master'] };
-  const connections = (seenReading: Record<string, string>, saved: Record<string, string>) => ({
+  const connections = (
+    seenReading: Record<string, string>,
+    saved: Record<string, string>,
+    outside: string[] = [],
+  ) => ({
+    isOutsideCluster: (id: string) => outside.includes(id),
     findIdByHostPort: (host: string, port: number) => (`${host}:${port}` === '10.0.0.2:6379' ? 'conn-2' : null),
     findIdObservingNode: (nodeId: string) =>
       Object.keys(seenReading).find((id) => seenReading[id] === nodeId) ?? null,
@@ -167,5 +172,21 @@ describe('collectionAmong', () => {
     expect(collectionAmong(node, 'seed', connections({}, { 'conn-2': 'node-2' })).collected).toBe(true);
     expect(collectionAmong(node, 'seed', connections({}, { 'conn-2': 'node-9' })).collected).toBe(false);
     expect(collectionAmong(node, 'seed', connections({}, {})).collected).toBe(true);
+  });
+
+  it('does not count a connection at the address that answers outside the cluster', () => {
+    expect(collectionAmong(node, 'seed', connections({}, { 'conn-2': 'node-2' }, ['conn-2']))).toEqual({
+      collected: false,
+    });
+    expect(collectionAmong(node, 'seed', connections({}, {}, ['conn-2']))).toEqual({ collected: false });
+  });
+
+  it('counts the viewing connection for its own node whatever is registered at the address', () => {
+    const own = { ...node, flags: ['myself', 'master'] };
+
+    expect(collectionAmong(own, 'seed', connections({}, {}, ['conn-2']))).toEqual({
+      collected: true,
+      connectionId: 'seed',
+    });
   });
 });

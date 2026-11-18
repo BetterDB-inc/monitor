@@ -138,6 +138,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   private startupConnectionErrors: Array<{ name: string; host: string; port: number; error: string }> = [];
   private readonly seedLocks = new Map<string, Promise<unknown>>();
   private readonly observedNodeIds = new Map<string, string>();
+  private readonly outsideCluster = new Set<string>();
   private readonly removalListeners = new Set<ConnectionRemovalListener>();
   // Connections whose in-memory secrets came from the environment because the
   // stored (encrypted) record could not be decrypted and no cipher is available.
@@ -1018,6 +1019,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     this.connections.delete(id);
     this.configs.delete(id);
     this.observedNodeIds.delete(id);
+    this.outsideCluster.delete(id);
     this.runtimeCapabilityTracker.removeConnection(id);
     this.externalMetricsStore.clear(id);
     await this.storage.deleteConnection(id);
@@ -1411,6 +1413,18 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
   getObservedNodeId(id: string): string | undefined {
     return this.observedNodeIds.get(id);
+  }
+
+  noteOutsideCluster(id: string, outside: boolean): void {
+    if (outside) {
+      this.outsideCluster.add(id);
+    } else {
+      this.outsideCluster.delete(id);
+    }
+  }
+
+  isOutsideCluster(id: string): boolean {
+    return this.outsideCluster.has(id);
   }
 
   findIdObservingNode(nodeId: string): string | null {

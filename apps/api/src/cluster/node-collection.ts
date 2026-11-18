@@ -38,6 +38,7 @@ interface ConnectionLookup {
   findIdByHostPort(host: string, port: number): string | null;
   findIdObservingNode(nodeId: string): string | null;
   getObservedNodeId(connectionId: string): string | undefined;
+  isOutsideCluster(connectionId: string): boolean;
   getConfig(connectionId: string): { membership?: { nodeId?: string } } | null | undefined;
 }
 
@@ -49,7 +50,10 @@ export function collectionAmong(
   return collectionOf(
     node,
     viewingConnectionId,
-    (host, port) => connections.findIdByHostPort(host, port),
+    (host, port) => {
+      const found = connections.findIdByHostPort(host, port);
+      return found && connections.isOutsideCluster(found) ? null : found;
+    },
     (id) => connections.getObservedNodeId(id) ?? connections.getConfig(id)?.membership?.nodeId,
     (nodeId) => connections.findIdObservingNode(nodeId),
   );
