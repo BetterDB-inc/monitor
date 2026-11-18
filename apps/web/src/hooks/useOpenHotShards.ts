@@ -5,7 +5,10 @@ import { usePolling } from './usePolling';
 const OPEN_EVENTS_POLL_MS = 5000;
 const HOT_SHARDS_POLL_MS = 10000;
 
-export function useOpenHotShards(connectionId: string | undefined): HotShardDetail[] {
+export function useOpenHotShards(
+  connectionId: string | undefined,
+  { keepOnError = false }: { keepOnError?: boolean } = {},
+): HotShardDetail[] {
   const { data: openEvents, error: eventsError } = usePolling({
     fetcher: () => metricsApi.getAnomalyEvents({ metricType: 'hot_shard', activeOnly: true }),
     interval: OPEN_EVENTS_POLL_MS,
@@ -23,6 +26,6 @@ export function useOpenHotShards(connectionId: string | undefined): HotShardDeta
     enabled: openIds.size > 0 && !!connectionId,
     queryKey: ['open-hot-shards', connectionId],
   });
-  if (!connectionId || eventsError || hotShardsError) return [];
+  if (!connectionId || (!keepOnError && (eventsError || hotShardsError))) return [];
   return (hotShards ?? []).filter((shard) => openIds.has(shard.eventId));
 }

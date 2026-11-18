@@ -1260,6 +1260,81 @@ describe('ClusterDiscoveryService', () => {
     });
   });
 
+  describe('onNodeClientOnce', () => {
+    function onceClient() {
+      const handlers: Record<string, (err: Error) => void> = {};
+      const client = {
+        connect: jest.fn().mockResolvedValue(undefined),
+        call: jest.fn().mockResolvedValue('OK'),
+        disconnect: jest.fn(),
+        on: jest.fn((event: string, handler: (err: Error) => void) => {
+          handlers[event] = handler;
+        }),
+        handlers,
+      };
+      jest.mocked(Valkey).mockImplementationOnce(() => client as never);
+      return client;
+    }
+
+    const node = (address = '10.0.0.9:7000') => ({
+      id: 'node1-id-abc123',
+      address,
+      role: 'master' as const,
+      slots: [],
+      configEpoch: 0,
+      state: 'healthy' as const,
+      flags: ['master'],
+    });
+
+    it('sends the work to the node on a socket of its own that never resends, and closes it', async () => {
+      const client = onceClient();
+
+      const reply = await service.onNodeClientOnce(node(), 'test-connection', 2_000, (own) =>
+        own.call('CLUSTER', 'CANCELSLOTMIGRATIONS'),
+      );
+
+      expect(reply).toBe('OK');
+      expect(jest.mocked(Valkey)).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          host: '10.0.0.9',
+          port: 7000,
+          username: 'testuser',
+          password: 'testpass',
+          connectTimeout: 2_000,
+          commandTimeout: 2_000,
+          enableOfflineQueue: false,
+          maxRetriesPerRequest: 0,
+        }),
+      );
+      const calls = jest.mocked(Valkey).mock.calls as unknown as Array<[{ retryStrategy: () => unknown }]>;
+      const options = calls[calls.length - 1][0];
+      expect(options.retryStrategy()).toBeNull();
+      expect(client.call).toHaveBeenCalledWith('CLUSTER', 'CANCELSLOTMIGRATIONS');
+      expect(client.disconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it('names why the node refused the connection, without running the work', async () => {
+      const client = onceClient();
+      client.connect.mockImplementation(async () => {
+        client.handlers.error(new Error('WRONGPASS invalid username-password pair'));
+        throw new Error('Connection is closed.');
+      });
+      const work = jest.fn();
+
+      await expect(
+        service.onNodeClientOnce(node(), 'test-connection', 2_000, work),
+      ).rejects.toThrow('WRONGPASS invalid username-password pair');
+      expect(work).not.toHaveBeenCalled();
+      expect(client.disconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses an address it cannot read', async () => {
+      await expect(
+        service.onNodeClientOnce(node('nope'), 'test-connection', 2_000, jest.fn()),
+      ).rejects.toThrow('Invalid node address: nope');
+    });
+  });
+
   describe('onOwnNodeClient', () => {
     let shared: { options: Record<string, unknown>; call: jest.Mock };
 

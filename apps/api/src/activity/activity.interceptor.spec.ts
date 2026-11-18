@@ -4,9 +4,11 @@ import {
   Controller,
   Delete,
   ExecutionContext,
+  ForbiddenException,
   Get,
   HttpCode,
   Injectable,
+  Param,
   Post,
   Req,
   Res,
@@ -74,6 +76,21 @@ class ConnectionsStubController {
   }
 }
 
+@Controller('anomaly')
+class AnomalyStubController {
+  @Post('hot-shards/:shardId/rebalance')
+  run(@Param('shardId') shardId: string): { sourceShardId: string } {
+    if (shardId === 'blocked') throw new ForbiddenException({ blockedBy: 'flag_off' });
+    return { sourceShardId: shardId };
+  }
+
+  @Post('slot-rebalance/cancel')
+  @HttpCode(200)
+  cancel(): { state: string } {
+    return { state: 'running' };
+  }
+}
+
 @Controller('auth')
 class AuthStubController {
   @Post('sign-in/email')
@@ -89,7 +106,7 @@ describe('ActivityInterceptor', () => {
   beforeAll(async () => {
     record = jest.fn().mockResolvedValue(undefined);
     const moduleRef = await Test.createTestingModule({
-      controllers: [ConnectionsStubController, AuthStubController],
+      controllers: [ConnectionsStubController, AnomalyStubController, AuthStubController],
       providers: [
         { provide: ActivityService, useValue: { record } },
         { provide: APP_GUARD, useClass: HeaderActorGuard },
@@ -168,6 +185,51 @@ describe('ActivityInterceptor', () => {
     await settle();
     expect(record).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'POST /connections/fail', statusCode: 409 }),
+    );
+  });
+
+  it('records a slot rebalance run and cancel against the source shard', async () => {
+    await app.inject({
+      method: 'POST',
+      url: '/api/anomaly/hot-shards/a0000000/rebalance',
+      headers: { 'x-test-actor': 'admin', 'x-connection-id': 'conn-9' },
+      payload: { moves: [] },
+    });
+    await app.inject({
+      method: 'POST',
+      url: '/api/anomaly/slot-rebalance/cancel',
+      headers: { 'x-test-actor': 'admin', 'x-connection-id': 'conn-9' },
+      payload: { sourceShardId: 'a0000000' },
+    });
+    await settle();
+    expect(record.mock.calls.map(([entry]) => entry)).toEqual([
+      expect.objectContaining({
+        action: 'slot_rebalance.run',
+        statusCode: 201,
+        connectionId: 'conn-9',
+        targetType: 'shard',
+        targetId: 'a0000000',
+      }),
+      expect.objectContaining({
+        action: 'slot_rebalance.cancel',
+        statusCode: 200,
+        targetType: 'shard',
+        targetId: 'a0000000',
+      }),
+    ]);
+  });
+
+  it('records a 403 that the route itself answers', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/anomaly/hot-shards/blocked/rebalance',
+      headers: { 'x-test-actor': 'admin' },
+      payload: { moves: [] },
+    });
+    expect(response.statusCode).toBe(403);
+    await settle();
+    expect(record).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'slot_rebalance.run', statusCode: 403, targetId: 'blocked' }),
     );
   });
 
