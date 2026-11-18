@@ -27496,6 +27496,37 @@ describe('AnomalyService', () => {
         ]);
       });
 
+      it('points a line at the event that was raised last when an outgoing one covers it too', async () => {
+        views.b = { a: { epoch: 9 } };
+        await rounds(3);
+        const [outgoing] = divergenceEvents();
+        silent.add('c');
+        await rounds(1);
+        const current = divergenceEvents().find((event) => event.id !== outgoing.id);
+
+        expect(outgoing.resolved).toBe(false);
+        expect(current).toBeDefined();
+        expect(service.getTopologyDisagreements('conn-1').disagreements).toMatchObject([
+          { id: 'config_epoch:a', confirmed: true, eventId: current?.id, resolvedByHand: false },
+        ]);
+      });
+
+      it('points a line at its open event when an outgoing one that covers it was resolved by hand', async () => {
+        views.b = { a: { epoch: 9 } };
+        await rounds(3);
+        const [outgoing] = divergenceEvents();
+        silent.add('c');
+        await rounds(1);
+        const current = divergenceEvents().find((event) => event.id !== outgoing.id);
+
+        await service.resolveAnomaly(outgoing.id);
+
+        expect(current?.resolved).toBe(false);
+        expect(service.getTopologyDisagreements('conn-1').disagreements).toMatchObject([
+          { id: 'config_epoch:a', confirmed: true, eventId: current?.id, resolvedByHand: false },
+        ]);
+      });
+
       it('says that the event of a line was resolved by hand until it is raised again', async () => {
         views.b = { a: { epoch: 9 } };
         await rounds(3);

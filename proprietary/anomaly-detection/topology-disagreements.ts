@@ -43,12 +43,14 @@ export interface DisagreementEvent {
 export interface RaisedDivergence {
   group: DivergenceGroup;
   event: DisagreementEvent;
+  confirmedAt: number;
 }
 
 export type DisagreementEventOf = (disagreement: TopologyDisagreement) => DisagreementEvent | undefined;
 
 export function eventOfRaised(raised: readonly RaisedDivergence[]): DisagreementEventOf {
-  return (disagreement) => matchDivergence(raised, disagreement)?.event;
+  const candidates = raised.map((entry) => ({ ...entry, resolvedByHand: entry.event.resolvedByHand === true }));
+  return (disagreement) => matchDivergence(candidates, disagreement)?.event;
 }
 
 export interface DisagreementRound {
