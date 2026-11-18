@@ -6,6 +6,9 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import Valkey from 'iovalkey';
 import type { ReplyProfile } from '../../test/load/fake-cluster';
+import { ignoreEnvFile } from './env-file';
+import { FAILOVER_SHARD, downOutsideHung, pickHungNodes } from './hung-nodes';
+import { pollerResult, round, type PollerResult } from './poller-result';
 import { PORTS_EXHAUSTED, portPressure, portsHeld } from './ports';
 import { ProcessLoadMeter, type ProcessLoad } from './process-load';
 import { RemoteCluster } from './remote-cluster';
@@ -24,17 +27,7 @@ export interface ScenarioOptions {
   license: LicenseTier;
   profile: ReplyProfile;
   replyDelayMs: number;
-}
-
-export interface PollerResult {
-  intervalMs: number;
-  ticks: number;
-  expectedTicks: number;
-  p50Ms: number;
-  p95Ms: number;
-  maxMs: number;
-  commandsPerTick: number;
-  commandsPerSecond: number;
+  callSites: boolean;
 }
 
 export interface InvalidRun {
@@ -80,11 +73,7 @@ const PLACEHOLDER_LICENSE_KEY = 'cluster-load-test-placeholder-not-a-license';
 export class InvalidRunError extends Error {}
 const FAILOVER_REQUESTED = 'cluster.failover (before the license check)';
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-const round = (value: number, digits = 1): number => Number(value.toFixed(digits));
 const mb = (bytes: number): number => round(bytes / 1024 / 1024);
-
-const percentile = (sorted: number[], fraction: number): number =>
-  sorted.length === 0 ? 0 : sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * fraction))];
 
 const APP_FRAME = /at (?:async )?(\S+) \(.*?\/(?:apps\/api\/src|proprietary)\/(.*?)\.ts:\d+:\d+\)/;
 
@@ -241,13 +230,14 @@ async function measure(options: ScenarioOptions, cluster: RemoteCluster, dataDir
       const owner = context.getStore() ?? BACKGROUND;
       clientCommands.set(owner, (clientCommands.get(owner) ?? 0) + 1);
       if (command.name?.toLowerCase() === 'cluster' && String(command.args?.[0]).toLowerCase() === 'nodes') {
-        const key = `${owner}\n${callSite()}`;
+        const key = `${owner}\n${options.callSites ? callSite() : ''}`;
         clusterNodesCallers.set(key, (clusterNodesCallers.get(key) ?? 0) + 1);
       }
     }
     return sendCommand.apply(this, args);
   };
 
+  ignoreEnvFile();
   const { NestFactory, ModulesContainer } = require('@nestjs/core');
   const { FastifyAdapter } = require('@nestjs/platform-fastify');
   const { AppModule } = require('../../src/app.module');
@@ -329,8 +319,11 @@ async function measure(options: ScenarioOptions, cluster: RemoteCluster, dataDir
   }
   await pause(options.warmupMs);
 
-  for (let index = 0; index < options.hang; index++) await cluster.hang(cluster.nodes.length - 1 - index);
-  if (options.hang > 0) await pause(options.warmupMs);
+  const hungNodes = pickHungNodes(cluster.nodes, options.hang, options.failover ? FAILOVER_SHARD : null).map(
+    (index) => cluster.nodes[index],
+  );
+  for (const node of hungNodes) await cluster.hang(node.index);
+  if (hungNodes.length > 0) await pause(options.warmupMs);
 
   const load = new ProcessLoadMeter();
   await cluster.resetStats();
@@ -344,7 +337,7 @@ async function measure(options: ScenarioOptions, cluster: RemoteCluster, dataDir
 
   if (options.failover) {
     await pause(options.measureMs / 2);
-    await cluster.failover(1);
+    await cluster.failover(FAILOVER_SHARD);
     await pause(options.measureMs / 2);
   } else {
     await pause(options.measureMs);
@@ -354,7 +347,7 @@ async function measure(options: ScenarioOptions, cluster: RemoteCluster, dataDir
   const processLoad = load.read();
   load.stop();
   const stats = await cluster.stats();
-  const ticks = new Map([...tickDurations].map(([name, durations]) => [name, [...durations].sort((a, b) => a - b)]));
+  const passes = new Map([...tickDurations].map(([name, durations]) => [name, [...durations]]));
   const commandsByOwner = new Map(clientCommands);
   const nodesCallers = [...clusterNodesCallers]
     .map(([key, count]) => {
@@ -362,35 +355,15 @@ async function measure(options: ScenarioOptions, cluster: RemoteCluster, dataDir
       return { poller, caller, perSecond: round(count / windowSeconds) };
     })
     .sort((left, right) => right.perSecond - left.perSecond);
-  const connections = registry.list() as Array<{ isConnected: boolean }>;
+  const connections = registry.list() as Array<{ host: string; port: number; isConnected: boolean }>;
   (global as { gc?: () => void }).gc?.();
   const memory = process.memoryUsage();
 
   const pollers: Record<string, PollerResult> = {};
-  for (const [name, sorted] of ticks) {
-    const commands = commandsByOwner.get(name) ?? 0;
-    const intervalMs = intervals.get(name) ?? 0;
-    pollers[name] = {
-      intervalMs,
-      ticks: sorted.length,
-      expectedTicks: intervalMs > 0 ? Math.floor((windowSeconds * 1000) / intervalMs) : 0,
-      p50Ms: round(percentile(sorted, 0.5)),
-      p95Ms: round(percentile(sorted, 0.95)),
-      maxMs: round(sorted[sorted.length - 1] ?? 0),
-      commandsPerTick: sorted.length ? round(commands / sorted.length) : 0,
-      commandsPerSecond: round(commands / windowSeconds),
-    };
+  for (const [name, durations] of passes) {
+    pollers[name] = pollerResult(durations, intervals.get(name) ?? 0, commandsByOwner.get(name) ?? 0, windowSeconds);
   }
-  pollers[BACKGROUND] = {
-    intervalMs: 0,
-    ticks: 0,
-    expectedTicks: 0,
-    p50Ms: 0,
-    p95Ms: 0,
-    maxMs: 0,
-    commandsPerTick: 0,
-    commandsPerSecond: round((commandsByOwner.get(BACKGROUND) ?? 0) / windowSeconds),
-  };
+  pollers[BACKGROUND] = pollerResult([], 0, commandsByOwner.get(BACKGROUND) ?? 0, windowSeconds);
 
   const connected = connections.filter((connection) => connection.isConnected).length;
   const socketsOpenedPerSecond = stats.connectionsOpened / windowSeconds;
@@ -403,10 +376,11 @@ async function measure(options: ScenarioOptions, cluster: RemoteCluster, dataDir
   }
   const pressure = portPressure(stats.peakConnections, socketsOpenedPerSecond);
   if (pressure) suspect.push(`${pressure}, so connections may have failed for lack of ports`);
-  const down = connections.length - connected;
+  const down = downOutsideHung(connections, hungNodes);
   const invalid =
-    down > options.hang
-      ? `${down} of ${connections.length} registered connections were down at the end of the window`
+    down > 0
+      ? `${down} of ${connections.length} registered connections were down at the end of the window` +
+        (hungNodes.length > 0 ? ', not counting the nodes made to hang' : '')
       : undefined;
 
   const result: ScenarioResult = {

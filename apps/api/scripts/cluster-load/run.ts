@@ -2,6 +2,7 @@ import { spawnSync, type SpawnSyncReturns } from 'child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { hangLimit } from './hung-nodes';
 import { TIME_WAIT_SECONDS, portProblem } from './ports';
 import type { InvalidRun, LicenseTier, ScenarioOptions, ScenarioResult } from './scenario';
 import type { ReplyProfile } from '../../test/load/fake-cluster';
@@ -21,6 +22,7 @@ interface CliOptions {
   license: LicenseTier;
   profile: ReplyProfile;
   replyDelayMs: number;
+  callSites: boolean;
   force: boolean;
   out?: string;
 }
@@ -33,7 +35,8 @@ const USAGE = `Usage: pnpm load:cluster [options]
   --warmup 30           seconds to wait before measuring (default 30)
   --measure 120         seconds measured (default 120)
   --settle 300          longest wait for auto-registration, seconds (default 300)
-  --hang 0              nodes that accept TCP and stop replying (default 0)
+  --hang 0              nodes that accept TCP and stop replying, from one warm-up before the
+                        window; never the first node or the shard of --failover (default 0)
   --failover            promote a replica of shard 1 halfway through the window
   --license pro         pro or enterprise = licensed features on, through a local stand-in
                         for the license server; community = no license (default pro)
@@ -41,6 +44,9 @@ const USAGE = `Usage: pnpm load:cluster [options]
                         60 commands in the stats and a keyspace to scan; empty = near-empty replies
                         (default realistic)
   --reply-delay-ms 0    hold every reply back this long, to stand in for a network (default 0)
+  --call-sites          also name the function behind every CLUSTER NODES read; reading the
+                        stack costs CPU in the measured process, so leave it out of runs
+                        whose CPU, loop delay or pass times are read
   --out <dir>           also write one JSON file per run and report.md there
   --force               run even when the size does not fit the local port range
 
@@ -86,7 +92,12 @@ function listOf<T>(flag: string, value: string, parse: (item: string) => T): T[]
   return items.map(parse);
 }
 
-function parseArgs(argv: string[]): CliOptions {
+function directory(value: string): string {
+  if (value.trim() === '' || value.startsWith('--')) reject('--out needs a directory.');
+  return value;
+}
+
+export function parseArgs(argv: string[]): CliOptions {
   const options: CliOptions = {
     nodes: [100, 250, 500],
     modes: ['seed', 'auto'],
@@ -99,6 +110,7 @@ function parseArgs(argv: string[]): CliOptions {
     license: 'pro',
     profile: 'realistic',
     replyDelayMs: 0,
+    callSites: false,
     force: false,
   };
   for (let index = 0; index < argv.length; index++) {
@@ -138,11 +150,14 @@ function parseArgs(argv: string[]): CliOptions {
       case '--reply-delay-ms':
         options.replyDelayMs = atLeast(flag, value(), 0);
         break;
+      case '--call-sites':
+        options.callSites = true;
+        break;
       case '--force':
         options.force = true;
         break;
       case '--out':
-        options.out = value();
+        options.out = directory(value());
         break;
       case '--':
         break;
@@ -164,6 +179,13 @@ function checkCombinations(options: CliOptions): void {
     }
     if (options.hang >= nodes) reject(`--hang ${options.hang} leaves no node answering with --nodes ${nodes}.`);
     if (options.failover && nodes / perShard < 2) reject(`--failover needs two shards, ${size} makes one.`);
+    const limit = hangLimit(nodes, perShard, options.failover);
+    if (options.failover && options.hang > limit) {
+      reject(
+        `--hang ${options.hang} with --failover would hang the shard that fails over or the first node, ` +
+          `${size} allows at most ${limit}.`,
+      );
+    }
   }
   if (options.failover && options.replicas === 0) {
     reject('--failover needs a replica to promote, --replicas is 0.');
@@ -325,12 +347,20 @@ function details(result: ScenarioResult): string {
         poller.commandsPerSecond,
       ]),
   );
-  const callers = table(
-    ['CLUSTER NODES sent by', 'Call site', 'Per second'],
-    result.clusterNodesCallers
-      .filter((entry) => entry.perSecond >= 0.1)
-      .map((entry) => [entry.poller, entry.caller, entry.perSecond]),
-  );
+  const sent = result.clusterNodesCallers.filter((entry) => entry.perSecond >= 0.1);
+  const callers = result.options.callSites
+    ? table(
+        ['CLUSTER NODES sent by', 'Call site', 'Per second'],
+        sent.map((entry) => [entry.poller, entry.caller, entry.perSecond]),
+      )
+    : [
+        table(
+          ['CLUSTER NODES sent by', 'Per second'],
+          sent.map((entry) => [entry.poller, entry.perSecond]),
+        ),
+        '',
+        'Run with --call-sites to split these by the function that sent them.',
+      ].join('\n');
   const events = Object.entries(result.webhookEvents)
     .map(([event, count]) => `${event}: ${count}`)
     .join(', ');
@@ -376,6 +406,7 @@ function main(): void {
         license: cli.license,
         profile: cli.profile,
         replyDelayMs: cli.replyDelayMs,
+        callSites: cli.callSites,
       };
       const problem = cli.force ? null : portProblem(nodes, mode);
       if (problem) {
@@ -407,4 +438,4 @@ function main(): void {
   else rmSync(workDir, { recursive: true, force: true });
 }
 
-main();
+if (require.main === module) main();
