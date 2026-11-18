@@ -61,6 +61,8 @@ export class ClusterNodeViews {
   private readonly viewKeys = new Map<string, string>();
   private readonly ownNodeIds = new Map<string, string>();
   private readonly ownRoles = new Map<string, OwnNodeRole>();
+  private readonly runIds = new Map<string, string>();
+  private readonly outsideCluster = new Set<string>();
 
   remember(
     connectionId: string,
@@ -72,6 +74,7 @@ export class ClusterNodeViews {
   ): void {
     const ownNodeId = nodes.find((node) => node.flags.includes('myself'))?.id;
     if (ownNodeId) this.ownNodeIds.set(connectionId, ownNodeId);
+    this.outsideCluster.delete(connectionId);
     if (this.viewKeys.get(connectionId) !== viewKey) {
       this.leaveView(connectionId);
       this.viewKeys.set(connectionId, viewKey);
@@ -88,6 +91,7 @@ export class ClusterNodeViews {
   }
 
   rememberOwnRole(connectionId: string, role: ClusterNodeRef['role'] | undefined, readAt: number): void {
+    this.outsideCluster.delete(connectionId);
     if (role) {
       this.ownRoles.set(connectionId, { role, readAt });
     } else {
@@ -95,10 +99,30 @@ export class ClusterNodeViews {
     }
   }
 
+  answersFromAnotherRun(connectionId: string, runId: string | undefined): boolean {
+    if (!runId) return false;
+    const last = this.runIds.get(connectionId);
+    this.runIds.set(connectionId, runId);
+    if (last === undefined || last === runId) return false;
+    this.ownNodeIds.delete(connectionId);
+    return true;
+  }
+
   forget(connectionId: string): void {
     this.leaveView(connectionId);
     this.ownNodeIds.delete(connectionId);
     this.ownRoles.delete(connectionId);
+    this.runIds.delete(connectionId);
+    this.outsideCluster.delete(connectionId);
+  }
+
+  leaveCluster(connectionId: string): void {
+    this.forget(connectionId);
+    this.outsideCluster.add(connectionId);
+  }
+
+  isOutsideCluster(connectionId: string): boolean {
+    return this.outsideCluster.has(connectionId);
   }
 
   view(viewKey: string): ClusterNodeView | undefined {

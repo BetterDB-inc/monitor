@@ -11683,6 +11683,43 @@ describe('AnomalyService', () => {
       expect(events[0].node).toEqual({ nodeId: 'primB', address: '10.0.0.1:6379', role: 'primary' });
     });
 
+    it('names the owner by its address when a newer view of another connection does not list it', async () => {
+      const withReplica = (epoch: number, ownerId: string) => [
+        ...shardNodes(epoch, ownerId),
+        { ...shardNodes(epoch, 'repC')[0], address: '10.0.0.3:6379@16379', flags: ['slave'], master: ownerId, slots: [] },
+      ];
+      const setOwner = (epoch: number, ownerId: string) =>
+        (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(withReplica(epoch, ownerId));
+      setOwner(1, 'primA');
+      await poll();
+      now += 5_000;
+      setOwner(2, 'primB');
+      await poll();
+      now += 5_000;
+      setOwner(3, 'primA');
+      await poll();
+      now += 5_000;
+      setOwner(4, 'primB');
+      const behind = {
+        ...mockCtx,
+        connectionId: 'conn-2',
+        port: 6380,
+        client: { ...dbClient, getClusterNodes: jest.fn().mockResolvedValue(withReplica(3, 'primA')) },
+      } as ConnectionContext;
+      let between = false;
+      jest.spyOn(service as any, 'adoptOpenEvents').mockImplementation(async () => {
+        if (between) return;
+        between = true;
+        now += 1_000;
+        await poll(behind);
+      });
+      await poll();
+
+      expect(churnEvents().map((event) => event.node)).toEqual([
+        { nodeId: 'primB', address: '10.0.0.1:6379', role: 'unknown' },
+      ]);
+    });
+
     it('escalates to CRITICAL when churn continues into a second window', async () => {
       let epoch = 1;
       const owners = ['primA', 'primB'];
@@ -12770,6 +12807,48 @@ describe('AnomalyService', () => {
       });
     });
 
+    describe('when the connection answers from another node than before', () => {
+      const infoOf = (role: string, runId: string) => ({ ...clusterInfoResponse, server: { role, run_id: runId } });
+      const raisedEarly = async () => {
+        let event: AnomalyEvent | undefined;
+        jest.spyOn(service as any, 'adoptOpenEvents').mockImplementation(async () => {
+          event = await raise({ metricType: MetricType.CONNECTIONS });
+        });
+        await poll();
+        return event;
+      };
+
+      beforeEach(async () => {
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoOf('master', 'run-a'));
+        await poll();
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoOf('slave', 'run-b'));
+        dbClient.getClusterNodes = jest.fn().mockResolvedValue(viewOf('repB'));
+      });
+
+      it('names the node it answers from on an event raised before the cluster is read', async () => {
+        const event = await raisedEarly();
+
+        expect(event?.node).toEqual(REPLICA_NODE);
+      });
+
+      it('names no node on such an event when the node cannot be read', async () => {
+        dbClient.getClusterNodes = jest.fn().mockRejectedValue(new Error('down'));
+
+        const event = await raisedEarly();
+
+        expect(event?.node).toBeUndefined();
+      });
+
+      it('keeps the node on such an event when the same node only restarted', async () => {
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoOf('master', 'run-b'));
+        dbClient.getClusterNodes = jest.fn().mockResolvedValue(viewOf('primA'));
+
+        const event = await raisedEarly();
+
+        expect(event?.node).toEqual(PRIMARY_NODE);
+      });
+    });
+
     describe('when another connection reads the cluster between the INFO read and a role change event', () => {
       const READ_AT = 1_700_000_000_000;
       const infoWithRole = (role: string) => ({ ...clusterInfoResponse, server: { role } });
@@ -12948,6 +13027,34 @@ describe('AnomalyService', () => {
 
         expect(clusterKeys().get('conn-r')).toBe(clusterKeys().get('conn-1'));
         expect(await nodeRead(event.id)).toEqual({ ...gone, collected: false });
+      });
+
+      it('does not count the event connection once it is read as an instance outside a cluster', async () => {
+        registeredAt('10.0.0.1:6379', 'conn-1');
+        await poll();
+        const event = await raise();
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+          ...clusterInfoResponse,
+          stats: { ...clusterInfoResponse.stats, cluster_enabled: '0' },
+        });
+        await poll();
+
+        expect(await nodeRead(event.id)).toEqual({ ...PRIMARY_NODE, collected: false });
+      });
+
+      it('counts it again once it is read as a node of the cluster', async () => {
+        registeredAt('10.0.0.1:6379', 'conn-1');
+        await poll();
+        const event = await raise();
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+          ...clusterInfoResponse,
+          stats: { ...clusterInfoResponse.stats, cluster_enabled: '0' },
+        });
+        await poll();
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(clusterInfoResponse);
+        await poll();
+
+        expect(await nodeRead(event.id)).toEqual({ ...PRIMARY_NODE, collected: true, connectionId: 'conn-1' });
       });
 
       it('does not count the event connection when it reads another node at the address', async () => {
