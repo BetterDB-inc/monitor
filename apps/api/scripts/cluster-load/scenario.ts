@@ -9,7 +9,7 @@ import type { ReplyProfile } from '../../test/load/fake-cluster';
 import { callSite } from './call-site';
 import { ignoreEnvFile } from './env-file';
 import { FAILOVER_SHARD, downOutsideHung, pickHungNodes } from './hung-nodes';
-import { PassRecorder, recordPasses, type Pass } from './pass-recorder';
+import { countPolls, PassRecorder, recordPasses, type Pass } from './pass-recorder';
 import { pauseChecking, sleep } from './pause';
 import { pollerResult, round, type PollerResult } from './poller-result';
 import { PORTS_EXHAUSTED, portPressure, portsHeld } from './ports';
@@ -255,6 +255,7 @@ async function measure(options: ScenarioOptions, cluster: RemoteCluster, dataDir
       }
       if (instance instanceof MultiConnectionPoller) {
         const name = instance.constructor.name;
+        instance['pollConnection'] = countPolls(instance['pollConnection'].bind(instance), context);
         instance['tick'] = recordPasses(
           instance['tick'].bind(instance),
           () => instance['isPollingBusy'](),

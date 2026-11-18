@@ -4,6 +4,7 @@ export interface Pass {
   name: string;
   startedAt: number;
   commands: number;
+  polls: number;
 }
 
 export interface PassTotals {
@@ -25,11 +26,11 @@ export class PassRecorder {
   }
 
   begin(name: string, now: number): Pass {
-    return { name, startedAt: now, commands: 0 };
+    return { name, startedAt: now, commands: 0, polls: 0 };
   }
 
   end(pass: Pass, now: number): void {
-    if (pass.startedAt < this.windowStartedAt) return;
+    if (pass.startedAt < this.windowStartedAt || pass.polls === 0) return;
     this.finished.get(pass.name)?.push({ pass, durationMs: now - pass.startedAt });
   }
 
@@ -64,5 +65,16 @@ export function recordPasses(
         passes.end(pass, performance.now());
       }
     });
+  };
+}
+
+export function countPolls<Args extends unknown[], Result>(
+  poll: (...args: Args) => Result,
+  context: AsyncLocalStorage<Pass>,
+): (...args: Args) => Result {
+  return (...args) => {
+    const pass = context.getStore();
+    if (pass) pass.polls += 1;
+    return poll(...args);
   };
 }

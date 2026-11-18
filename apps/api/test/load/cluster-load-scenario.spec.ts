@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'async_hooks';
 import { appFrame } from '../../scripts/cluster-load/call-site';
 import { downOutsideHung, hangLimit, pickHungNodes } from '../../scripts/cluster-load/hung-nodes';
-import { PassRecorder, recordPasses, type Pass } from '../../scripts/cluster-load/pass-recorder';
+import { countPolls, PassRecorder, recordPasses, type Pass } from '../../scripts/cluster-load/pass-recorder';
 import { pauseChecking } from '../../scripts/cluster-load/pause';
 import { pollerResult } from '../../scripts/cluster-load/poller-result';
 
@@ -123,13 +123,19 @@ describe('cluster load test, passes in the window', () => {
     recorder.track(POLLER);
   });
 
+  const polled = (now: number): Pass => {
+    const pass = recorder.begin(POLLER, now);
+    pass.polls += 1;
+    return pass;
+  };
+
   it('leaves out a pass that began before the window', () => {
-    const early = recorder.begin(POLLER, 100);
+    const early = polled(100);
     early.commands += 5;
     recorder.startWindow(200);
     early.commands += 3;
     recorder.end(early, 9200);
-    const inside = recorder.begin(POLLER, 9300);
+    const inside = polled(9300);
     inside.commands += 7;
     recorder.end(inside, 9550);
     expect(recorder.totals().get(POLLER)).toEqual({ durations: [250], commands: 7 });
@@ -137,16 +143,16 @@ describe('cluster load test, passes in the window', () => {
 
   it('leaves out a pass that has not ended', () => {
     recorder.startWindow(200);
-    const done = recorder.begin(POLLER, 300);
+    const done = polled(300);
     done.commands += 4;
     recorder.end(done, 400);
-    recorder.begin(POLLER, 500).commands += 9;
+    polled(500).commands += 9;
     expect(recorder.totals().get(POLLER)).toEqual({ durations: [100], commands: 4 });
   });
 
   it('counts the commands a pass sends after it ended', () => {
     recorder.startWindow(200);
-    const pass = recorder.begin(POLLER, 300);
+    const pass = polled(300);
     pass.commands += 4;
     recorder.end(pass, 400);
     pass.commands += 2;
@@ -154,10 +160,19 @@ describe('cluster load test, passes in the window', () => {
   });
 
   it('forgets the passes of the warm-up', () => {
-    const warmup = recorder.begin(POLLER, 100);
+    const warmup = polled(100);
     recorder.end(warmup, 150);
     recorder.startWindow(200);
     expect(recorder.totals().get(POLLER)).toEqual({ durations: [], commands: 0 });
+  });
+
+  it('leaves out a pass that polled no connection', () => {
+    recorder.startWindow(200);
+    const real = polled(300);
+    real.commands += 4;
+    recorder.end(real, 400);
+    recorder.end(recorder.begin(POLLER, 500), 501);
+    expect(recorder.totals().get(POLLER)).toEqual({ durations: [100], commands: 4 });
   });
 
   it('divides the commands of the counted passes by those passes', () => {
@@ -173,16 +188,21 @@ describe('cluster load test, recorded passes', () => {
   class FakePoller {
     private polling = false;
     private finish: () => void = () => undefined;
+    inFlight = false;
     polls = 0;
 
     async tick(): Promise<void> {
       if (this.polling) return;
       this.polling = true;
+      if (!this.inFlight) await this.pollConnection();
+      this.polling = false;
+    }
+
+    async pollConnection(): Promise<void> {
       this.polls += 1;
       await new Promise<void>((resolve) => {
         this.finish = resolve;
       });
-      this.polling = false;
     }
 
     isPollingBusy(): boolean {
@@ -202,6 +222,7 @@ describe('cluster load test, recorded passes', () => {
     recorder = new PassRecorder();
     context = new AsyncLocalStorage<Pass>();
     poller = new FakePoller();
+    poller.pollConnection = countPolls(poller.pollConnection.bind(poller), context);
     poller.tick = recordPasses(
       poller.tick.bind(poller),
       () => poller.isPollingBusy(),
@@ -220,10 +241,10 @@ describe('cluster load test, recorded passes', () => {
   });
 
   it('runs the poll with its pass as the context', async () => {
-    const send = async (): Promise<void> => {
+    const send = countPolls(async (): Promise<void> => {
       const pass = context.getStore();
       if (pass) pass.commands += 3;
-    };
+    }, context);
     const tick = recordPasses(send, () => false, 'Sender', recorder, context);
     await tick();
     expect(recorder.totals().get('Sender')).toMatchObject({ commands: 3 });
@@ -237,6 +258,29 @@ describe('cluster load test, recorded passes', () => {
     await first;
     expect(poller.polls).toBe(1);
     expect(recorder.totals().get(POLLER)?.durations).toHaveLength(1);
+  });
+
+  it('records one pass for a poll that later ticks find still in flight', async () => {
+    const first = poller.tick();
+    poller.finishPoll();
+    await first;
+    poller.inFlight = true;
+    await poller.tick();
+    await poller.tick();
+    expect(poller.polls).toBe(1);
+    expect(recorder.totals().get(POLLER)?.durations).toHaveLength(1);
+  });
+
+  it('counts a poll into the pass it ran in', () => {
+    const pass = recorder.begin(POLLER, 100);
+    const poll = countPolls((id: string) => `polled ${id}`, context);
+    expect(context.run(pass, () => [poll('a'), poll('b')])).toEqual(['polled a', 'polled b']);
+    expect(pass.polls).toBe(2);
+  });
+
+  it('lets a poll outside any pass through', () => {
+    const poll = countPolls((id: string) => `polled ${id}`, context);
+    expect(poll('a')).toBe('polled a');
   });
 });
 

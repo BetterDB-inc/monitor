@@ -160,6 +160,10 @@ range.
   104 passes in two minutes, not 120.
   Only passes that began and ended inside the window are counted, and
   **Commands per tick** divides the commands of those passes by their number.
+  A pass that polled no connection is not counted either. That happens while
+  an earlier poll of the connection is still running after the poller stopped
+  waiting for it, so with a hung poll the pass count falls below the expected
+  count.
 - **KB/s received** is dominated by `CLUSTER NODES` on large clusters. Its
   reply grows with the number of nodes, and so does the number of nodes it is
   read from.
@@ -220,7 +224,8 @@ skipped.
 
 The tables were measured when a pass that began in the warm-up and ended inside
 the window was still counted, so a pass count here can be one higher than the
-test would print now.
+test would print now. A pass that polled no connection was counted too, which
+can add one more pass to the seed run with hung nodes.
 
 ### One registered connection
 
