@@ -71,6 +71,8 @@ describe('ClusterDiscoveryService', () => {
       getDefaultId: jest.fn().mockReturnValue('test-connection'),
       getConfig: jest.fn().mockReturnValue({ id: 'test-connection', host: 'localhost', port: 6379 }),
       getNodeAvailabilityZones: jest.fn().mockReturnValue(undefined),
+      getObservedNodeId: jest.fn().mockReturnValue(undefined),
+      findIdObservingNode: jest.fn().mockReturnValue(null),
       list: jest.fn().mockReturnValue([{
         id: 'test-connection',
         name: 'Test Connection',
@@ -154,6 +156,69 @@ describe('ClusterDiscoveryService', () => {
 
       expect(replica?.collected).toBe(false);
       expect(replica?.connectionId).toBeUndefined();
+    });
+
+    describe('with the node each connection was seen reading', () => {
+      const seenReading = (observed: Record<string, string>) => {
+        mockConnectionRegistry.getObservedNodeId = jest.fn((id: string) => observed[id]);
+        mockConnectionRegistry.findIdObservingNode = jest.fn(
+          (nodeId: string) => Object.keys(observed).find((id) => observed[id] === nodeId) ?? null,
+        );
+      };
+
+      it('counts a node that replaced another at the same address before the next sync', async () => {
+        configs['auto-child'] = {
+          id: 'auto-child',
+          host: '192.168.1.11',
+          port: 6379,
+          membership: { nodeId: 'node-that-was-replaced' },
+        };
+        seenReading({ 'auto-child': 'node2-id-def456' });
+
+        expect(await replicaCollectedBy('auto-child')).toMatchObject({
+          collected: true,
+          connectionId: 'auto-child',
+        });
+      });
+
+      it('does not count a dead node still listed at the address of a hand-added connection', async () => {
+        mockDbClient.getClusterNodes.mockResolvedValue([
+          ...mockClusterNodes,
+          {
+            ...mockClusterNodes[1],
+            id: 'dead-node-id',
+            flags: ['slave', 'fail'],
+            linkState: 'disconnected',
+          },
+        ]);
+        seenReading({ 'hand-made': 'node2-id-def456' });
+        mockConnectionRegistry.getConfig.mockImplementation((id: string) => configs[id]);
+        mockConnectionRegistry.findIdByHostPort = jest.fn((host: string) =>
+          host === '192.168.1.11' ? 'hand-made' : null,
+        );
+
+        const nodes = await service.discoverNodesWithCollection();
+
+        expect(nodes.find((node) => node.id === 'dead-node-id')).toMatchObject({ collected: false });
+        expect(nodes.find((node) => node.id === 'node2-id-def456')).toMatchObject({
+          collected: true,
+          connectionId: 'hand-made',
+        });
+      });
+
+      it('counts a connection that reads the node through another address', async () => {
+        configs['behind-nat'] = { id: 'behind-nat', host: 'replica.example.internal', port: 6379 };
+        seenReading({ 'behind-nat': 'node2-id-def456' });
+        mockConnectionRegistry.getConfig.mockImplementation((id: string) => configs[id]);
+        mockConnectionRegistry.findIdByHostPort = jest.fn().mockReturnValue(null);
+
+        const nodes = await service.discoverNodesWithCollection();
+
+        expect(nodes.find((node) => node.id === 'node2-id-def456')).toMatchObject({
+          collected: true,
+          connectionId: 'behind-nat',
+        });
+      });
     });
 
     it('keeps the viewing connection it started with when the default changes meanwhile', async () => {

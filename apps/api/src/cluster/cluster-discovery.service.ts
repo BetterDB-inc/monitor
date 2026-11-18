@@ -131,7 +131,10 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         node,
         viewerId,
         (host, port) => this.connectionRegistry.findIdByHostPort(host, port),
-        (id) => this.connectionRegistry.getConfig(id)?.membership?.nodeId,
+        (id) =>
+          this.connectionRegistry.getObservedNodeId(id) ??
+          this.connectionRegistry.getConfig(id)?.membership?.nodeId,
+        (nodeId) => this.connectionRegistry.findIdObservingNode(nodeId),
       ),
     }));
   }

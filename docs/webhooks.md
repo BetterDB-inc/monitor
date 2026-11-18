@@ -268,7 +268,7 @@ Which alerts carry it:
 | `failover.started`, `failover.completed` | The node that changed role, with the role it changed to |
 | `data.loss.detected` | The node that was read |
 | `retry_amplification.detected` | The primary the finding was read on |
-| `replication.divergence`, `replication.recovered` | The replica in `replica`, not the primary in `instance` |
+| `replication.divergence`, `replication.recovered` | The replica in `replica`, not the primary in `instance`. `replication.recovered` names the node stored on the divergence event it closes, so both name the same node and role when the replica's address was reused or its role changed in between |
 
 `node` is left out on a standalone or Sentinel connection, and when the node cannot be found in the cluster view. `replication.lag`, `cluster.failover`, `cluster.demoted.writes` and `cluster.bus.corruption` do not carry it yet.
 

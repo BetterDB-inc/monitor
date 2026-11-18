@@ -425,6 +425,51 @@ describe('ConnectionRegistry membership', () => {
     ]);
   });
 
+  describe('the node a connection was seen reading', () => {
+    it('remembers the node a connection was seen reading', () => {
+      const { registry } = build();
+      put(registry, seed);
+
+      registry.noteObservedNodeId('seed', 'node-a');
+
+      expect(registry.getObservedNodeId('seed')).toBe('node-a');
+      expect(registry.getObservedNodeId('another')).toBeUndefined();
+    });
+
+    it('forgets the node when the connection is seen reading none', () => {
+      const { registry } = build();
+      put(registry, seed);
+      registry.noteObservedNodeId('seed', 'node-a');
+
+      registry.noteObservedNodeId('seed', undefined);
+
+      expect(registry.getObservedNodeId('seed')).toBeUndefined();
+    });
+
+    it('forgets the node when the connection is removed', async () => {
+      const { registry } = build();
+      put(registry, seed);
+      registry.noteObservedNodeId('seed', 'node-a');
+
+      await registry.removeConnection('seed');
+
+      expect(registry.getObservedNodeId('seed')).toBeUndefined();
+      expect(registry.findIdObservingNode('node-a')).toBeNull();
+    });
+
+    it('finds the listed connection that was seen reading a node', () => {
+      const { registry } = build();
+      put(registry, seed);
+      put(registry, { id: 'retired', membership: { seedId: 'seed', nodeId: 'b', origin: 'auto', source: 'cluster', retiredAt: 5 } });
+      registry.noteObservedNodeId('seed', 'node-a');
+      registry.noteObservedNodeId('retired', 'node-b');
+
+      expect(registry.findIdObservingNode('node-a')).toBe('seed');
+      expect(registry.findIdObservingNode('node-b')).toBeNull();
+      expect(registry.findIdObservingNode('node-c')).toBeNull();
+    });
+  });
+
   it('uses data node credentials for children when the seed has them', async () => {
     const { registry, storage } = build();
     const seedId = await registry.addConnection({ name: 's', host: 's1', port: 26379, username: 'sentinel-user', password: 'sentinel-pass', nodeUsername: 'app', nodePassword: 'secret' });

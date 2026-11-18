@@ -137,6 +137,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   private readonly encryption: EnvelopeEncryptionService | null;
   private startupConnectionErrors: Array<{ name: string; host: string; port: number; error: string }> = [];
   private readonly seedLocks = new Map<string, Promise<unknown>>();
+  private readonly observedNodeIds = new Map<string, string>();
   private readonly removalListeners = new Set<ConnectionRemovalListener>();
   // Connections whose in-memory secrets came from the environment because the
   // stored (encrypted) record could not be decrypted and no cipher is available.
@@ -1016,6 +1017,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
     this.connections.delete(id);
     this.configs.delete(id);
+    this.observedNodeIds.delete(id);
     this.runtimeCapabilityTracker.removeConnection(id);
     this.externalMetricsStore.clear(id);
     await this.storage.deleteConnection(id);
@@ -1396,6 +1398,25 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   isListed(id: string): boolean {
     const config = this.configs.get(id);
     return config !== undefined && !isRetiredAuto(config);
+  }
+
+  noteObservedNodeId(id: string, nodeId: string | undefined): void {
+    if (nodeId) {
+      this.observedNodeIds.set(id, nodeId);
+    } else {
+      this.observedNodeIds.delete(id);
+    }
+  }
+
+  getObservedNodeId(id: string): string | undefined {
+    return this.observedNodeIds.get(id);
+  }
+
+  findIdObservingNode(nodeId: string): string | null {
+    for (const [id, observed] of this.observedNodeIds) {
+      if (observed === nodeId && this.isListed(id)) return id;
+    }
+    return null;
   }
 
   /** True when `id` was registered automatically from a cluster or Sentinel seed. */

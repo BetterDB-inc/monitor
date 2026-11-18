@@ -1,5 +1,5 @@
 import type { ClusterNode } from '@app/common/types/metrics.types';
-import { ClusterNodeViews, nodeOfEvent } from '../event-node';
+import { ClusterNodeViews, nodeOfEvent, nodeRoleOfInfo } from '../event-node';
 import { AnomalySeverity, AnomalyType, MetricType, type AnomalyEvent } from '../types';
 
 function node(overrides: Partial<ClusterNode> & Pick<ClusterNode, 'id' | 'address'>): ClusterNode {
@@ -67,12 +67,24 @@ describe('nodeOfEvent', () => {
     });
   });
 
-  it('gives the node of a role change the role it changed to', () => {
-    const demoted = resolve({ metricType: MetricType.REPLICATION_ROLE, value: 0, baseline: 1 });
-    const promoted = resolve({ metricType: MetricType.REPLICATION_ROLE, value: 1, baseline: 0 });
+  it.each([MetricType.REPLICATION_ROLE, MetricType.CONNECTIONS, MetricType.MEMORY_USED])(
+    'gives the own node the role the connection read for it on a %s event',
+    (metricType) => {
+      const demoted = nodeOfEvent(event({ metricType }), directory, ownNodeId, true, 'replica');
+      const promoted = nodeOfEvent(event({ metricType }), directory, ownNodeId, true, 'primary');
 
-    expect(demoted).toMatchObject({ nodeId: 'primary-a', role: 'replica' });
-    expect(promoted).toMatchObject({ nodeId: 'primary-a', role: 'primary' });
+      expect(demoted).toMatchObject({ nodeId: 'primary-a', role: 'replica' });
+      expect(promoted).toMatchObject({ nodeId: 'primary-a', role: 'primary' });
+    },
+  );
+
+  it('keeps the role of the view for a node that is not the own node', () => {
+    const about = event({ metricType: MetricType.CLUSTER_TOPOLOGY, nodeSubject: { nodeId: 'replica-a' } });
+
+    expect(nodeOfEvent(about, directory, ownNodeId, true, 'primary')).toMatchObject({
+      nodeId: 'replica-a',
+      role: 'replica',
+    });
   });
 
   it('names the node a detector points at over the own node', () => {
@@ -149,10 +161,8 @@ describe('nodeOfEvent', () => {
     expect(resolve({ node })).toBe(node);
   });
 
-  it('keeps the role a role change names when the view is too old to say', () => {
-    const promoted = event({ metricType: MetricType.REPLICATION_ROLE, value: 1, baseline: 0 });
-
-    expect(nodeOfEvent(promoted, directory, ownNodeId, false)?.role).toBe('primary');
+  it('keeps the role the connection read for its own node when the view is too old to say', () => {
+    expect(nodeOfEvent(event(), directory, ownNodeId, false, 'replica')?.role).toBe('replica');
   });
 
   it('gives the node an unknown role when the view is too old to say', () => {
@@ -171,6 +181,19 @@ describe('nodeOfEvent', () => {
 
   it('names no node without a cluster view', () => {
     expect(nodeOfEvent(event(), undefined, undefined)).toBeUndefined();
+  });
+});
+
+describe('nodeRoleOfInfo', () => {
+  it.each([
+    ['master', 'primary'],
+    ['slave', 'replica'],
+    ['replica', 'replica'],
+    ['active-replica', undefined],
+    ['sentinel', undefined],
+    [undefined, undefined],
+  ])('reads INFO role %s as %s', (role, expected) => {
+    expect(nodeRoleOfInfo(role)).toBe(expected);
   });
 });
 
@@ -280,6 +303,31 @@ describe('ClusterNodeViews', () => {
     expect(views.view('cluster-1')).toBeUndefined();
     expect(views.ownNodeId('conn-a')).toBeUndefined();
     expect(views.connectionsOfNode('primary-a')).toEqual([]);
+  });
+
+  it('keeps the role each connection read for its own node, with when it was read', () => {
+    const views = new ClusterNodeViews();
+    views.rememberOwnRole('conn-a', 'primary', 1_000);
+    views.rememberOwnRole('conn-b', 'replica', 2_000);
+
+    expect(views.ownRole('conn-a')).toEqual({ role: 'primary', readAt: 1_000 });
+    expect(views.ownRole('conn-b')).toEqual({ role: 'replica', readAt: 2_000 });
+  });
+
+  it('drops the own role of a connection whose read names none', () => {
+    const views = new ClusterNodeViews();
+    views.rememberOwnRole('conn-a', 'primary', 1_000);
+    views.rememberOwnRole('conn-a', undefined, 2_000);
+
+    expect(views.ownRole('conn-a')).toBeUndefined();
+  });
+
+  it('forgets the own role with the connection', () => {
+    const views = new ClusterNodeViews();
+    views.rememberOwnRole('conn-a', 'primary', 1_000);
+    views.forget('conn-a');
+
+    expect(views.ownRole('conn-a')).toBeUndefined();
   });
 
   it('answers with the connections that read a node as their own', () => {

@@ -17,6 +17,7 @@ export function collectionOf(
   viewingConnectionId: string | null,
   findIdByHostPort: (host: string, port: number) => string | null,
   ownNodeIdOf: (connectionId: string) => string | undefined = () => undefined,
+  findIdReadingNode: (nodeId: string) => string | null = () => null,
 ): NodeCollection {
   const address = parseNodeAddress(node.address);
   const readingNodeAt = (host: string, port: number): string | null => {
@@ -26,6 +27,7 @@ export function collectionOf(
     return ownNodeId && ownNodeId !== node.id ? null : found;
   };
   const connectionId =
+    findIdReadingNode(node.id) ??
     (address ? readingNodeAt(address.host, address.port) : null) ??
     (address && node.hostname ? readingNodeAt(node.hostname, address.port) : null) ??
     (node.flags.includes('myself') ? viewingConnectionId : null);
