@@ -12624,9 +12624,92 @@ describe('AnomalyService', () => {
       });
     });
 
+    describe('when another connection of the cluster is in its first poll', () => {
+      const READ_AT = 1_700_000_000_000;
+      const joining = (): ConnectionContext =>
+        ({
+          ...mockCtx,
+          connectionId: 'conn-2',
+          port: 6380,
+          client: { ...dbClient, getClusterNodes: jest.fn().mockResolvedValue(viewOf('repB')) },
+        }) as ConnectionContext;
+
+      const pollWhileTheOtherHasOnlyReadTheNodes = async (): Promise<AnomalyEvent | undefined> => {
+        const now = jest.spyOn(Date, 'now');
+        const started = now.getMockImplementation()?.() ?? READ_AT;
+        now.mockReturnValue(started + 10_000);
+        let event: AnomalyEvent | undefined;
+        let release: () => void = () => {};
+        const held = new Promise<void>((resolve) => (release = resolve));
+        let other: Promise<void> | undefined;
+        jest.spyOn(service as any, 'adoptOpenEvents').mockImplementation(async (ctx: any) => {
+          if (ctx.connectionId === 'conn-2') return held;
+          now.mockReturnValue(started + 12_000);
+          let reached: () => void = () => {};
+          const atAdoption = new Promise<void>((resolve) => (reached = resolve));
+          (service as any).adoptOpenEvents.mockImplementationOnce(async () => {
+            reached();
+            return held;
+          });
+          other = poll(joining());
+          await atAdoption;
+        });
+        jest.spyOn(service as any, 'detectOrphanedSlotKeys').mockImplementation(async (ctx: any) => {
+          if (ctx.connectionId === 'conn-1') event = await raise();
+        });
+        await poll();
+        release();
+        await other;
+        return event;
+      };
+
+      it('keeps the shard and the zone on an event of a connection that read them before', async () => {
+        const now = jest.spyOn(Date, 'now').mockReturnValue(READ_AT);
+        await poll();
+        now.mockReturnValue(READ_AT + 10_000);
+        let event: AnomalyEvent | undefined;
+        jest.spyOn(service as any, 'adoptOpenEvents').mockImplementation(async (ctx: any) => {
+          if (ctx.connectionId === 'conn-2') event = await raise();
+        });
+
+        await poll(joining());
+
+        expect(event?.node).toEqual(PRIMARY_NODE);
+      });
+
+      it('keeps them on an event raised after an own shard read that is older than the nodes the other read', async () => {
+        jest.spyOn(Date, 'now').mockReturnValue(READ_AT);
+        await poll();
+
+        const event = await pollWhileTheOtherHasOnlyReadTheNodes();
+
+        expect(event?.node).toEqual(PRIMARY_NODE);
+      });
+
+      it('takes them from an own shard read when both connections are in their first poll', async () => {
+        jest.spyOn(Date, 'now').mockReturnValue(READ_AT);
+
+        const event = await pollWhileTheOtherHasOnlyReadTheNodes();
+
+        expect(event?.node).toEqual(PRIMARY_NODE);
+      });
+
+      it('still has no shard after a shard read that failed', async () => {
+        const now = jest.spyOn(Date, 'now').mockReturnValue(READ_AT);
+        await poll();
+        now.mockReturnValue(READ_AT + 10_000);
+        dbClient.getClusterShards = jest.fn().mockRejectedValue(new Error('unknown subcommand'));
+        await poll();
+
+        const event = await raise({ timestamp: READ_AT + 10_000 });
+
+        expect(event.node).toEqual({ nodeId: 'primA', address: '10.0.0.1:6379', role: 'primary' });
+      });
+    });
+
     describe('in the poll that sees a failover', () => {
       const infoWithRole = (role: string) => ({ ...clusterInfoResponse, server: { role } });
-      const promoted = (nodes: ClusterNode[]): ClusterNode[] =>
+      const promoted =(nodes: ClusterNode[]): ClusterNode[] =>
         nodes.map((node) =>
           node.id === 'repB'
             ? { ...node, flags: node.flags.map((flag) => (flag === 'slave' ? 'master' : flag)), master: '-' }

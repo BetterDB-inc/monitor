@@ -9482,11 +9482,17 @@ export class AnomalyService
     nodes: ClusterNode[],
     shards: ClusterShard[] | undefined,
     readAt: number,
+    shardsRead = true,
   ): void {
     const zones = this.connectionRegistry.getNodeAvailabilityZones(connectionId);
     const viewKey = this.clusterKeyOfNodes(nodes) ?? connectionId;
-    this.clusterNodeViews.remember(connectionId, viewKey, nodes, readAt, () =>
-      withConfiguredZones(withShardMetadata(nodes, shards), zones),
+    this.clusterNodeViews.remember(
+      connectionId,
+      viewKey,
+      nodes,
+      readAt,
+      () => withConfiguredZones(withShardMetadata(nodes, shards), zones),
+      shardsRead,
     );
   }
 
@@ -9787,7 +9793,7 @@ export class AnomalyService
         'CLUSTER NODES timed out',
       );
       this.rememberClusterKey(ctx.connectionId, nodes);
-      this.rememberClusterNodes(ctx.connectionId, nodes, undefined, readAt);
+      this.rememberClusterNodes(ctx.connectionId, nodes, undefined, readAt, false);
     } catch (err) {
       this.logger.debug(
         `Failed to read cluster nodes for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
