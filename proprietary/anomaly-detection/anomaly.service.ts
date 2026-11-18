@@ -730,6 +730,7 @@ interface RetryAmplificationReport {
   ctx: ConnectionContext;
   key: string;
   nodeAddr: string | undefined;
+  node: ClusterNodeRef | undefined;
   state: RetryAmplificationState;
   finding: RetryAmplificationFinding;
   clientSnapshots: ClientCommandSnapshot[];
@@ -4687,6 +4688,7 @@ export class AnomalyService
       ctx,
       key,
       nodeAddr,
+      node: this.retryAmplificationNode(ctx.connectionId, nodeAddr, closedAt ?? timestamp),
       state,
       finding,
       clientSnapshots,
@@ -4718,6 +4720,20 @@ export class AnomalyService
     }
   }
 
+  private retryAmplificationNode(
+    connectionId: string,
+    nodeAddr: string | undefined,
+    timestamp: number,
+  ): ClusterNodeRef | undefined {
+    const measured = {
+      metricType: MetricType.RETRY_AMPLIFICATION,
+      timestamp,
+      connectionId,
+      ...(nodeAddr ? { nodeAddr } : {}),
+    } as AnomalyEvent;
+    return this.nodeInClusterView(measured, connectionId);
+  }
+
   private queueRetryAmplificationReport(report: RetryAmplificationReport): void {
     const { key } = report;
     const tail = (this.retryAmplificationReports.get(key) ?? Promise.resolve())
@@ -4737,6 +4753,7 @@ export class AnomalyService
     ctx,
     key,
     nodeAddr,
+    node,
     state,
     finding,
     clientSnapshots,
@@ -4786,6 +4803,7 @@ export class AnomalyService
       resolved: false,
       connectionId: ctx.connectionId,
       ...(nodeAddr ? { nodeAddr } : {}),
+      ...(node ? { node } : {}),
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
     this.anomalySaveHooks.set(event, () => {
