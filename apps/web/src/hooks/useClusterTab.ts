@@ -2,13 +2,7 @@ import { useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { CLUSTER_NODE_PARAM, CLUSTER_TAB_PARAM } from '@betterdb/shared';
 
-export const CLUSTER_TABS = [
-  'overview',
-  'nodes',
-  'replication',
-  'slowlog',
-  'disagreements',
-] as const;
+export const CLUSTER_TABS = ['overview', 'nodes', 'replication', 'slowlog'] as const;
 export type ClusterTab = (typeof CLUSTER_TABS)[number];
 
 function tabOf(value: string | null): ClusterTab {
