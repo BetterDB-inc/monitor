@@ -242,15 +242,15 @@ describe('summarizeDisagreements', () => {
       ]);
     });
 
-      it('is not open without an event, and not after its event was resolved by hand', () => {
+    it('is not open without an event, and not after its event was resolved by hand', () => {
       const nodes = round(cluster(3), { observers: ['s000p', 's000r0', 's001p'], disagreements: [old] });
-        const resolved = () => ({
+      const resolved = () => ({
         eventId: 'e3',
         eventType: MetricType.TOPOLOGY_DIVERGENCE,
         eventAt: AT,
         connectionId: 'c1',
-      resolvedByHand: true,
-    });
+        resolvedByHand: true,
+      });
 
       expect(summarizeDisagreements(nodes, noEvent).disagreements).toMatchObject([
         { id: old.key, open: false, confirmed: false, resolvedByHand: false },

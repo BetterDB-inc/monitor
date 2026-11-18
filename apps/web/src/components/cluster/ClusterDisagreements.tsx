@@ -14,7 +14,6 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { isOpenDisagreement } from '@/lib/clusterDisagreements';
 import { nodeHref } from '@/lib/clusterNodeHref';
 import { formatSlotRanges } from '@/types/cluster';
 import type {
@@ -118,6 +117,13 @@ function coverageText(coverage: DisagreementCoverage): string {
   return `${coverage.asked} of ${plural(coverage.nodes, 'node')} asked, ${coverage.answered} answered`;
 }
 
+function unconfirmedText(line: DisagreementLine): string {
+  if (!line.resolvedByHand) return `Not confirmed yet, seen in ${plural(line.rounds, 'round')}`;
+  return line.stale
+    ? 'Event resolved by hand'
+    : 'Event resolved by hand, the disagreement is still seen';
+}
+
 function DisagreementCard({
   line,
   asOf,
@@ -147,9 +153,7 @@ function DisagreementCard({
             Open event
           </Link>
         ) : (
-          <span className="text-xs text-muted-foreground">
-            Not confirmed yet, seen in {plural(line.rounds, 'round')}
-          </span>
+          <span className="text-xs text-muted-foreground">{unconfirmedText(line)}</span>
         )}
       </div>
       {line.kind !== 'slot_owner' && (
@@ -366,8 +370,8 @@ export function ClusterDisagreements({
 
   const { coverage, shards } = summary;
   const compared = summary.status === 'ok';
-  const disagreements = summary.disagreements.filter(isOpenDisagreement);
-  const unconfirmed = summary.disagreements.filter((line) => !isOpenDisagreement(line));
+  const disagreements = summary.disagreements.filter((line) => line.open);
+  const unconfirmed = summary.disagreements.filter((line) => !line.open);
 
   return (
     <div className="space-y-4">
@@ -413,7 +417,9 @@ export function ClusterDisagreements({
           )}
           {compared && disagreements.length === 0 && (
             <p className="text-sm">
-              No disagreements among the {plural(coverage.answered, 'view')} compared.
+              {unconfirmed.length > 0
+                ? 'No disagreements confirmed this round.'
+                : `No disagreements among the ${plural(coverage.answered, 'view')} compared.`}
             </p>
           )}
           {disagreements.map((line) => (
