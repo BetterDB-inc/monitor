@@ -1764,12 +1764,16 @@ export class AnomalyService
       if (info['cluster_enabled'] === '1') {
         this.clusterNodeViews.rememberOwnRole(ctx.connectionId, nodeRoleOfInfo(info['role']), timestamp);
       }
-      if (live && info['cluster_enabled'] === '1' && clusterKeyUnknown) {
+      const anotherRun =
+        info['cluster_enabled'] === '1' &&
+        this.clusterNodeViews.answersFromAnotherRun(ctx.connectionId, info['run_id'] || undefined);
+      if (live && info['cluster_enabled'] === '1' && (clusterKeyUnknown || anotherRun)) {
         await this.learnClusterKey(ctx, timestamp);
       }
       if (live && info['cluster_enabled'] !== '1') {
         this.forgetClusterKey(ctx.connectionId);
-        this.forgetClusterNodes(ctx.connectionId);
+        this.clusterNodeViews.leaveCluster(ctx.connectionId);
+        this.connectionRegistry.noteObservedNodeId(ctx.connectionId, undefined);
       }
       await this.adoptOpenEvents(ctx, timestamp);
       replicationSample = this.replicationStream.observe(ctx.connectionId, info, timestamp);
@@ -9031,7 +9035,10 @@ export class AnomalyService
         message: `${prefix}: ${finding.message}`,
         resolved: false,
         connectionId: ctx.connectionId,
-        nodeSubject: { nodeId: finding.ownerId },
+        nodeSubject: {
+          nodeId: finding.ownerId,
+          address: nodes.find((node) => node.id === finding.ownerId)?.address,
+        },
       };
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
       await this.addAnomaly(event, ctx);
@@ -9491,11 +9498,17 @@ export class AnomalyService
     nodes: ClusterNode[],
     shards: ClusterShard[] | undefined,
     readAt: number,
+    shardsRead = true,
   ): void {
     const zones = this.connectionRegistry.getNodeAvailabilityZones(connectionId);
     const viewKey = this.clusterKeyOfNodes(nodes) ?? connectionId;
-    this.clusterNodeViews.remember(connectionId, viewKey, nodes, readAt, () =>
-      withConfiguredZones(withShardMetadata(nodes, shards), zones),
+    this.clusterNodeViews.remember(
+      connectionId,
+      viewKey,
+      nodes,
+      readAt,
+      () => withConfiguredZones(withShardMetadata(nodes, shards), zones),
+      shardsRead,
     );
     this.connectionRegistry.noteObservedNodeId(connectionId, this.clusterNodeViews.ownNodeId(connectionId));
   }
@@ -9802,7 +9815,7 @@ export class AnomalyService
         'CLUSTER NODES timed out',
       );
       this.rememberClusterKey(ctx.connectionId, nodes);
-      this.rememberClusterNodes(ctx.connectionId, nodes, undefined, readAt);
+      this.rememberClusterNodes(ctx.connectionId, nodes, undefined, readAt, false);
     } catch (err) {
       this.logger.debug(
         `Failed to read cluster nodes for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
@@ -10766,7 +10779,7 @@ export class AnomalyService
   private connectionAtAddressOf(node: ClusterNodeRef, eventConnectionId: string | undefined): string | undefined {
     const address = splitHostPort(node.address);
     const found = address ? this.connectionRegistry.findIdByHostPort(address.host, address.port) : null;
-    if (!found) return undefined;
+    if (!found || this.clusterNodeViews.isOutsideCluster(found)) return undefined;
     const readsAnotherNode = (this.clusterNodeViews.ownNodeId(found) ?? node.nodeId) !== node.nodeId;
     if (readsAnotherNode) return undefined;
     if (found === eventConnectionId) return found;
