@@ -1534,6 +1534,13 @@ describe('renamedPartialMemberships', () => {
     expect(renamedPartialMemberships(open, elsewhere, answered)).toEqual([]);
   });
 
+  it('names an event picked up after a restart by the finding it last saw for it', () => {
+    const open = new Map([[underOldName.signature, { observed: underOldName }]]);
+    expect(renamedPartialMemberships(open, [finding], answered)).toEqual(['partial_membership:p9']);
+    expect(renamedPartialMemberships(open, [finding], new Set(lacking))).toEqual([]);
+    expect(renamedPartialMemberships(open, [{ ...finding, confirmed: false }], answered)).toEqual([]);
+  });
+
   it('leaves an open event whose finding it never saw', () => {
     expect(renamedPartialMemberships(new Map([[underOldName.signature, {}]]), [finding], answered)).toEqual([]);
   });
@@ -1563,6 +1570,12 @@ describe('inheritedPartialMemberships', () => {
     const open = new Map([[underOldName.signature, { group: underOldName }]]);
     expect(inheritedPartialMemberships(open, [])).toEqual([]);
     expect(inheritedPartialMemberships(open, [{ ...counted, disagreementKeys: ['membership:p8'] }])).toEqual([]);
+  });
+
+  it('names an event picked up after a restart by the finding it last saw for it', () => {
+    const open = new Map([[underOldName.signature, { observed: underOldName }]]);
+    expect(inheritedPartialMemberships(open, [counted])).toEqual(['partial_membership:p9']);
+    expect(inheritedPartialMemberships(open, [finding])).toEqual([]);
   });
 
   it('leaves an open event whose finding it never saw', () => {

@@ -386,8 +386,15 @@ export function membershipSides(
   );
 }
 
+type OpenPartialMembership = { group?: PartialMembership; observed?: PartialMembership };
+
+function lastFinding(entry: OpenPartialMembership): PartialMembership[] {
+  const finding = entry.group ?? entry.observed;
+  return finding ? [finding] : [];
+}
+
 export function renamedPartialMemberships(
-  open: ReadonlyMap<string, { group?: PartialMembership }>,
+  open: ReadonlyMap<string, OpenPartialMembership>,
   found: PartialMembership[],
   answered: ReadonlySet<string>,
 ): string[] {
@@ -397,18 +404,18 @@ export function renamedPartialMemberships(
     [finding.nodeId, ...finding.notKnownBy.map((peer) => peer.nodeId)].every((nodeId) => answered.has(nodeId));
   const lost = (finding: PartialMembership) =>
     !current.has(finding.signature) && read(finding) && finding.disagreementKeys.some((key) => held.has(key));
-  return [...open].filter(([, entry]) => entry.group && lost(entry.group)).map(([signature]) => signature);
+  return [...open].filter(([, entry]) => lastFinding(entry).some(lost)).map(([signature]) => signature);
 }
 
 export function inheritedPartialMemberships(
-  open: ReadonlyMap<string, { group?: PartialMembership }>,
+  open: ReadonlyMap<string, OpenPartialMembership>,
   found: PartialMembership[],
 ): string[] {
   const current = new Set(found.map((finding) => finding.signature));
   const counted = new Set(found.filter((finding) => !finding.confirmed).flatMap((finding) => finding.disagreementKeys));
   const waits = (finding: PartialMembership) =>
     !current.has(finding.signature) && finding.disagreementKeys.some((key) => counted.has(key));
-  return [...open].filter(([, entry]) => entry.group && waits(entry.group)).map(([signature]) => signature);
+  return [...open].filter(([, entry]) => lastFinding(entry).some(waits)).map(([signature]) => signature);
 }
 
 export function unclaimedByPartialMembership<T extends { key: string }>(

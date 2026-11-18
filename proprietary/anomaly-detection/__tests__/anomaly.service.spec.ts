@@ -27299,6 +27299,44 @@ describe('AnomalyService', () => {
         expect(service.getTopologyDivergence('conn-1').divergences).toEqual([]);
       });
 
+      it('lists an adopted event as it was last seen while it closes', async () => {
+        views.b = { a: { epoch: 9 } };
+        await rounds(1);
+        views.b = {};
+
+        await rounds(1);
+
+        expect(storage.resolveAnomaly).not.toHaveBeenCalledWith('stored-1', expect.anything());
+        expect(service.getTopologyDivergence('conn-1').divergences).toMatchObject([
+          { eventId: 'stored-1', confirmed: true, disagreements: [{ kind: 'config_epoch' }] },
+        ]);
+      });
+
+      it('lists the group as still counted once its adopted event is closed by hand', async () => {
+        views.b = { a: { epoch: 9 } };
+        await rounds(2);
+
+        await expect(service.resolveAnomaly('stored-1')).resolves.toBe(true);
+
+        expect(service.getTopologyDivergence('conn-1').divergences).toMatchObject([
+          { eventId: null, confirmed: false, disagreements: [{ kind: 'config_epoch', eventId: null }] },
+        ]);
+      });
+
+      it('raises the group again after its adopted event was closed by hand', async () => {
+        views.b = { a: { epoch: 9 } };
+        await rounds(2);
+        await service.resolveAnomaly('stored-1');
+
+        await rounds(1);
+
+        const open = divergenceEvents().filter((e) => !e.resolved);
+        expect(open).toHaveLength(1);
+        expect(service.getTopologyDivergence('conn-1').divergences).toMatchObject([
+          { eventId: open[0].id, confirmed: true },
+        ]);
+      });
+
       it('closes an adopted event once the views have agreed for the configured rounds', async () => {
         await rounds(2);
         expect(storage.resolveAnomaly).not.toHaveBeenCalledWith('stored-1', expect.anything());
@@ -28455,6 +28493,30 @@ describe('AnomalyService', () => {
           expect(report().partialMembership).toMatchObject([{ eventId: 'stored-partial', confirmed: true }]);
         });
 
+        it('lists the node as still counted once its adopted event is closed by hand', async () => {
+          await rounds(2);
+
+          await expect(service.resolveAnomaly('stored-partial')).resolves.toBe(true);
+
+          expect(report().partialMembership).toMatchObject([
+            { eventId: null, confirmed: false, node: { nodeId: 'n' }, disagreements: [{ eventId: null }] },
+          ]);
+        });
+
+        it('raises the node again after its adopted event was closed by hand', async () => {
+          await rounds(2);
+          await service.resolveAnomaly('stored-partial');
+
+          await rounds(16);
+          expect(partialEvents()).toEqual([]);
+          expect(report().partialMembership).toMatchObject([{ eventId: null, confirmed: false }]);
+
+          await rounds(1);
+          const [raised] = openPartialEvents();
+          expect(openPartialEvents()).toHaveLength(1);
+          expect(report().partialMembership).toMatchObject([{ eventId: raised.id, confirmed: true }]);
+        });
+
         it('lists the adopted event while it closes when the node joins before it is confirmed again', async () => {
           await rounds(1);
           knows.b = EVERYONE;
@@ -28477,6 +28539,62 @@ describe('AnomalyService', () => {
 
           await rounds(2);
           expect(storage.resolveAnomaly).toHaveBeenCalledWith('stored-partial', expect.any(Number));
+        });
+      });
+
+      describe('with an event open from before a restart', () => {
+        function storedOpen(id: string, metricType: MetricType, dedupeKey: string) {
+          storage.getAnomalyEvents.mockImplementation(async (query) =>
+            query.metricType === metricType && !query.offset
+              ? [{ id, metricType, dedupeKey, timestamp: now - 120_000, resolved: false }]
+              : [],
+          );
+          (service as any).connectionRegistry.getConfig.mockImplementation((id: string) => ({ id }));
+        }
+
+        function closed(id: string) {
+          return storage.resolveAnomaly.mock.calls.some(([eventId]) => eventId === id);
+        }
+
+        it('keeps the event of a failing node in the report until it closes after the flag is gone', async () => {
+          storedOpen('stored-divergence', MetricType.TOPOLOGY_DIVERGENCE, 'topology_divergence:a');
+          flagsBy.a = { n: 'master,fail' };
+          silent.add('n');
+          await rounds(2);
+          flagsBy = {};
+
+          for (let round = 0; round < 2; round++) {
+            await rounds(1);
+
+            expect(closed('stored-divergence')).toBe(false);
+            expect(report().divergences).toMatchObject([
+              { eventId: 'stored-divergence', confirmed: true, disagreements: [] },
+            ]);
+            expect(report().partialMembership).toMatchObject([
+              { eventId: null, node: { nodeId: 'n' }, disagreements: [{ kind: 'membership', eventId: null }] },
+            ]);
+          }
+
+          await rounds(1);
+          expect(closed('stored-divergence')).toBe(true);
+          expect(report().divergences).toEqual([]);
+        });
+
+        it('keeps one event open while the finding moves to the peer of two nodes that lacked each other', async () => {
+          storedOpen('stored-partial-b', MetricType.PARTIAL_MEMBERSHIP, 'partial_membership:b');
+          knows = { a: ['a', 'b', 'c'], b: ['a', 'b'], c: ['a', 'c'] };
+          await rounds(2);
+          knows.c = ['a', 'b', 'c'];
+
+          const open: number[] = [];
+          for (let round = 0; round < 20; round++) {
+            await rounds(1);
+            open.push((closed('stored-partial-b') ? 0 : 1) + openPartialEvents().length);
+          }
+
+          expect(open).toEqual(new Array(20).fill(1));
+          expect(closed('stored-partial-b')).toBe(true);
+          expect(openPartialEvents().map((event) => event.dedupeKey)).toEqual(['partial_membership:c']);
         });
       });
     });

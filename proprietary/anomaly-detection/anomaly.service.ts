@@ -7531,6 +7531,7 @@ export class AnomalyService
         )
       : [];
     const groups = groupDivergences(confirmed);
+    const counted = groupDivergences(unclaimed);
     const confirmedPartial = comparable ? partial.filter((finding) => finding.confirmed) : [];
     const openPartial = this.connectionClaims(
       this.partialMembershipOpen,
@@ -7548,7 +7549,8 @@ export class AnomalyService
       store: divergenceStore,
       open: this.connectionClaims(this.topologyDivergenceOpen, clusterKey, () => new Map<string, OpenDivergence>()),
       confirmed: groups,
-      pendingSignatures: new Set(groupDivergences(unclaimed).map((group) => group.signature)),
+      observed: counted,
+      pendingSignatures: new Set(counted.map((group) => group.signature)),
       superseded: this.outrankedTopologyDivergences(groups, eventIds),
       metricType: MetricType.TOPOLOGY_DIVERGENCE,
       buildEvent: (group) => this.buildTopologyDivergenceEvent(ctx, timestamp, round, group),
@@ -11194,7 +11196,7 @@ export class AnomalyService
     const raisedGroups = shown(
       this.topologyDivergenceOpen.get(clusterKey),
       this.topologyEventStores.divergence.eventIds.get(round.anchorConnectionId),
-      (signature, entry) => raisedDivergenceGroup(trackedBySignature.get(signature), entry.group),
+      (signature, entry) => raisedDivergenceGroup(trackedBySignature.get(signature), entry.group ?? entry.observed),
     );
     const raised = raisedGroups.map(({ group, eventId }) =>
       buildDivergenceDetail(
@@ -13371,7 +13373,21 @@ export class AnomalyService
   }
 
   async resolveAnomaly(anomalyId: string): Promise<boolean> {
-    return (await this.resolveAnomalyOutcome(anomalyId, undefined, false)) === 'resolved';
+    const resolved = (await this.resolveAnomalyOutcome(anomalyId, undefined, false)) === 'resolved';
+    if (resolved) this.untrackTopologyEvent(anomalyId);
+    return resolved;
+  }
+
+  private untrackTopologyEvent(eventId: string): void {
+    for (const store of this.allTopologyEventStores) {
+      for (const [connectionId, eventIds] of store.eventIds) {
+        for (const [signature, tracked] of [...eventIds]) {
+          if (tracked !== eventId) continue;
+          eventIds.delete(signature);
+          store.active.get(connectionId)?.delete(signature);
+        }
+      }
+    }
   }
 
   /**
