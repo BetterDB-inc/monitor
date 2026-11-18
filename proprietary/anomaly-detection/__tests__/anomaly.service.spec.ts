@@ -8383,6 +8383,42 @@ describe('AnomalyService', () => {
       expect(recorded).toHaveLength(0);
     });
 
+    it('names the node the finding was made on when the connection reads another node before the report is saved', async () => {
+      const nodeAt = (id: string, address: string, flags: string[]): ClusterNode => ({
+        id,
+        address,
+        flags,
+        master: '-',
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 1,
+        linkState: 'connected',
+        slots: [],
+      });
+      const readAs = (own: string): ClusterNode[] => [
+        nodeAt(own, '10.0.0.1:6379@16379', ['myself', 'master']),
+        nodeAt('node-c', '10.0.0.3:6379@16379', ['master']),
+      ];
+      const reported = () =>
+        service.getRecentEvents().filter((e) => e.metricType === MetricType.RETRY_AMPLIFICATION);
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+      let release: () => void = () => {};
+      storage.getClientCaptureSummary = jest.fn().mockReturnValue(
+        new Promise((resolve) => (release = () => resolve(summarizeClientCaptures([])))),
+      );
+      (service as any).rememberClusterNodes('conn-1', readAs('node-a'), undefined, 1_000_000);
+
+      const { ts } = await runRetry({ realEmit: true });
+      const savedWhileWaiting = reported().length;
+      (service as any).rememberClusterNodes('conn-1', readAs('node-b'), undefined, ts);
+      release();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(savedWhileWaiting).toBe(0);
+      expect(reported().map((e) => e.node?.nodeId)).toEqual(['node-a']);
+    });
+
     describe('when the capture read fails', () => {
       // A client whose command rate grew fivefold during the episode.
       const reading = (takenAt: number, totalCommands: number) => ({
