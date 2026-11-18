@@ -11003,12 +11003,16 @@ export class AnomalyService
     if (!clusterKey || !round) return summarizeDisagreements(undefined, () => undefined);
     const eventIds = this.topologyDivergenceEventIds.get(round.anchorConnectionId);
     const raised: RaisedDivergence[] = [];
-    for (const [signature, { group }] of this.topologyDivergenceOpen.get(clusterKey) ?? []) {
+    for (const [signature, { group, lastCountedAt }] of this.topologyDivergenceOpen.get(clusterKey) ?? []) {
       const eventId = eventIds?.get(signature);
       if (eventId === undefined || !group) continue;
       const event = this.eventInMemory(eventId) ?? this.findIncidentEvent(eventId);
       const eventType = event?.metricType ?? MetricType.TOPOLOGY_DIVERGENCE;
-      raised.push({ group, event: { eventId, eventType, resolvedByHand: event?.resolved === true } });
+      raised.push({
+        group,
+        event: { eventId, eventType, resolvedByHand: event?.resolved === true },
+        confirmedAt: lastCountedAt,
+      });
     }
     return summarizeDisagreements(round, eventOfRaised(raised));
   }
