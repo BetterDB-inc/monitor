@@ -22,7 +22,28 @@ const METRICS_WITHOUT_OWN_NODE: ReadonlySet<MetricType> = new Set([MetricType.TO
 interface NodeView {
   read: () => readonly ClusterNode[];
   readAt: number;
+  shardsRead: boolean;
   directory?: NodeDirectory;
+}
+
+function withShardDataOf(nodes: readonly ClusterNode[], source: readonly ClusterNode[]): ClusterNode[] {
+  const known = new Map(source.map((node) => [node.id, node]));
+  return nodes.map((node) => {
+    const from = known.get(node.id);
+    const shardId = node.shardId ?? from?.shardId;
+    const availabilityZone = node.availabilityZone ?? from?.availabilityZone;
+    return {
+      ...node,
+      ...(shardId ? { shardId } : {}),
+      ...(availabilityZone ? { availabilityZone } : {}),
+    };
+  });
+}
+
+function borrowingShards(view: NodeView, source: NodeView): NodeView {
+  if (view.shardsRead || !source.shardsRead) return view;
+  const nodes = withShardDataOf(view.read(), source.read());
+  return { read: () => nodes, readAt: view.readAt, shardsRead: true };
 }
 
 export interface ClusterNodeView {
@@ -38,8 +59,9 @@ export interface OwnNodeRole {
 export class ClusterNodeViews {
   private readonly views = new Map<string, NodeView>();
   private readonly viewKeys = new Map<string, string>();
-  private readonly ownNodeIds = new Map<string, string>();
   private readonly ownRoles = new Map<string, OwnNodeRole>();
+  private readonly runIds = new Map<string, string>();
+  private readonly outsideCluster = new Set<string>();
 
   remember(
     connectionId: string,
@@ -47,19 +69,26 @@ export class ClusterNodeViews {
     nodes: readonly ClusterNode[],
     readAt: number,
     describe: () => readonly ClusterNode[] = () => nodes,
+    shardsRead = true,
   ): void {
-    const ownNodeId = nodes.find((node) => node.flags.includes('myself'))?.id;
-    if (ownNodeId) this.ownNodeIds.set(connectionId, ownNodeId);
+    this.outsideCluster.delete(connectionId);
     if (this.viewKeys.get(connectionId) !== viewKey) {
       this.leaveView(connectionId);
       this.viewKeys.set(connectionId, viewKey);
     }
+    const read: NodeView = { read: describe, readAt, shardsRead };
     const held = this.views.get(viewKey);
-    if (held && held.readAt > readAt) return;
-    this.views.set(viewKey, { read: describe, readAt });
+    if (!held) {
+      this.views.set(viewKey, read);
+    } else if (held.readAt > readAt) {
+      this.views.set(viewKey, borrowingShards(held, read));
+    } else {
+      this.views.set(viewKey, borrowingShards(read, held));
+    }
   }
 
   rememberOwnRole(connectionId: string, role: ClusterNodeRef['role'] | undefined, readAt: number): void {
+    this.outsideCluster.delete(connectionId);
     if (role) {
       this.ownRoles.set(connectionId, { role, readAt });
     } else {
@@ -67,10 +96,27 @@ export class ClusterNodeViews {
     }
   }
 
+  answersFromAnotherRun(connectionId: string, runId: string | undefined): boolean {
+    if (!runId) return false;
+    const last = this.runIds.get(connectionId);
+    this.runIds.set(connectionId, runId);
+    return last !== undefined && last !== runId;
+  }
+
   forget(connectionId: string): void {
     this.leaveView(connectionId);
-    this.ownNodeIds.delete(connectionId);
     this.ownRoles.delete(connectionId);
+    this.runIds.delete(connectionId);
+    this.outsideCluster.delete(connectionId);
+  }
+
+  leaveCluster(connectionId: string): void {
+    this.forget(connectionId);
+    this.outsideCluster.add(connectionId);
+  }
+
+  isOutsideCluster(connectionId: string): boolean {
+    return this.outsideCluster.has(connectionId);
   }
 
   view(viewKey: string): ClusterNodeView | undefined {
@@ -84,16 +130,8 @@ export class ClusterNodeViews {
     return this.viewKeys.get(connectionId);
   }
 
-  ownNodeId(connectionId: string): string | undefined {
-    return this.ownNodeIds.get(connectionId);
-  }
-
   ownRole(connectionId: string): OwnNodeRole | undefined {
     return this.ownRoles.get(connectionId);
-  }
-
-  connectionsOfNode(nodeId: string): string[] {
-    return [...this.ownNodeIds].filter(([, own]) => own === nodeId).map(([connectionId]) => connectionId);
   }
 
   private leaveView(connectionId: string): void {
@@ -124,6 +162,10 @@ export type EventNodeSource = Pick<
 
 function roleChangedTo(value: number): ClusterNodeRef['role'] {
   return value === 1 ? 'primary' : 'replica';
+}
+
+export function ownNodeIdOf(nodes: readonly ClusterNode[]): string | undefined {
+  return nodes.find((node) => node.flags.includes('myself'))?.id;
 }
 
 export function nodeRoleOfInfo(role: string | undefined): ClusterNodeRef['role'] | undefined {
