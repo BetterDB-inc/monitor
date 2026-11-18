@@ -14013,12 +14013,13 @@ describe('AnomalyService', () => {
       });
 
       it('keeps the role of another node the event is about', async () => {
-        await poll();
         (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWithRole('slave'));
+        dbClient.getClusterNodes = jest.fn().mockResolvedValue(viewOf('repB'));
+        await poll();
 
-        const event = await raisedEarly({ metricType: MetricType.CLUSTER_TOPOLOGY, nodeSubject: { nodeId: 'repB' } });
+        const event = await raisedEarly({ metricType: MetricType.CLUSTER_TOPOLOGY, nodeSubject: { nodeId: 'primA' } });
 
-        expect(event?.node).toMatchObject({ nodeId: 'repB', role: 'replica' });
+        expect(event?.node).toMatchObject({ nodeId: 'primA', role: 'primary' });
       });
 
       it('follows a newer read of the cluster by another connection over its own older role', async () => {
@@ -14165,6 +14166,7 @@ describe('AnomalyService', () => {
 
         await poll();
 
+        expect(event).toBeDefined();
         expect(event?.node).toBeUndefined();
       });
 
