@@ -8,6 +8,7 @@ import {
   confirmedDisagreements,
   dissentOf,
   groupDivergences,
+  matchDivergence,
   migrationTouchesSlots,
   type OpenDivergence,
   settleOpenDivergences,
@@ -772,6 +773,112 @@ describe('groupDivergences', () => {
 
     expect(groups).toHaveLength(1);
     expect(groups[0]).toMatchObject({ dissent: ['a'], others: ['b', 'c'] });
+  });
+});
+
+describe('matchDivergence', () => {
+  const tracked = (
+    key: string,
+    positions: TopologyDisagreement['positions'],
+    slots?: number[][],
+  ): TopologyDisagreement & { firstSeenAt: number; lastSeenAt: number; rounds: number } => ({
+    key,
+    kind: slots ? 'slot_owner' : 'config_epoch',
+    subjectIds: slots ? positions.map((position) => position.value) : [key.split(':')[1]],
+    ...(slots ? { slots } : {}),
+    positions,
+    firstSeenAt: 0,
+    lastSeenAt: 10000,
+    rounds: 3,
+  });
+  const dispute = (key: string, slots: number[][], dissent: string[], others = ['a', 'd']) =>
+    tracked(
+      key,
+      [
+        { value: 'A', observers: others },
+        { value: 'B', observers: dissent },
+      ],
+      slots,
+    );
+  const epoch = (subject: string, dissent: string[], others = ['a', 'd']) =>
+    tracked(`config_epoch:${subject}`, [
+      { value: '1', observers: others },
+      { value: '9', observers: dissent },
+    ]);
+  const raisedFor = (id: string, ...disagreements: ReturnType<typeof tracked>[]) => {
+    const [group] = groupDivergences(disagreements);
+    return { id, group };
+  };
+
+  it('finds the event of a slot dispute by its owners and its slots, whatever the key says', () => {
+    const first = raisedFor('e1', dispute('slot_owner:A|B', [[9000, 9100]], ['b']));
+    const second = raisedFor('e2', dispute('slot_owner:A|B#2', [[5000, 5100]], ['c']));
+
+    expect(matchDivergence([first, second], dispute('slot_owner:A|B', [[5000, 5100]], ['c']))?.id).toBe('e2');
+    expect(matchDivergence([first, second], dispute('slot_owner:A|B#2', [[9000, 9100]], ['b']))?.id).toBe('e1');
+    expect(matchDivergence([second], dispute('slot_owner:A|B', [[5050, 5100]], ['c']))?.id).toBe('e2');
+  });
+
+  it('finds nothing for a dispute between the same owners on other slots', () => {
+    const ended = raisedFor('e1', dispute('slot_owner:A|B', [[0, 100]], ['b']));
+
+    expect(matchDivergence([ended], dispute('slot_owner:A|B', [[200, 300]], ['b']))).toBeUndefined();
+  });
+
+  it('finds nothing for the same slots between other owners', () => {
+    const raised = raisedFor('e1', dispute('slot_owner:A|B', [[0, 100]], ['b']));
+    const others = tracked(
+      'slot_owner:A|C',
+      [
+        { value: 'A', observers: ['a', 'd'] },
+        { value: 'C', observers: ['b'] },
+      ],
+      [[0, 100]],
+    );
+
+    expect(matchDivergence([raised], others)).toBeUndefined();
+  });
+
+  it('finds nothing once the dissenting node of the event is back with the others', () => {
+    const raised = raisedFor('e1', epoch('x', ['b'], ['a', 'c', 'd']));
+
+    expect(matchDivergence([raised], epoch('x', ['c'], ['a', 'b', 'd']))).toBeUndefined();
+    expect(matchDivergence([raised], epoch('x', ['b'], ['a', 'c', 'd']))?.id).toBe('e1');
+  });
+
+  it('finds nothing for a slot dispute whose dissenting side moved to another node', () => {
+    const raised = raisedFor('e1', dispute('slot_owner:A|B', [[0, 100]], ['b'], ['a', 'c', 'd']));
+
+    expect(matchDivergence([raised], dispute('slot_owner:A|B', [[0, 100]], ['c'], ['a', 'b', 'd']))).toBeUndefined();
+  });
+
+  it('finds nothing for another node, or for another kind about the same node', () => {
+    const raised = raisedFor('e1', epoch('x', ['b']));
+    const flags = { ...epoch('x', ['b']), key: 'failure_flags:x', kind: 'failure_flags' as const };
+
+    expect(matchDivergence([raised], epoch('y', ['b']))).toBeUndefined();
+    expect(matchDivergence([raised], flags)).toBeUndefined();
+  });
+
+  it('keeps the event when more nodes are asked and the dissenting node still stands apart', () => {
+    const raised = raisedFor('e1', epoch('x', ['b'], ['a', 'd']));
+
+    expect(matchDivergence([raised], epoch('x', ['b', 'r7'], ['a', 'd', 'e', 'f', 'g']))?.id).toBe('e1');
+    expect(matchDivergence([raised], epoch('x', ['b', 'e', 'f', 'g'], ['a', 'd']))?.id).toBe('e1');
+    expect(matchDivergence([raised], epoch('x', ['r7'], ['a', 'b', 'd']))).toBeUndefined();
+  });
+
+  it('finds nothing when no node of the dissenting side gave a view', () => {
+    const raised = raisedFor('e1', epoch('x', ['b'], ['a', 'd']));
+
+    expect(matchDivergence([raised], epoch('x', ['r7'], ['a', 'd']))).toBeUndefined();
+  });
+
+  it('takes the event that shares the most slots', () => {
+    const small = raisedFor('e1', dispute('slot_owner:A|B', [[0, 9]], ['b']));
+    const large = raisedFor('e2', dispute('slot_owner:A|B#2', [[10, 99]], ['b']));
+
+    expect(matchDivergence([small, large], dispute('slot_owner:A|B', [[0, 99]], ['b']))?.id).toBe('e2');
   });
 });
 

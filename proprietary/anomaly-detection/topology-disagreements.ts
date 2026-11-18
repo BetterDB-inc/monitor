@@ -1,21 +1,30 @@
 import type { ClusterNode } from '@app/common/types/metrics.types';
 import {
   UNASSIGNED_SLOT_OWNER,
+  compareText,
+  countSlots,
   intersectSlotRanges,
+  isMember,
+  matchDivergence,
+  type DivergenceGroup,
   type DivergenceKind,
   type DivergencePosition,
+  type TopologyDisagreement,
   type TrackedDisagreement,
 } from './topology-divergence';
 import type { FailureFlagViews } from './topology-divergence-monitor';
-import { DIVERGENCE_SEVERITY_BY_KIND, toDivergenceNode, type DivergenceNode } from './topology-divergence-report';
+import {
+  DIVERGENCE_SEVERITY_BY_KIND,
+  SEVERITY_ORDER,
+  toDivergenceNode,
+  type DivergenceNode,
+} from './topology-divergence-report';
 import { AnomalySeverity, MetricType } from './types';
 
 export const DISAGREEMENT_LIST_LIMIT = 25;
 
 const MAX_LISTED_RANGES = 3;
 const SHORT_ID_LENGTH = 8;
-const NON_MEMBER_FLAGS = ['handshake', 'noaddr'];
-const SEVERITY_RANK = [AnomalySeverity.INFO, AnomalySeverity.WARNING, AnomalySeverity.CRITICAL];
 const MEMBERSHIP_LABELS: Record<string, string> = {
   known: 'a member',
   handshake: 'in handshake',
@@ -28,6 +37,18 @@ export interface DisagreementEvent {
   eventType: MetricType;
   eventAt: number | null;
   connectionId: string;
+  resolvedByHand?: boolean;
+}
+
+export interface RaisedDivergence {
+  group: DivergenceGroup;
+  event: DisagreementEvent;
+}
+
+export type DisagreementEventOf = (disagreement: TopologyDisagreement) => DisagreementEvent | undefined;
+
+export function eventOfRaised(raised: readonly RaisedDivergence[]): DisagreementEventOf {
+  return (disagreement) => matchDivergence(raised, disagreement)?.event;
 }
 
 export interface DisagreementRound {
@@ -61,7 +82,9 @@ export interface DisagreementLine {
   id: string;
   kind: DivergenceKind;
   severity: AnomalySeverity;
+  open: boolean;
   confirmed: boolean;
+  resolvedByHand: boolean;
   eventId: string | null;
   eventType: MetricType | null;
   eventAt: number | null;
@@ -124,25 +147,12 @@ interface Shard {
   slots: number[][];
 }
 
-function compareText(a: string, b: string): number {
-  if (a < b) return -1;
-  return a > b ? 1 : 0;
-}
-
 function isPrimary(node: ClusterNode): boolean {
   return node.flags.includes('master');
 }
 
-function isMember(node: ClusterNode): boolean {
-  return !node.flags.some((flag) => NON_MEMBER_FLAGS.includes(flag));
-}
-
 function rangesOf(slots: number[][]): number[][] {
   return slots.map(([start, end = start]) => [start, end]).sort((a, b) => a[0] - b[0]);
-}
-
-function countSlots(ranges: number[][]): number {
-  return ranges.reduce((total, [start, end]) => total + end - start + 1, 0);
 }
 
 function viewsOf(count: number): string {
@@ -205,6 +215,17 @@ function sideOf(kind: DivergenceKind, position: DivergencePosition, subjects: Re
   return `${value}#${position.observers.length}#${others.join(',')}`;
 }
 
+interface MergedDrafts {
+  drafts: Draft[];
+  sides: Array<Set<string>>;
+}
+
+function keepsSidesApart(merged: MergedDrafts, draft: Draft): boolean {
+  return draft.positions.every((position, at) =>
+    position.observers.every((id) => merged.sides.every((side, other) => other === at || !side.has(id))),
+  );
+}
+
 function mergeDrafts(drafts: Draft[]): Draft[][] {
   const subjectsByKind = new Map<DivergenceKind, Set<string>>();
   for (const { disagreement } of drafts) {
@@ -213,7 +234,7 @@ function mergeDrafts(drafts: Draft[]): Draft[][] {
     subjectsByKind.set(disagreement.kind, subjects);
   }
 
-  const groups = new Map<string, Draft[]>();
+  const groups = new Map<string, MergedDrafts[]>();
   for (const draft of drafts) {
     const { kind, key } = draft.disagreement;
     const subjects = subjectsByKind.get(kind) as Set<string>;
@@ -229,11 +250,17 @@ function mergeDrafts(drafts: Draft[]): Draft[][] {
     const seen = draft.stale ? draft.disagreement.lastSeenAt : '';
     const signature = kind === 'slot_owner' ? key : `${kind}|${seen}|${draft.event?.eventId ?? ''}|${sides}`;
     const aligned = { ...draft, positions: sided.map(({ position }) => position) };
-    const group = groups.get(signature);
-    if (group) group.push(aligned);
-    else groups.set(signature, [aligned]);
+    const alike = groups.get(signature) ?? [];
+    const merged = alike.find((group) => keepsSidesApart(group, aligned));
+    if (merged) {
+      merged.drafts.push(aligned);
+      aligned.positions.forEach((position, at) => position.observers.forEach((id) => merged.sides[at].add(id)));
+    } else {
+      alike.push({ drafts: [aligned], sides: aligned.positions.map((position) => new Set(position.observers)) });
+      groups.set(signature, alike);
+    }
   }
-  return [...groups.values()];
+  return [...groups.values()].flatMap((alike) => alike.map((merged) => merged.drafts));
 }
 
 function heldByAny(sides: DivergencePosition[]): string[] {
@@ -252,7 +279,7 @@ function slotsLabel(ranges: number[][]): string {
 
 export function summarizeDisagreements(
   round: DisagreementRound | undefined,
-  eventOf: (key: string) => DisagreementEvent | undefined,
+  eventOf: DisagreementEventOf,
 ): TopologyDisagreementSummary {
   if (!round) {
     return {
@@ -363,13 +390,16 @@ export function summarizeDisagreements(
       observerCount: side.observers.length,
       observers: listed(side.observers),
     }));
-    const event = first.event;
+    const resolvedByHand = first.event?.resolvedByHand === true;
+    const event = resolvedByHand ? undefined : first.event;
 
     return {
       id: merged ? `${first.disagreement.key}+${drafts.length - 1}` : first.disagreement.key,
       kind,
       severity: DIVERGENCE_SEVERITY_BY_KIND[kind],
+      open: !stale || event !== undefined,
       confirmed: event !== undefined,
+      resolvedByHand,
       eventId: event?.eventId ?? null,
       eventType: event?.eventType ?? null,
       eventAt: event?.eventAt ?? null,
@@ -405,15 +435,16 @@ export function summarizeDisagreements(
   const drafts = round.disagreements.map((disagreement) => ({
     disagreement,
     positions: splitFailing(disagreement, round.failureFlags),
-    event: eventOf(disagreement.key),
+    event: eventOf(disagreement),
     stale: !compared || disagreement.lastSeenAt < round.at,
   }));
   const disagreements = mergeDrafts(drafts)
     .map(lineOf)
     .sort(
       (a, b) =>
+        Number(b.open) - Number(a.open) ||
         Number(a.stale) - Number(b.stale) ||
-        SEVERITY_RANK.indexOf(b.severity) - SEVERITY_RANK.indexOf(a.severity) ||
+        SEVERITY_ORDER.indexOf(b.severity) - SEVERITY_ORDER.indexOf(a.severity) ||
         Number(b.confirmed) - Number(a.confirmed) ||
         a.since - b.since ||
         compareText(a.id, b.id),
@@ -422,7 +453,7 @@ export function summarizeDisagreements(
   const linesByShard = new Map<string, string[]>();
   const staleLinesByShard = new Map<string, string[]>();
   for (const line of disagreements) {
-    const byShard = line.stale ? staleLinesByShard : linesByShard;
+    const byShard = line.open ? linesByShard : staleLinesByShard;
     for (const shardId of line.shardIds) {
       const ids = byShard.get(shardId);
       if (ids) ids.push(line.id);
@@ -435,8 +466,7 @@ export function summarizeDisagreements(
       const primary = primaryOf(shard.members);
       const disagreementIds = linesByShard.get(shard.shardId) ?? [];
       const staleDisagreementIds = staleLinesByShard.get(shard.shardId) ?? [];
-      const settled = staleDisagreementIds.length > 0 ? 'not_compared' : 'undisputed';
-      const state = disagreementIds.length > 0 ? 'disputed' : settled;
+      const settled = compared && staleDisagreementIds.length === 0 ? 'undisputed' : 'not_compared';
       return {
         shardId: shard.shardId,
         primary: primary ? named(primary.id) : null,
@@ -446,7 +476,7 @@ export function summarizeDisagreements(
         slotCount: countSlots(shard.slots),
         nodes: shard.members.length,
         ownViews: shard.members.filter((node) => answered.has(node.id)).length,
-        state: compared ? state : 'not_compared',
+        state: disagreementIds.length > 0 ? 'disputed' : settled,
         disagreementIds,
         staleDisagreementIds,
       };
