@@ -1550,6 +1550,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
   async refreshChild(id: string, node: DesiredNode): Promise<void> {
     const previous = this.requireMembership(id);
+    if (this.observedNodeIds.get(id) !== node.nodeId) this.observedNodeIds.delete(id);
     const { seedId, origin, retiredAt, hostname } = previous;
     const membershipOf = (target: DesiredNode): TopologyMembership => ({
       seedId,
@@ -1576,6 +1577,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
   async retireChild(id: string): Promise<void> {
     const membership = this.requireMembership(id);
+    this.observedNodeIds.delete(id);
     if (membership.origin === 'auto') {
       const adapter = this.connections.get(id);
       try {
@@ -1593,6 +1595,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
   async reactivateChild(id: string, node: DesiredNode): Promise<void> {
     const membership = this.requireMembership(id);
+    this.observedNodeIds.delete(id);
     const config = this.configs.get(id)!;
     if (membership.origin === 'auto') {
       const adapter = this.createAdapter({ ...config, membership: { ...membership, hostname: node.hostname } });

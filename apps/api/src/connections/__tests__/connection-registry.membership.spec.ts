@@ -5,6 +5,7 @@ import type { DatabaseConnectionConfig } from '@betterdb/shared';
 import { CHILD_CONNECT_TIMEOUT_MS, ConnectionRegistry } from '../connection-registry.service';
 import { UnifiedDatabaseAdapter } from '../../database/adapters/unified.adapter';
 import { ExternalMetricsStore } from '../../external-metrics/external-metrics-store';
+import { collectionAmong } from '../../cluster/node-collection';
 
 function build(env: Record<string, string> = {}) {
   const storage = {
@@ -455,6 +456,67 @@ describe('ConnectionRegistry membership', () => {
 
       expect(registry.getObservedNodeId('seed')).toBeUndefined();
       expect(registry.findIdObservingNode('node-a')).toBeNull();
+    });
+
+    describe('when topology sync changes the child', () => {
+      const child = { id: 'child', host: '10.0.0.2', port: 7002 };
+      const membershipOf = (nodeId: string) => ({ seedId: 'seed', nodeId, origin: 'auto' as const, source: 'cluster' as const });
+      const nodeAt = (id: string, flags: string[]) => ({ id, address: '10.0.0.2:7002@17002', flags });
+      const desired = (nodeId: string) => ({ host: '10.0.0.2', port: 7002, nodeId, source: 'cluster' as const });
+
+      it('forgets the node of a child that is retired', async () => {
+        const { registry } = build();
+        put(registry, seed);
+        put(registry, { ...child, membership: membershipOf('node-n') });
+        registry.noteObservedNodeId('child', 'node-n');
+
+        await registry.retireChild('child');
+
+        expect(registry.getObservedNodeId('child')).toBeUndefined();
+      });
+
+      it('counts a child reactivated for a new node at its address as reading that node at once', async () => {
+        const { registry } = build();
+        put(registry, seed);
+        put(registry, { ...child, membership: { ...membershipOf('node-n'), retiredAt: 5 } });
+        registry.noteObservedNodeId('child', 'node-n');
+
+        await registry.reactivateChild('child', desired('node-m'));
+
+        expect(registry.getObservedNodeId('child')).toBeUndefined();
+        expect(collectionAmong(nodeAt('node-m', ['master']), 'seed', registry)).toEqual({
+          collected: true,
+          connectionId: 'child',
+        });
+        expect(collectionAmong(nodeAt('node-n', ['master', 'fail']), 'seed', registry)).toEqual({ collected: false });
+      });
+
+      it('forgets the node of a child refreshed to another node', async () => {
+        const { registry } = build();
+        put(registry, seed);
+        put(registry, { ...child, membership: membershipOf('node-n') });
+        registry.noteObservedNodeId('child', 'node-n');
+
+        await registry.refreshChild('child', desired('node-m'));
+
+        expect(registry.getObservedNodeId('child')).toBeUndefined();
+        expect(collectionAmong(nodeAt('node-m', ['master']), 'seed', registry)).toEqual({
+          collected: true,
+          connectionId: 'child',
+        });
+        expect(collectionAmong(nodeAt('node-n', ['master', 'fail']), 'seed', registry)).toEqual({ collected: false });
+      });
+
+      it('keeps the node of a child refreshed for the same node', async () => {
+        const { registry } = build();
+        put(registry, seed);
+        put(registry, { ...child, membership: membershipOf('node-n') });
+        registry.noteObservedNodeId('child', 'node-n');
+
+        await registry.refreshChild('child', { ...desired('node-n'), role: 'replica' });
+
+        expect(registry.getObservedNodeId('child')).toBe('node-n');
+      });
     });
 
     it('finds the listed connection that was seen reading a node', () => {
