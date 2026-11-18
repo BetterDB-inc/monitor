@@ -20,17 +20,21 @@ export function collectionOf(
   findIdReadingNode: (nodeId: string) => string | null = () => null,
 ): NodeCollection {
   const address = parseNodeAddress(node.address);
+  const readsAnotherNode = (connectionId: string): boolean => {
+    const ownNodeId = ownNodeIdOf(connectionId);
+    return !!ownNodeId && ownNodeId !== node.id;
+  };
   const readingNodeAt = (host: string, port: number): string | null => {
     const found = findIdByHostPort(host, port);
-    if (!found) return null;
-    const ownNodeId = ownNodeIdOf(found);
-    return ownNodeId && ownNodeId !== node.id ? null : found;
+    return found && !readsAnotherNode(found) ? found : null;
   };
+  const viewingItsOwnNode =
+    node.flags.includes('myself') && !!viewingConnectionId && !readsAnotherNode(viewingConnectionId);
   const connectionId =
     findIdReadingNode(node.id) ??
     (address ? readingNodeAt(address.host, address.port) : null) ??
     (address && node.hostname ? readingNodeAt(node.hostname, address.port) : null) ??
-    (node.flags.includes('myself') ? viewingConnectionId : null);
+    (viewingItsOwnNode ? viewingConnectionId : null);
   return connectionId ? { collected: true, connectionId } : { collected: false };
 }
 
