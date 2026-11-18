@@ -57,8 +57,10 @@ export const TOPOLOGY_DIVERGENCE_SIGNATURE_PREFIX = 'topology_divergence:';
 export const UNASSIGNED_SLOT_OWNER = 'unassigned';
 
 const SLOT_COUNT = 16384;
-const FAILING_FLAGS = ['fail', 'fail?'];
+export const FAILING_FLAGS = ['fail', 'fail?'];
 const FINISHED_MIGRATION_STATES = ['success', 'failed', 'cancelled'];
+
+export type FailureVote = 'fail' | 'fail?' | 'ok';
 
 type MemberStatus = 'known' | 'handshake' | 'noaddr';
 
@@ -68,7 +70,7 @@ interface ViewIndex {
   status: Map<string, MemberStatus>;
 }
 
-function compareText(a: string, b: string): number {
+export function compareText(a: string, b: string): number {
   if (a < b) return -1;
   return a > b ? 1 : 0;
 }
@@ -84,6 +86,16 @@ function hostPort(address: string): string {
 function statusOf(node: ClusterNode): MemberStatus {
   if (node.flags.includes('handshake')) return 'handshake';
   return node.flags.includes('noaddr') ? 'noaddr' : 'known';
+}
+
+export function isMember(node: ClusterNode): boolean {
+  return statusOf(node) === 'known';
+}
+
+export function failureVoteOf(observerId: string, node: ClusterNode): FailureVote | null {
+  if (node.id === observerId || !isMember(node)) return null;
+  if (node.flags.includes('fail')) return 'fail';
+  return node.flags.some((flag) => FAILING_FLAGS.includes(flag)) ? 'fail?' : 'ok';
 }
 
 function indexViews(views: TopologyView[]): ViewIndex[] {
@@ -147,9 +159,8 @@ function perNodeDisagreements(indexes: ViewIndex[]): TopologyDisagreement[] {
       const node = index.known.get(subject);
       if (!node) continue;
       vote(epochs, String(node.configEpoch), index.observerId);
-      if (index.observerId === subject) continue;
-      const failing = node.flags.some((flag) => FAILING_FLAGS.includes(flag));
-      vote(failures, failing ? 'failing' : 'ok', index.observerId);
+      const failure = failureVoteOf(index.observerId, node);
+      if (failure) vote(failures, failure === 'ok' ? 'ok' : 'failing', index.observerId);
     }
 
     const kinds: Array<[DivergenceKind, Map<string, string[]>]> = [
@@ -256,7 +267,7 @@ export function intersectSlotRanges(a: number[][], b: number[][]): number[][] {
   return shared.sort((x, y) => x[0] - y[0]);
 }
 
-function countSlots(ranges: number[][]): number {
+export function countSlots(ranges: number[][]): number {
   return ranges.reduce((total, [start, end = start]) => total + end - start + 1, 0);
 }
 
@@ -433,6 +444,48 @@ export function confirmedDisagreements(
     );
     return [{ ...entry, slots: mergeSlotRanges(lasting.flatMap((streak) => streak.slots)) }];
   });
+}
+
+function sharedWith(entry: TopologyDisagreement, disagreement: TopologyDisagreement): number {
+  if (entry.kind !== disagreement.kind) return 0;
+  if (!entry.slots || !disagreement.slots) return entry.key === disagreement.key ? 1 : 0;
+  if (slotDisputeOwners(entry) !== slotDisputeOwners(disagreement)) return 0;
+  return countSlots(intersectSlotRanges(entry.slots, disagreement.slots));
+}
+
+function keepsSidesOf(
+  entry: TopologyDisagreement,
+  dissent: ReadonlySet<string>,
+  disagreement: TopologyDisagreement,
+): boolean {
+  const others = new Set(entry.positions.flatMap((position) => position.observers).filter((id) => !dissent.has(id)));
+  const dissenting = disagreement.positions.filter((position) => position.observers.some((id) => dissent.has(id)));
+  return dissenting.length > 0 && dissenting.every((position) => !position.observers.some((id) => others.has(id)));
+}
+
+function sharedWithGroup(group: DivergenceGroup, disagreement: TopologyDisagreement): number {
+  const dissent = new Set(group.dissent);
+  return Math.max(
+    0,
+    ...group.disagreements
+      .filter((entry) => keepsSidesOf(entry, dissent, disagreement))
+      .map((entry) => sharedWith(entry, disagreement)),
+  );
+}
+
+export function matchDivergence<T extends { group: DivergenceGroup }>(
+  raised: readonly T[],
+  disagreement: TopologyDisagreement,
+): T | undefined {
+  let match: T | undefined;
+  let most = 0;
+  for (const candidate of raised) {
+    const shared = sharedWithGroup(candidate.group, disagreement);
+    if (shared <= most) continue;
+    match = candidate;
+    most = shared;
+  }
+  return match;
 }
 
 export function divergenceSignature(dissent: string[]): string {

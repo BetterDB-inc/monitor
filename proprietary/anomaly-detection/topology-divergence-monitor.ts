@@ -1,9 +1,13 @@
 import type { ClusterNode } from '@app/common/types/metrics.types';
 import {
   DivergenceTracker,
+  FAILING_FLAGS,
   type TopologyView,
   type TrackedDisagreement,
+  compareText,
   compareTopologyViews,
+  failureVoteOf,
+  isMember,
 } from './topology-divergence';
 import { selectObservers } from './topology-observers';
 
@@ -21,9 +25,6 @@ export const TOPOLOGY_DIVERGENCE_MAX_OBSERVERS = 12;
 export const TOPOLOGY_DIVERGENCE_MAX_ACCUSED = 2;
 export const TOPOLOGY_DIVERGENCE_IDLE_ROUNDS = 3;
 export const TOPOLOGY_DIVERGENCE_BACKOFF_MAX_ROUNDS = 8;
-
-const FAILING_FLAGS = ['fail', 'fail?'];
-const UNREACHABLE_FLAGS = ['handshake', 'noaddr'];
 
 export interface DivergencePoll {
   clusterKey: string;
@@ -82,7 +83,7 @@ function myselfOf(nodes: ClusterNode[]): ClusterNode | undefined {
 }
 
 function isUnreachable(node: ClusterNode): boolean {
-  return node.flags.some((flag) => UNREACHABLE_FLAGS.includes(flag));
+  return !isMember(node);
 }
 
 function withMetadataOf(kept: ClusterNode, node: ClusterNode): ClusterNode {
@@ -318,9 +319,10 @@ export class TopologyDivergenceMonitor {
     const flagged = new Map<string, FailureFlagViews>();
     for (const view of views) {
       for (const node of view.nodes) {
-        if (node.id === view.observerId || !isAccused(node)) continue;
+        const failure = failureVoteOf(view.observerId, node);
+        if (!failure || failure === 'ok') continue;
         const entry = flagged.get(node.id) ?? { suspected: [], failed: [] };
-        (node.flags.includes('fail') ? entry.failed : entry.suspected).push(view.observerId);
+        (failure === 'fail' ? entry.failed : entry.suspected).push(view.observerId);
         flagged.set(node.id, entry);
       }
     }
@@ -328,7 +330,7 @@ export class TopologyDivergenceMonitor {
       entry.suspected.sort();
       entry.failed.sort();
     }
-    return new Map([...flagged].sort((a, b) => (a[0] < b[0] ? -1 : 1)));
+    return new Map([...flagged].sort((a, b) => compareText(a[0], b[0])));
   }
 
   private accusedBy(views: TopologyView[]): string[] {
@@ -339,7 +341,7 @@ export class TopologyDivergenceMonitor {
       }
     }
     return [...accusers.entries()]
-      .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
+      .sort((a, b) => b[1] - a[1] || compareText(a[0], b[0]))
       .map(([id]) => id);
   }
 }

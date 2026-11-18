@@ -27418,6 +27418,83 @@ describe('AnomalyService', () => {
         ]);
       });
 
+      it('keeps the event of an ended slot dispute off a new dispute between the same owners', async () => {
+        views.b = { a: { slots: '101-5460' }, b: { slots: '0-100 5461-10922' } };
+        await rounds(3);
+        const [event] = divergenceEvents();
+        expect(service.getTopologyDisagreements('conn-1').disagreements).toMatchObject([
+          { id: 'slot_owner:a|b', slots: [[0, 100]], confirmed: true, eventId: event.id },
+        ]);
+
+        views.b = {};
+        views.c = { a: { slots: '0-199 301-5460' }, b: { slots: '200-300 5461-10922' } };
+        await rounds(1);
+
+        expect(event.resolved).toBe(false);
+        expect(service.getTopologyDisagreements('conn-1').disagreements).toMatchObject([
+          { id: 'slot_owner:a|b', slots: [[200, 300]], rounds: 1, confirmed: false, eventId: null, eventType: null },
+        ]);
+      });
+
+      it('points a line at the event of the node that holds its dissenting side now', async () => {
+        views.c = { b: { epoch: 9 } };
+        await rounds(3);
+        const [eventOfC] = divergenceEvents();
+        views.b = { a: { epoch: 9 } };
+        await rounds(3);
+        const eventOfB = divergenceEvents().find((event) => event.id !== eventOfC.id);
+        expect(service.getTopologyDisagreements('conn-1').disagreements).toMatchObject([
+          { id: 'config_epoch:b', eventId: eventOfC.id },
+          { id: 'config_epoch:a', eventId: eventOfB?.id },
+        ]);
+
+        views.b = {};
+        views.c = { a: { epoch: 9 }, b: { epoch: 9 } };
+        await rounds(1);
+
+        expect(eventOfB?.resolved).toBe(false);
+        expect(service.getTopologyDisagreements('conn-1').disagreements).toMatchObject([
+          { id: 'config_epoch:a+1', subjectCount: 2, confirmed: true, eventId: eventOfC.id },
+        ]);
+      });
+
+      it('says that the event of a line was resolved by hand until it is raised again', async () => {
+        views.b = { a: { epoch: 9 } };
+        await rounds(3);
+        expect(service.getTopologyDisagreements('conn-1').disagreements).toMatchObject([{ resolvedByHand: false }]);
+
+        await service.resolveAnomaly(divergenceEvents()[0].id);
+        expect(service.getTopologyDisagreements('conn-1').disagreements).toMatchObject([
+          { id: 'config_epoch:a', confirmed: false, eventId: null, resolvedByHand: true, open: true },
+        ]);
+
+        await rounds(1);
+        const raisedAgain = divergenceEvents().find((event) => !event.resolved);
+        expect(service.getTopologyDisagreements('conn-1').disagreements).toMatchObject([
+          { id: 'config_epoch:a', confirmed: true, eventId: raisedAgain?.id, resolvedByHand: false },
+        ]);
+      });
+
+      it('keeps a line that was not seen again open while its event is open', async () => {
+        views.b = { a: { epoch: 9 } };
+        await rounds(3);
+        const [event] = divergenceEvents();
+        silent.add('b');
+
+        await rounds(1);
+
+        const summary = service.getTopologyDisagreements('conn-1');
+        expect(summary.disagreements).toMatchObject([
+          { id: 'config_epoch:a', stale: true, positions: [], confirmed: true, eventId: event.id, open: true },
+        ]);
+        expect(summary.shards.map((shard) => [shard.shardId, shard.state, shard.disagreementIds])).toEqual([
+          ['a', 'disputed', ['config_epoch:a']],
+          ['b', 'undisputed', []],
+          ['c', 'undisputed', []],
+        ]);
+        expect(summary.shardTotals).toMatchObject({ disputed: 1, notCompared: 0 });
+      });
+
       it('names the nodes that did not answer and does not call the round complete', async () => {
         silent.add('b');
 
