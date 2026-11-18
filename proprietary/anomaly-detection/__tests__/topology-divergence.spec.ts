@@ -80,19 +80,47 @@ describe('slotRangesOverlap', () => {
 });
 
 describe('compareTopologyViewsInSteps', () => {
-  it('finds what the comparison in one go finds, and can be left between steps', () => {
-    const views = [view('p1', { p3: failing(), p2: { configEpoch: 9 } }), view('p2'), view('p3'), view('r1')];
-    const steps = compareTopologyViewsInSteps(views);
-    let pauses = 0;
-    let step = steps.next();
-    while (!step.done) {
-      pauses += 1;
-      step = steps.next();
+  it('gives each of two comparisons its own result when they are stepped in turn', () => {
+    const running = [
+      compareTopologyViewsInSteps([view('p1', { p3: failing() }), view('p2'), view('r1')]),
+      compareTopologyViewsInSteps([view('p1', { p2: { configEpoch: 9 } }), view('p2'), view('p3')]),
+    ];
+    const found: Array<TopologyDisagreement[] | undefined> = [undefined, undefined];
+    let turns = 0;
+    while (found.includes(undefined)) {
+      running.forEach((steps, at) => {
+        if (found[at]) return;
+        const step = steps.next();
+        if (step.done) found[at] = step.value;
+      });
+      turns += 1;
     }
 
-    expect(step.value).toEqual(compareTopologyViews(views));
-    expect(step.value.length).toBeGreaterThan(0);
-    expect(pauses).toBeGreaterThan(views.length);
+    expect(turns).toBeGreaterThan(10);
+    expect(found).toEqual([
+      [
+        {
+          key: 'failure_flags:p3',
+          kind: 'failure_flags',
+          subjectIds: ['p3'],
+          positions: [
+            { value: 'failing', observers: ['p1'] },
+            { value: 'ok', observers: ['p2', 'r1'] },
+          ],
+        },
+      ],
+      [
+        {
+          key: 'config_epoch:p2',
+          kind: 'config_epoch',
+          subjectIds: ['p2'],
+          positions: [
+            { value: '2', observers: ['p2', 'p3'] },
+            { value: '9', observers: ['p1'] },
+          ],
+        },
+      ],
+    ]);
   });
 });
 

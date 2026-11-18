@@ -424,14 +424,19 @@ describe('runFullCheck', () => {
       expect(restedBeforeTheEnd).toBe(true);
     });
 
-    it('finds the same as a comparison in one go', async () => {
-      const sliced = await check(nodes, { readView });
-      const atOnce = await check(nodes, {
-        readView,
-        pace: { sliceMs: Infinity, clock: () => 0, rest: async () => undefined },
-      });
+    it('finds one line per node, with that node alone on its side', async () => {
+      const ids = nodes.map((entry) => entry.id).sort();
 
-      expect(sliced.round).toEqual(atOnce.round);
+      const outcome = await check(nodes, { readView });
+
+      expect(outcome.round.disagreements.map((entry) => entry.key)).toEqual(ids.map((id) => `config_epoch:${id}`));
+      expect(
+        outcome.round.disagreements.map((entry) => entry.positions.find((side) => side.value === '7')?.observers),
+      ).toEqual(ids.map((id) => [id]));
+      expect(sides(outcome, 'config_epoch:s000p')).toEqual([
+        ['1', ids.filter((id) => id !== 's000p')],
+        ['7', ['s000p']],
+      ]);
     });
 
     it('lets other work run while it compares', async () => {
@@ -819,6 +824,7 @@ describe('event of a full check line', () => {
         eventAt: AT,
         connectionId: 'c1',
       },
+      confirmedAt: AT,
     }));
   }
 
