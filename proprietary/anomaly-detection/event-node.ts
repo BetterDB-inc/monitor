@@ -1,6 +1,7 @@
 import type { ClusterNodeRef } from '@betterdb/shared';
 import { buildNodeDirectory, resolveNodeRef, type NodeDirectory } from '@app/cluster/node-ref';
 import type { ClusterNode } from '@app/common/types/metrics.types';
+import { isReadOnlyReplicaRole } from '@app/database/parsers/replication-info.parser';
 import { MetricType, type AnomalyEvent } from './types';
 
 const METRICS_WITHOUT_NODE: ReadonlySet<MetricType> = new Set([
@@ -29,10 +30,16 @@ export interface ClusterNodeView {
   readAt: number;
 }
 
+export interface OwnNodeRole {
+  role: ClusterNodeRef['role'];
+  readAt: number;
+}
+
 export class ClusterNodeViews {
   private readonly views = new Map<string, NodeView>();
   private readonly viewKeys = new Map<string, string>();
   private readonly ownNodeIds = new Map<string, string>();
+  private readonly ownRoles = new Map<string, OwnNodeRole>();
 
   remember(
     connectionId: string,
@@ -52,9 +59,18 @@ export class ClusterNodeViews {
     this.views.set(viewKey, { read: describe, readAt });
   }
 
+  rememberOwnRole(connectionId: string, role: ClusterNodeRef['role'] | undefined, readAt: number): void {
+    if (role) {
+      this.ownRoles.set(connectionId, { role, readAt });
+    } else {
+      this.ownRoles.delete(connectionId);
+    }
+  }
+
   forget(connectionId: string): void {
     this.leaveView(connectionId);
     this.ownNodeIds.delete(connectionId);
+    this.ownRoles.delete(connectionId);
   }
 
   view(viewKey: string): ClusterNodeView | undefined {
@@ -70,6 +86,10 @@ export class ClusterNodeViews {
 
   ownNodeId(connectionId: string): string | undefined {
     return this.ownNodeIds.get(connectionId);
+  }
+
+  ownRole(connectionId: string): OwnNodeRole | undefined {
+    return this.ownRoles.get(connectionId);
   }
 
   connectionsOfNode(nodeId: string): string[] {
@@ -96,8 +116,9 @@ function subjectOfDetector(
   return { nodeId: subject.nodeId, address: subject.address.split('@')[0], role: 'unknown' };
 }
 
-function roleChangedTo(event: AnomalyEvent): ClusterNodeRef['role'] {
-  return event.value === 1 ? 'primary' : 'replica';
+export function nodeRoleOfInfo(role: string | undefined): ClusterNodeRef['role'] | undefined {
+  if (role === 'master') return 'primary';
+  return isReadOnlyReplicaRole(role) ? 'replica' : undefined;
 }
 
 export function nodeOfEvent(
@@ -105,13 +126,12 @@ export function nodeOfEvent(
   directory: NodeDirectory | undefined,
   ownNodeId: string | undefined,
   roleKnown = true,
+  ownRole?: ClusterNodeRef['role'],
 ): ClusterNodeRef | undefined {
   if (event.node) return event.node;
   const node = nodeInView(event, directory, ownNodeId);
   if (!node) return undefined;
-  if (event.metricType === MetricType.REPLICATION_ROLE && node.nodeId === ownNodeId) {
-    return { ...node, role: roleChangedTo(event) };
-  }
+  if (ownRole && node.nodeId === ownNodeId) return { ...node, role: ownRole };
   return roleKnown ? node : { ...node, role: 'unknown' };
 }
 

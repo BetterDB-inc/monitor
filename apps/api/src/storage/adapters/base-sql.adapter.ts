@@ -21,16 +21,8 @@ import { normalizeDetectorConfigMap } from '../../anomaly/anomaly.types';
 
 const NODE_ROLES: readonly ClusterNodeRole[] = ['primary', 'replica', 'unknown'];
 
-function parseJson(raw: string): unknown {
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return undefined;
-  }
-}
-
 function parseNodeRef(raw: unknown): ClusterNodeRef | undefined {
-  const parsed = typeof raw === 'string' ? parseJson(raw) : undefined;
+  const parsed = typeof raw === 'string' ? safeJsonParse<unknown>(raw) : undefined;
   if (typeof parsed !== 'object' || parsed === null) return undefined;
   const { nodeId, address, role, shardId, availabilityZone } = parsed as Record<string, unknown>;
   if (typeof nodeId !== 'string' || typeof address !== 'string') return undefined;
