@@ -13123,6 +13123,92 @@ describe('AnomalyService', () => {
         expect(recovered.mock.calls[0][0]).not.toHaveProperty('node');
       });
 
+      describe('replication.recovered after the cluster changed', () => {
+        const replica = '10.0.0.2:6380';
+        const recoveredNode = async (recovery: object, timestamp = Date.now()) => {
+          const recovered = jest.fn().mockResolvedValue(undefined);
+          (webhookEventsProService as any).dispatchReplicationRecovered = recovered;
+          await (service as any).resolveReplicationDivergence(
+            { replicas: new Map([[replica, { announced: true, windows: [] }]]) },
+            { kind: 'recovered', addr: replica, gapBytes: 0, ...recovery },
+            mockCtx,
+            timestamp,
+            'conn-1',
+          );
+          return recovered.mock.calls[0][0].node;
+        };
+        const anotherNodeTakesTheAddress = async () => {
+          dbClient.getClusterNodes = jest
+            .fn()
+            .mockResolvedValue([
+              clusterNode('primA', '10.0.0.1:6379@16379', ['myself', 'master']),
+              clusterNode('newC', '10.0.0.2:6380@16380', ['master']),
+            ]);
+          dbClient.getClusterShards = jest.fn().mockResolvedValue([]);
+          await poll();
+        };
+
+        it('names the node of the divergence event it closes when another node took the address', async () => {
+          await poll();
+          const divergence = await raise({ metricType: MetricType.REPLICATION_DIVERGENCE, replicaAddr: replica });
+          await anotherNodeTakesTheAddress();
+
+          expect(await recoveredNode({ eventId: divergence.id })).toEqual({ ...REPLICA_NODE, collected: false });
+        });
+
+        it('names the node of an event that left the recent list', async () => {
+          await poll();
+          const divergence = await raise({ metricType: MetricType.REPLICATION_DIVERGENCE, replicaAddr: replica });
+          (service as any).recentAnomalies.length = 0;
+          (service as any).incidentEventsById.set(divergence.id, divergence);
+          await anotherNodeTakesTheAddress();
+
+          expect(await recoveredNode({ eventId: divergence.id })).toEqual({ ...REPLICA_NODE, collected: false });
+        });
+
+        it('leaves the role unknown when no event is known and the cluster was read long ago', async () => {
+          await poll();
+
+          expect(await recoveredNode({}, Date.now() + 60 * 60_000)).toEqual({
+            ...REPLICA_NODE,
+            role: 'unknown',
+            collected: false,
+          });
+        });
+
+        it('names the node of the event a restart left open', async () => {
+          await poll();
+          await anotherNodeTakesTheAddress();
+          const recovered = jest.fn().mockResolvedValue(undefined);
+          (webhookEventsProService as any).dispatchReplicationRecovered = recovered;
+          storage.getAnomalyEvents.mockResolvedValueOnce([
+            raised({
+              id: 'left-open',
+              metricType: MetricType.REPLICATION_DIVERGENCE,
+              replicaAddr: replica,
+              node: REPLICA_NODE as AnomalyEvent['node'],
+            }),
+          ]);
+          storage.resolveOpenAnomaly.mockResolvedValueOnce(true);
+          const windows = [0, 30_000].map((start) => ({ start, end: start + 30_000, gapBytes: 0, secondsBehind: 0 }));
+          const state = {
+            replicas: new Map([[replica, { level: 'none', windows, eventId: null, disagreeEventId: null }]]),
+            observed: new Set([replica]),
+            windowStart: 60_000,
+            lastWindowEnd: 60_000,
+            closedWindowCount: 2,
+          };
+
+          await (service as any).collectOrphanedDivergenceEvents(state, mockCtx, 'restart-key', undefined);
+          await (service as any).settleOrphanedDivergenceEvents(state, mockCtx, 'restart-key');
+
+          expect(recovered.mock.calls[0]?.[0]).toMatchObject({
+            reason: 'resolved_after_restart',
+            node: { ...REPLICA_NODE, collected: false },
+          });
+        });
+      });
+
       describe('the node a connection reads, as the connection list sees it', () => {
         const registry = () => (service as any).connectionRegistry;
 

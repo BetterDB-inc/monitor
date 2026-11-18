@@ -116,13 +116,18 @@ function subjectOfDetector(
   return { nodeId: subject.nodeId, address: subject.address.split('@')[0], role: 'unknown' };
 }
 
+export type EventNodeSource = Pick<
+  AnomalyEvent,
+  'node' | 'metricType' | 'nodeSubject' | 'replicaAddr' | 'nodeAddr'
+>;
+
 export function nodeRoleOfInfo(role: string | undefined): ClusterNodeRef['role'] | undefined {
   if (role === 'master') return 'primary';
   return isReadOnlyReplicaRole(role) ? 'replica' : undefined;
 }
 
 export function nodeOfEvent(
-  event: AnomalyEvent,
+  event: EventNodeSource,
   directory: NodeDirectory | undefined,
   ownNodeId: string | undefined,
   roleKnown = true,
@@ -136,7 +141,7 @@ export function nodeOfEvent(
 }
 
 function nodeInView(
-  event: AnomalyEvent,
+  event: EventNodeSource,
   directory: NodeDirectory | undefined,
   ownNodeId: string | undefined,
 ): ClusterNodeRef | undefined {
