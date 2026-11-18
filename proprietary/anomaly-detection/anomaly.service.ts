@@ -2309,7 +2309,9 @@ export class AnomalyService
           );
         }
         const shards = await shardsPromise;
-        if (nodes) this.rememberClusterNodes(ctx.connectionId, nodes, shards, timestamp);
+        if (nodes) {
+          this.rememberClusterNodes(ctx.connectionId, nodes, shards, timestamp, isRaft || shards !== undefined);
+        }
 
         // Gossip-race detectors only: under Raft, topology is consensus-managed.
         if (!isRaft && nodes) {
