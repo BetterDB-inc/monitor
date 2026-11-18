@@ -135,7 +135,14 @@ export function diffMembership(
   lookup: AddressLookup,
 ): MembershipDiff {
   const diff: MembershipDiff = { add: [], adopt: [], reactivate: [], refresh: [], retire: [], skipped: [] };
-  const currentByAddress = new Map(current.map((member) => [addressKey(member.host, member.port), member]));
+  const currentByAddress = new Map<string, MemberSnapshot>();
+  for (const member of current) {
+    const key = addressKey(member.host, member.port);
+    const held = currentByAddress.get(key);
+    if (!held || held.membership.retiredAt !== undefined) currentByAddress.set(key, member);
+  }
+  const adoptable = (owner: AddressOwner): boolean =>
+    owner.connectionType !== 'external' && !owner.membership && !owner.isSeed;
   const desiredKeys = new Set<string>();
 
   const changed = (membership: TopologyMembership, node: DesiredNode): boolean =>
@@ -152,10 +159,12 @@ export function diffMembership(
     if (member) {
       if (member.membership.retiredAt !== undefined) {
         const owner = lookup(node.host, node.port);
-        if (owner && owner.id !== member.id) {
-          diff.skipped.push({ host: node.host, port: node.port, reason: 'occupied' });
-        } else {
+        if (!owner || owner.id === member.id) {
           diff.reactivate.push({ id: member.id, node });
+        } else if (adoptable(owner)) {
+          diff.adopt.push({ id: owner.id, node });
+        } else {
+          diff.skipped.push({ host: node.host, port: node.port, reason: 'occupied' });
         }
       } else if (changed(member.membership, node)) {
         diff.refresh.push({ id: member.id, node });

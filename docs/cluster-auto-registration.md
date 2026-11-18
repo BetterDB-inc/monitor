@@ -147,7 +147,10 @@ and click **Connect to this node** to add a connection for that one node.
 - It is a normal connection, not an auto-registered child. A sync does not
   retire it while auto-registration is off, and it does not register the
   rest of the cluster. If auto-registration is turned on later, the
-  connection is adopted rather than duplicated.
+  connection is adopted rather than duplicated. That also holds for a node
+  that was auto-registered before auto-registration was turned off: the
+  connection you added is adopted, and the retired child of that node stays
+  retired.
 - One node per click. Every node you connect is polled on its own, and the
   load that adds grows with the size of the cluster.
 - There is no button when the cluster is read through an agent or OTLP push,
