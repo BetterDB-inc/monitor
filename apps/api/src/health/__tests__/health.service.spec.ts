@@ -589,6 +589,51 @@ describe('HealthService ping deadline', () => {
       expect(webhooks.dispatchHealthChange).not.toHaveBeenCalled();
     });
 
+    describe('when the client answers another caller before the new connection does', () => {
+      const POLLER_JOINS_AFTER_MS = 2000;
+
+      const pollerCheckOutlivedByNewConnection = async (service: HealthService) => {
+        const caller = service.getHealth('conn-1');
+        await jest.advanceTimersByTimeAsync(POLLER_JOINS_AFTER_MS);
+        const poller = startPollerCheck(service);
+        await jest.advanceTimersByTimeAsync(PING_TIMEOUT_MS - POLLER_JOINS_AFTER_MS);
+        await caller;
+        client.ping.mockResolvedValue(true);
+        expect((await service.getHealth('conn-1')).status).toBe('connected');
+        await jest.advanceTimersByTimeAsync(POLLER_JOINS_AFTER_MS);
+        await poller;
+      };
+
+      it('does not report down or drop the client when the new connection gets no answer', async () => {
+        client.pingOnNewConnection!.mockImplementation(hang);
+        const service = build();
+        await pollerCheckAfterDeadline(service);
+
+        await pollerCheckOutlivedByNewConnection(service);
+
+        expect(client.pingOnNewConnection).toHaveBeenCalledTimes(1);
+        expect(webhooks.dispatchHealthChange).not.toHaveBeenCalled();
+        expect(client.disconnect).not.toHaveBeenCalled();
+      });
+
+      it('does not reconnect the client on the sixth missed check', async () => {
+        client.reconnectClient = jest.fn().mockResolvedValue(undefined);
+        const service = build();
+        for (let check = 1; check < QUIET_RECONNECT_AFTER_MISSES; check++) {
+          await pollerCheckAfterDeadline(service);
+        }
+        client.pingOnNewConnection!.mockImplementation(
+          () => new Promise<boolean>((resolve) => setTimeout(() => resolve(true), PING_TIMEOUT_MS - 1)),
+        );
+
+        await pollerCheckOutlivedByNewConnection(service);
+
+        expect(client.reconnectClient).not.toHaveBeenCalled();
+        expect(client.disconnect).not.toHaveBeenCalled();
+        expect(webhooks.dispatchHealthChange).not.toHaveBeenCalled();
+      });
+    });
+
     it('counts from the start again after the quiet reconnect', async () => {
       const service = build();
       for (let check = 1; check <= QUIET_RECONNECT_AFTER_MISSES; check++) {

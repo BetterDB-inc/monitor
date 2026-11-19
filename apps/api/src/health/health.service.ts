@@ -185,7 +185,11 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
     if (missed < this.MISSED_PINGS_BEFORE_DOWN) {
       return false;
     }
-    if (await answersOnNewConnection) {
+    const answeredOnNewConnection = await answersOnNewConnection;
+    if (this.missedPings.get(connectionId) !== missed) {
+      return false;
+    }
+    if (answeredOnNewConnection) {
       if (missed >= this.MISSED_PINGS_BEFORE_QUIET_RECONNECT) {
         this.logger.warn(
           `${connectionId} answers on a new connection but its client got no ping answer for ${missed} checks in a row; reconnecting the client`,
