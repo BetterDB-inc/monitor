@@ -10,6 +10,7 @@ interface FakeClient {
   status: string;
   options: { host: string; port: number };
   connect: jest.Mock;
+  quit: jest.Mock;
   disconnect: jest.Mock;
   sendCommand(command: FakeCommand): unknown;
 }
@@ -331,6 +332,53 @@ describe('ClusterDiscoveryService unresponsive node', () => {
 
       expect(service.getConnectionPoolSize()).toBe(0);
       expect(created[0].status).toBe('end');
+    });
+
+    it('leaves the client of a connection that was added again alone when an older connect ends late', async () => {
+      holdNextConnect();
+      const stale = service.getNodeConnection(healthy.id, 'seed');
+      const failed = expect(stale).rejects.toThrow('was released while it was opening');
+      await jest.advanceTimersByTimeAsync(0);
+      const finishStale = connected;
+      await service.releaseConnection('seed');
+      const fresh = await service.getNodeConnection(healthy.id, 'seed');
+
+      finishStale();
+      await failed;
+
+      expect(created[1].status).toBe('ready');
+      expect(created[0].status).toBe('end');
+      await expect(service.getNodeConnection(healthy.id, 'seed')).resolves.toBe(fresh);
+      expect(service.getConnectionPoolSize()).toBe(1);
+    });
+
+    it('does not store a client whose connection was released while it closed the client it replaces', async () => {
+      holdNextConnect();
+      const first = service.getNodeConnection(healthy.id, 'seed');
+      await jest.advanceTimersByTimeAsync(0);
+      const finishFirst = connected;
+      holdNextConnect();
+      const second = service.getNodeConnection(healthy.id, 'seed');
+      const failed = expect(second).rejects.toThrow('was released while it was opening');
+      await jest.advanceTimersByTimeAsync(0);
+      const finishSecond = connected;
+      finishFirst();
+      await first;
+      let closed: () => void = () => undefined;
+      const closing = new Promise<void>((resolve) => {
+        closed = resolve;
+      });
+      created[0].quit.mockImplementation(() => closing);
+      finishSecond();
+      await jest.advanceTimersByTimeAsync(0);
+
+      const releasing = service.releaseConnection('seed');
+      closed();
+      await releasing;
+      await failed;
+
+      expect(service.getConnectionPoolSize()).toBe(0);
+      expect(created[1].status).toBe('end');
     });
 
     it('keeps a client of another connection that was not released', async () => {

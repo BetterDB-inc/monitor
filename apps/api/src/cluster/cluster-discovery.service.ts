@@ -87,6 +87,12 @@ interface OpeningNodeClient {
   released: boolean;
 }
 
+function assertNotReleased(opening: OpeningNodeClient, address: string): void {
+  if (opening.released) {
+    throw new Error(`Connection to ${address} was released while it was opening`);
+  }
+}
+
 class NodeClient extends Valkey {
   private readonly report: (outcome: NodeCommandOutcome) => void;
 
@@ -731,6 +737,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       connecting = false;
       lastError = undefined;
       this.markNodeAnswering(address);
+      assertNotReleased(opening, address);
 
       const connection: NodeConnection = {
         node,
@@ -752,9 +759,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       }
       if (replaced && replaced.client !== client) {
         await this.closeNodeClient(replaced.client);
-      }
-      if (opening.released) {
-        throw new Error(`Connection to ${address} was released while it was opening`);
+        assertNotReleased(opening, address);
       }
 
       this.discoveredNodes.set(storeKey, connection);
