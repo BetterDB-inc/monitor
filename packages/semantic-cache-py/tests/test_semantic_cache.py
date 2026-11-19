@@ -19,6 +19,7 @@ from betterdb_semantic_cache.types import (
     EmbeddingCacheOptions,
     SemanticCacheOptions,
     TelemetryOptions,
+    UsageTrackingOptions,
 )
 
 from .conftest import _ft_info_response, _ft_search_hit, _ft_search_miss, make_client, make_telemetry
@@ -34,6 +35,7 @@ def _make_cache(
     use_default_cost_table: bool = True,
     cost_table: dict | None = None,
     name: str = "test",
+    usage_tracking_enabled: bool = True,
 ) -> tuple[SemanticCache, MagicMock]:
     client = make_client(search_result=search_result)
     embed_fn = AsyncMock(return_value=[0.5, 0.5])
@@ -50,6 +52,7 @@ def _make_cache(
         use_default_cost_table=use_default_cost_table,
         cost_table=cost_table or {},
         discovery=DiscoveryOptions(enabled=False),
+        usage_tracking=UsageTrackingOptions(enabled=usage_tracking_enabled),
     )
     cache = SemanticCache(opts)
 
@@ -361,9 +364,9 @@ async def test_flush_escapes_glob_chars_in_name():
 
 @pytest.mark.asyncio
 async def test_check_batch_ttl_refresh_pipelined():
-    """When default_ttl is set and check_batch() gets hits, all TTL refreshes
-    must be issued in a single pipeline call after the result loop."""
-    cache, client = _make_cache(default_ttl=3600)
+    """When usage tracking is off and default_ttl is set, check_batch() gets hits,
+    all TTL refreshes must be issued in a single pipeline call after the result loop."""
+    cache, client = _make_cache(default_ttl=3600, usage_tracking_enabled=False)
     await cache.initialize()
 
     # Pipeline returns two hits
@@ -387,3 +390,23 @@ async def test_check_batch_ttl_refresh_pipelined():
     # All expire calls should use the configured TTL
     for c in expire_calls:
         assert c.args[1] == 3600
+    client.expire.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_check_batch_ttl_refresh_error_keeps_hits():
+    """A failed opt-out TTL pipeline must not fail a batch that already hit."""
+    cache, client = _make_cache(default_ttl=3600, usage_tracking_enabled=False)
+    await cache.initialize()
+
+    pipe = client.pipeline()
+    pipe.execute = AsyncMock(side_effect=[
+        [
+            ["1", "key1", ["response", "Answer 1", "__score", "0.01"]],
+            ["1", "key2", ["response", "Answer 2", "__score", "0.02"]],
+        ],
+        Exception("expire failed"),
+    ])
+
+    results = await cache.check_batch(["prompt1", "prompt2"])
+    assert [r.hit for r in results] == [True, True]

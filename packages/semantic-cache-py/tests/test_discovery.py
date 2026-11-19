@@ -127,14 +127,14 @@ def _make_manager(
 # ---------------------------------------------------------------------------
 
 class TestBuildSemanticMetadata:
-    def test_capabilities_include_all_three(self) -> None:
+    def test_capabilities_include_entry_analytics(self) -> None:
         meta = build_semantic_metadata(_base_input())
-        assert set(meta['capabilities']) == {
+        assert meta['capabilities'] == [
             'invalidate',
             'similarity_distribution',
             'threshold_adjust',
-        }
-        assert len(meta['capabilities']) == 3
+            'entry_analytics',
+        ]
 
     def test_type_is_semantic_cache(self) -> None:
         meta = build_semantic_metadata(_base_input())
