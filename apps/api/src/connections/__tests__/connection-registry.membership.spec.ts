@@ -653,6 +653,41 @@ describe('ConnectionRegistry membership', () => {
     });
   });
 
+  describe('the client registered under a connection id', () => {
+    const clientOf = (name: string) => ({ name }) as never;
+
+    it('is the one the agent connection was registered with', async () => {
+      const { registry } = build();
+      const client = clientOf('first');
+      await registry.registerAgentConnection('agent-token-1', 'agent', client);
+
+      expect(registry.isRegisteredClient('agent-token-1', client)).toBe(true);
+    });
+
+    it('is no longer the one of an agent connection that was removed', async () => {
+      const { registry } = build();
+      const client = clientOf('first');
+      await registry.registerAgentConnection('agent-token-1', 'agent', client);
+
+      registry.removeAgentConnection('agent-token-1');
+
+      expect(registry.isRegisteredClient('agent-token-1', client)).toBe(false);
+    });
+
+    it('is the new one once the agent connection is registered again under the same id', async () => {
+      const { registry } = build();
+      const first = clientOf('first');
+      const second = clientOf('second');
+      await registry.registerAgentConnection('agent-token-1', 'agent', first);
+      registry.removeAgentConnection('agent-token-1');
+
+      await registry.registerAgentConnection('agent-token-1', 'agent', second);
+
+      expect(registry.isRegisteredClient('agent-token-1', first)).toBe(false);
+      expect(registry.isRegisteredClient('agent-token-1', second)).toBe(true);
+    });
+  });
+
   describe('sentinelDataNodeCredentials', () => {
     it('returns only the data node credentials the seed configures', () => {
       const { registry } = build();

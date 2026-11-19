@@ -212,6 +212,7 @@ describe('AnomalyService', () => {
               else outsideCluster.delete(id);
             }),
             isOutsideCluster: jest.fn((id: string) => outsideCluster.has(id)),
+            isRegisteredClient: jest.fn().mockReturnValue(true),
             findIdObservingNode: jest.fn(
               (nodeId: string) =>
                 [...observedNodeIds].find(([id, observed]) => observed === nodeId && isListed(id))?.[0] ?? null,
@@ -14797,6 +14798,69 @@ describe('AnomalyService', () => {
           });
         });
 
+        describe('when the connection is removed while its nodes are read', () => {
+          const removedWhileRead = async () => {
+            registry().noteObservedNodeId('conn-1', undefined);
+            registry().isRegisteredClient.mockReturnValue(false);
+            return viewOf('primA');
+          };
+          const registeredAgainWhileRead = async () => {
+            const reconnected = {};
+            registry().noteObservedNodeId('conn-1', undefined);
+            registry().isRegisteredClient.mockImplementation((_id: string, client: unknown) => client === reconnected);
+            return viewOf('primA');
+          };
+
+          it('does not tell the connection list the node that read answered with', async () => {
+            await poll();
+            dbClient.getClusterNodes = jest.fn().mockImplementation(removedWhileRead);
+
+            await poll();
+
+            expect(dbClient.getClusterNodes).toHaveBeenCalledTimes(1);
+            expect(registry().getObservedNodeId('conn-1')).toBeUndefined();
+          });
+
+          it('does not tell it either when the read is the early one of a connection not seen reading yet', async () => {
+            dbClient.getClusterNodes = jest
+              .fn()
+              .mockImplementationOnce(removedWhileRead)
+              .mockRejectedValue(new Error('down'));
+
+            await poll();
+
+            expect(registry().getObservedNodeId('conn-1')).toBeUndefined();
+          });
+
+          it('does not tell it either when the connection was registered again under the same id', async () => {
+            await poll();
+            dbClient.getClusterNodes = jest.fn().mockImplementation(registeredAgainWhileRead);
+
+            await poll();
+
+            expect(dbClient.getClusterNodes).toHaveBeenCalledTimes(1);
+            expect(registry().getObservedNodeId('conn-1')).toBeUndefined();
+          });
+
+          it('asks about the client the read was made with', async () => {
+            await poll();
+
+            expect(registry().isRegisteredClient).toHaveBeenLastCalledWith('conn-1', dbClient);
+          });
+
+          it('tells it the node of a read made by the registered client', async () => {
+            await poll();
+            dbClient.getClusterNodes = jest.fn().mockImplementation(removedWhileRead);
+            await poll();
+            registry().isRegisteredClient.mockReturnValue(true);
+            dbClient.getClusterNodes = jest.fn().mockResolvedValue(viewOf('repB'));
+
+            await poll();
+
+            expect(registry().getObservedNodeId('conn-1')).toBe('repB');
+          });
+        });
+
         it('tells the connection list when the connection stops being a cluster', async () => {
           await poll();
           (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
@@ -18182,6 +18246,7 @@ describe('AnomalyService', () => {
               getObservedNodeId: jest.fn(),
               noteOutsideCluster: jest.fn(),
               isOutsideCluster: jest.fn().mockReturnValue(false),
+              isRegisteredClient: jest.fn().mockReturnValue(true),
               findIdObservingNode: jest.fn().mockReturnValue(null),
             },
           },

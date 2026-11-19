@@ -1405,6 +1405,10 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     return config !== undefined && !isRetiredAuto(config);
   }
 
+  isRegisteredClient(id: string, client: DatabasePort): boolean {
+    return this.connections.get(id) === client;
+  }
+
   noteObservedNodeId(id: string, nodeId: string | undefined): void {
     if (nodeId) {
       this.observedNodeIds.set(id, nodeId);

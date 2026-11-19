@@ -2374,7 +2374,7 @@ export class AnomalyService
             shards,
             timestamp,
             isRaft || shards !== undefined,
-            this.savedMembershipOf(ctx.connectionId) === membershipAtRead,
+            this.readIsCurrent(ctx, membershipAtRead),
           );
         }
 
@@ -9630,7 +9630,7 @@ export class AnomalyService
     shards: ClusterShard[] | undefined,
     readAt: number,
     shardsRead = true,
-    membershipUnchanged = true,
+    publishOwnNode = true,
   ): void {
     const zones = this.connectionRegistry.getNodeAvailabilityZones(connectionId);
     const viewKey = this.clusterKeyOfNodes(nodes) ?? connectionId;
@@ -9643,13 +9643,20 @@ export class AnomalyService
       shardsRead,
     );
     const ownNodeId = ownNodeIdOf(nodes);
-    if (ownNodeId && membershipUnchanged) this.connectionRegistry.noteObservedNodeId(connectionId, ownNodeId);
+    if (ownNodeId && publishOwnNode) this.connectionRegistry.noteObservedNodeId(connectionId, ownNodeId);
     this.connectionRegistry.noteOutsideCluster(connectionId, false);
   }
 
   private savedMembershipOf(connectionId: string): string {
     const membership = this.connectionRegistry.getConfig(connectionId)?.membership;
     return membership ? `${membership.nodeId}:${membership.retiredAt ?? ''}` : '';
+  }
+
+  private readIsCurrent(ctx: ConnectionContext, membershipAtRead: string): boolean {
+    return (
+      this.connectionRegistry.isRegisteredClient(ctx.connectionId, ctx.client) &&
+      this.savedMembershipOf(ctx.connectionId) === membershipAtRead
+    );
   }
 
   private forgetClusterNodes(connectionId: string): void {
@@ -9962,7 +9969,7 @@ export class AnomalyService
         undefined,
         readAt,
         false,
-        this.savedMembershipOf(ctx.connectionId) === membershipAtRead,
+        this.readIsCurrent(ctx, membershipAtRead),
       );
     } catch (err) {
       this.logger.debug(
