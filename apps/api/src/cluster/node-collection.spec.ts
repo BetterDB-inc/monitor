@@ -100,6 +100,21 @@ describe('collectionOf with the node each connection reads', () => {
       connectionId: 'seed',
     });
   });
+
+  it('does not count the viewing connection for a node marked as its own when it reads another node', () => {
+    const own = { ...node, flags: ['myself', 'master'] };
+
+    expect(collectionOf(own, 'seed', registered({}), ownNodeIds({ seed: 'node-9' }))).toEqual({ collected: false });
+  });
+
+  it('counts the viewing connection for the node marked as its own when it reads that node', () => {
+    const own = { ...node, flags: ['myself', 'master'] };
+
+    expect(collectionOf(own, 'seed', registered({}), ownNodeIds({ seed: 'node-2' }))).toEqual({
+      collected: true,
+      connectionId: 'seed',
+    });
+  });
 });
 
 describe('collectionOf with the node each connection was seen reading', () => {
@@ -187,6 +202,17 @@ describe('collectionAmong', () => {
     expect(collectionAmong(own, 'seed', connections({}, {}, ['conn-2']))).toEqual({
       collected: true,
       connectionId: 'seed',
+    });
+  });
+
+  it('does not count the viewing connection for a node marked as its own once it was seen reading another', () => {
+    const own = { ...node, flags: ['myself', 'master'] };
+
+    expect(collectionAmong(own, 'seed', connections({ seed: 'node-new' }, {}, ['conn-2']))).toEqual({
+      collected: false,
+    });
+    expect(collectionAmong(own, 'seed', connections({}, { seed: 'node-new' }, ['conn-2']))).toEqual({
+      collected: false,
     });
   });
 });

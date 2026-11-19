@@ -1220,6 +1220,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         credentialStatus: config.credentialStatus,
         credentialError: config.credentialError,
         connectionType: config.host === 'agent' ? 'agent' : (config.connectionType ?? 'direct'),
+        dialsDataNodes: dialsDataNodes(this.zoneMapOwner(config)),
         autoRegisterNodes: config.autoRegisterNodes,
         membership: config.membership,
         nodeAvailabilityZones: this.zoneMapOwner(config).nodeAvailabilityZones,
@@ -1366,6 +1367,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     this.connections.delete(id);
     this.configs.delete(id);
     this.serverlessAgentIds.delete(id);
+    this.observedNodeIds.delete(id);
+    this.outsideCluster.delete(id);
     this.runtimeCapabilityTracker.removeConnection(id);
 
     if (this.defaultId === id) {
@@ -1400,6 +1403,10 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   isListed(id: string): boolean {
     const config = this.configs.get(id);
     return config !== undefined && !isRetiredAuto(config);
+  }
+
+  isRegisteredClient(id: string, client: DatabasePort): boolean {
+    return this.connections.get(id) === client;
   }
 
   noteObservedNodeId(id: string, nodeId: string | undefined): void {
@@ -1550,6 +1557,58 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       throw error;
     }
     this.logger.log(`Auto-registered ${node.source} node ${config.name}`);
+    return config.id;
+  }
+
+  async addNodeConnection(sourceId: string, node: { host: string; port: number }): Promise<string> {
+    const source = this.configs.get(sourceId);
+    if (!source) {
+      throw new NotFoundException(`Connection '${sourceId}' not found.`);
+    }
+    const now = Date.now();
+    const config: DatabaseConnectionConfig = {
+      id: randomUUID(),
+      name: `${source.name} · ${node.host}:${node.port}`,
+      host: node.host,
+      port: node.port,
+      ...dataNodeCredentialsOf(source),
+      dbIndex: 0,
+      tls: source.tls,
+      tlsConfig: source.tlsConfig,
+      authMode: source.authMode,
+      connectionType: 'direct',
+      autoRegisterNodes: false,
+      isDefault: false,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const adapter = this.createAdapter(config);
+    try {
+      await connectWithin(adapter, CHILD_CONNECT_TIMEOUT_MS);
+    } catch (error) {
+      await adapter.disconnect().catch(() => { });
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(`Could not connect to ${node.host}:${node.port}: ${errorMsg}`);
+    }
+    try {
+      if (this.secretsAreMemoryOnly(source)) {
+        this.memoryOnlySecrets.add(config.id);
+        this.logger.warn(`${config.name}: connected in memory only (ENCRYPTION_KEY is not set; inherited secrets are not written)`);
+      } else {
+        await this.storage.saveConnection(this.encryptConfig(config));
+      }
+      this.configs.set(config.id, { ...config, credentialStatus: 'valid' });
+      this.connections.set(config.id, adapter);
+    } catch (error) {
+      this.memoryOnlySecrets.delete(config.id);
+      this.configs.delete(config.id);
+      this.connections.delete(config.id);
+      await adapter.disconnect().catch(() => { });
+      this.logger.error(`Failed to persist node connection ${config.name}: ${error instanceof Error ? error.message : error}`);
+      throw error;
+    }
+    this.discoveredInstances?.forget(config.host, config.port);
+    this.logger.log(`Connected cluster node ${config.name}`);
     return config.id;
   }
 

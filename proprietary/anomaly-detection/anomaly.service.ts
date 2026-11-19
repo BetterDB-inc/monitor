@@ -2356,6 +2356,7 @@ export class AnomalyService
         // evidence must survive a probe blip or a flapping shard could never
         // accumulate enough observations to fire.
         const shardsPromise = isRaft ? undefined : this.safeGetClusterShards(ctx);
+        const membershipAtRead = this.savedMembershipOf(ctx.connectionId);
         let nodes: ClusterNode[] | undefined;
         try {
           nodes = await ctx.client.getClusterNodes();
@@ -2367,7 +2368,14 @@ export class AnomalyService
         }
         const shards = await shardsPromise;
         if (nodes) {
-          this.rememberClusterNodes(ctx.connectionId, nodes, shards, timestamp, isRaft || shards !== undefined);
+          this.rememberClusterNodes(
+            ctx.connectionId,
+            nodes,
+            shards,
+            timestamp,
+            isRaft || shards !== undefined,
+            this.readIsCurrent(ctx, membershipAtRead),
+          );
         }
 
         // Gossip-race detectors only: under Raft, topology is consensus-managed.
@@ -9622,6 +9630,7 @@ export class AnomalyService
     shards: ClusterShard[] | undefined,
     readAt: number,
     shardsRead = true,
+    publishOwnNode = true,
   ): void {
     const zones = this.connectionRegistry.getNodeAvailabilityZones(connectionId);
     const viewKey = this.clusterKeyOfNodes(nodes) ?? connectionId;
@@ -9634,8 +9643,20 @@ export class AnomalyService
       shardsRead,
     );
     const ownNodeId = ownNodeIdOf(nodes);
-    if (ownNodeId) this.connectionRegistry.noteObservedNodeId(connectionId, ownNodeId);
+    if (ownNodeId && publishOwnNode) this.connectionRegistry.noteObservedNodeId(connectionId, ownNodeId);
     this.connectionRegistry.noteOutsideCluster(connectionId, false);
+  }
+
+  private savedMembershipOf(connectionId: string): string {
+    const membership = this.connectionRegistry.getConfig(connectionId)?.membership;
+    return membership ? `${membership.nodeId}:${membership.retiredAt ?? ''}` : '';
+  }
+
+  private readIsCurrent(ctx: ConnectionContext, membershipAtRead: string): boolean {
+    return (
+      this.connectionRegistry.isRegisteredClient(ctx.connectionId, ctx.client) &&
+      this.savedMembershipOf(ctx.connectionId) === membershipAtRead
+    );
   }
 
   private forgetClusterNodes(connectionId: string): void {
@@ -9935,13 +9956,21 @@ export class AnomalyService
 
   private async learnClusterKey(ctx: ConnectionContext, readAt: number): Promise<void> {
     try {
+      const membershipAtRead = this.savedMembershipOf(ctx.connectionId);
       const nodes = await withTimeout(
         ctx.client.getClusterNodes(),
         this.infoTimeoutMs,
         'CLUSTER NODES timed out',
       );
       this.rememberClusterKey(ctx.connectionId, nodes);
-      this.rememberClusterNodes(ctx.connectionId, nodes, undefined, readAt, false);
+      this.rememberClusterNodes(
+        ctx.connectionId,
+        nodes,
+        undefined,
+        readAt,
+        false,
+        this.readIsCurrent(ctx, membershipAtRead),
+      );
     } catch (err) {
       this.logger.debug(
         `Failed to read cluster nodes for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,

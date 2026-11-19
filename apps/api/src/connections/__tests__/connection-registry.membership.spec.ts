@@ -628,6 +628,66 @@ describe('ConnectionRegistry membership', () => {
     });
   });
 
+  describe('an agent connection that is removed', () => {
+    const agent = { id: 'agent-token-1', host: 'agent', port: 0 };
+
+    it('forgets the node it was seen reading', () => {
+      const { registry } = build();
+      put(registry, agent);
+      registry.noteObservedNodeId('agent-token-1', 'node-n');
+
+      registry.removeAgentConnection('agent-token-1');
+
+      expect(registry.getObservedNodeId('agent-token-1')).toBeUndefined();
+      expect(registry.findIdObservingNode('node-n')).toBeNull();
+    });
+
+    it('forgets that it answered outside a cluster', () => {
+      const { registry } = build();
+      put(registry, agent);
+      registry.noteOutsideCluster('agent-token-1', true);
+
+      registry.removeAgentConnection('agent-token-1');
+
+      expect(registry.isOutsideCluster('agent-token-1')).toBe(false);
+    });
+  });
+
+  describe('the client registered under a connection id', () => {
+    const clientOf = (name: string) => ({ name }) as never;
+
+    it('is the one the agent connection was registered with', async () => {
+      const { registry } = build();
+      const client = clientOf('first');
+      await registry.registerAgentConnection('agent-token-1', 'agent', client);
+
+      expect(registry.isRegisteredClient('agent-token-1', client)).toBe(true);
+    });
+
+    it('is no longer the one of an agent connection that was removed', async () => {
+      const { registry } = build();
+      const client = clientOf('first');
+      await registry.registerAgentConnection('agent-token-1', 'agent', client);
+
+      registry.removeAgentConnection('agent-token-1');
+
+      expect(registry.isRegisteredClient('agent-token-1', client)).toBe(false);
+    });
+
+    it('is the new one once the agent connection is registered again under the same id', async () => {
+      const { registry } = build();
+      const first = clientOf('first');
+      const second = clientOf('second');
+      await registry.registerAgentConnection('agent-token-1', 'agent', first);
+      registry.removeAgentConnection('agent-token-1');
+
+      await registry.registerAgentConnection('agent-token-1', 'agent', second);
+
+      expect(registry.isRegisteredClient('agent-token-1', first)).toBe(false);
+      expect(registry.isRegisteredClient('agent-token-1', second)).toBe(true);
+    });
+  });
+
   describe('sentinelDataNodeCredentials', () => {
     it('returns only the data node credentials the seed configures', () => {
       const { registry } = build();
@@ -661,6 +721,31 @@ describe('ConnectionRegistry membership', () => {
     const { registry } = build();
     put(registry, { ...seed, autoRegisterNodes: true });
     expect(registry.list()[0]).toMatchObject({ autoRegisterNodes: true });
+  });
+
+  it.each([
+    ['a direct connection', { ...seed }, true],
+    ['an agent connection', { ...seed, host: 'agent' }, false],
+    ['a connection fed by pushed metrics', { ...seed, connectionType: 'external' as const }, false],
+  ])('says in list() whether %s opens its own connections to data nodes', (_what, config, dials) => {
+    const { registry } = build();
+    put(registry, config);
+    expect(registry.list()[0]).toMatchObject({ dialsDataNodes: dials });
+  });
+
+  it.each([
+    ['dials', { ...seed }, true],
+    ['does not dial', { ...seed, connectionType: 'external' as const }, false],
+  ])('answers for a cluster node by its seed, which %s', (_what, seedConfig, dials) => {
+    const { registry } = build();
+    put(registry, seedConfig);
+    put(registry, {
+      id: 'child',
+      host: '10.0.0.2',
+      port: 7002,
+      membership: { seedId: 'seed', nodeId: 'n2', origin: 'auto', source: 'cluster' },
+    });
+    expect(registry.list().find((status) => status.id === 'child')).toMatchObject({ dialsDataNodes: dials });
   });
 
   it('reads the auto-register env default as a boolean flag', () => {

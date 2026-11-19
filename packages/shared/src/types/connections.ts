@@ -432,6 +432,7 @@ export interface ConnectionStatus {
   updatedAt?: number;
   isConnected: boolean;
   connectionType?: 'direct' | 'agent' | 'external';
+  dialsDataNodes?: boolean;
   autoRegisterNodes?: boolean;
   membership?: TopologyMembership;
   nodeAvailabilityZones?: NodeAvailabilityZones;
