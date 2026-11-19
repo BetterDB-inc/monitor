@@ -46,6 +46,7 @@ jest.mock('iovalkey', () => {
 
 const COOL_OFF_MS = 30_000;
 const CONNECT_TIMEOUT_MS = 5_000;
+const MARK_LIMIT = 512;
 
 const answered = (): FakeCommand => ({ promise: Promise.resolve('OK') });
 const timedOut = (): FakeCommand => ({ promise: Promise.reject(new Error('Command timed out')) });
@@ -246,6 +247,34 @@ describe('ClusterDiscoveryService unresponsive node', () => {
     await send(second, answered());
 
     await expect(service.getAddressConnection('10.0.0.1', 6379, 'seed')).resolves.toBe(second);
+  });
+
+  it('still refuses a silent node after another node timed out much later', async () => {
+    await silence();
+    await jest.advanceTimersByTimeAsync(2 * COOL_OFF_MS + 1_000);
+    const other = await service.getNodeConnection(healthy.id, 'seed');
+
+    await send(other, timedOut());
+
+    await expect(service.getNodeConnection(silent.id, 'seed')).rejects.toThrow('10.0.0.1:6379 is not answering');
+  });
+
+  it('forgets the node with the oldest retry time once more than 512 are marked', async () => {
+    const hostOf = (index: number): string => `10.1.${Math.floor(index / 256)}.${index % 256}`;
+    const silenceAddress = async (index: number): Promise<void> => {
+      const client = await service.getAddressConnection(hostOf(index), 6379, 'seed');
+      await send(client, timedOut());
+      jest.advanceTimersByTime(1);
+    };
+    const held = await service.getReplicaConnection(hostOf(0), 6379, 'seed');
+    for (let index = 0; index < MARK_LIMIT; index++) await silenceAddress(index);
+    await send(held, timedOut());
+
+    await silenceAddress(MARK_LIMIT);
+
+    await expect(service.getAddressConnection(hostOf(0), 6379, 'seed')).rejects.toThrow('is not answering');
+    await expect(service.getAddressConnection(hostOf(1), 6379, 'seed')).resolves.toBeDefined();
+    await expect(service.getAddressConnection(hostOf(2), 6379, 'seed')).rejects.toThrow('is not answering');
   });
 
   describe('when a client connects after its connection is gone', () => {

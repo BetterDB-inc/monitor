@@ -72,6 +72,7 @@ function nodeCommandTimeoutMs(): number {
 }
 
 const UNRESPONSIVE_NODE_COOL_OFF_MS = 30_000;
+const MAX_UNRESPONSIVE_NODES = 512;
 const COMMAND_TIMED_OUT = 'Command timed out';
 const CONNECTION_TIMED_OUT = 'Connection timeout';
 
@@ -552,16 +553,16 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   }
 
   private markNodeUnresponsive(address: string, client?: Valkey): void {
-    const now = Date.now();
-    for (const [other, until] of this.unresponsiveUntil) {
-      if (until + UNRESPONSIVE_NODE_COOL_OFF_MS < now) this.unresponsiveUntil.delete(other);
-    }
     if (!this.unresponsiveUntil.has(address)) {
       this.logger.warn(
         `Node ${address} is not answering; skipping it and trying again every ${UNRESPONSIVE_NODE_COOL_OFF_MS / 1000}s`,
       );
     }
-    this.unresponsiveUntil.set(address, now + UNRESPONSIVE_NODE_COOL_OFF_MS);
+    this.unresponsiveUntil.set(address, Date.now() + UNRESPONSIVE_NODE_COOL_OFF_MS);
+    if (this.unresponsiveUntil.size > MAX_UNRESPONSIVE_NODES) {
+      const [oldest] = [...this.unresponsiveUntil].reduce((first, next) => (next[1] < first[1] ? next : first));
+      this.unresponsiveUntil.delete(oldest);
+    }
     if (client) this.evictNodeClient(client);
   }
 
