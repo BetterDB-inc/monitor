@@ -675,6 +675,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         ...this.nodeClientOptions(ownerId, node, host, port, { username, password }),
         connectTimeout: this.CONNECTION_TIMEOUT,
         commandTimeout: nodeCommandTimeoutMs(),
+        enableReadyCheck: true,
       },
       (outcome) => {
         if (outcome === 'answered') this.markNodeAnswering(address);
