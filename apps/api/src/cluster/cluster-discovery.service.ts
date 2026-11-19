@@ -527,14 +527,6 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     return open();
   }
 
-  /**
-   * Fails fast for a node that let a command or a connect time out, so no
-   * caller waits out the same silent node again. After the cool-off the node
-   * is tried again in the background with `open`, while callers keep failing
-   * fast; a connect that succeeds or any reply from the node clears the mark,
-   * and a connect that fails for another reason hands the node back to the
-   * callers so they see that error.
-   */
   private assertNodeAnswers(host: string, port: number, open: () => Promise<Valkey>): void {
     const address = `${host}:${port}`;
     let until = this.unresponsiveUntil.get(address);
