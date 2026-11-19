@@ -81,6 +81,11 @@ function isConnectTimeout(error: unknown): boolean {
 
 type NodeCommandOutcome = 'answered' | 'timedOut';
 
+interface OpeningNodeClient {
+  ownerId: string | undefined;
+  released: boolean;
+}
+
 class NodeClient extends Valkey {
   private readonly report: (outcome: NodeCommandOutcome) => void;
 
@@ -118,6 +123,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   private readonly OWN_NODE_IDLE_MS = 5 * 60_000;
   private readonly POOL_LIMIT_WARN_INTERVAL_MS = 60_000;
   private pendingNodeClients = 0;
+  private openingNodeClients = new Set<OpeningNodeClient>();
   private poolLimitWarnedAt = 0;
   private poolLimitClosedSinceWarning = 0;
   private unresponsiveUntil: Map<string, number> = new Map();
@@ -645,11 +651,17 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     ownerId: string | undefined,
     credentials: { username: string; password: string },
   ): Promise<Valkey> {
-    await this.reserveNodeClientSlot();
+    const opening: OpeningNodeClient = { ownerId, released: false };
+    this.openingNodeClients.add(opening);
     try {
-      return await this.connectNodeClient(key, node, host, port, ownerId, credentials);
+      await this.reserveNodeClientSlot();
+      try {
+        return await this.connectNodeClient(key, node, host, port, opening, credentials);
+      } finally {
+        this.releaseNodeClientSlot();
+      }
     } finally {
-      this.releaseNodeClientSlot();
+      this.openingNodeClients.delete(opening);
     }
   }
 
@@ -658,9 +670,10 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     node: DiscoveredNode,
     host: string,
     port: number,
-    ownerId: string | undefined,
+    opening: OpeningNodeClient,
     { username, password }: { username: string; password: string },
   ): Promise<Valkey> {
+    const { ownerId } = opening;
     const address = `${host}:${port}`;
     const client: Valkey = new NodeClient(
       {
@@ -738,6 +751,9 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       }
       if (replaced && replaced.client !== client) {
         await this.closeNodeClient(replaced.client);
+      }
+      if (opening.released) {
+        throw new Error(`Connection to ${address} was released while it was opening`);
       }
 
       this.discoveredNodes.set(storeKey, connection);
@@ -886,6 +902,9 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   async releaseConnection(connectionId: string): Promise<void> {
     const owned = [...this.discoveredNodes].filter(([, connection]) => connection.connectionId === connectionId);
     for (const [key] of owned) this.discoveredNodes.delete(key);
+    for (const opening of this.openingNodeClients) {
+      if (opening.ownerId === connectionId) opening.released = true;
+    }
     this.discoveryCacheByConnection.delete(connectionId);
     this.discoveryInFlight.delete(connectionId);
     this.releaseOwnNodeClient(connectionId);
@@ -916,6 +935,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
 
   async disconnectAll(): Promise<void> {
     this.logger.log(`Disconnecting from ${this.discoveredNodes.size} nodes`);
+    for (const opening of this.openingNodeClients) opening.released = true;
 
     await Promise.allSettled(
       Array.from(this.discoveredNodes.values(), (connection) => this.closeNodeClient(connection.client)),

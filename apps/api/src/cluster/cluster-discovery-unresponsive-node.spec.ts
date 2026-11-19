@@ -247,4 +247,73 @@ describe('ClusterDiscoveryService unresponsive node', () => {
 
     await expect(service.getAddressConnection('10.0.0.1', 6379, 'seed')).resolves.toBe(second);
   });
+
+  describe('when a client connects after its connection is gone', () => {
+    let connected: () => void;
+
+    const holdNextConnect = (): void => {
+      nextConnect = () =>
+        new Promise<void>((resolve) => {
+          connected = resolve;
+        });
+    };
+
+    it('closes a background retry that connected after its connection was released', async () => {
+      await silence();
+      await jest.advanceTimersByTimeAsync(COOL_OFF_MS);
+      holdNextConnect();
+      await expect(service.getNodeConnection(silent.id, 'seed')).rejects.toThrow('is not answering');
+      await jest.advanceTimersByTimeAsync(0);
+      expect(created).toHaveLength(2);
+
+      await service.releaseConnection('seed');
+      connected();
+      await jest.advanceTimersByTimeAsync(0);
+
+      expect(service.getConnectionPoolSize()).toBe(0);
+      expect(created[1].status).toBe('end');
+    });
+
+    it('refuses a caller whose client connected after its connection was released', async () => {
+      holdNextConnect();
+      const connecting = service.getNodeConnection(healthy.id, 'seed');
+      const failed = expect(connecting).rejects.toThrow('was released while it was opening');
+      await jest.advanceTimersByTimeAsync(0);
+      expect(created).toHaveLength(1);
+
+      await service.releaseConnection('seed');
+      connected();
+      await failed;
+
+      expect(service.getConnectionPoolSize()).toBe(0);
+      expect(created[0].status).toBe('end');
+    });
+
+    it('closes a client that connected after the service shut down', async () => {
+      holdNextConnect();
+      const connecting = service.getNodeConnection(healthy.id, 'seed');
+      const failed = expect(connecting).rejects.toThrow('was released while it was opening');
+      await jest.advanceTimersByTimeAsync(0);
+      expect(created).toHaveLength(1);
+
+      await service.disconnectAll();
+      connected();
+      await failed;
+
+      expect(service.getConnectionPoolSize()).toBe(0);
+      expect(created[0].status).toBe('end');
+    });
+
+    it('keeps a client of another connection that was not released', async () => {
+      holdNextConnect();
+      const connecting = service.getNodeConnection(healthy.id, 'seed');
+      await jest.advanceTimersByTimeAsync(0);
+
+      await service.releaseConnection('other');
+      connected();
+
+      await expect(connecting).resolves.toBe(created[0]);
+      expect(service.getConnectionPoolSize()).toBe(1);
+    });
+  });
 });
