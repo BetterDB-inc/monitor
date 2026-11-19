@@ -231,6 +231,14 @@ resource "aws_apigatewayv2_route" "get_tenant_by_subdomain" {
   authorizer_id      = aws_apigatewayv2_authorizer.api_key.id
 }
 
+resource "aws_apigatewayv2_route" "get_tenant_status" {
+  api_id             = aws_apigatewayv2_api.entitlement.id
+  route_key          = "GET /tenants/by-subdomain/{subdomain}/status"
+  target             = "integrations/${aws_apigatewayv2_integration.entitlement.id}"
+  authorization_type = "CUSTOM"
+  authorizer_id      = aws_apigatewayv2_authorizer.api_key.id
+}
+
 resource "aws_apigatewayv2_route" "get_tenant_by_domain" {
   api_id             = aws_apigatewayv2_api.entitlement.id
   route_key          = "GET /tenants/by-domain/{domain}"
