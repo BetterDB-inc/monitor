@@ -3,11 +3,17 @@ import Valkey from 'iovalkey';
 import { ClusterDiscoveryService } from './cluster-discovery.service';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 
+let mockConnectMs = 0;
+
 jest.mock('iovalkey', () => {
   return jest.fn().mockImplementation(() => {
     const client = {
       status: 'ready',
-      connect: jest.fn().mockResolvedValue(undefined),
+      connect: jest.fn().mockImplementation(() =>
+        mockConnectMs > 0
+          ? new Promise<void>((resolve) => setTimeout(resolve, mockConnectMs))
+          : Promise.resolve(),
+      ),
       quit: jest.fn().mockImplementation(async () => {
         client.status = 'end';
       }),
@@ -25,6 +31,7 @@ const POOL_LIMIT = 512;
 const NODE_COUNT = 600;
 const COMMAND_TIMEOUT_MS = 5000;
 const STEP_MS = 20;
+const CONNECT_MS = 50;
 const START = 1_000_000;
 
 describe('ClusterDiscoveryService node client limit', () => {
@@ -85,6 +92,8 @@ describe('ClusterDiscoveryService node client limit', () => {
   });
 
   afterEach(async () => {
+    mockConnectMs = 0;
+    jest.useRealTimers();
     jest.restoreAllMocks();
     await service.disconnectAll();
   });
@@ -101,6 +110,26 @@ describe('ClusterDiscoveryService node client limit', () => {
 
     expect(clients.filter((client) => client.status !== 'ready')).toHaveLength(0);
     expect(new Set(clients).size).toBe(NODE_COUNT);
+  });
+
+  it('connects the clients over the limit at the same time as the others', async () => {
+    jest.useFakeTimers();
+    mockConnectMs = CONNECT_MS;
+    let served = 0;
+    const all = Promise.all(
+      nodes.map((node) =>
+        service.getNodeConnection(node.id, 'seed').then(() => {
+          served += 1;
+        }),
+      ),
+    );
+
+    await jest.advanceTimersByTimeAsync(CONNECT_MS);
+    const servedAfterOneConnect = served;
+    await jest.advanceTimersByTimeAsync(CONNECT_MS * NODE_COUNT);
+    await all;
+
+    expect(servedAfterOneConnect).toBe(NODE_COUNT);
   });
 
   it('opens no new client when the same callers ask again', async () => {

@@ -137,7 +137,6 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   private poolLimitWarnedAt = 0;
   private poolLimitClosedSinceWarning = 0;
   private unresponsiveUntil: Map<string, number> = new Map();
-  private nodeClientSlotWaiters: Array<() => void> = [];
 
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
@@ -624,15 +623,11 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       }
       const oldestNodeId = this.findOldestConnection(Date.now() - nodeCommandTimeoutMs());
       const oldest = oldestNodeId ? this.discoveredNodes.get(oldestNodeId) : undefined;
-      if (oldestNodeId && oldest) {
-        this.logger.debug(`Closing oldest connection to ${oldestNodeId} to make room for new connection`);
-        this.poolLimitClosedSinceWarning += 1;
-        this.discoveredNodes.delete(oldestNodeId);
-        void this.closeNodeClient(oldest.client).catch(() => undefined);
-        continue;
-      }
-      if (this.pendingNodeClients === 0) break;
-      await new Promise<void>((resolve) => this.nodeClientSlotWaiters.push(resolve));
+      if (!oldestNodeId || !oldest) break;
+      this.logger.debug(`Closing oldest connection to ${oldestNodeId} to make room for new connection`);
+      this.poolLimitClosedSinceWarning += 1;
+      this.discoveredNodes.delete(oldestNodeId);
+      void this.closeNodeClient(oldest.client).catch(() => undefined);
     }
     this.pendingNodeClients += 1;
   }
@@ -651,7 +646,6 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
 
   private releaseNodeClientSlot(): void {
     this.pendingNodeClients -= 1;
-    for (const wake of this.nodeClientSlotWaiters.splice(0)) wake();
   }
 
   private async openNodeClient(
