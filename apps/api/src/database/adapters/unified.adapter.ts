@@ -498,6 +498,10 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
         this._client.disconnect();
         this._client = null;
       }
+      if (this.cliClient) {
+        this.cliClient.disconnect();
+        this.cliClient = null;
+      }
       this.connectHost = this.config.host;
       this.connectPort = this.config.port;
     }

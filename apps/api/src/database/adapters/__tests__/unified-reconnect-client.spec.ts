@@ -1,5 +1,5 @@
 import { createServer, type AddressInfo, type Server, type Socket } from 'net';
-import { UnifiedDatabaseAdapter } from '../unified.adapter';
+import { UnifiedDatabaseAdapter, type UnifiedDatabaseAdapterConfig } from '../unified.adapter';
 
 const SERVER_INFO = '# Server\r\nredis_version:7.2.0\r\n';
 
@@ -7,6 +7,7 @@ describe('UnifiedDatabaseAdapter reconnecting its main client', () => {
   let server: Server;
   let sockets: Socket[];
   let adapter: UnifiedDatabaseAdapter | undefined;
+  let serverInfo: string;
 
   const bulk = (text: string): string => `$${Buffer.byteLength(text)}\r\n${text}\r\n`;
 
@@ -19,7 +20,7 @@ describe('UnifiedDatabaseAdapter reconnecting its main client', () => {
   const replyTo = (command: string): string => {
     const name = command.split('\r\n')[2]?.toUpperCase();
     if (name === 'PING') return '+PONG\r\n';
-    if (name === 'INFO') return bulk(SERVER_INFO);
+    if (name === 'INFO') return bulk(serverInfo);
     if (name === 'CONFIG') return `*2\r\n${bulk('maxmemory')}${bulk('0')}`;
     return '+OK\r\n';
   };
@@ -33,6 +34,7 @@ describe('UnifiedDatabaseAdapter reconnecting its main client', () => {
   beforeEach(async () => {
     sockets = [];
     adapter = undefined;
+    serverInfo = SERVER_INFO;
     server = createServer((socket) => {
       sockets.push(socket);
       socket.on('error', () => undefined);
@@ -49,11 +51,12 @@ describe('UnifiedDatabaseAdapter reconnecting its main client', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
-  const connectWithCliSession = async (): Promise<UnifiedDatabaseAdapter> => {
-    adapter = new UnifiedDatabaseAdapter({
-      host: '127.0.0.1',
-      port: (server.address() as AddressInfo).port,
-    });
+  const serverPort = (): number => (server.address() as AddressInfo).port;
+
+  const connectWithCliSession = async (
+    config: UnifiedDatabaseAdapterConfig = { host: '127.0.0.1', port: serverPort() },
+  ): Promise<UnifiedDatabaseAdapter> => {
+    adapter = new UnifiedDatabaseAdapter(config);
     await adapter.connect();
     await adapter.call('PING', [], { cli: true });
     return adapter;
@@ -80,5 +83,36 @@ describe('UnifiedDatabaseAdapter reconnecting its main client', () => {
     expect(cli.destroyed).toBe(false);
     await expect(connected.call('PING', [], { cli: true })).resolves.toBe('PONG');
     expect(sockets).toHaveLength(3);
+  });
+
+  it('closes the CLI connection when the reconnect fails and its SSH tunnel is closed', async () => {
+    const sshTunnelService = {
+      createTunnel: jest.fn().mockImplementation(async () => serverPort()),
+      closeTunnel: jest.fn().mockResolvedValue(undefined),
+    };
+    const connected = await connectWithCliSession({
+      host: 'db.internal',
+      port: 6379,
+      sshTunnel: {
+        enabled: true,
+        host: 'bastion.internal',
+        port: 22,
+        username: 'monitor',
+        authMethod: 'password',
+        password: 'not-used',
+      },
+      sshTunnelService:
+        sshTunnelService as unknown as UnifiedDatabaseAdapterConfig['sshTunnelService'],
+    });
+    const [, cli] = sockets;
+    serverInfo = '';
+
+    await expect(connected.reconnectClient()).rejects.toThrow('Could not detect database version');
+
+    expect(sshTunnelService.closeTunnel).toHaveBeenCalledTimes(1);
+    await expect(connected.call('PING', [], { cli: true })).rejects.toThrow(
+      'SSH tunnel is not established',
+    );
+    await closedByClient(cli);
   });
 });
