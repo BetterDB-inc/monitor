@@ -651,6 +651,12 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     }
   }
 
+  async reconnectClient(): Promise<void> {
+    this._client?.disconnect();
+    this.connected = false;
+    await this.connect();
+  }
+
   async pingOnNewConnection(timeoutMs: number): Promise<boolean> {
     if (this.usesTunnel && !this.tunnelActive) {
       return false;

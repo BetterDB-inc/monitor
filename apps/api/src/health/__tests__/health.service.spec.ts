@@ -289,6 +289,7 @@ describe('HealthService ping deadline', () => {
     connect: jest.Mock;
     disconnect: jest.Mock;
     pingOnNewConnection?: jest.Mock;
+    reconnectClient?: jest.Mock;
   };
   let webhooks: { dispatchHealthChange: jest.Mock };
   let config: { host: string; port: number; connectionType?: string };
@@ -573,6 +574,18 @@ describe('HealthService ping deadline', () => {
 
       expect(client.disconnect).toHaveBeenCalledTimes(1);
       expect(client.connect).toHaveBeenCalledTimes(1);
+      expect(webhooks.dispatchHealthChange).not.toHaveBeenCalled();
+    });
+
+    it('reconnects only the main client when the adapter can, so a CLI session stays open', async () => {
+      client.reconnectClient = jest.fn().mockResolvedValue(undefined);
+      const service = build();
+      for (let check = 1; check <= QUIET_RECONNECT_AFTER_MISSES; check++) {
+        await pollerCheckAfterDeadline(service);
+      }
+
+      expect(client.reconnectClient).toHaveBeenCalledTimes(1);
+      expect(client.disconnect).not.toHaveBeenCalled();
       expect(webhooks.dispatchHealthChange).not.toHaveBeenCalled();
     });
 

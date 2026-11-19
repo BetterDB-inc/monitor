@@ -190,9 +190,13 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
         this.logger.warn(
           `${connectionId} answers on a new connection but its client got no ping answer for ${missed} checks in a row; reconnecting the client`,
         );
-        await withTimeout(client.disconnect(), this.RECONNECT_TIMEOUT_MS).catch(() => undefined);
         this.missedPings.delete(connectionId);
-        await this.tryReconnect(connectionId);
+        if (client.reconnectClient) {
+          await withTimeout(client.reconnectClient(), this.RECONNECT_TIMEOUT_MS).catch(() => undefined);
+        } else {
+          await withTimeout(client.disconnect(), this.RECONNECT_TIMEOUT_MS).catch(() => undefined);
+          await this.tryReconnect(connectionId);
+        }
       }
       return false;
     }
