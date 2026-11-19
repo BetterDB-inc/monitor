@@ -619,7 +619,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         await this.cleanupIdleConnections(this.HEALTH_CHECK_INTERVAL);
         continue;
       }
-      const oldestNodeId = this.findOldestConnection();
+      const oldestNodeId = this.findOldestConnection(Date.now() - nodeCommandTimeoutMs());
       const oldest = oldestNodeId ? this.discoveredNodes.get(oldestNodeId) : undefined;
       if (oldestNodeId && oldest) {
         this.logger.debug(`Closing oldest connection to ${oldestNodeId} to make room for new connection`);
@@ -628,6 +628,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         void this.closeNodeClient(oldest.client).catch(() => undefined);
         continue;
       }
+      if (this.pendingNodeClients === 0) break;
       await new Promise<void>((resolve) => this.nodeClientSlotWaiters.push(resolve));
     }
     this.pendingNodeClients += 1;
@@ -988,9 +989,9 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     }
   }
 
-  private findOldestConnection(): string | null {
+  private findOldestConnection(handedOutBefore: number): string | null {
     let oldestNodeId: string | null = null;
-    let oldestTime = Number.MAX_SAFE_INTEGER;
+    let oldestTime = handedOutBefore;
 
     for (const [nodeId, connection] of this.discoveredNodes.entries()) {
       if (connection.lastHealthCheck < oldestTime) {

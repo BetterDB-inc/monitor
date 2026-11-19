@@ -23,6 +23,9 @@ jest.mock('iovalkey', () => {
 
 const POOL_LIMIT = 512;
 const NODE_COUNT = 600;
+const COMMAND_TIMEOUT_MS = 5000;
+const STEP_MS = 20;
+const START = 1_000_000;
 
 describe('ClusterDiscoveryService node client limit', () => {
   let service: ClusterDiscoveryService;
@@ -41,13 +44,26 @@ describe('ClusterDiscoveryService node client limit', () => {
     slots: [[index, index]],
   }));
 
+  const spare = { ...nodes[0], id: 'node-spare', address: '10.9.9.9:6379', slots: [[NODE_COUNT, NODE_COUNT]] };
+
+  const createdClients = (): number => (Valkey as unknown as jest.Mock).mock.results.length;
+
   const openClients = (): number =>
     (Valkey as unknown as jest.Mock).mock.results.filter((result) => result.value.status === 'ready').length;
+
+  const askOneAfterAnother = async (now: jest.SpyInstance): Promise<void> => {
+    for (const [index, node] of nodes.entries()) {
+      now.mockReturnValue(START + index * STEP_MS);
+      await service.getNodeConnection(node.id, 'seed');
+    }
+  };
+
+  const askAtTheSameTime = () => Promise.all(nodes.map((node) => service.getNodeConnection(node.id, 'seed')));
 
   beforeEach(async () => {
     (Valkey as unknown as jest.Mock).mockClear();
     const adapter = {
-      getClusterNodes: jest.fn().mockResolvedValue(nodes),
+      getClusterNodes: jest.fn().mockResolvedValue([...nodes, spare]),
       getClusterShards: jest.fn().mockResolvedValue([]),
       getClient: jest.fn().mockReturnValue({ options: { username: '', password: '' } }),
     };
@@ -69,21 +85,55 @@ describe('ClusterDiscoveryService node client limit', () => {
   });
 
   afterEach(async () => {
+    jest.restoreAllMocks();
     await service.disconnectAll();
   });
 
   it('keeps the pool at the limit when callers ask one after another', async () => {
-    for (const node of nodes) await service.getNodeConnection(node.id, 'seed');
+    await askOneAfterAnother(jest.spyOn(Date, 'now'));
 
-    expect(service.getConnectionPoolSize()).toBeLessThanOrEqual(POOL_LIMIT);
-    expect(openClients()).toBeLessThanOrEqual(POOL_LIMIT);
+    expect(service.getConnectionPoolSize()).toBe(POOL_LIMIT);
+    expect(openClients()).toBe(POOL_LIMIT);
   });
 
-  it('keeps the pool at the limit when callers ask at the same time', async () => {
-    await Promise.all(nodes.map((node) => service.getNodeConnection(node.id, 'seed')));
+  it('hands every caller a usable client when more callers than the limit ask at the same time', async () => {
+    const clients = await askAtTheSameTime();
 
-    expect(service.getConnectionPoolSize()).toBeLessThanOrEqual(POOL_LIMIT);
-    expect(openClients()).toBeLessThanOrEqual(POOL_LIMIT);
+    expect(clients.filter((client) => client.status !== 'ready')).toHaveLength(0);
+    expect(new Set(clients).size).toBe(NODE_COUNT);
+  });
+
+  it('opens no new client when the same callers ask again', async () => {
+    await askAtTheSameTime();
+
+    const clients = await askAtTheSameTime();
+
+    expect(createdClients()).toBe(NODE_COUNT);
+    expect(clients.filter((client) => client.status !== 'ready')).toHaveLength(0);
+  });
+
+  it('does not close a client that was handed out again within the command timeout', async () => {
+    const now = jest.spyOn(Date, 'now').mockReturnValue(START);
+    await Promise.all(nodes.slice(0, POOL_LIMIT).map((node) => service.getNodeConnection(node.id, 'seed')));
+    now.mockReturnValue(START + COMMAND_TIMEOUT_MS + 1);
+    const first = await service.getNodeConnection(nodes[0].id, 'seed');
+
+    await service.getNodeConnection(spare.id, 'seed');
+
+    expect(first.status).toBe('ready');
+    expect(service.getConnectionPoolSize()).toBe(POOL_LIMIT);
+  });
+
+  it('brings the pool back to the limit once the clients are older than the command timeout', async () => {
+    const now = jest.spyOn(Date, 'now').mockReturnValue(START);
+    await askAtTheSameTime();
+    expect(service.getConnectionPoolSize()).toBe(NODE_COUNT);
+
+    now.mockReturnValue(START + COMMAND_TIMEOUT_MS + 1);
+    await service.getNodeConnection(spare.id, 'seed');
+
+    expect(service.getConnectionPoolSize()).toBe(POOL_LIMIT);
+    expect(openClients()).toBe(POOL_LIMIT);
   });
 
   it('gives the slot back when a connect fails', async () => {
@@ -103,7 +153,7 @@ describe('ClusterDiscoveryService node client limit', () => {
   });
 
   it('warns about the limit once while callers keep hitting it', async () => {
-    for (const node of nodes) await service.getNodeConnection(node.id, 'seed');
+    await askOneAfterAnother(jest.spyOn(Date, 'now'));
 
     const warnings = warn.mock.calls.filter(([message]) => String(message).includes('Connection limit reached'));
     expect(warnings).toHaveLength(1);
@@ -112,13 +162,10 @@ describe('ClusterDiscoveryService node client limit', () => {
 
   it('warns again a minute later and says how many connections it closed', async () => {
     const now = jest.spyOn(Date, 'now');
-    const start = 1_000_000;
-    now.mockReturnValue(start);
-    for (const node of nodes) await service.getNodeConnection(node.id, 'seed');
+    await askOneAfterAnother(now);
 
-    now.mockReturnValue(start + 60_000);
+    now.mockReturnValue(START + NODE_COUNT * STEP_MS + 60_000);
     await service.getNodeConnection(nodes[0].id, 'seed');
-    now.mockRestore();
 
     expect(warn).toHaveBeenLastCalledWith(expect.stringContaining(`${NODE_COUNT - POOL_LIMIT} closed since the last warning`));
   });
