@@ -87,7 +87,7 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
     if (ctx.connectionType === 'external' && (ctx.client.sampleVersion?.() ?? null) === null) {
       return;
     }
-    await this.getHealth(ctx.connectionId);
+    await this.checkHealth(ctx.connectionId, true);
   }
 
   protected onConnectionRemoved(connectionId: string): void {
@@ -124,12 +124,12 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
     return withTimeout(raw, this.RECONNECT_TIMEOUT_MS).catch(() => {});
   }
 
-  private ping(connectionId: string, client: DatabasePort, dropWhenHung: boolean): Promise<PingOutcome> {
+  private ping(connectionId: string, client: DatabasePort): Promise<PingOutcome> {
     const existing = this.pingsInFlight.get(connectionId);
     if (existing) {
       return existing;
     }
-    const run = this.pingWithinDeadline(connectionId, client, dropWhenHung).finally(() => {
+    const run = this.pingWithinDeadline(connectionId, client).finally(() => {
       if (this.pingsInFlight.get(connectionId) === run) {
         this.pingsInFlight.delete(connectionId);
       }
@@ -138,11 +138,7 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
     return run;
   }
 
-  private async pingWithinDeadline(
-    connectionId: string,
-    client: DatabasePort,
-    dropWhenHung: boolean,
-  ): Promise<PingOutcome> {
+  private async pingWithinDeadline(connectionId: string, client: DatabasePort): Promise<PingOutcome> {
     let timer: NodeJS.Timeout | undefined;
     const deadline = new Promise<'missed'>((resolve) => {
       timer = setTimeout(() => resolve('missed'), this.PING_TIMEOUT_MS);
@@ -159,20 +155,27 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
     }
     if (outcome === 'answered') {
       this.missedPings.delete(connectionId);
-      return outcome;
     }
-    if (outcome === 'refused') {
-      return outcome;
-    }
+    return outcome;
+  }
+
+  private async countMissedCheck(
+    connectionId: string,
+    client: DatabasePort,
+    dropWhenHung: boolean,
+  ): Promise<boolean> {
     const missed = (this.missedPings.get(connectionId) ?? 0) + 1;
     this.missedPings.set(connectionId, missed);
-    if (missed >= this.MISSED_PINGS_BEFORE_DOWN && dropWhenHung) {
+    if (missed < this.MISSED_PINGS_BEFORE_DOWN) {
+      return false;
+    }
+    if (dropWhenHung) {
       this.logger.warn(
         `No ping answer from ${connectionId} for ${missed} checks in a row; closing its client`,
       );
       await withTimeout(client.disconnect(), this.RECONNECT_TIMEOUT_MS).catch(() => undefined);
     }
-    return outcome;
+    return true;
   }
 
   onModuleInit(): void {
@@ -198,6 +201,13 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
    * Get health for a specific connection or the default connection
    */
   async getHealth(connectionId?: string): Promise<HealthResponse> {
+    return this.checkHealth(connectionId, false);
+  }
+
+  private async checkHealth(
+    connectionId: string | undefined,
+    countsMissedPings: boolean,
+  ): Promise<HealthResponse> {
     const targetId = connectionId || this.connectionRegistry.getDefaultId();
     if (!targetId) {
       // Issue #1: Return empty string for host instead of 'none' to avoid confusion
@@ -273,10 +283,13 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
         };
       }
 
-      const ping = await this.ping(targetId, client, dialsDataNodes(config));
+      const ping = await this.ping(targetId, client);
 
       if (ping === 'missed') {
-        if ((this.missedPings.get(targetId) ?? 0) >= this.MISSED_PINGS_BEFORE_DOWN) {
+        if (
+          countsMissedPings &&
+          (await this.countMissedCheck(targetId, client, dialsDataNodes(config)))
+        ) {
           await this.handleInstanceDown(targetId, config.host, config.port, this.PING_TIMED_OUT);
         }
         return {
