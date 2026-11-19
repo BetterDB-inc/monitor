@@ -652,8 +652,10 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   }
 
   async reconnectClient(): Promise<void> {
-    this._client?.disconnect();
+    const silent = this._client;
+    this._client = null;
     this.connected = false;
+    silent?.disconnect();
     await this.connect();
   }
 
