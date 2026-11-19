@@ -41,6 +41,7 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
   private readonly RECONNECT_TIMEOUT_MS = 3000;
   private readonly PING_TIMEOUT_MS = 5000;
   private readonly MISSED_PINGS_BEFORE_DOWN = 2;
+  private readonly MISSED_PINGS_BEFORE_QUIET_RECONNECT = 6;
   private readonly PING_TIMED_OUT = 'Database ping timed out';
   private missedPings = new Map<string, number>();
   private pingsInFlight = new Map<string, Promise<PingOutcome>>();
@@ -159,14 +160,40 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
     return outcome;
   }
 
+  private answersOnNewConnection(
+    connectionId: string,
+    client: DatabasePort,
+    dialsDatabase: boolean,
+  ): Promise<boolean> | undefined {
+    if (!dialsDatabase || !client.pingOnNewConnection || !this.missedPings.has(connectionId)) {
+      return undefined;
+    }
+    return withTimeout(
+      client.pingOnNewConnection(this.PING_TIMEOUT_MS),
+      this.PING_TIMEOUT_MS,
+    ).catch(() => false);
+  }
+
   private async countMissedCheck(
     connectionId: string,
     client: DatabasePort,
     dropWhenHung: boolean,
+    answersOnNewConnection: Promise<boolean> | undefined,
   ): Promise<boolean> {
     const missed = (this.missedPings.get(connectionId) ?? 0) + 1;
     this.missedPings.set(connectionId, missed);
     if (missed < this.MISSED_PINGS_BEFORE_DOWN) {
+      return false;
+    }
+    if (await answersOnNewConnection) {
+      if (missed >= this.MISSED_PINGS_BEFORE_QUIET_RECONNECT) {
+        this.logger.warn(
+          `${connectionId} answers on a new connection but its client got no ping answer for ${missed} checks in a row; reconnecting the client`,
+        );
+        await withTimeout(client.disconnect(), this.RECONNECT_TIMEOUT_MS).catch(() => undefined);
+        this.missedPings.delete(connectionId);
+        await this.tryReconnect(connectionId);
+      }
       return false;
     }
     if (dropWhenHung) {
@@ -283,12 +310,16 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
         };
       }
 
+      const dialsDatabase = dialsDataNodes(config);
+      const answersOnNewConnection = countsMissedPings
+        ? this.answersOnNewConnection(targetId, client, dialsDatabase)
+        : undefined;
       const ping = await this.ping(targetId, client);
 
       if (ping === 'missed') {
         if (
           countsMissedPings &&
-          (await this.countMissedCheck(targetId, client, dialsDataNodes(config)))
+          (await this.countMissedCheck(targetId, client, dialsDatabase, answersOnNewConnection))
         ) {
           await this.handleInstanceDown(targetId, config.host, config.port, this.PING_TIMED_OUT);
         }

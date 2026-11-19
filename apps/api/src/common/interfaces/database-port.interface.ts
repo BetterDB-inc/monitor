@@ -56,6 +56,7 @@ export interface DatabasePort {
   sampleVersion?(): number | null;
   getActiveDbIndex?(): number;
   ping(): Promise<boolean>;
+  pingOnNewConnection?(timeoutMs: number): Promise<boolean>;
   getInfo(sections?: string[]): Promise<Record<string, unknown>>;
   getCapabilities(): DatabaseCapabilities;
   refreshCapabilities?(): Promise<void>;

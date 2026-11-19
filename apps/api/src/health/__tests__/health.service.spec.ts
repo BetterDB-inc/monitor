@@ -288,6 +288,7 @@ describe('HealthService ping deadline', () => {
     getCapabilities: jest.Mock;
     connect: jest.Mock;
     disconnect: jest.Mock;
+    pingOnNewConnection?: jest.Mock;
   };
   let webhooks: { dispatchHealthChange: jest.Mock };
   let config: { host: string; port: number; connectionType?: string };
@@ -461,10 +462,12 @@ describe('HealthService ping deadline', () => {
     config = { host: 'agent', port: 0 };
     client.ping.mockImplementation(hang);
     const service = build();
+    client.pingOnNewConnection = jest.fn().mockResolvedValue(true);
     await pollerCheckAfterDeadline(service);
     await pollerCheckAfterDeadline(service);
     expect(webhooks.dispatchHealthChange).toHaveBeenCalledTimes(1);
     expect(client.disconnect).not.toHaveBeenCalled();
+    expect(client.pingOnNewConnection).not.toHaveBeenCalled();
   });
 
   it('still reports down when dropping the client fails', async () => {
@@ -486,5 +489,105 @@ describe('HealthService ping deadline', () => {
     (service as unknown as { onConnectionRemoved(id: string): void }).onConnectionRemoved('conn-1');
     await pollerCheckAfterDeadline(service);
     expect(webhooks.dispatchHealthChange).not.toHaveBeenCalled();
+  });
+
+  describe('when the client can ping on a new connection', () => {
+    const QUIET_RECONNECT_AFTER_MISSES = 6;
+
+    beforeEach(() => {
+      client.ping.mockImplementation(hang);
+      client.pingOnNewConnection = jest.fn().mockResolvedValue(true);
+    });
+
+    it('does not report down or drop the client when the new connection answers', async () => {
+      const service = build();
+      await pollerCheckAfterDeadline(service);
+      await pollerCheckAfterDeadline(service);
+      expect(client.pingOnNewConnection).toHaveBeenCalledTimes(1);
+      expect(client.pingOnNewConnection).toHaveBeenCalledWith(PING_TIMEOUT_MS);
+      expect(webhooks.dispatchHealthChange).not.toHaveBeenCalled();
+      expect(client.disconnect).not.toHaveBeenCalled();
+    });
+
+    it('reports down and drops the client when the new connection gets no answer either', async () => {
+      client.pingOnNewConnection!.mockResolvedValue(false);
+      const service = build();
+      await pollerCheckAfterDeadline(service);
+      await pollerCheckAfterDeadline(service);
+      expect(webhooks.dispatchHealthChange).toHaveBeenCalledTimes(1);
+      expect(webhooks.dispatchHealthChange.mock.calls[0][1]).toMatchObject({
+        reason: 'Database ping timed out',
+      });
+      expect(client.disconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it('reports down when the ping on the new connection never settles', async () => {
+      client.pingOnNewConnection!.mockImplementation(hang);
+      const service = build();
+      await pollerCheckAfterDeadline(service);
+      await pollerCheckAfterDeadline(service);
+      expect(webhooks.dispatchHealthChange).toHaveBeenCalledTimes(1);
+      expect(client.disconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it('reports down when the ping on the new connection fails', async () => {
+      client.pingOnNewConnection!.mockRejectedValue(new Error('tunnel is gone'));
+      const service = build();
+      await pollerCheckAfterDeadline(service);
+      await pollerCheckAfterDeadline(service);
+      expect(webhooks.dispatchHealthChange).toHaveBeenCalledTimes(1);
+      expect(client.disconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it('opens no new connection before a miss is counted or for other callers', async () => {
+      const service = build();
+      await pollerCheckAfterDeadline(service);
+      await checkAfterDeadline(service);
+      expect(client.pingOnNewConnection).not.toHaveBeenCalled();
+    });
+
+    it('ignores the new connection when the client answers the second check', async () => {
+      const service = build();
+      await pollerCheckAfterDeadline(service);
+      client.ping.mockResolvedValue(true);
+      client.pingOnNewConnection!.mockResolvedValue(false);
+      await pollerCheckAfterDeadline(service);
+      expect(webhooks.dispatchHealthChange).not.toHaveBeenCalled();
+      expect(client.disconnect).not.toHaveBeenCalled();
+    });
+
+    it('reconnects the client without reporting down after six missed checks the new connection answered', async () => {
+      client.disconnect.mockImplementation(async () => {
+        client.isConnected.mockReturnValue(false);
+      });
+      client.connect.mockImplementation(async () => {
+        client.isConnected.mockReturnValue(true);
+      });
+      const service = build();
+      for (let check = 1; check < QUIET_RECONNECT_AFTER_MISSES; check++) {
+        await pollerCheckAfterDeadline(service);
+      }
+      expect(client.disconnect).not.toHaveBeenCalled();
+
+      await pollerCheckAfterDeadline(service);
+
+      expect(client.disconnect).toHaveBeenCalledTimes(1);
+      expect(client.connect).toHaveBeenCalledTimes(1);
+      expect(webhooks.dispatchHealthChange).not.toHaveBeenCalled();
+    });
+
+    it('counts from the start again after the quiet reconnect', async () => {
+      const service = build();
+      for (let check = 1; check <= QUIET_RECONNECT_AFTER_MISSES; check++) {
+        await pollerCheckAfterDeadline(service);
+      }
+      client.pingOnNewConnection!.mockClear();
+
+      await pollerCheckAfterDeadline(service);
+
+      expect(client.pingOnNewConnection).not.toHaveBeenCalled();
+      expect(client.disconnect).toHaveBeenCalledTimes(1);
+      expect(webhooks.dispatchHealthChange).not.toHaveBeenCalled();
+    });
   });
 });
