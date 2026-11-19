@@ -63,10 +63,13 @@ interface DiscoveryCache {
 
 const DEFAULT_NODE_COMMAND_TIMEOUT_MS = 5000;
 const MIN_NODE_COMMAND_TIMEOUT_MS = 100;
+const MAX_NODE_COMMAND_TIMEOUT_MS = 2_147_483_647;
 
 function nodeCommandTimeoutMs(): number {
   const configured = Number(process.env.CLUSTER_NODE_COMMAND_TIMEOUT_MS);
-  return Number.isInteger(configured) && configured >= MIN_NODE_COMMAND_TIMEOUT_MS
+  return Number.isInteger(configured) &&
+    configured >= MIN_NODE_COMMAND_TIMEOUT_MS &&
+    configured <= MAX_NODE_COMMAND_TIMEOUT_MS
     ? configured
     : DEFAULT_NODE_COMMAND_TIMEOUT_MS;
 }

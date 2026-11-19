@@ -614,6 +614,24 @@ describe('ClusterDiscoveryService', () => {
         expect(Valkey).toHaveBeenLastCalledWith(expect.objectContaining({ commandTimeout: 1500 }));
       });
 
+      it('takes the largest delay a timer can hold', async () => {
+        process.env.CLUSTER_NODE_COMMAND_TIMEOUT_MS = '2147483647';
+        const nodes = await service.discoverNodes();
+
+        await service.getNodeConnection(nodes[0].id, 'test-connection');
+
+        expect(Valkey).toHaveBeenLastCalledWith(expect.objectContaining({ commandTimeout: 2147483647 }));
+      });
+
+      it('falls back to 5 seconds for a value a timer would cut down to 1 ms', async () => {
+        process.env.CLUSTER_NODE_COMMAND_TIMEOUT_MS = '2147483648';
+        const nodes = await service.discoverNodes();
+
+        await service.getNodeConnection(nodes[0].id, 'test-connection');
+
+        expect(Valkey).toHaveBeenLastCalledWith(expect.objectContaining({ commandTimeout: 5000 }));
+      });
+
       it('falls back to 5 seconds for a value that is not a usable number', async () => {
         process.env.CLUSTER_NODE_COMMAND_TIMEOUT_MS = 'soon';
         const nodes = await service.discoverNodes();
