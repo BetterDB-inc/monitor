@@ -3,7 +3,8 @@ name: Publish CLI Package
 on:
   push:
     tags:
-      - 'v*'
+      # vX.Y.Z only; 'v*' also matched valkey-search-kit-v* tags
+      - 'v[0-9]*'
   workflow_dispatch:
     inputs:
       version:
@@ -21,42 +22,39 @@ on:
         type: boolean
         default: true
 
+# A tag push and a manual run for the same version share one group
+# (cli-publish-v0.26.0), so they queue instead of racing to publish.
+concurrency:
+  group: cli-publish-${{ inputs.version && format('v{0}', inputs.version) || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
+  # Install, build, smoke-test and pack with read-only access. Third-party
+  # install scripts never run next to the npm token or repo-write permission.
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
-      contents: write
-      id-token: write
+      contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
+      tarball: ${{ steps.pack.outputs.tarball }}
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
+      # pnpm must be on PATH before setup-node can cache its store
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
-          registry-url: 'https://registry.npmjs.org'
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-
-      - name: Get pnpm store directory
-        shell: bash
-        run: |
-          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
-
-      - name: Setup pnpm cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.STORE_PATH }}
-          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-pnpm-store-
+          cache: 'pnpm'
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -64,32 +62,34 @@ jobs:
       - name: Determine version
         id: version
         env:
+          EVENT_NAME: ${{ github.event_name }}
           INPUT_VERSION: ${{ inputs.version }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             if [ -z "$INPUT_VERSION" ]; then
               echo "workflow_dispatch requires inputs.version (e.g., 0.4.0)" >&2
               exit 1
             fi
-            if ! echo "$INPUT_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?(\+[a-zA-Z0-9.-]+)?$'; then
-              echo "Invalid version format: $INPUT_VERSION. Expected semver format (e.g., 0.4.0 or 1.0.0-beta.1)" >&2
-              exit 1
-            fi
-            echo "version=$INPUT_VERSION" >> $GITHUB_OUTPUT
+            VERSION="$INPUT_VERSION"
           else
-            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+            VERSION="${GITHUB_REF_NAME#v}"
           fi
+          # [[ =~ ]] matches the whole string; grep would accept a value with an
+          # extra line after a valid version.
+          # No +build suffix: npm drops +build metadata on publish, so the
+          # registry version wouldn't match the tag.
+          SEMVER='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[a-zA-Z0-9.-]+)?$'
+          if [[ ! "$VERSION" =~ $SEMVER ]]; then
+            echo "Invalid version format: $VERSION. Expected X.Y.Z or X.Y.Z-prerelease (e.g., 0.4.0 or 1.0.0-beta.1); +build metadata is not allowed" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Update version before build
+        working-directory: packages/cli
         env:
           VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          cd packages/cli
-          node -e "
-            const pkg = require('./package.json');
-            pkg.version = '$VERSION';
-            require('fs').writeFileSync('./package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
+        run: npm pkg set version="$VERSION"
 
       - name: Build CLI package
         env:
@@ -99,19 +99,12 @@ jobs:
 
       - name: Prepare and pack for publishing
         id: pack
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
         run: |
+          set -o pipefail
           cd packages/cli
 
           # Remove workspace devDependencies (already bundled)
-          node -e "
-            const pkg = require('./package.json');
-            if (pkg.devDependencies) {
-              delete pkg.devDependencies['@betterdb/shared'];
-            }
-            require('fs').writeFileSync('./package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
+          npm pkg delete devDependencies.@betterdb/shared
 
           # Show what we're publishing
           echo "=== package.json ==="
@@ -120,68 +113,141 @@ jobs:
 
           # Use npm pack (not pnpm) to avoid workspace protocol issues
           # --ignore-scripts skips prepublishOnly since we already built
-          npm pack --ignore-scripts
+          # Take the filename from npm itself instead of rebuilding it by hand
+          TARBALL=$(npm pack --ignore-scripts --json | jq -r '.[0].filename')
+          if [ -z "$TARBALL" ] || [ ! -f "$TARBALL" ]; then
+            echo "npm pack did not produce a tarball (got: '$TARBALL')" >&2
+            exit 1
+          fi
+          echo "Packed $TARBALL"
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
 
-          echo "tarball=packages/cli/betterdb-monitor-$VERSION.tgz" >> $GITHUB_OUTPUT
+      # npm versions can't be republished, so check the tarball before it ships.
+      - name: Smoke-test packed CLI
+        working-directory: packages/cli
+        env:
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # Install the way users do and check the reported version
+          PREFIX="$RUNNER_TEMP/cli-smoke"
+          npm install --global --prefix "$PREFIX" --no-audit --no-fund "./$TARBALL"
+          ACTUAL=$("$PREFIX/bin/betterdb" --version)
+          if [ "$ACTUAL" != "$VERSION" ]; then
+            echo "betterdb --version printed '$ACTUAL', expected '$VERSION'" >&2
+            exit 1
+          fi
+          echo "Smoke test passed: betterdb $ACTUAL"
 
       - name: Upload tarball artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: cli-tarball
-          path: packages/cli/betterdb-monitor-${{ steps.version.outputs.version }}.tgz
+          path: packages/cli/${{ steps.pack.outputs.tarball }}
+          if-no-files-found: error
+          retention-days: 7
+
+  # Publishes the tarball built above. No checkout and no install, so only
+  # npm itself runs with the token and the OIDC permission.
+  publish-npm:
+    needs: build
+    if: ${{ github.event_name == 'push' || inputs.publish_npm }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download tarball artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: cli-tarball
 
       - name: Publish to npm
-        if: ${{ github.event_name == 'push' || inputs.publish_npm }}
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          TARBALL: ${{ needs.build.outputs.tarball }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          cd packages/cli
-          npm publish ./betterdb-monitor-$VERSION.tgz --provenance --access public --tag latest
+        run: npm publish "./$TARBALL" --provenance --access public --tag latest
 
-      - name: Ensure latest dist-tag
-        if: ${{ github.event_name == 'push' || inputs.publish_npm }}
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm dist-tag add @betterdb/monitor@$VERSION latest
+  # Runs after npm as before. Also runs when npm publishing was turned off,
+  # but not when it failed.
+  release:
+    needs: [build, publish-npm]
+    if: >-
+      ${{ !cancelled()
+        && needs.build.result == 'success'
+        && needs.publish-npm.result != 'failure'
+        && (github.event_name == 'push' || inputs.create_release) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download tarball artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: cli-tarball
 
       - name: Create GitHub Release
-        if: ${{ github.event_name == 'push' || inputs.create_release }}
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
-          tag_name: v${{ steps.version.outputs.version }}
-          name: v${{ steps.version.outputs.version }}
+          tag_name: v${{ needs.build.outputs.version }}
+          name: v${{ needs.build.outputs.version }}
           draft: false
-          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+          prerelease: ${{ contains(needs.build.outputs.version, '-') }}
           generate_release_notes: true
           files: |
-            packages/cli/betterdb-monitor-${{ steps.version.outputs.version }}.tgz
+            ${{ needs.build.outputs.tarball }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   verify:
-    needs: build
+    needs: [build, publish-npm]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     if: ${{ github.event_name == 'push' || inputs.publish_npm }}
 
     steps:
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
 
-      - name: Wait for npm propagation
-        run: sleep 30
-
-      - name: Verify npm package
+      # Poll instead of a fixed sleep. --prefer-online skips npm's local
+      # metadata cache, which would otherwise hide the new version for minutes.
+      - name: Wait for npm to serve the version
         env:
           VERSION: ${{ needs.build.outputs.version }}
         run: |
-          npm view @betterdb/monitor@$VERSION || echo "Package not yet available"
+          for attempt in $(seq 1 20); do
+            PUBLISHED=$(npm view "@betterdb/monitor@$VERSION" version --prefer-online 2>/dev/null || true)
+            if [ "$PUBLISHED" = "$VERSION" ]; then
+              echo "npm serves @betterdb/monitor@$VERSION (attempt $attempt)"
+              exit 0
+            fi
+            echo "Not on npm yet (attempt $attempt/20), retrying in 15s"
+            sleep 15
+          done
+          echo "@betterdb/monitor@$VERSION is still not on npm after 5 minutes" >&2
+          exit 1
 
       - name: Test npx installation
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
-          npx @betterdb/monitor@${{ needs.build.outputs.version }} --version || echo "npx test skipped (package may not be available yet)"
+          ACTUAL=$(npx --yes "@betterdb/monitor@$VERSION" --version)
+          if [ "$ACTUAL" != "$VERSION" ]; then
+            echo "npx @betterdb/monitor@$VERSION --version printed '$ACTUAL', expected '$VERSION'" >&2
+            exit 1
+          fi
+          echo "npx install works: betterdb $ACTUAL"
