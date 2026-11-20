@@ -542,6 +542,7 @@ export function groupDivergences(tracked: TrackedDisagreement[]): DivergenceGrou
 
 export interface OpenDivergence {
   group?: DivergenceGroup;
+  confirmedAt?: number;
   lastCountedAt: number;
   clean: number;
 }
@@ -569,7 +570,7 @@ export function settleOpenDivergences(input: {
   for (const [signature, entry] of open) {
     const group = confirmed.get(signature);
     if (group) {
-      open.set(signature, { group, lastCountedAt: at, clean: 0 });
+      open.set(signature, { group, confirmedAt: at, lastCountedAt: at, clean: 0 });
       continue;
     }
     const pending = input.pendingSignatures.has(signature);
