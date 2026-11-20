@@ -1345,6 +1345,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
     this.connections.set(id, adapter);
     this.configs.set(id, config);
+    this.observedNodeIds.delete(id);
+    this.outsideCluster.delete(id);
     if (options.serverless === true) {
       this.serverlessAgentIds.add(id);
     } else {

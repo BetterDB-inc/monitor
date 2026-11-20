@@ -45,4 +45,16 @@ describe('ConnectionRegistry agent connections', () => {
     registry.removeAgentConnection('agent-1');
     expect(registry.isServerlessAgentConnection('agent-1')).toBe(false);
   });
+
+  it('starts a reconnected agent without the node id or outside-cluster mark of its last session', async () => {
+    const registry = build();
+    await registry.registerAgentConnection('agent-1', 'Agent', {} as never);
+    registry.noteObservedNodeId('agent-1', 'node-a');
+    registry.noteOutsideCluster('agent-1', true);
+
+    await registry.registerAgentConnection('agent-1', 'Agent', {} as never);
+
+    expect(registry.getObservedNodeId('agent-1')).toBeUndefined();
+    expect(registry.isOutsideCluster('agent-1')).toBe(false);
+  });
 });
