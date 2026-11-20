@@ -11231,6 +11231,7 @@ export class AnomalyService
     }
     if (!this.connectionRegistry.getConfig(connectionId)) return { result: 'unknown_connection' };
     if (this.connectionClusterKeys.get(connectionId) !== clusterKey) return { result: 'view_unreadable' };
+    if (this.clusterKeyOfNodes(nodes) !== clusterKey) return { result: 'view_unreadable' };
 
     const started = this.topologyFullChecks.start(clusterKey, Date.now(), nodes.length, async (onProgress) => {
       const outcome = await runFullCheck({

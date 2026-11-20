@@ -280,7 +280,8 @@ export class AnomalyController {
     description:
       'Counts are over the views that answered in the last round, not over every node: coverage says how many ' +
       'nodes there are, how many were asked and how many answered. Node lists are capped at 25, the counts are exact. ' +
-      'fullCheck holds the last check that asked every node, when one was run, with its own summary.',
+      'fullCheck holds the last check that set out to ask every node, when one was run, with its own summary: ' +
+      'the coverage of that summary says how many nodes it reached.',
   })
   @ApiHeader({ name: CONNECTION_ID_HEADER, required: true, description: 'Connection ID of the cluster' })
   getTopologyDisagreements(@ConnectionId({ required: true }) connectionId: string): TopologyDisagreementReport {
@@ -294,7 +295,8 @@ export class AnomalyController {
   @ApiOperation({
     summary: 'Ask every node of the cluster for its view, once',
     description:
-      'Starts the check and returns at once; progress and the result are in fullCheck of topology-disagreements. ' +
+      'Reads the node list, starts the check and returns without waiting for the nodes to answer; progress and ' +
+      'the result are in fullCheck of topology-disagreements. ' +
       'A request made while a check runs joins it. On a self-hosted install with user control on, only an admin ' +
       'can start it; a read-only member gets 403. Answers 404 for a connection that is not registered, 409 when ' +
       'the check cannot be run on the connection, 429 within 30 seconds of the last check and 503 when the node ' +

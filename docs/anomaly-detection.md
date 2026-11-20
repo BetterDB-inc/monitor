@@ -1577,7 +1577,7 @@ POST /api/anomaly/topology-disagreements/full-check
 X-Connection-ID: <connection-id>
 ```
 
-Asks every node of the cluster for its view once, so that the counts are over the whole cluster and not over the sample of a round: "497 views against 3" where the round says "9 against 3". The call returns at once with `202` and the state of the check. Progress and the result are read from `fullCheck` of [`GET /api/anomaly/topology-disagreements`](#get-topology-disagreements). A request made while a check runs returns the running check and does not start a second one. It needs the anomaly detection licence. On a self-hosted install with user control on, only an admin can call it and a read-only member gets `403`: the check opens a connection to every node of the monitored cluster.
+Asks every node of the cluster for its view once, so that the counts are over the whole cluster and not over the sample of a round: "497 views against 3" where the round says "9 against 3". The call reads the node list of the cluster, starts the check and returns `202` with the state of the check; it does not wait for the nodes to answer. Progress and the result are read from `fullCheck` of [`GET /api/anomaly/topology-disagreements`](#get-topology-disagreements). A request made while a check runs returns the running check and does not start a second one. It needs the anomaly detection licence. On a self-hosted install with user control on, only an admin can call it and a read-only member gets `403`: the check opens a connection to every node of the monitored cluster.
 
 | Field of `fullCheck` | Meaning |
 |-------|---------|
@@ -1611,7 +1611,7 @@ A check cannot be run, and `unavailable` says so, when:
 | `404` | The connection in the header is not registered |
 | `409` | A check cannot be run on this connection. The body has `reason` and the same in words as `message` |
 | `429` | The last check finished or broke less than 30 seconds ago. The body has `retryAt` |
-| `503` | The node list of the cluster could not be read |
+| `503` | The node list of the cluster could not be read, or it lists none of the nodes the connection was bound to |
 
 **Response** (`202`):
 ```json

@@ -29770,6 +29770,33 @@ describe('AnomalyService', () => {
         expect((service as any).topologyFullChecks.state(clusterKey, now)).toEqual({ state: 'none' });
       });
 
+      it('does not start when the seed lists the nodes of another cluster than the one it was bound to', async () => {
+        await rounds(1);
+        const clusterKey = (service as any).connectionClusterKeys.get('conn-1');
+        const listed: ClusterNode[] = await clusterClient('a').getClusterNodes();
+        const renamed = (id: string) => (id === '-' ? id : `other-${id}`);
+        dbClient.getClusterNodes = jest.fn(async () =>
+          listed.map((node) => ({ ...node, id: renamed(node.id), master: renamed(node.master) })),
+        );
+
+        expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'view_unreadable' });
+        await finished();
+
+        expect(once).not.toHaveBeenCalled();
+        expect((service as any).topologyFullChecks.state(clusterKey, now)).toEqual({ state: 'none' });
+      });
+
+      it('still starts when the seed lists a node the last round did not have', async () => {
+        await rounds(1);
+        const listed: ClusterNode[] = await clusterClient('a').getClusterNodes();
+        dbClient.getClusterNodes = jest.fn(async () => [...listed, { ...listed[0], id: 'joined', slots: [] }]);
+
+        expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'started' });
+        await finished();
+
+        expect(once.mock.calls.map(([node]) => node.id)).toEqual(['a', 'b', 'c', 'joined']);
+      });
+
       it('says so when the node list cannot be read', async () => {
         await rounds(1);
         dbClient.getClusterNodes = jest.fn().mockRejectedValue(new Error('Connection is closed.'));
