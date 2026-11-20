@@ -232,6 +232,8 @@ export interface ClusterNode {
   hostname?: string;
   availabilityZone?: string;
   shardId?: string;
+  migratingSlots?: Array<{ slot: number; toNodeId: string }>;
+  importingSlots?: Array<{ slot: number; fromNodeId: string }>;
 }
 
 export interface SlotStatsMetric {

@@ -5,6 +5,36 @@ import { metricsApi } from '../api/metrics';
 import type { ClusterNode } from '../types/metrics';
 import { CLUSTER_TOTAL_SLOTS, type ClusterHealth } from '../types/cluster';
 
+export function classifyClusterNodes(nodes: ClusterNode[] | null | undefined): {
+  primaries: ClusterNode[];
+  emptyPrimaries: ClusterNode[];
+  replicas: ClusterNode[];
+} {
+  if (!nodes) return { primaries: [], emptyPrimaries: [], replicas: [] };
+
+  const primaries: ClusterNode[] = [];
+  const emptyPrimaries: ClusterNode[] = [];
+  const replicas: ClusterNode[] = [];
+
+  for (const node of nodes) {
+    if (node.flags.includes('master')) {
+      const dead = node.flags.includes('fail') || node.flags.includes('noaddr');
+      const hasSlots = node.slots.length > 0;
+      const hasMigration =
+        (node.migratingSlots?.length ?? 0) > 0 || (node.importingSlots?.length ?? 0) > 0;
+      if (!dead && hasSlots) {
+        primaries.push(node);
+      } else if (!hasSlots && !hasMigration) {
+        emptyPrimaries.push(node);
+      }
+    } else if (node.flags.includes('slave') || node.flags.includes('replica')) {
+      replicas.push(node);
+    }
+  }
+
+  return { primaries, emptyPrimaries, replicas };
+}
+
 export function useCluster() {
   const { capabilities } = useCapabilities();
 
@@ -74,22 +104,10 @@ export function useCluster() {
     ? serverInfoError || (isClusterMode ? (infoError || nodesError) : null)
     : null;
 
-  const { masters, replicas } = useMemo(() => {
-    if (!nodes) return { masters: [], replicas: [] };
-
-    const masters: ClusterNode[] = [];
-    const replicas: ClusterNode[] = [];
-
-    for (const node of nodes) {
-      if (node.flags.includes('master')) {
-        masters.push(node);
-      } else if (node.flags.includes('slave') || node.flags.includes('replica')) {
-        replicas.push(node);
-      }
-    }
-
-    return { masters, replicas };
-  }, [nodes]);
+  const { primaries, emptyPrimaries, replicas } = useMemo(
+    () => classifyClusterNodes(nodes),
+    [nodes],
+  );
 
   const health = useMemo<ClusterHealth>(() => {
     if (!info) {
@@ -146,7 +164,9 @@ export function useCluster() {
     errors,
     info,
     nodes: nodes || [],
-    masters,
+    primaries,
+    emptyPrimaries,
+    masters: primaries,
     replicas,
     slotStats: slotStatsResult?.stats || null,
     slotStatsFailedNodes: slotStatsResult?.failedNodes ?? [],

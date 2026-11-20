@@ -1,6 +1,6 @@
 import type { ClusterNode } from '@app/common/types/metrics.types';
 
-export type DivergenceKind = 'slot_owner' | 'config_epoch' | 'failure_flags' | 'membership';
+export type DivergenceKind = 'slot_owner' | 'config_epoch' | 'failure_flags' | 'membership' | 'role';
 
 export interface TopologyView {
   observerId: string;
@@ -163,6 +163,12 @@ function vote(votes: Map<string, string[]>, value: string, observerId: string): 
   else votes.set(value, [observerId]);
 }
 
+function roleOf(node: ClusterNode): 'master' | 'replica' | null {
+  if (node.flags.includes('master')) return 'master';
+  if (node.flags.includes('slave') || node.flags.includes('replica')) return 'replica';
+  return null;
+}
+
 function perNodeDisagreements(indexes: ViewIndex[]): TopologyDisagreement[] {
   const subjects = sortedUnique(indexes.flatMap((index) => [...index.known.keys()]));
   const found: TopologyDisagreement[] = [];
@@ -171,12 +177,17 @@ function perNodeDisagreements(indexes: ViewIndex[]): TopologyDisagreement[] {
     const membership = new Map<string, string[]>();
     const epochs = new Map<string, string[]>();
     const failures = new Map<string, string[]>();
+    const roles = new Map<string, string[]>();
 
     for (const index of indexes) {
       vote(membership, index.status.get(subject) ?? 'missing', index.observerId);
       const node = index.known.get(subject);
       if (!node) continue;
       vote(epochs, String(node.configEpoch), index.observerId);
+      if (!isFlaggedFailing(node)) {
+        const role = roleOf(node);
+        if (role) vote(roles, role, index.observerId);
+      }
       if (index.observerId === subject) continue;
       vote(failures, isFlaggedFailing(node) ? 'failing' : 'ok', index.observerId);
     }
@@ -185,6 +196,7 @@ function perNodeDisagreements(indexes: ViewIndex[]): TopologyDisagreement[] {
       ['membership', membership],
       ['config_epoch', epochs],
       ['failure_flags', failures],
+      ['role', roles],
     ];
     for (const [kind, votes] of kinds) {
       if (votes.size < 2) continue;

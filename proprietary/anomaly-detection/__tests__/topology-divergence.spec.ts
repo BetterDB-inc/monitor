@@ -3,6 +3,7 @@ import {
   DivergenceTracker,
   TOPOLOGY_DIVERGENCE_BLIND_MS,
   type TopologyDisagreement,
+  type TrackedDisagreement,
   type TopologyView,
   compareTopologyViews,
   confirmedDisagreements,
@@ -1299,5 +1300,76 @@ describe('durationOf', () => {
     expect(durationOf(47 * 3_600_000)).toBe('47h');
     expect(durationOf(48 * 3_600_000)).toBe('2d');
     expect(durationOf(10 * 86_400_000)).toBe('10d');
+  });
+});
+
+describe('role divergence', () => {
+  it('reports a role disagreement when peers see a replica as a slotless master', () => {
+    const staleMaster: NodePatch = { flags: ['master'], master: '-', slots: [], configEpoch: 146 };
+    const found = compareTopologyViews([
+      view('p1', { r1: staleMaster }),
+      view('p2', { r1: staleMaster }),
+      view('r1', { r1: { configEpoch: 145 } }),
+      view('p3', { r1: { configEpoch: 145 } }),
+    ]);
+
+    expect(byKey(found, 'role:r1')).toEqual({
+      key: 'role:r1',
+      kind: 'role',
+      subjectIds: ['r1'],
+      positions: [
+        { value: 'master', observers: ['p1', 'p2'] },
+        { value: 'replica', observers: ['p3', 'r1'] },
+      ],
+    });
+    expect(byKey(found, 'config_epoch:r1')).toEqual({
+      key: 'config_epoch:r1',
+      kind: 'config_epoch',
+      subjectIds: ['r1'],
+      positions: [
+        { value: '145', observers: ['p3', 'r1'] },
+        { value: '146', observers: ['p1', 'p2'] },
+      ],
+    });
+  });
+
+  it('reports nothing when all views agree on a re-joining slotless master', () => {
+    const joining: NodePatch = { flags: ['master'], master: '-', slots: [], configEpoch: 0 };
+    const found = compareTopologyViews([
+      view('p1', { r1: joining }),
+      view('p2', { r1: joining }),
+      view('r1', { r1: joining }),
+    ]);
+
+    expect(found).toEqual([]);
+  });
+
+  it('ignores a peer holding a stale role when that peer flags the node fail?', () => {
+    const found = compareTopologyViews([
+      view('p1', { r1: { flags: ['master', 'fail?'], master: '-', slots: [] } }),
+      view('p2'),
+      view('r1'),
+    ]);
+
+    expect(found.filter((d) => d.kind === 'role')).toEqual([]);
+  });
+
+  it('holds role disagreements until the 120s grace period has elapsed', () => {
+    const rule = { minRounds: 3, minAgeMs: { role: 120_000 } };
+    const stale: TrackedDisagreement = {
+      key: 'role:r1',
+      kind: 'role',
+      subjectIds: ['r1'],
+      positions: [
+        { value: 'master', observers: ['p1'] },
+        { value: 'replica', observers: ['p2', 'r1'] },
+      ],
+      firstSeenAt: 0,
+      lastSeenAt: 119_000,
+      rounds: 24,
+    };
+
+    expect(confirmedDisagreements([stale], 119_000, rule)).toEqual([]);
+    expect(confirmedDisagreements([{ ...stale, lastSeenAt: 120_000, rounds: 25 }], 120_000, rule)).toHaveLength(1);
   });
 });

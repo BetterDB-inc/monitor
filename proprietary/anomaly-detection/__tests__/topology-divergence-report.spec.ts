@@ -107,6 +107,9 @@ describe('divergenceMessage', () => {
     expect(divergenceMessage(group([tracked('membership', 'r')]), NODES, 100000)).toContain(
       'about whether 10.0.9.9:6379 is a member.',
     );
+    expect(divergenceMessage(group([tracked('role', 'r')]), NODES, 100000)).toContain(
+      'about the role of 10.0.9.9:6379.',
+    );
   });
 
   it('shortens long lists of nodes and slot ranges', () => {
@@ -137,6 +140,7 @@ describe('DIVERGENCE_SEVERITY_BY_KIND', () => {
       failure_flags: AnomalySeverity.WARNING,
       membership: AnomalySeverity.WARNING,
       config_epoch: AnomalySeverity.WARNING,
+      role: AnomalySeverity.WARNING,
     });
   });
 });
@@ -151,7 +155,7 @@ describe('outranksSeverity', () => {
 
 describe('divergenceSeverity', () => {
   it('takes the highest severity among the kinds in dispute', () => {
-    const kinds: DivergenceKind[] = ['slot_owner', 'failure_flags', 'membership', 'config_epoch'];
+    const kinds: DivergenceKind[] = ['slot_owner', 'failure_flags', 'membership', 'config_epoch', 'role'];
     for (const kind of kinds) {
       expect(divergenceSeverity(group([tracked(kind, 'b')]))).toBe(DIVERGENCE_SEVERITY_BY_KIND[kind]);
     }

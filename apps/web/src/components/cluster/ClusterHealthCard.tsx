@@ -6,10 +6,16 @@ import type { ClusterHealth } from '../../types/cluster';
 interface ClusterHealthCardProps {
   health: ClusterHealth;
   masterCount: number;
+  emptyMasterCount?: number;
   replicaCount: number;
 }
 
-export function ClusterHealthCard({ health, masterCount, replicaCount }: ClusterHealthCardProps) {
+export function ClusterHealthCard({
+  health,
+  masterCount,
+  emptyMasterCount = 0,
+  replicaCount,
+}: ClusterHealthCardProps) {
   const statusConfig = {
     healthy: {
       icon: CheckCircle,
@@ -83,6 +89,9 @@ export function ClusterHealthCard({ health, masterCount, replicaCount }: Cluster
           <div className="space-y-1">
             <div className="text-xs text-muted-foreground">Masters</div>
             <div className="text-2xl font-bold">{masterCount}</div>
+            {emptyMasterCount > 0 && (
+              <div className="text-xs text-muted-foreground">Empty: {emptyMasterCount}</div>
+            )}
           </div>
           <div className="space-y-1">
             <div className="text-xs text-muted-foreground">Replicas</div>

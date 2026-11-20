@@ -295,6 +295,7 @@ import {
   TOPOLOGY_DIVERGENCE_DEFAULTS,
   TOPOLOGY_DIVERGENCE_MAX_MIGRATION_CHECKS,
   TOPOLOGY_DIVERGENCE_MEMBERSHIP_MIN_AGE_MS,
+  TOPOLOGY_DIVERGENCE_ROLE_MIN_AGE_MS,
   TOPOLOGY_DIVERGENCE_NODE_TIMEOUT_FALLBACK_MS,
   TOPOLOGY_DIVERGENCE_NODE_TIMEOUT_REFRESH_MS,
   TopologyDivergenceMonitor,
@@ -7537,6 +7538,7 @@ export class AnomalyService
       minAgeMs: {
         failure_flags: countsFailures ? await this.clusterNodeTimeoutMs(ctx, clusterKey, timestamp) : 0,
         membership: TOPOLOGY_DIVERGENCE_MEMBERSHIP_MIN_AGE_MS,
+        role: TOPOLOGY_DIVERGENCE_ROLE_MIN_AGE_MS,
       },
     };
     const confirmed = comparable

@@ -21,7 +21,7 @@ export function ClusterTopology({ nodes, nodeStats }: ClusterTopologyProps) {
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
 
   // Organize nodes by master-replica relationships
-  const topology = useMemo(() => {
+  const { topology, emptyMasters } = useMemo(() => {
     const masters = nodes.filter((n) => n.flags.includes('master'));
     const replicaMap = new Map<string, ClusterNode[]>();
 
@@ -36,10 +36,18 @@ export function ClusterTopology({ nodes, nodeStats }: ClusterTopologyProps) {
       }
     });
 
-    return masters.map((master) => ({
-      master,
-      replicas: replicaMap.get(master.id) || [],
-    }));
+    const serving: Array<{ master: ClusterNode; replicas: ClusterNode[] }> = [];
+    const empty: ClusterNode[] = [];
+    for (const master of masters) {
+      const attached = replicaMap.get(master.id) || [];
+      if (master.slots.length === 0 && attached.length === 0) {
+        empty.push(master);
+      } else {
+        serving.push({ master, replicas: attached });
+      }
+    }
+
+    return { topology: serving, emptyMasters: empty };
   }, [nodes]);
 
   const toggleNode = (nodeId: string) => {
@@ -274,7 +282,18 @@ export function ClusterTopology({ nodes, nodeStats }: ClusterTopologyProps) {
               </div>
             ))}
 
-            {topology.length === 0 && (
+            {emptyMasters.length > 0 && (
+              <div className="space-y-3 pt-2 border-t">
+                <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                  Not serving slots ({emptyMasters.length})
+                </div>
+                <div className="space-y-2">
+                  {emptyMasters.map((node) => renderNode(node, true))}
+                </div>
+              </div>
+            )}
+
+            {topology.length === 0 && emptyMasters.length === 0 && (
               <EmptyState variant="inline" icon={Server} title="No cluster nodes found" />
             )}
           </div>

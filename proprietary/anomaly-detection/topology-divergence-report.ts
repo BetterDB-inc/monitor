@@ -46,6 +46,7 @@ export const DIVERGENCE_SEVERITY_BY_KIND: Record<DivergenceKind, AnomalySeverity
   failure_flags: AnomalySeverity.WARNING,
   membership: AnomalySeverity.WARNING,
   config_epoch: AnomalySeverity.WARNING,
+  role: AnomalySeverity.WARNING,
 };
 
 const SEVERITY_ORDER = [AnomalySeverity.INFO, AnomalySeverity.WARNING, AnomalySeverity.CRITICAL];
@@ -89,6 +90,7 @@ function topicOf(
   const subjects = [...new Set(disagreements.flatMap((d) => d.subjectIds))];
   const one = subjects.length === 1 ? nameOf(subjects[0], nodes) : null;
   if (kind === 'membership') return one ? `whether ${one} is a member` : `the membership of ${subjects.length} nodes`;
+  if (kind === 'role') return `the role of ${one ?? `${subjects.length} nodes`}`;
   const what = kind === 'failure_flags' ? 'the failure state' : 'the config epoch';
   return `${what} of ${one ?? `${subjects.length} nodes`}`;
 }
@@ -102,7 +104,7 @@ export function divergenceMessage(
   nodes: ReadonlyMap<string, ClusterNode>,
   at: number,
 ): string {
-  const kinds: DivergenceKind[] = ['failure_flags', 'membership', 'slot_owner', 'config_epoch'];
+  const kinds: DivergenceKind[] = ['failure_flags', 'membership', 'slot_owner', 'role', 'config_epoch'];
   const topics = kinds
     .map((kind) => [kind, group.disagreements.filter((d) => d.kind === kind)] as const)
     .filter(([, found]) => found.length > 0)
