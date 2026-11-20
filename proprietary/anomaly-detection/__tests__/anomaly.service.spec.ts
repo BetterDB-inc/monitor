@@ -29128,7 +29128,7 @@ describe('AnomalyService', () => {
             if (silent.has(nodeId)) throw new Error('ECONNREFUSED');
             const command = args.join(' ');
             if (command === 'CLUSTER NODES') return memberView(nodeId);
-            if (command === 'CLUSTER GETSLOTMIGRATIONS') return [];
+            if (command === 'CLUSTER GETSLOTMIGRATIONS') return migrations[nodeId] ?? [];
             throw new Error('ERR unknown command');
           }),
         }));
@@ -29995,6 +29995,39 @@ describe('AnomalyService', () => {
             await rounds(1);
             expect(openPartialEvents()).toHaveLength(1);
             expect(openPartialEvents()[0].severity).toBe(AnomalySeverity.WARNING);
+          });
+
+          describe('and the owner migrates the slots when the alert is released after a hold', () => {
+            const hold = async () => {
+              knows.n = ['a', 'c', 'n'];
+              slotsBy = {};
+              await rounds(6);
+            };
+            const release = async () => {
+              knows.n = EVERYONE;
+              slotsBy = { n: { b: '' } };
+              migrations.b = [['name', 'job-1', 'state', 'running', 'slot_ranges', '5461-10922']];
+              await rounds(6);
+            };
+
+            it('raises no second slot alert after one that had passed the migration check', async () => {
+              await rounds(3);
+              expect(criticalEvents()).toHaveLength(1);
+              await hold();
+              expect(criticalEvents().filter((e) => !e.resolved)).toEqual([]);
+
+              await release();
+
+              expect(criticalEvents()).toHaveLength(1);
+            });
+
+            it('raises no slot alert when none was raised before the hold', async () => {
+              await hold();
+
+              await release();
+
+              expect(criticalEvents()).toHaveLength(0);
+            });
           });
 
           it('does not count a round with too few views as one of the three', async () => {
