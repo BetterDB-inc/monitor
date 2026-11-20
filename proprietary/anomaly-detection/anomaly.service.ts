@@ -307,6 +307,12 @@ import {
   outranksSeverity,
   toDivergenceNode,
 } from './topology-divergence-report';
+import {
+  type RaisedDivergence,
+  type TopologyDisagreementSummary,
+  eventOfRaised,
+  summarizeDisagreements,
+} from './topology-disagreements';
 import { ShardLoadService } from '@app/cluster/shard-load.service';
 import type { ShardLoadSample, SlotLoadRate } from '@app/cluster/shard-load';
 import { parseNodeAddress } from '@app/topology/membership-diff';
@@ -7588,7 +7594,7 @@ export class AnomalyService
 
     for (const group of groups) {
       if (eventIds.has(group.signature) && !open.get(group.signature)?.group) {
-        open.set(group.signature, { group, lastCountedAt: round.at, clean: 0 });
+        open.set(group.signature, { group, confirmedAt: round.at, lastCountedAt: round.at, clean: 0 });
       }
     }
     const tracked = new Set([...this.topologyDivergenceEventIds.values()].flatMap((ids) => [...ids.values()]));
@@ -11171,6 +11177,26 @@ export class AnomalyService
       unanswered: round.unanswered.map((id) => toDivergenceNode(id, round.nodes)),
       divergences: [...raised, ...counting],
     };
+  }
+
+  getTopologyDisagreements(connectionId: string): TopologyDisagreementSummary {
+    const clusterKey = this.connectionClusterKeys.get(connectionId);
+    const round = clusterKey ? this.topologyDivergence.lastRound(clusterKey) : undefined;
+    if (!clusterKey || !round) return summarizeDisagreements(undefined, () => undefined);
+    const eventIds = this.topologyDivergenceEventIds.get(round.anchorConnectionId);
+    const raised: RaisedDivergence[] = [];
+    for (const [signature, { group, confirmedAt }] of this.topologyDivergenceOpen.get(clusterKey) ?? []) {
+      const eventId = eventIds?.get(signature);
+      if (eventId === undefined || !group) continue;
+      const event = this.eventInMemory(eventId) ?? this.findIncidentEvent(eventId);
+      const eventType = event?.metricType ?? MetricType.TOPOLOGY_DIVERGENCE;
+      raised.push({
+        group,
+        event: { eventId, eventType, resolvedByHand: event?.resolved === true },
+        confirmedAt: confirmedAt ?? 0,
+      });
+    }
+    return summarizeDisagreements(round, eventOfRaised(raised));
   }
 
   getRecentEvents(limit = 100, metricType?: MetricType): AnomalyEvent[] {

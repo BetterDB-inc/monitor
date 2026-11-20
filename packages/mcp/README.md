@@ -174,6 +174,7 @@ Clients that load skills from a plugin (Connect Apps and other skill-aware clien
 | `get_anomalies` | Anomaly detection events *(Pro)* |
 | `get_retry_amplification` | Live retry-amplification state, last episode and top clients *(Pro)* |
 | `get_hot_shards` | Open hot shards on a cluster with their top slots, hot keys and a suggested slot rebalance, or the reason none is suggested *(Pro)* |
+| `get_topology_disagreements` | Where the nodes of a cluster disagree about slot owners, config epochs, failure flags or membership, with the number of views on each side and one line per shard *(Pro)* |
 | `get_client_activity` | Time-bucketed client activity from persisted snapshots |
 | `get_acl_audit` | ACL audit log entries |
 | `get_cluster_nodes` | Cluster node discovery — roles, state (`healthy`, `suspect` or `failed`), slot ranges, whether the monitor collects each node, plus availability zone and shard id on Valkey 9.1+ (older versions: the zone from the connection's zone map) |

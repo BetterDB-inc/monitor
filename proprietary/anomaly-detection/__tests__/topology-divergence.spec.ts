@@ -1,5 +1,6 @@
 import type { ClusterNode } from '@app/common/types/metrics.types';
 import {
+  type DivergenceGroup,
   DivergenceTracker,
   TOPOLOGY_DIVERGENCE_BLIND_MS,
   type TopologyDisagreement,
@@ -11,6 +12,7 @@ import {
   failingForEveryView,
   groupDivergences,
   lackingObservers,
+  matchDivergence,
   membersByObserver,
   migrationTouchesSlots,
   type OpenDivergence,
@@ -1073,6 +1075,196 @@ describe('groupDivergences', () => {
   });
 });
 
+describe('matchDivergence', () => {
+  const tracked = (
+    key: string,
+    positions: TopologyDisagreement['positions'],
+    slots?: number[][],
+  ): TopologyDisagreement & { firstSeenAt: number; lastSeenAt: number; rounds: number } => ({
+    key,
+    kind: slots ? 'slot_owner' : 'config_epoch',
+    subjectIds: slots ? positions.map((position) => position.value) : [key.split(':')[1]],
+    ...(slots ? { slots } : {}),
+    positions,
+    firstSeenAt: 0,
+    lastSeenAt: 10000,
+    rounds: 3,
+  });
+  const dispute = (key: string, slots: number[][], dissent: string[], others = ['a', 'd']) =>
+    tracked(
+      key,
+      [
+        { value: 'A', observers: others },
+        { value: 'B', observers: dissent },
+      ],
+      slots,
+    );
+  const epoch = (subject: string, dissent: string[], others = ['a', 'd']) =>
+    tracked(`config_epoch:${subject}`, [
+      { value: '1', observers: others },
+      { value: '9', observers: dissent },
+    ]);
+  const raisedFor = (id: string, ...disagreements: ReturnType<typeof tracked>[]) => {
+    const [group] = groupDivergences(disagreements);
+    return { id, group };
+  };
+
+  it('finds the event of a slot dispute by its owners and its slots, whatever the key says', () => {
+    const first = raisedFor('e1', dispute('slot_owner:A|B', [[9000, 9100]], ['b']));
+    const second = raisedFor('e2', dispute('slot_owner:A|B#2', [[5000, 5100]], ['c']));
+
+    expect(matchDivergence([first, second], dispute('slot_owner:A|B', [[5000, 5100]], ['c']))?.id).toBe('e2');
+    expect(matchDivergence([first, second], dispute('slot_owner:A|B#2', [[9000, 9100]], ['b']))?.id).toBe('e1');
+    expect(matchDivergence([second], dispute('slot_owner:A|B', [[5050, 5100]], ['c']))?.id).toBe('e2');
+  });
+
+  it('finds nothing for a dispute between the same owners on other slots', () => {
+    const ended = raisedFor('e1', dispute('slot_owner:A|B', [[0, 100]], ['b']));
+
+    expect(matchDivergence([ended], dispute('slot_owner:A|B', [[200, 300]], ['b']))).toBeUndefined();
+  });
+
+  it('finds nothing for the same slots between other owners', () => {
+    const raised = raisedFor('e1', dispute('slot_owner:A|B', [[0, 100]], ['b']));
+    const others = tracked(
+      'slot_owner:A|C',
+      [
+        { value: 'A', observers: ['a', 'd'] },
+        { value: 'C', observers: ['b'] },
+      ],
+      [[0, 100]],
+    );
+
+    expect(matchDivergence([raised], others)).toBeUndefined();
+  });
+
+  it('finds nothing once the dissenting node of the event is back with the others', () => {
+    const raised = raisedFor('e1', epoch('x', ['b'], ['a', 'c', 'd']));
+
+    expect(matchDivergence([raised], epoch('x', ['c'], ['a', 'b', 'd']))).toBeUndefined();
+    expect(matchDivergence([raised], epoch('x', ['b'], ['a', 'c', 'd']))?.id).toBe('e1');
+  });
+
+  it('finds nothing for a slot dispute whose dissenting side moved to another node', () => {
+    const raised = raisedFor('e1', dispute('slot_owner:A|B', [[0, 100]], ['b'], ['a', 'c', 'd']));
+
+    expect(matchDivergence([raised], dispute('slot_owner:A|B', [[0, 100]], ['c'], ['a', 'b', 'd']))).toBeUndefined();
+  });
+
+  it('finds nothing for another node, or for another kind about the same node', () => {
+    const raised = raisedFor('e1', epoch('x', ['b']));
+    const flags = { ...epoch('x', ['b']), key: 'failure_flags:x', kind: 'failure_flags' as const };
+
+    expect(matchDivergence([raised], epoch('y', ['b']))).toBeUndefined();
+    expect(matchDivergence([raised], flags)).toBeUndefined();
+  });
+
+  it('keeps the event when more nodes are asked and the dissenting node still stands apart', () => {
+    const raised = raisedFor('e1', epoch('x', ['b'], ['a', 'd']));
+
+    expect(matchDivergence([raised], epoch('x', ['b', 'r7'], ['a', 'd', 'e', 'f', 'g']))?.id).toBe('e1');
+    expect(matchDivergence([raised], epoch('x', ['b', 'e', 'f', 'g'], ['a', 'd']))?.id).toBe('e1');
+    expect(matchDivergence([raised], epoch('x', ['r7'], ['a', 'b', 'd']))).toBeUndefined();
+  });
+
+  it('finds nothing when no node of the dissenting side gave a view', () => {
+    const raised = raisedFor('e1', epoch('x', ['b'], ['a', 'd']));
+
+    expect(matchDivergence([raised], epoch('x', ['r7'], ['a', 'd']))).toBeUndefined();
+  });
+
+  it('takes the group that was confirmed last when two cover a line alike, in whatever order they come', () => {
+    const outgoing = { ...raisedFor('e1', epoch('x', ['b'])), confirmedAt: 1000 };
+    const current = { ...raisedFor('e2', epoch('x', ['b', 'c'])), confirmedAt: 2000 };
+    const line = epoch('x', ['b', 'c']);
+
+    expect(matchDivergence([outgoing, current], line)?.id).toBe('e2');
+    expect(matchDivergence([current, outgoing], line)?.id).toBe('e2');
+  });
+
+  it('takes an event that is open before one that was resolved by hand', () => {
+    const resolved = { ...raisedFor('e1', epoch('x', ['b'])), confirmedAt: 3000, resolvedByHand: true };
+    const open = { ...raisedFor('e2', epoch('x', ['b', 'c'])), confirmedAt: 2000 };
+    const line = epoch('x', ['b', 'c']);
+
+    expect(matchDivergence([resolved, open], line)?.id).toBe('e2');
+    expect(matchDivergence([open, resolved], line)?.id).toBe('e2');
+    expect(matchDivergence([resolved], line)?.id).toBe('e1');
+  });
+
+  it('takes an open event that shares fewer slots before one that was resolved by hand', () => {
+    const resolved = { ...raisedFor('e1', dispute('slot_owner:A|B', [[0, 100]], ['b'])), resolvedByHand: true };
+    const open = raisedFor('e2', dispute('slot_owner:A|B#2', [[50, 50]], ['b']));
+
+    expect(matchDivergence([resolved, open], dispute('slot_owner:A|B', [[0, 100]], ['b']))?.id).toBe('e2');
+  });
+
+  it('takes the event that shares the most slots', () => {
+    const small = raisedFor('e1', dispute('slot_owner:A|B', [[0, 9]], ['b']));
+    const large = raisedFor('e2', dispute('slot_owner:A|B#2', [[10, 99]], ['b']));
+
+    expect(matchDivergence([small, large], dispute('slot_owner:A|B', [[0, 99]], ['b']))?.id).toBe('e2');
+  });
+
+  it('takes the group that was confirmed last when an older one that covers the line is still being counted', () => {
+    const membership = (positions: TopologyDisagreement['positions']) => ({
+      ...tracked('membership:n1', positions),
+      kind: 'membership' as const,
+    });
+    const wide = membership([
+      { value: 'known', observers: ['a', 'd', 'e'] },
+      { value: 'handshake', observers: ['b'] },
+      { value: 'missing', observers: ['c'] },
+    ]);
+    const narrow = membership([
+      { value: 'known', observers: ['a', 'c', 'd', 'e'] },
+      { value: 'handshake', observers: ['b'] },
+    ]);
+    const [both] = groupDivergences([wide]);
+    const [alone] = groupDivergences([narrow]);
+    const open = new Map<string, OpenDivergence>();
+    const settle = (at: number, openSignatures: string[], confirmed: DivergenceGroup[], pending: string[] = []) =>
+      settleOpenDivergences({
+        open,
+        openSignatures,
+        confirmed,
+        pendingSignatures: new Set(pending),
+        comparable: true,
+        at,
+        minRounds: 3,
+      });
+    settle(1000, [both.signature], [both]);
+    settle(2000, [both.signature, alone.signature], [alone]);
+    settle(3000, [both.signature, alone.signature], [both], [alone.signature]);
+
+    const raised = [...open.values()].flatMap(({ group, confirmedAt }) => (group ? [{ group, confirmedAt }] : []));
+
+    expect(raised.map((entry) => entry.group.signature)).toEqual(['topology_divergence:b,c', 'topology_divergence:b']);
+    expect(matchDivergence(raised, wide)?.group.signature).toBe('topology_divergence:b,c');
+    expect(matchDivergence([...raised].reverse(), wide)?.group.signature).toBe('topology_divergence:b,c');
+  });
+
+  it('looks at the sides of a group entry only when it is about the same thing as the line', () => {
+    const subjects = Array.from({ length: 200 }, (_, at) => `n${at}`);
+    const [group] = groupDivergences(subjects.map((subject) => epoch(subject, ['b'])));
+    const sidesRead: string[] = [];
+    const counted = {
+      ...group,
+      disagreements: group.disagreements.map((entry) => ({
+        ...entry,
+        get positions() {
+          sidesRead.push(entry.key);
+          return entry.positions;
+        },
+      })),
+    };
+
+    expect(counted.disagreements).toHaveLength(200);
+    expect(matchDivergence([{ id: 'e1', group: counted }], epoch('n7', ['b']))?.id).toBe('e1');
+    expect(sidesRead).toEqual(['config_epoch:n7']);
+  });
+});
+
 describe('migrationTouchesSlots', () => {
   const owner = primary('p1', 1, [[0, 5460]], 1);
 
@@ -1229,6 +1421,26 @@ describe('settleOpenDivergences', () => {
     expect(settle(open, 0).has(SIGNATURE)).toBe(true);
     expect(settle(open, 5000).has(SIGNATURE)).toBe(true);
     expect(settle(open, 10000).has(SIGNATURE)).toBe(false);
+  });
+
+  it('keeps the confirm time of a group that is only being counted', () => {
+    const WIDER = 'topology_divergence:a,b';
+    const widerGroup = { signature: WIDER, dissent: ['a', 'b'], others: ['c'], disagreements: [] };
+    const open = new Map<string, OpenDivergence>();
+    const both = { openSignatures: [WIDER, SIGNATURE] };
+    settle(open, 1000, { openSignatures: [WIDER], confirmed: [widerGroup] });
+    settle(open, 2000, { ...both, confirmed: [confirmedGroup] });
+    settle(open, 3000, { ...both, confirmed: [widerGroup], pendingSignatures: new Set([SIGNATURE]) });
+
+    expect(open.get(SIGNATURE)).toMatchObject({ group: confirmedGroup, confirmedAt: 2000, lastCountedAt: 3000 });
+    expect(open.get(WIDER)).toMatchObject({ group: widerGroup, confirmedAt: 3000, lastCountedAt: 3000 });
+  });
+
+  it('gives no confirm time to an event whose group it has not seen confirmed', () => {
+    const open = new Map<string, OpenDivergence>();
+    settle(open, 1000, { pendingSignatures: new Set([SIGNATURE]) });
+
+    expect(open.get(SIGNATURE)).toEqual({ lastCountedAt: 1000, clean: 0 });
   });
 
   it('forgets an event that is no longer open', () => {
