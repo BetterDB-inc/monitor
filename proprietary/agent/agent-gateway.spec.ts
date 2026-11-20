@@ -94,6 +94,7 @@ describe('AgentGateway reconnects', () => {
     const adapter = registry.get(CONNECTION_ID);
 
     oldSocket.emit('close');
+    expect(jest.getTimerCount()).toBe(1);
     await jest.advanceTimersByTimeAsync(30_000);
 
     expect(registry.isRegisteredClient(CONNECTION_ID, adapter)).toBe(true);
@@ -106,9 +107,11 @@ describe('AgentGateway reconnects', () => {
   it('closes the old socket and stops its pings when a new hello arrives', async () => {
     const { connect } = build();
     const oldSocket = await connect();
+    expect(jest.getTimerCount()).toBe(1);
     await connect();
 
     expect(oldSocket.closes).toHaveLength(1);
+    expect(jest.getTimerCount()).toBe(1);
 
     await jest.advanceTimersByTimeAsync(60_000);
 
@@ -121,9 +124,11 @@ describe('AgentGateway reconnects', () => {
     const oldSocket = await connect();
     await jest.advanceTimersByTimeAsync(30_000);
     expect(oldSocket.pings()).toBe(1);
+    expect(jest.getTimerCount()).toBe(2);
 
     const newSocket = await connect();
     const adapter = registry.get(CONNECTION_ID);
+    expect(jest.getTimerCount()).toBe(1);
     await jest.advanceTimersByTimeAsync(10_000);
     oldSocket.emit('close');
 
