@@ -56,6 +56,7 @@ import type {
   RebalanceRun,
   ReplicaDivergenceHistory,
   IncidentTimeline,
+  TopologyDisagreementSummary,
 } from '../types/anomaly';
 import type {
   DiscoveredNode,
@@ -462,6 +463,12 @@ export const metricsApi = {
   getAnomalyCoverage: () => fetchApi<FanoutCoverage[]>('/anomaly/coverage'),
 
   getHotShards: () => fetchApi<HotShardDetail[]>('/anomaly/hot-shards'),
+
+  getTopologyDisagreements: (connectionId: string, signal?: AbortSignal) =>
+    fetchApi<TopologyDisagreementSummary>('/anomaly/topology-disagreements', {
+      signal,
+      headers: { 'x-connection-id': connectionId },
+    }),
 
   runRebalance: (shardId: string, moves: Array<Pick<RebalanceMove, 'targetShardId' | 'ranges'>>) =>
     fetchApi<RebalanceRun>(`/anomaly/hot-shards/${encodeURIComponent(shardId)}/rebalance`, {

@@ -179,7 +179,7 @@ describe('summarizeDisagreements', () => {
       ],
     });
     const eventOf = ({ key }: { key: string }) =>
-      key === old.key ? { eventId: 'e3', eventType: MetricType.TOPOLOGY_DIVERGENCE } : undefined;
+      key === old.key ? { eventId: 'e3', eventType: MetricType.TOPOLOGY_DIVERGENCE, eventAt: AT, connectionId: 'c1' } : undefined;
 
     it('is kept without counts, after the lines of this round, and says when it was last seen', () => {
       const summary = summarizeDisagreements(
@@ -244,7 +244,13 @@ describe('summarizeDisagreements', () => {
 
     it('is not open without an event, and not after its event was resolved by hand', () => {
       const nodes = round(cluster(3), { observers: ['s000p', 's000r0', 's001p'], disagreements: [old] });
-      const resolved = () => ({ eventId: 'e3', eventType: MetricType.TOPOLOGY_DIVERGENCE, resolvedByHand: true });
+      const resolved = () => ({
+        eventId: 'e3',
+        eventType: MetricType.TOPOLOGY_DIVERGENCE,
+        eventAt: AT,
+        connectionId: 'c1',
+        resolvedByHand: true,
+      });
 
       expect(summarizeDisagreements(nodes, noEvent).disagreements).toMatchObject([
         { id: old.key, open: false, confirmed: false, resolvedByHand: false },
@@ -455,6 +461,8 @@ describe('summarizeDisagreements', () => {
         resolvedByHand: false,
         eventId: null,
         eventType: null,
+        eventAt: null,
+        eventConnectionId: null,
         since: AT - 10_000,
         rounds: 3,
         stale: false,
@@ -751,7 +759,7 @@ describe('summarizeDisagreements', () => {
       });
     const disagreements = [about('s001p', ['s000p']), about('s001r0', ['s000r0']), about('s002p', ['s000p'])];
     const eventOf = ({ key }: { key: string }) =>
-      key === 'failure_flags:s002p' ? { eventId: 'e1', eventType: MetricType.TOPOLOGY_DIVERGENCE } : undefined;
+      key === 'failure_flags:s002p' ? { eventId: 'e1', eventType: MetricType.TOPOLOGY_DIVERGENCE, eventAt: AT, connectionId: 'c1' } : undefined;
 
     const summary = summarizeDisagreements(round(cluster(3), { disagreements }), eventOf);
 
@@ -905,12 +913,23 @@ describe('summarizeDisagreements', () => {
         { value: 'missing', observers: ['s002p'] },
       ],
     });
-    const eventOf = jest.fn().mockReturnValue({ eventId: 'e7', eventType: MetricType.TOPOLOGY_DIVERGENCE });
+    const eventOf = jest.fn().mockReturnValue({
+      eventId: 'e7',
+      eventType: MetricType.TOPOLOGY_DIVERGENCE,
+      eventAt: AT - 40_000,
+      connectionId: 'c1',
+    });
 
     const [line] = summarizeDisagreements(round(cluster(3), { disagreements: [membership] }), eventOf).disagreements;
 
     expect(eventOf).toHaveBeenCalledWith(membership);
-    expect(line).toMatchObject({ confirmed: true, eventId: 'e7', eventType: MetricType.TOPOLOGY_DIVERGENCE });
+    expect(line).toMatchObject({
+      confirmed: true,
+      eventId: 'e7',
+      eventType: MetricType.TOPOLOGY_DIVERGENCE,
+      eventAt: AT - 40_000,
+      eventConnectionId: 'c1',
+    });
   });
 
   it('says that the event of a line of this round was resolved by hand and keeps the line open', () => {
@@ -923,7 +942,13 @@ describe('summarizeDisagreements', () => {
         { value: '9', observers: ['s001p'] },
       ],
     });
-    const resolved = () => ({ eventId: 'e7', eventType: MetricType.TOPOLOGY_DIVERGENCE, resolvedByHand: true });
+    const resolved = () => ({
+      eventId: 'e7',
+      eventType: MetricType.TOPOLOGY_DIVERGENCE,
+      eventAt: AT,
+      connectionId: 'c1',
+      resolvedByHand: true,
+    });
 
     const summary = summarizeDisagreements(round(cluster(3), { disagreements: [epoch] }), resolved);
 
@@ -1004,7 +1029,7 @@ describe('summarizeDisagreements', () => {
       ],
     });
     const eventOf = ({ key }: { key: string }) =>
-      key === 'failure_flags:s002p' ? { eventId: 'e1', eventType: MetricType.TOPOLOGY_DIVERGENCE } : undefined;
+      key === 'failure_flags:s002p' ? { eventId: 'e1', eventType: MetricType.TOPOLOGY_DIVERGENCE, eventAt: AT, connectionId: 'c1' } : undefined;
 
     const summary = summarizeDisagreements(
       round(cluster(3), {
