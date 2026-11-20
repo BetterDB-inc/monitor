@@ -1,4 +1,6 @@
+import type { ServedClusterNodeRef } from '@betterdb/shared';
 import { ConnectionLink } from '../../ConnectionLink';
+import { NodeLink } from '../../cluster/NodeLink';
 import { Siren } from 'lucide-react';
 import { EmptyState } from '../../ui/empty-state';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../ui/table';
@@ -23,6 +25,38 @@ function scopeLabel(incident: IncidentTimeline): string {
   const parts = connections > 0 ? [`${connections} connection${connections === 1 ? '' : 's'}`] : [];
   if (nodes.size > 0) parts.push(`${nodes.size} node${nodes.size === 1 ? '' : 's'}`);
   return parts.join(' · ') || 'Unscoped';
+}
+
+const NODE_LINK_LIMIT = 3;
+
+interface IncidentNode {
+  node: ServedClusterNodeRef;
+  connectionId: string;
+}
+
+function nodesOf(incident: IncidentTimeline): IncidentNode[] {
+  const nodes = new Map<string, IncidentNode>();
+  for (const entry of incident.entries) {
+    if (entry.node && !nodes.has(entry.node.nodeId)) {
+      nodes.set(entry.node.nodeId, { node: entry.node, connectionId: entry.connectionId });
+    }
+  }
+  return [...nodes.values()];
+}
+
+function IncidentNodes({ incident }: { incident: IncidentTimeline }) {
+  const nodes = nodesOf(incident);
+  if (nodes.length === 0) return null;
+  return (
+    <div className="mt-1 flex flex-col gap-0.5">
+      {nodes.slice(0, NODE_LINK_LIMIT).map(({ node, connectionId }) => (
+        <NodeLink key={node.nodeId} node={node} connectionId={connectionId} />
+      ))}
+      {nodes.length > NODE_LINK_LIMIT && (
+        <span className="text-xs">and {nodes.length - NODE_LINK_LIMIT} more</span>
+      )}
+    </div>
+  );
 }
 
 export function IncidentList({
@@ -95,6 +129,7 @@ export function IncidentList({
                   </TableCell>
                   <TableCell className="text-sm text-muted-foreground">
                     {scopeLabel(incident)}
+                    <IncidentNodes incident={incident} />
                   </TableCell>
                   <TableCell className="text-sm">{formatDateTime(incident.startedAt)}</TableCell>
                   <TableCell className="text-sm">

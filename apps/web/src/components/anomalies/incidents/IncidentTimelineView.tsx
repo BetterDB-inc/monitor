@@ -4,6 +4,7 @@ import type { IncidentTimeline, IncidentTimelineEntry } from '../../../types/ano
 import { SEVERITY_CONFIG, formatTime, metricLabel, patternLabel } from '../anomaly-display';
 import { formatDateTime, formatDuration } from '../../../lib/formatters';
 import { IncidentNotice } from './IncidentNotice';
+import { NodeLink } from '../../cluster/NodeLink';
 import { IncidentStatusBadge } from './IncidentStatusBadge';
 import { LiveDuration } from './LiveDuration';
 import { incidentSubject, incidentTitle, type IncidentConnection } from './incident-summary';
@@ -186,8 +187,12 @@ export function IncidentTimelineView({
                         {tag.label}
                       </span>
                     ))}
-                    {entry.nodeAddr && (
-                      <span className="text-xs text-muted-foreground">{entry.nodeAddr}</span>
+                    {entry.node ? (
+                      <NodeLink node={entry.node} connectionId={entry.connectionId} />
+                    ) : (
+                      entry.nodeAddr && (
+                        <span className="text-xs text-muted-foreground">{entry.nodeAddr}</span>
+                      )
                     )}
                   </div>
                   <p className="text-sm">{entry.message}</p>

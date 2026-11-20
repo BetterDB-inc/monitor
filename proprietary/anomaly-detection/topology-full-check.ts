@@ -1,10 +1,10 @@
 import { createHash } from 'crypto';
 import type { ClusterNode } from '@app/common/types/metrics.types';
 import {
-  FAILING_FLAGS,
   compareText,
   compareTopologyViewsInSteps,
-  isMember,
+  isFlaggedFailing,
+  isKnownMember,
   type Steps,
   type TopologyDisagreement,
   type TopologyView,
@@ -219,7 +219,7 @@ function fingerprint(nodes: ClusterNode[]): string {
 }
 
 function isAccused(node: ClusterNode): boolean {
-  return isMember(node) && node.flags.some((flag) => FAILING_FLAGS.includes(flag));
+  return isKnownMember(node) && isFlaggedFailing(node);
 }
 
 function readWithin(

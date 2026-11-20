@@ -17,6 +17,7 @@ export * from './utils/key-display';
 export * from './utils/url-credentials';
 export * from './utils/glob';
 export * from './utils/incident-link';
+export * from './utils/cluster-node-link';
 export * from './utils/elasticache-host';
 export * from './utils/cluster-node-state';
 export * from './license/index';

@@ -3,7 +3,7 @@ import {
   UNASSIGNED_SLOT_OWNER,
   compareText,
   countSlots,
-  isMember,
+  isKnownMember,
   matchDivergence,
   slotRangesOverlap,
   type DivergenceGroup,
@@ -53,7 +53,8 @@ export function eventOfRaised(raised: readonly RaisedDivergence[]): Disagreement
   return (disagreement) => matchDivergence(candidates, disagreement)?.event;
 }
 
-export type RoundDisagreement = TopologyDisagreement & Partial<Pick<TrackedDisagreement, 'firstSeenAt' | 'lastSeenAt' | 'rounds'>>;
+export type RoundDisagreement = TopologyDisagreement &
+  Partial<Pick<TrackedDisagreement, 'firstSeenAt' | 'lastSeenAt' | 'rounds' | 'gapStreaks'>>;
 
 export interface DisagreementRound {
   status: 'ok' | 'insufficient_views';
@@ -303,14 +304,16 @@ export function summarizeDisagreements(
   const listed = (ids: string[]) => ids.slice(0, DISAGREEMENT_LIST_LIMIT).map(named);
   const nameOf = (id: string) => named(id).address || id.slice(0, SHORT_ID_LENGTH);
 
-  const members = [...nodes.values()].filter(isMember);
+  const members = [...nodes.values()].filter(isKnownMember);
   const shards = shardsOf(members, nodes);
   const compared = round.status === 'ok';
   const silent = new Set(round.unanswered);
   const answered = new Set(round.observers.filter((id) => !silent.has(id)));
-  const held = [
-    ...new Set(round.disagreements.flatMap((entry) => entry.positions.flatMap((position) => position.observers))),
-  ]
+  const awaited = round.disagreements.flatMap((entry) => [
+    ...entry.positions.flatMap((position) => position.observers),
+    ...Object.keys(entry.gapStreaks ?? {}),
+  ]);
+  const held = [...new Set(awaited)]
     .filter((id) => nodes.has(id) && !answered.has(id) && !silent.has(id))
     .sort(compareText);
   const unanswered = [...round.unanswered, ...held];
@@ -319,7 +322,7 @@ export function summarizeDisagreements(
     const touched = new Set<string>();
     for (const id of subjectIds) {
       const node = nodes.get(id);
-      if (node && isMember(node)) touched.add(shardKeyOf(node, nodes));
+      if (node && isKnownMember(node)) touched.add(shardKeyOf(node, nodes));
     }
     if (slots) {
       for (const shard of shards) {

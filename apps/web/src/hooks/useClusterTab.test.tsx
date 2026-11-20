@@ -24,6 +24,7 @@ describe('useClusterTab', () => {
 
   it('opens the tab named in the URL', () => {
     expect(renderTab('/cluster?tab=disagreements').result.current.tab).toBe('disagreements');
+    expect(renderTab('/cluster?tab=replication').result.current.tab).toBe('replication');
     expect(renderTab('/cluster?connection=c1&tab=nodes').result.current.tab).toBe('nodes');
   });
 

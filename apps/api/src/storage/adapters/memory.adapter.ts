@@ -705,6 +705,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       relatedMetrics: event.relatedMetrics ?? existing.relatedMetrics,
       replicaAddr: event.replicaAddr ?? existing.replicaAddr,
       nodeAddr: event.nodeAddr ?? existing.nodeAddr,
+      node: existing.node ?? event.node,
       dedupeKey: event.dedupeKey ?? existing.dedupeKey,
       commands: existing.commands ?? event.commands,
       eventSequence: existing.eventSequence ?? event.eventSequence,

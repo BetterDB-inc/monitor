@@ -177,7 +177,7 @@ Clients that load skills from a plugin (Connect Apps and other skill-aware clien
 | `get_topology_disagreements` | Where the nodes of a cluster disagree about slot owners, config epochs, failure flags or membership, with the number of views on each side and one line per shard, plus the last check that asked every node when one was run from the Cluster page *(Pro)* |
 | `get_client_activity` | Time-bucketed client activity from persisted snapshots |
 | `get_acl_audit` | ACL audit log entries |
-| `get_cluster_nodes` | Cluster node discovery — roles, state (`healthy`, `suspect` or `failed`), slot ranges, plus availability zone and shard id on Valkey 9.1+ (older versions: the zone from the connection's zone map) |
+| `get_cluster_nodes` | Cluster node discovery — roles, state (`healthy`, `suspect` or `failed`), slot ranges, whether the monitor collects each node, plus availability zone and shard id on Valkey 9.1+ (older versions: the zone from the connection's zone map) |
 | `get_cluster_node_stats` | Per-node performance stats across the cluster |
 | `get_cluster_slowlog` | Aggregated slowlog across all cluster nodes |
 | `get_slot_stats` | Per-slot key counts and CPU usage (Valkey 8+) |

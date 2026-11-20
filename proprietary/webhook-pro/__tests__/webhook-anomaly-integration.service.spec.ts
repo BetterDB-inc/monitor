@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { WebhookAnomalyIntegrationService } from '../webhook-anomaly-integration.service';
 import { WebhookProService } from '../webhook-pro.service';
 import { StoragePort, StoredAnomalyEvent } from '@app/common/interfaces/storage-port.interface';
-import { incidentEventUrl } from '@betterdb/shared';
+import { clusterNodeUrl, incidentEventUrl } from '@betterdb/shared';
 
 describe('WebhookAnomalyIntegrationService', () => {
   let service: WebhookAnomalyIntegrationService;
@@ -388,6 +388,100 @@ describe('WebhookAnomalyIntegrationService', () => {
       expect(webhookProService.dispatchAnomalyDetected.mock.calls[0][0]).not.toHaveProperty(
         'incidentUrl',
       );
+    });
+  });
+
+  describe('failing node', () => {
+    const node = {
+      nodeId: 'primA',
+      address: '10.0.0.1:6379',
+      role: 'primary' as const,
+      shardId: 'shard-1',
+      collected: false,
+    };
+    const replica = { nodeId: 'repB', address: '10.0.0.2:6380', role: 'replica' as const, collected: false };
+    const anomaly = (overrides: Partial<StoredAnomalyEvent> = {}): StoredAnomalyEvent => ({
+      id: 'ev-1',
+      timestamp: 1706457000000,
+      metricType: 'memory_used',
+      anomalyType: 'spike',
+      severity: 'warning',
+      value: 2,
+      baseline: 1,
+      stdDev: 0.1,
+      zScore: 5,
+      threshold: 3,
+      message: 'Memory spike',
+      resolved: false,
+      connectionId: 'conn-1',
+      ...overrides,
+    });
+    const sent = () => webhookProService.dispatchAnomalyDetected.mock.calls[0][0] as Record<string, unknown>;
+    const group = (anomalies: unknown[]) =>
+      ({
+        correlationId: 'grp-1',
+        timestamp: 1000,
+        anomalies,
+        pattern: 'memory_pressure',
+        severity: 'critical',
+        diagnosis: 'd',
+        recommendations: [],
+      }) as any;
+    const member = (id: string, eventNode?: unknown) =>
+      ({ id, timestamp: 1000, metricType: 'connections', connectionId: 'conn-1', node: eventNode }) as any;
+    const sentSequence = () =>
+      webhookProService.dispatchAnomalySequenceDetected.mock.calls[0][0] as unknown as Record<string, unknown>;
+
+    it('sends the node of the event', async () => {
+      await service.dispatchAnomalyWebhook(anomaly({ node }));
+
+      expect(sent().node).toEqual(node);
+    });
+
+    it('adds the link to the node when the frontend URL is set', async () => {
+      frontendUrl = 'https://m.example.com/';
+
+      await service.dispatchAnomalyWebhook(anomaly({ node }));
+
+      expect(sent().nodeUrl).toBe(clusterNodeUrl('https://m.example.com', 'primA', 'conn-1'));
+    });
+
+    it('leaves the link to the node off without a frontend URL', async () => {
+      await service.dispatchAnomalyWebhook(anomaly({ node }));
+
+      expect(sent()).not.toHaveProperty('nodeUrl');
+    });
+
+    it('sends no node and no link for an event without one', async () => {
+      frontendUrl = 'https://m.example.com';
+
+      await service.dispatchAnomalyWebhook(anomaly());
+
+      expect(sent()).not.toHaveProperty('node');
+      expect(sent()).not.toHaveProperty('nodeUrl');
+    });
+
+    it('sends each node of a sequence once, in the order of its events', async () => {
+      await service.dispatchSequenceWebhook(group([member('a', node), member('b', replica), member('c', node)]));
+
+      expect(sentSequence().nodes).toEqual([node, replica]);
+    });
+
+    it('links a sequence to the node of its first event', async () => {
+      frontendUrl = 'https://m.example.com';
+
+      await service.dispatchSequenceWebhook(group([member('a', replica), member('b', node)]));
+
+      expect(sentSequence().nodeUrl).toBe(clusterNodeUrl('https://m.example.com', 'repB', 'conn-1'));
+    });
+
+    it('sends no link for a sequence whose first event names no node', async () => {
+      frontendUrl = 'https://m.example.com';
+
+      await service.dispatchSequenceWebhook(group([member('a'), member('b', node)]));
+
+      expect(sentSequence().nodes).toEqual([node]);
+      expect(sentSequence()).not.toHaveProperty('nodeUrl');
     });
   });
 });

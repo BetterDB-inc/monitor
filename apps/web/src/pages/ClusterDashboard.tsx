@@ -1,4 +1,6 @@
 import { useMemo, useCallback, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import { CLUSTER_NODE_PARAM } from '@betterdb/shared';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { EmptyState } from '../components/ui/empty-state';
@@ -12,6 +14,7 @@ import { useConnection } from '../hooks/useConnection';
 import { useConnectionDialog } from '../hooks/useConnectionDialog';
 import { useClusterTab } from '../hooks/useClusterTab';
 import { useClusterDisagreements } from '../hooks/useClusterDisagreements';
+import { useNodeCollection } from '../hooks/useNodeCollection';
 import { metricsApi } from '../api/metrics';
 import { ClusterHealthCard } from '../components/cluster/ClusterHealthCard';
 import { ClusterTopology } from '../components/cluster/ClusterTopology';
@@ -95,6 +98,16 @@ export function ClusterDashboard() {
   const openDisagreements = (disagreements.summary?.disagreements ?? []).filter(
     (line) => line.open,
   );
+  const [searchParams] = useSearchParams();
+  const focusNodeId = searchParams.get(CLUSTER_NODE_PARAM);
+  const { collection, refresh: refreshCollection } = useNodeCollection(
+    currentConnection?.id,
+    shouldPoll && tab === 'nodes',
+  );
+  const handleNodeConnected = useCallback(async () => {
+    await refreshConnections();
+    await refreshCollection();
+  }, [refreshConnections, refreshCollection]);
 
   // Memoize slot-to-node mapping separately for reuse
   const slotNodeMap = useMemo(() => buildSlotNodeMap(nodes), [nodes]);
@@ -399,7 +412,13 @@ export function ClusterDashboard() {
         {/* Nodes Tab */}
         <TabsContent value="nodes" className="space-y-4">
           <NodeStatsComparison nodeStats={nodeStats || undefined} />
-          <ClusterNodesTable nodes={nodes} />
+          <ClusterNodesTable
+            nodes={nodes}
+            focusNodeId={focusNodeId}
+            collection={collection}
+            clusterConnection={currentConnection}
+            onNodeConnected={handleNodeConnected}
+          />
         </TabsContent>
 
         {/* Replication Tab */}
