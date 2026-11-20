@@ -20,6 +20,7 @@ export * from './utils/incident-link';
 export * from './utils/cluster-node-link';
 export * from './utils/elasticache-host';
 export * from './utils/cluster-node-state';
+export * from './utils/admin-commands';
 export * from './license/index';
 export * from './auth/broker';
 export * from './webhooks/index';

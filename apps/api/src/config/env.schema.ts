@@ -224,6 +224,13 @@ export const envSchema = z
     // Comma-separated lower-case `cmd` or `cmd|subcmd`, for example
     // `cluster|slot-stats,latency|histogram`.
     ANOMALY_SLOWLOG_IGNORE_COMMANDS: z.string().default(''),
+    // Comma-separated lower-case latencystats names the P99 regression guard
+    // skips; `cmd|*` matches every subcommand. Unset keeps the built-in admin
+    // and monitoring list, set but empty evaluates every command. No default,
+    // so the two stay apart.
+    LATENCY_REGRESSION_IGNORE_COMMANDS: z.string().optional(),
+    // Added to whichever list applies, for example `my|admincmd`.
+    LATENCY_REGRESSION_EXTRA_IGNORE_COMMANDS: z.string().default(''),
 
     KV_CACHE_FOOTPRINT_INTERVAL_MS: z.string().optional(),
     KV_CACHE_SCAN_MAX_KEYS: z.string().optional(),

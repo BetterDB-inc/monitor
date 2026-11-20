@@ -320,6 +320,25 @@ describe('envSchema', () => {
       }
     });
 
+    it('keeps an empty LATENCY_REGRESSION_IGNORE_COMMANDS apart from an unset one', () => {
+      const defaults = envSchema.safeParse({});
+      expect(defaults.success).toBe(true);
+      if (defaults.success) {
+        expect(defaults.data.LATENCY_REGRESSION_IGNORE_COMMANDS).toBeUndefined();
+        expect(defaults.data.LATENCY_REGRESSION_EXTRA_IGNORE_COMMANDS).toBe('');
+      }
+
+      const set = envSchema.safeParse({
+        LATENCY_REGRESSION_IGNORE_COMMANDS: '',
+        LATENCY_REGRESSION_EXTRA_IGNORE_COMMANDS: 'my|admincmd,client|*',
+      });
+      expect(set.success).toBe(true);
+      if (set.success) {
+        expect(set.data.LATENCY_REGRESSION_IGNORE_COMMANDS).toBe('');
+        expect(set.data.LATENCY_REGRESSION_EXTRA_IGNORE_COMMANDS).toBe('my|admincmd,client|*');
+      }
+    });
+
     it('reads BETTERDB_TELEMETRY through the shared negative set, trimming like CLOUD_MODE', () => {
       // Parity guard for the isNegativeEnvValue helper CLOUD_MODE also uses: a
       // padded ' off ' opts out here exactly as ' off ' reads self-hosted for
