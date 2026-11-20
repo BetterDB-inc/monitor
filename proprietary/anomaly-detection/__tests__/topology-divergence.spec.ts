@@ -85,6 +85,39 @@ describe('slotRangesOverlap', () => {
 });
 
 describe('compareTopologyViewsInSteps', () => {
+  it('reads one view in a step when a handshake entry needs the addresses of every view', () => {
+    const stuck: ClusterNode = { ...replica('f00d', 6, '-', 0), flags: ['handshake'] };
+    const observers = Array.from({ length: 40 }, (_, at) => `o${String(at).padStart(2, '0')}`);
+    let reads = 0;
+    const views: TopologyView[] = observers.map((observerId, at) => {
+      const { nodes } = at === 0 ? view(observerId, { r3: null }, [stuck]) : view(observerId);
+      return {
+        observerId,
+        get nodes() {
+          reads += 1;
+          return nodes;
+        },
+      };
+    });
+
+    const steps = compareTopologyViewsInSteps(views);
+    let mostInOneStep = 0;
+    let found: TopologyDisagreement[] | undefined;
+    while (!found) {
+      const before = reads;
+      const step = steps.next();
+      mostInOneStep = Math.max(mostInOneStep, reads - before);
+      if (step.done) found = step.value;
+    }
+
+    expect(mostInOneStep).toBeLessThanOrEqual(2);
+    expect(found).toEqual(compareTopologyViews(views));
+    expect(found.find((entry) => entry.key === 'membership:r3')?.positions[0]).toEqual({
+      value: 'handshake',
+      observers: ['o00'],
+    });
+  });
+
   it('gives each of two comparisons its own result when they are stepped in turn', () => {
     const running = [
       compareTopologyViewsInSteps([view('p1', { p3: failing() }), view('p2'), view('r1')]),

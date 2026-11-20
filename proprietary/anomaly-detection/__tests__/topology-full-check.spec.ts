@@ -380,6 +380,46 @@ describe('runFullCheck', () => {
     expect(outcome.round.nodes.get('s000p')?.shardId).toBe('s000');
   });
 
+  it.each([
+    ['first', 's000p'],
+    ['last', 's001r'],
+  ])(
+    'takes a node the seed does not list for a member when the reply that has no address for it comes %s',
+    async (_when, lacking) => {
+      const nodes = cluster(2);
+      const stray = node('zzzzp');
+      const unreachable = node('zzzzp', { address: ':0@0', flags: ['master', 'noaddr'] });
+      const outcome = await check(nodes, {
+        concurrency: 1,
+        readView: async (entry) => [...viewOf(nodes, entry.id), entry.id === lacking ? unreachable : stray],
+      });
+
+      const { summary } = fullCheckResult(outcome, noEvent);
+
+      expect(outcome.round.nodes.get('zzzzp')).toMatchObject({
+        address: 'zzzzp.internal:6379@16379',
+        flags: ['master'],
+      });
+      expect(summary.coverage.nodes).toBe(5);
+      expect(summary.shards.map((shard) => shard.primary?.nodeId)).toContain('zzzzp');
+    },
+  );
+
+  it('counts a member found in a reply in the total, as the summary does', async () => {
+    const nodes = cluster(2);
+    const stray = node('zzzzp');
+    const outcome = await check(nodes, {
+      readView: async (entry) =>
+        entry.id === 's001r' ? [...viewOf(nodes, entry.id), stray] : viewOf(nodes, entry.id),
+    });
+
+    const result = fullCheckResult(outcome, noEvent);
+
+    expect(result.summary.coverage).toMatchObject({ nodes: 5, asked: 4, answered: 4, complete: false });
+    expect(result).toMatchObject({ asked: 4, total: 5 });
+    expect(fullCheckView({ state: 'done', result }, null)).toMatchObject({ asked: 4, total: 5 });
+  });
+
   describe('comparing 500 nodes that all say something different', () => {
     const nodes = cluster(250);
     const edit: Edit = (entry, observerId) => (entry.id === observerId ? { ...entry, configEpoch: 7 } : entry);

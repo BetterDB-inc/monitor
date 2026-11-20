@@ -300,7 +300,8 @@ function* compareDistinct(asked: ClusterNode[], groups: DistinctView[]): Steps<C
       membersOf.set(speaker, group.members);
     }
     for (const node of group.nodes) {
-      if (!nodes.has(node.id)) nodes.set(node.id, node);
+      const kept = nodes.get(node.id);
+      if (!kept || (!isKnownMember(kept) && isKnownMember(node))) nodes.set(node.id, node);
     }
     yield;
   }
@@ -374,7 +375,7 @@ export async function runFullCheck(input: FullCheckRun): Promise<FullCheckOutcom
   return {
     startedAt,
     finishedAt,
-    total: queue.length,
+    total: [...compared.nodes.values()].filter(isKnownMember).length,
     asked,
     distinctViews: groups.length,
     round: {

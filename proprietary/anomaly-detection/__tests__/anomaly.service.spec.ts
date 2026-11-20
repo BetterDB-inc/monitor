@@ -29530,7 +29530,12 @@ describe('AnomalyService', () => {
         await finished();
 
         expect(once.mock.calls.map(([node]) => node.id)).toEqual(['a', 'b']);
-        expect(fullCheck()).toMatchObject({ state: 'done', asked: 2, total: 2 });
+        expect(fullCheck()).toMatchObject({
+          state: 'done',
+          asked: 2,
+          total: 3,
+          summary: { coverage: { nodes: 3, asked: 2, complete: false } },
+        });
       });
 
       it('shows a running check and joins it on a second request', async () => {

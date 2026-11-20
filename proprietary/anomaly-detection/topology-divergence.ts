@@ -134,7 +134,7 @@ function finish<T>(steps: Steps<T>): T {
   }
 }
 
-function knownIdsByAddress(views: TopologyView[]): Map<string, Set<string>> {
+function* knownIdsByAddress(views: TopologyView[]): Steps<Map<string, Set<string>>> {
   const idsByAddress = new Map<string, Set<string>>();
   for (const view of views) {
     for (const node of view.nodes) {
@@ -144,6 +144,7 @@ function knownIdsByAddress(views: TopologyView[]): Map<string, Set<string>> {
       if (ids) ids.add(node.id);
       else idsByAddress.set(address, new Set([node.id]));
     }
+    yield;
   }
   return idsByAddress;
 }
@@ -166,7 +167,7 @@ function* indexViews(views: TopologyView[]): Steps<ViewIndex[]> {
         status.set(node.id, 'noaddr');
       }
     }
-    if (handshakes.length > 0) idsByAddress ??= knownIdsByAddress(views);
+    if (handshakes.length > 0) idsByAddress ??= yield* knownIdsByAddress(views);
     for (const node of handshakes) {
       const ids = idsByAddress?.get(hostPort(node.address));
       if (ids?.size !== 1) continue;
