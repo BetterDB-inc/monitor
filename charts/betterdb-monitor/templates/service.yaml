@@ -1,15 +1,45 @@
+{{- /*
+Every optional field is rendered only for the Service types Kubernetes accepts
+it on (the API server rejects nodePort and externalTrafficPolicy on ClusterIP,
+and the loadBalancer* fields only mean something on LoadBalancer), so a value
+set for one type does not break a switch to another. With the defaults the
+Service is the same as before these options existed.
+*/ -}}
+{{- $external := has .Values.service.type (list "NodePort" "LoadBalancer") -}}
 apiVersion: v1
 kind: Service
 metadata:
   name: {{ include "betterdb-monitor.fullname" . }}
   labels:
     {{- include "betterdb-monitor.labels" . | nindent 4 }}
+    {{- with .Values.service.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   type: {{ .Values.service.type }}
+  {{- if and $external .Values.service.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ .Values.service.externalTrafficPolicy }}
+  {{- end }}
+  {{- if eq .Values.service.type "LoadBalancer" }}
+  {{- with .Values.service.loadBalancerClass }}
+  loadBalancerClass: {{ . }}
+  {{- end }}
+  {{- with .Values.service.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- end }}
   ports:
     - name: http
       port: {{ .Values.service.port }}
       targetPort: http
       protocol: TCP
+      {{- if and $external .Values.service.nodePort }}
+      nodePort: {{ .Values.service.nodePort }}
+      {{- end }}
   selector:
     {{- include "betterdb-monitor.selectorLabels" . | nindent 4 }}

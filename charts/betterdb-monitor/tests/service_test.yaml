@@ -1,0 +1,154 @@
+suite: service
+templates:
+  - templates/service.yaml
+tests:
+  - it: defaults to a ClusterIP without nodePort, annotations or external fields
+    asserts:
+      - equal:
+          path: spec.type
+          value: ClusterIP
+      - equal:
+          path: spec.ports[0].port
+          value: 3001
+      - notExists:
+          path: spec.ports[0].nodePort
+      - notExists:
+          path: metadata.annotations
+      - notExists:
+          path: spec.externalTrafficPolicy
+      - notExists:
+          path: spec.loadBalancerClass
+      - notExists:
+          path: spec.loadBalancerSourceRanges
+
+  - it: renders nodePort for NodePort
+    set:
+      service.type: NodePort
+      service.nodePort: 30301
+    asserts:
+      - equal:
+          path: spec.type
+          value: NodePort
+      - equal:
+          path: spec.ports[0].nodePort
+          value: 30301
+
+  - it: renders nodePort for LoadBalancer
+    set:
+      service.type: LoadBalancer
+      service.nodePort: 30301
+    asserts:
+      - equal:
+          path: spec.ports[0].nodePort
+          value: 30301
+
+  - it: ignores nodePort and externalTrafficPolicy for ClusterIP
+    set:
+      service.nodePort: 30301
+      service.externalTrafficPolicy: Local
+    asserts:
+      - notExists:
+          path: spec.ports[0].nodePort
+      - notExists:
+          path: spec.externalTrafficPolicy
+
+  - it: renders the LoadBalancer options
+    set:
+      service.type: LoadBalancer
+      service.loadBalancerClass: service.k8s.aws/nlb
+      service.loadBalancerSourceRanges:
+        - 203.0.113.0/24
+      service.externalTrafficPolicy: Local
+      service.annotations:
+        service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+    asserts:
+      - equal:
+          path: spec.loadBalancerClass
+          value: service.k8s.aws/nlb
+      - equal:
+          path: spec.loadBalancerSourceRanges
+          value:
+            - 203.0.113.0/24
+      - equal:
+          path: spec.externalTrafficPolicy
+          value: Local
+      - equal:
+          path: metadata.annotations["service.beta.kubernetes.io/aws-load-balancer-scheme"]
+          value: internal
+
+  - it: renders externalTrafficPolicy for NodePort
+    set:
+      service.type: NodePort
+      service.externalTrafficPolicy: Local
+    asserts:
+      - equal:
+          path: spec.externalTrafficPolicy
+          value: Local
+
+  - it: leaves the LoadBalancer-only fields off a NodePort Service
+    set:
+      service.type: NodePort
+      service.loadBalancerClass: service.k8s.aws/nlb
+      service.loadBalancerSourceRanges:
+        - 203.0.113.0/24
+    asserts:
+      - notExists:
+          path: spec.loadBalancerClass
+      - notExists:
+          path: spec.loadBalancerSourceRanges
+
+  - it: leaves the LoadBalancer-only fields off a ClusterIP Service
+    set:
+      service.loadBalancerClass: service.k8s.aws/nlb
+      service.loadBalancerSourceRanges:
+        - 203.0.113.0/24
+    asserts:
+      - notExists:
+          path: spec.loadBalancerClass
+      - notExists:
+          path: spec.loadBalancerSourceRanges
+
+  - it: adds annotations and labels on any type, keeping the chart's labels
+    set:
+      service.annotations:
+        external-dns.alpha.kubernetes.io/hostname: monitor.example.com
+      service.labels:
+        team: databases
+    asserts:
+      - equal:
+          path: metadata.annotations["external-dns.alpha.kubernetes.io/hostname"]
+          value: monitor.example.com
+      - equal:
+          path: metadata.labels.team
+          value: databases
+      - equal:
+          path: metadata.labels["app.kubernetes.io/name"]
+          value: betterdb-monitor
+      - equal:
+          path: spec.selector
+          value:
+            app.kubernetes.io/name: betterdb-monitor
+            app.kubernetes.io/instance: RELEASE-NAME
+
+  - it: rejects an unknown service key such as a lower-case nodeport
+    set:
+      service.nodeport: 30301
+    asserts:
+      - failedTemplate:
+          errorPattern: "nodeport"
+
+  - it: rejects a nodePort outside the node port range
+    set:
+      service.type: NodePort
+      service.nodePort: 8080
+    asserts:
+      - failedTemplate:
+          errorPattern: "nodePort"
+
+  - it: rejects an externalTrafficPolicy Kubernetes does not know
+    set:
+      service.type: NodePort
+      service.externalTrafficPolicy: local
+    asserts:
+      - failedTemplate:
+          errorPattern: "externalTrafficPolicy"

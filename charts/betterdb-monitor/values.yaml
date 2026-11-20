@@ -87,8 +87,28 @@ persistence:
   annotations: {}
 
 service:
+  # ClusterIP | NodePort | LoadBalancer
   type: ClusterIP
   port: 3001
+  # Fixed node port (30000-32767) for type NodePort or LoadBalancer. Empty =
+  # Kubernetes allocates one. Ignored for ClusterIP.
+  nodePort: null
+  # Added to the Service, e.g. cloud load-balancer settings or ExternalDNS:
+  #   service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+  #   external-dns.alpha.kubernetes.io/hostname: monitor.example.com
+  annotations: {}
+  # Added to the Service's labels (the chart's own labels are always kept).
+  labels: {}
+  # type LoadBalancer only: the load-balancer implementation to use, e.g.
+  # service.k8s.aws/nlb. Empty = the cluster default.
+  loadBalancerClass: ""
+  # type LoadBalancer only: client CIDRs allowed through the load balancer,
+  # e.g. ["203.0.113.0/24"]. Empty = no restriction.
+  loadBalancerSourceRanges: []
+  # type NodePort or LoadBalancer only: Cluster (the Kubernetes default) or
+  # Local (keeps the client source IP; traffic only reaches nodes running
+  # the pod). Empty = not set.
+  externalTrafficPolicy: ""
 
 # HTTP port the app listens on (PORT env). The Service targets this.
 containerPort: 3001
