@@ -273,7 +273,7 @@ import {
   parseSlotMigrationJobs,
 } from '@app/cluster/cluster-metrics.service';
 import { withConfiguredZones, withShardMetadata } from '@app/cluster/shard-metadata';
-import { resolveNodeRef, type NodeSubject } from '@app/cluster/node-ref';
+import { resolveNodeRef, toClusterNodeRef, type NodeSubject } from '@app/cluster/node-ref';
 import {
   ClusterNodeViews,
   nodeOfEvent,
@@ -300,11 +300,26 @@ import {
   TopologyDivergenceMonitor,
 } from './topology-divergence-monitor';
 import {
+  type PartialMembership,
+  type PartialMembershipRound,
+  inheritedPartialMemberships,
+  membershipSides,
+  partialMembershipMessage,
+  partialMembershipNodeId,
+  partiallyKnownNodes,
+  renamedPartialMemberships,
+  unclaimedByPartialMembership,
+} from './partial-membership';
+import {
   type TopologyDivergenceReport,
   buildDivergenceDetail,
+  buildPartialMembershipDetail,
+  closingPartialMembershipDetail,
+  disagreementsByFinding,
   divergenceMessage,
   divergenceSeverity,
   outranksSeverity,
+  raisedDivergenceGroup,
   toDivergenceNode,
 } from './topology-divergence-report';
 import { ShardLoadService } from '@app/cluster/shard-load.service';
@@ -637,6 +652,7 @@ const ADOPTED_METRICS: MetricType[] = [
   MetricType.RESHARD_SHARD_SKEW,
   MetricType.HOT_SHARD,
   MetricType.TOPOLOGY_DIVERGENCE,
+  MetricType.PARTIAL_MEMBERSHIP,
   MetricType.REPLICA_SLOT_STATE,
   MetricType.RAFT_HEALTH,
   MetricType.SLOT_MIGRATION,
@@ -667,6 +683,13 @@ interface PendingNodeEvents {
   resync: StoredAnomalyEvent[];
   fork: StoredAnomalyEvent[];
   cob: StoredAnomalyEvent[];
+}
+
+interface TopologyEventStore {
+  firstSeen: Map<string, Map<string, number>>;
+  active: Map<string, Set<string>>;
+  eventIds: Map<string, Map<string, string>>;
+  closedByHand: Map<string, Set<string>>;
 }
 
 interface FanoutSocket {
@@ -871,12 +894,16 @@ export class AnomalyService
     minRounds: number;
     intervalMs: number;
   };
-  private topologyDivergenceFirstSeen = new Map<string, Map<string, number>>();
-  private activeTopologyDivergences = new Map<string, Set<string>>();
-  private topologyDivergenceEventIds = new Map<string, Map<string, string>>();
   private topologyDivergenceEventOwners = new Map<string, string>();
   private topologyDivergenceEventSeverity = new Map<string, AnomalySeverity>();
   private topologyDivergenceOpen = new Map<string, Map<string, OpenDivergence>>();
+  private partialMembershipOpen = new Map<string, Map<string, OpenDivergence<PartialMembership>>>();
+  private partialMembershipRounds = new Map<string, PartialMembershipRound>();
+  private readonly topologyEventStores: Record<'divergence' | 'partial', TopologyEventStore> = {
+    divergence: { firstSeen: new Map(), active: new Map(), eventIds: new Map(), closedByHand: new Map() },
+    partial: { firstSeen: new Map(), active: new Map(), eventIds: new Map(), closedByHand: new Map() },
+  };
+  private readonly allTopologyEventStores = Object.values(this.topologyEventStores);
   private topologyDivergenceAnchors = new Map<string, string>();
   private topologyDivergenceNodeTimeouts = new Map<string, { ms: number; readAt: number }>();
   private topologyDivergenceSettledSlots = new Map<string, Set<string>>();
@@ -2784,7 +2811,16 @@ export class AnomalyService
       });
       this.adoptReshardEvents(connectionId, rows(MetricType.RESHARD_SHARD_SKEW));
       this.adoptHotShardEvents(connectionId, rows(MetricType.HOT_SHARD));
-      this.adoptTopologyDivergenceEvents(connectionId, rows(MetricType.TOPOLOGY_DIVERGENCE));
+      this.adoptTopologyDivergenceEvents(
+        connectionId,
+        rows(MetricType.TOPOLOGY_DIVERGENCE),
+        this.topologyEventStores.divergence,
+      );
+      this.adoptTopologyDivergenceEvents(
+        connectionId,
+        rows(MetricType.PARTIAL_MEMBERSHIP),
+        this.topologyEventStores.partial,
+      );
       this.adoptReplicaSlotEvents(connectionId, rows(MetricType.REPLICA_SLOT_STATE));
       this.adoptSlotMigrationEvents(
         connectionId,
@@ -7539,59 +7575,76 @@ export class AnomalyService
         membership: TOPOLOGY_DIVERGENCE_MEMBERSHIP_MIN_AGE_MS,
       },
     };
+    const { divergence: divergenceStore, partial: partialStore } = this.topologyEventStores;
+    const eventIds = this.connectionClaims(divergenceStore.eventIds, ctx.connectionId, () => new Map<string, string>());
+    const partialEventIds = this.connectionClaims(
+      partialStore.eventIds,
+      ctx.connectionId,
+      () => new Map<string, string>(),
+    );
+    const partial = this.partialMembershipOf(round, [
+      ...partialEventIds.keys(),
+      ...(partialStore.closedByHand.get(ctx.connectionId) ?? []),
+    ]);
+    const settledSlots = this.topologyDivergenceSettledSlots.get(clusterKey);
+    for (const key of partial.flatMap((finding) => finding.slotDisputeKeys)) {
+      this.topologyDivergence.restart(clusterKey, key);
+      settledSlots?.delete(key);
+    }
+    const unclaimed = unclaimedByPartialMembership(round.disagreements, partial);
     const confirmed = comparable
       ? await this.withoutMigratingSlots(
           ctx,
           round,
-          confirmedDisagreements(round.disagreements, round.at, rule),
+          confirmedDisagreements(unclaimed, round.at, rule),
           canDial,
         )
       : [];
     const groups = groupDivergences(confirmed);
-    const open = this.connectionClaims(
-      this.topologyDivergenceOpen,
+    const counted = groupDivergences(unclaimed);
+    const confirmedPartial = comparable ? partial.filter((finding) => finding.confirmed) : [];
+    const openPartial = this.connectionClaims(
+      this.partialMembershipOpen,
       clusterKey,
-      () => new Map<string, OpenDivergence>(),
+      () => new Map<string, OpenDivergence<PartialMembership>>(),
     );
-    const eventIds = this.connectionClaims(
-      this.topologyDivergenceEventIds,
-      ctx.connectionId,
-      () => new Map<string, string>(),
-    );
-    const kept = settleOpenDivergences({
-      open,
-      openSignatures: [...eventIds.keys()],
-      confirmed: groups,
-      pendingSignatures: new Set(groupDivergences(round.disagreements).map((group) => group.signature)),
-      comparable,
-      at: round.at,
-      minRounds,
-    });
+    const silent = new Set(round.unanswered);
+    const answered = new Set(round.observers.filter((nodeId) => !silent.has(nodeId)));
+    const renamed = comparable ? renamedPartialMemberships(openPartial, partial, answered) : [];
 
-    await this.closeOutrankedTopologyDivergences(ctx.connectionId, groups, eventIds);
-
-    await this.applyTopologyPersistenceGate({
+    await this.settleTopologyEvents({
       ctx,
       timestamp,
-      findings: groups,
-      signatureOf: (group) => group.signature,
-      firstSeenByConn: this.topologyDivergenceFirstSeen,
-      activeByConn: this.activeTopologyDivergences,
-      minPersistMs: 0,
-      buildEvent: (group) => this.buildTopologyDivergenceEvent(ctx, timestamp, round, group),
-      eventIdsByConn: this.topologyDivergenceEventIds,
+      round,
+      store: divergenceStore,
+      open: this.connectionClaims(this.topologyDivergenceOpen, clusterKey, () => new Map<string, OpenDivergence>()),
+      confirmed: groups,
+      observed: counted,
+      pendingSignatures: new Set(counted.map((group) => group.signature)),
+      superseded: this.outrankedTopologyDivergences(groups, eventIds),
       metricType: MetricType.TOPOLOGY_DIVERGENCE,
-      preserveSignature: (signature) => kept.has(signature),
+      buildEvent: (group) => this.buildTopologyDivergenceEvent(ctx, timestamp, round, group),
       contextOf: (group) => this.nodeContext(ctx, this.topologyDivergenceNodeAddr(round, group)),
-      ownerOf: (eventId) => this.topologyDivergenceEventOwners.get(eventId),
+    });
+    await this.settleTopologyEvents({
+      ctx,
+      timestamp,
+      round,
+      store: partialStore,
+      open: openPartial,
+      confirmed: confirmedPartial,
+      observed: partial,
+      pendingSignatures: new Set([
+        ...partial.map((finding) => finding.signature),
+        ...inheritedPartialMemberships(openPartial, partial),
+      ]),
+      superseded: renamed,
+      metricType: MetricType.PARTIAL_MEMBERSHIP,
+      buildEvent: (finding) => this.buildPartialMembershipEvent(ctx, timestamp, round, finding),
+      contextOf: (finding) => this.nodeContext(ctx, finding.address || undefined),
     });
 
-    for (const group of groups) {
-      if (eventIds.has(group.signature) && !open.get(group.signature)?.group) {
-        open.set(group.signature, { group, lastCountedAt: round.at, clean: 0 });
-      }
-    }
-    const tracked = new Set([...this.topologyDivergenceEventIds.values()].flatMap((ids) => [...ids.values()]));
+    const tracked = this.trackedTopologyEventIds();
     for (const eventId of [...this.topologyDivergenceEventOwners.keys()]) {
       if (tracked.has(eventId)) continue;
       this.topologyDivergenceEventOwners.delete(eventId);
@@ -7599,17 +7652,128 @@ export class AnomalyService
     }
   }
 
-  private async closeOutrankedTopologyDivergences(
+  private async settleTopologyEvents<G extends { signature: string }>(params: {
+    ctx: ConnectionContext;
+    timestamp: number;
+    round: DivergenceRoundResult;
+    store: TopologyEventStore;
+    open: Map<string, OpenDivergence<G>>;
+    confirmed: G[];
+    observed?: G[];
+    pendingSignatures: ReadonlySet<string>;
+    superseded: string[];
+    metricType: MetricType;
+    buildEvent: (finding: G) => AnomalyEvent;
+    contextOf: (finding: G) => ConnectionContext;
+  }): Promise<void> {
+    const { ctx, timestamp, round, store, open, confirmed, metricType, buildEvent, contextOf } = params;
+    const eventIds = this.connectionClaims(store.eventIds, ctx.connectionId, () => new Map<string, string>());
+    await this.closeTopologyEventsNow(store, ctx.connectionId, params.superseded);
+    const kept = settleOpenDivergences({
+      open,
+      openSignatures: [...eventIds.keys()],
+      confirmed,
+      pendingSignatures: params.pendingSignatures,
+      comparable: round.status === 'ok',
+      at: round.at,
+      minRounds: this.topologyDivergenceSettings.minRounds,
+    });
+    await this.applyTopologyPersistenceGate({
+      ctx,
+      timestamp,
+      findings: confirmed,
+      signatureOf: (finding) => finding.signature,
+      firstSeenByConn: store.firstSeen,
+      activeByConn: store.active,
+      minPersistMs: 0,
+      buildEvent,
+      eventIdsByConn: store.eventIds,
+      metricType,
+      preserveSignature: (signature) => kept.has(signature),
+      contextOf,
+      ownerOf: (eventId) => this.topologyDivergenceEventOwners.get(eventId),
+    });
+    for (const finding of confirmed) {
+      if (eventIds.has(finding.signature) && !open.get(finding.signature)?.group) {
+        open.set(finding.signature, { group: finding, lastCountedAt: round.at, clean: 0 });
+      }
+    }
+    for (const finding of params.observed ?? []) {
+      const entry = open.get(finding.signature);
+      if (entry && !entry.group && eventIds.has(finding.signature)) entry.observed = finding;
+    }
+    const closedByHand = store.closedByHand.get(ctx.connectionId) ?? new Set<string>();
+    const shown = new Set((params.observed ?? confirmed).map((finding) => finding.signature));
+    for (const signature of [...closedByHand]) {
+      const gone = round.status === 'ok' && !shown.has(signature);
+      if (gone || eventIds.has(signature)) closedByHand.delete(signature);
+    }
+  }
+
+  private trackedTopologyEventIds(): Set<string> {
+    return new Set(
+      this.allTopologyEventStores.flatMap((store) => [...store.eventIds.values()].flatMap((ids) => [...ids.values()])),
+    );
+  }
+
+  private partialMembershipOf(round: DivergenceRoundResult, openSignatures: string[]): PartialMembership[] {
+    const { clusterKey } = round;
+    const previous = this.partialMembershipRounds.get(clusterKey);
+    if (round.status !== 'ok') {
+      const tracked = new Set(round.disagreements.map((disagreement) => disagreement.key));
+      const stillTracked = (finding: PartialMembership) => finding.disagreementKeys.some((key) => tracked.has(key));
+      const held = (previous?.found ?? []).filter(stillTracked);
+      this.partialMembershipRounds.set(clusterKey, { found: held, sides: previous?.sides ?? new Map() });
+      return held;
+    }
+    const found = this.partiallyKnownNodesOf(round, openSignatures);
+    const sides = membershipSides(round.disagreements, found, round.at, previous?.sides);
+    const switched = [...sides].filter(([key, side]) => (previous?.sides.get(key) ?? side) !== side);
+    this.topologyDivergence.recount(
+      round,
+      switched.map(([key]) => key),
+    );
+    const counted = switched.length > 0 ? this.partiallyKnownNodesOf(round, openSignatures) : found;
+    this.partialMembershipRounds.set(clusterKey, { found: counted, sides });
+    return counted;
+  }
+
+  private partiallyKnownNodesOf(round: DivergenceRoundResult, openSignatures: string[]): PartialMembership[] {
+    const openNodeIds = openSignatures
+      .map(partialMembershipNodeId)
+      .filter((nodeId): nodeId is string => nodeId !== null);
+    return partiallyKnownNodes({
+      disagreements: round.disagreements,
+      sightings: round.sightings,
+      nodes: round.nodes,
+      selves: round.selves,
+      at: round.at,
+      minRounds: this.topologyDivergenceSettings.minRounds,
+      openNodeIds: new Set(openNodeIds),
+    });
+  }
+
+  private outrankedTopologyDivergences(groups: DivergenceGroup[], eventIds: ReadonlyMap<string, string>): string[] {
+    return groups
+      .filter((group) => {
+        const eventId = eventIds.get(group.signature);
+        const raised = eventId ? this.topologyDivergenceEventSeverity.get(eventId) : undefined;
+        return !!raised && outranksSeverity(divergenceSeverity(group), raised);
+      })
+      .map((group) => group.signature);
+  }
+
+  private async closeTopologyEventsNow(
+    store: TopologyEventStore,
     connectionId: string,
-    groups: DivergenceGroup[],
-    eventIds: Map<string, string>,
+    signatures: string[],
   ): Promise<void> {
-    for (const group of groups) {
-      const eventId = eventIds.get(group.signature);
-      const raised = eventId ? this.topologyDivergenceEventSeverity.get(eventId) : undefined;
-      if (!eventId || !raised || !outranksSeverity(divergenceSeverity(group), raised)) continue;
-      eventIds.delete(group.signature);
-      this.activeTopologyDivergences.get(connectionId)?.delete(group.signature);
+    const eventIds = store.eventIds.get(connectionId);
+    for (const signature of signatures) {
+      const eventId = eventIds?.get(signature);
+      if (!eventIds || !eventId) continue;
+      eventIds.delete(signature);
+      store.active.get(connectionId)?.delete(signature);
       try {
         await this.resolveAnomalyOutcome(eventId);
       } catch {
@@ -7623,33 +7787,44 @@ export class AnomalyService
     this.topologyDivergenceAnchors.set(clusterKey, connectionId);
     const holders = new Set<string>(previous ? [previous] : []);
     for (const [peer, peerKey] of this.connectionClusterKeys) {
-      if (peerKey === clusterKey && this.topologyDivergenceEventIds.has(peer)) holders.add(peer);
+      if (peerKey !== clusterKey) continue;
+      if (this.allTopologyEventStores.some((store) => store.eventIds.has(peer))) holders.add(peer);
     }
     holders.delete(connectionId);
 
     for (const holder of holders) {
-      const firstSeen = this.topologyDivergenceFirstSeen.get(holder);
-      const active = this.activeTopologyDivergences.get(holder);
-      const eventIds = this.topologyDivergenceEventIds.get(holder);
-      this.topologyDivergenceFirstSeen.delete(holder);
-      this.activeTopologyDivergences.delete(holder);
-      this.topologyDivergenceEventIds.delete(holder);
-      if (firstSeen) {
-        const mine = this.connectionClaims(this.topologyDivergenceFirstSeen, connectionId, () => new Map<string, number>());
-        for (const [signature, at] of firstSeen) {
-          if (!mine.has(signature)) mine.set(signature, at);
-        }
+      for (const store of this.allTopologyEventStores) this.moveTopologyEvents(store, holder, connectionId);
+    }
+  }
+
+  private moveTopologyEvents(store: TopologyEventStore, from: string, to: string): void {
+    const firstSeen = store.firstSeen.get(from);
+    const active = store.active.get(from);
+    const eventIds = store.eventIds.get(from);
+    const closedByHand = store.closedByHand.get(from);
+    store.firstSeen.delete(from);
+    store.active.delete(from);
+    store.eventIds.delete(from);
+    store.closedByHand.delete(from);
+    if (firstSeen) {
+      const mine = this.connectionClaims(store.firstSeen, to, () => new Map<string, number>());
+      for (const [signature, at] of firstSeen) {
+        if (!mine.has(signature)) mine.set(signature, at);
       }
-      if (active) {
-        const mine = this.connectionClaims(this.activeTopologyDivergences, connectionId, () => new Set<string>());
-        for (const signature of active) mine.add(signature);
-      }
-      if (eventIds) {
-        const mine = this.connectionClaims(this.topologyDivergenceEventIds, connectionId, () => new Map<string, string>());
-        for (const [signature, eventId] of eventIds) {
-          if (mine.has(signature)) this.closeLater(eventId);
-          else mine.set(signature, eventId);
-        }
+    }
+    if (active) {
+      const mine = this.connectionClaims(store.active, to, () => new Set<string>());
+      for (const signature of active) mine.add(signature);
+    }
+    if (closedByHand) {
+      const mine = this.connectionClaims(store.closedByHand, to, () => new Set<string>());
+      for (const signature of closedByHand) mine.add(signature);
+    }
+    if (eventIds) {
+      const mine = this.connectionClaims(store.eventIds, to, () => new Map<string, string>());
+      for (const [signature, eventId] of eventIds) {
+        if (mine.has(signature)) this.closeLater(eventId);
+        else mine.set(signature, eventId);
       }
     }
   }
@@ -7795,8 +7970,50 @@ export class AnomalyService
     };
   }
 
-  private adoptTopologyDivergenceEvents(connectionId: string, open: StoredAnomalyEvent[]): void {
-    const eventIds = this.topologyDivergenceEventIds.get(connectionId) ?? new Map<string, string>();
+  private buildPartialMembershipEvent(
+    ctx: ConnectionContext,
+    timestamp: number,
+    round: DivergenceRoundResult,
+    finding: PartialMembership,
+  ): AnomalyEvent {
+    const id = randomUUID();
+    this.topologyDivergenceEventOwners.set(id, ctx.connectionId);
+    const event: AnomalyEvent = {
+      id,
+      timestamp,
+      metricType: MetricType.PARTIAL_MEMBERSHIP,
+      anomalyType: AnomalyType.SPIKE,
+      severity: AnomalySeverity.WARNING,
+      value: finding.brokenPeers,
+      baseline: 0,
+      zScore: 0,
+      stdDev: 0,
+      threshold: this.topologyDivergenceSettings.minRounds,
+      message: partialMembershipMessage(finding, round.at),
+      resolved: false,
+      connectionId: ctx.connectionId,
+      ...(finding.address ? { nodeAddr: finding.address } : {}),
+      dedupeKey: finding.signature,
+    };
+    const inOwnView = this.nodeInClusterView(event, ctx.connectionId);
+    if (finding.address && inOwnView?.nodeId !== finding.nodeId) {
+      event.node = this.partlyJoinedNodeOf(round, finding);
+    }
+    return event;
+  }
+
+  private partlyJoinedNodeOf(round: DivergenceRoundResult, finding: PartialMembership): ClusterNodeRef {
+    const seen = round.selves.get(finding.nodeId) ?? round.nodes.get(finding.nodeId);
+    const known = seen ? toClusterNodeRef(seen) : { role: 'unknown' as const };
+    return { ...known, nodeId: finding.nodeId, address: finding.address };
+  }
+
+  private adoptTopologyDivergenceEvents(
+    connectionId: string,
+    open: StoredAnomalyEvent[],
+    store: TopologyEventStore,
+  ): void {
+    const eventIds = store.eventIds.get(connectionId) ?? new Map<string, string>();
     const tracked = new Set(eventIds.values());
     for (const event of [...open].sort((a, b) => b.timestamp - a.timestamp)) {
       if (tracked.has(event.id)) continue;
@@ -7809,16 +8026,20 @@ export class AnomalyService
       this.topologyDivergenceEventOwners.set(event.id, connectionId);
       this.topologyDivergenceEventSeverity.set(event.id, event.severity as AnomalySeverity);
     }
-    if (eventIds.size > 0) this.topologyDivergenceEventIds.set(connectionId, eventIds);
+    if (eventIds.size > 0) store.eventIds.set(connectionId, eventIds);
   }
 
   private forgetTopologyDivergence(connectionId: string): void {
     this.topologyDivergence.forgetConnection(connectionId);
-    this.topologyDivergenceFirstSeen.delete(connectionId);
-    this.activeTopologyDivergences.delete(connectionId);
-    this.topologyDivergenceEventIds.delete(connectionId);
+    for (const store of this.allTopologyEventStores) {
+      store.firstSeen.delete(connectionId);
+      store.active.delete(connectionId);
+      store.eventIds.delete(connectionId);
+      store.closedByHand.delete(connectionId);
+    }
+    const tracked = this.trackedTopologyEventIds();
     for (const [eventId, owner] of [...this.topologyDivergenceEventOwners]) {
-      if (owner !== connectionId) continue;
+      if (owner !== connectionId || tracked.has(eventId)) continue;
       this.topologyDivergenceEventOwners.delete(eventId);
       this.topologyDivergenceEventSeverity.delete(eventId);
     }
@@ -7828,6 +8049,8 @@ export class AnomalyService
       if (watched.has(clusterKey)) continue;
       this.topologyDivergenceAnchors.delete(clusterKey);
       this.topologyDivergenceOpen.delete(clusterKey);
+      this.partialMembershipOpen.delete(clusterKey);
+      this.partialMembershipRounds.delete(clusterKey);
       this.topologyDivergenceNodeTimeouts.delete(clusterKey);
       this.topologyDivergenceSettledSlots.delete(clusterKey);
       this.topologyDivergence.forgetCluster(clusterKey);
@@ -11151,25 +11374,77 @@ export class AnomalyService
     const clusterKey = this.connectionClusterKeys.get(connectionId);
     const round = clusterKey ? this.topologyDivergence.lastRound(clusterKey) : undefined;
     if (!clusterKey || !round) {
-      return { status: 'not_sampled', sampledAt: null, observers: [], unanswered: [], divergences: [] };
+      return {
+        status: 'not_sampled',
+        sampledAt: null,
+        observers: [],
+        unanswered: [],
+        divergences: [],
+        partialMembership: [],
+      };
     }
-    const eventIds = this.topologyDivergenceEventIds.get(round.anchorConnectionId);
-    const open = this.topologyDivergenceOpen.get(clusterKey);
-    const raised = [...(open ?? [])].flatMap(([signature, entry]) => {
-      const eventId = eventIds?.get(signature);
-      if (!entry.group || eventId === undefined) return [];
-      if (this.eventInMemory(eventId)?.resolved === true) return [];
-      return [buildDivergenceDetail(entry.group, round.nodes, { eventId, confirmed: true })];
-    });
-    const counting = groupDivergences(round.disagreements)
-      .filter((group) => !open?.has(group.signature))
+    const found = this.partialMembershipRounds.get(clusterKey)?.found ?? [];
+    const shown = <G>(
+      open: Map<string, OpenDivergence<G>> | undefined,
+      eventIds: Map<string, string> | undefined,
+      groupOf: (signature: string, entry: OpenDivergence<G>) => G | undefined,
+    ) =>
+      [...(open ?? [])].flatMap(([signature, entry]) => {
+        const eventId = eventIds?.get(signature);
+        const group = groupOf(signature, entry);
+        if (!group || eventId === undefined) return [];
+        if ((this.eventInMemory(eventId) ?? this.findIncidentEvent(eventId))?.resolved === true) return [];
+        return [{ signature, eventId, group }];
+      });
+
+    const tracked = groupDivergences(unclaimedByPartialMembership(round.disagreements, found));
+    const trackedBySignature = new Map(tracked.map((group) => [group.signature, group]));
+    const raisedGroups = shown(
+      this.topologyDivergenceOpen.get(clusterKey),
+      this.topologyEventStores.divergence.eventIds.get(round.anchorConnectionId),
+      (signature, entry) => raisedDivergenceGroup(trackedBySignature.get(signature), entry.group ?? entry.observed),
+    );
+    const raised = raisedGroups.map(({ group, eventId }) =>
+      buildDivergenceDetail(
+        group,
+        round.nodes,
+        { eventId, confirmed: true },
+        unclaimedByPartialMembership(group.disagreements, found),
+      ),
+    );
+    const raisedSignatures = new Set(raisedGroups.map(({ signature }) => signature));
+    const counting = tracked
+      .filter((group) => !raisedSignatures.has(group.signature))
       .map((group) => buildDivergenceDetail(group, round.nodes, { eventId: null, confirmed: false }));
+
+    const seen = new Map(found.map((finding) => [finding.signature, finding]));
+    const raisedFindings = shown(
+      this.partialMembershipOpen.get(clusterKey),
+      this.topologyEventStores.partial.eventIds.get(round.anchorConnectionId),
+      (signature, entry) => seen.get(signature) ?? entry.group ?? entry.observed,
+    );
+    const raisedIds = new Map(raisedFindings.map(({ signature, eventId }) => [signature, eventId]));
+    const listed = disagreementsByFinding(
+      found.map((finding) => ({ finding, eventId: raisedIds.get(finding.signature) ?? null })),
+      round.disagreements,
+    );
+    const detailOf = (finding: PartialMembership, state: { eventId: string | null; confirmed: boolean }) =>
+      buildPartialMembershipDetail(finding, listed.get(finding.signature) ?? [], round.nodes, state);
+    const raisedPartial = raisedFindings.map(({ signature, eventId, group }) =>
+      seen.has(signature)
+        ? detailOf(group, { eventId, confirmed: true })
+        : closingPartialMembershipDetail(group, round.nodes, eventId),
+    );
+    const countingPartial = found
+      .filter((finding) => !raisedIds.has(finding.signature))
+      .map((finding) => detailOf(finding, { eventId: null, confirmed: false }));
     return {
       status: round.status,
       sampledAt: round.at,
       observers: round.observers.map((id) => toDivergenceNode(id, round.nodes)),
       unanswered: round.unanswered.map((id) => toDivergenceNode(id, round.nodes)),
       divergences: [...raised, ...counting],
+      partialMembership: [...raisedPartial, ...countingPartial],
     };
   }
 
@@ -13051,7 +13326,7 @@ export class AnomalyService
       ...(this.staleBacklogEventIds.get(connectionId) ?? []),
       ...(this.reshardSkewEventIds.get(connectionId)?.values() ?? []),
       ...(this.hotShardEventIds.get(connectionId)?.values() ?? []),
-      ...(this.topologyDivergenceEventIds.get(connectionId)?.values() ?? []),
+      ...this.allTopologyEventStores.flatMap((store) => [...(store.eventIds.get(connectionId)?.values() ?? [])]),
       ...(this.replicaSlotEventIds.get(connectionId)?.values() ?? []),
       ...(this.slotMigrationEventIds.get(connectionId)?.values() ?? []),
       ...(this.stuckSlotMigrationEventIds.get(connectionId)?.values() ?? []),
@@ -13409,7 +13684,22 @@ export class AnomalyService
   }
 
   async resolveAnomaly(anomalyId: string): Promise<boolean> {
-    return (await this.resolveAnomalyOutcome(anomalyId, undefined, false)) === 'resolved';
+    const resolved = (await this.resolveAnomalyOutcome(anomalyId, undefined, false)) === 'resolved';
+    if (resolved) this.untrackTopologyEvent(anomalyId);
+    return resolved;
+  }
+
+  private untrackTopologyEvent(eventId: string): void {
+    for (const store of this.allTopologyEventStores) {
+      for (const [connectionId, eventIds] of store.eventIds) {
+        for (const [signature, tracked] of [...eventIds]) {
+          if (tracked !== eventId) continue;
+          eventIds.delete(signature);
+          store.active.get(connectionId)?.delete(signature);
+          this.connectionClaims(store.closedByHand, connectionId, () => new Set<string>()).add(signature);
+        }
+      }
+    }
   }
 
   /**
@@ -13516,6 +13806,7 @@ export class AnomalyService
         anomaly.resolved = true;
         this.incidentsDirty = true;
         anomaly.resolvedAt ??= resolvedAt;
+        this.untrackTopologyEvent(anomaly.id);
         continue;
       }
       let persisted = false;
@@ -13528,6 +13819,7 @@ export class AnomalyService
         anomaly.resolved = true;
         this.incidentsDirty = true;
         anomaly.resolvedAt ??= resolvedAt;
+        this.untrackTopologyEvent(anomaly.id);
       } else {
         allResolved = false;
       }

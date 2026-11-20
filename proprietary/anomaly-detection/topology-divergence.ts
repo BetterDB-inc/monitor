@@ -422,6 +422,18 @@ export class DivergenceTracker {
     this.entries.delete(key);
   }
 
+  recount(key: string, at: number): TrackedDisagreement | undefined {
+    const entry = this.entries.get(key);
+    if (!entry) return undefined;
+    const fresh = { firstSeenAt: at, rounds: 1 };
+    const gapStreaks = Object.fromEntries(
+      Object.entries(entry.gapStreaks ?? {}).map(([observer, streak]) => [observer, { ...streak, ...fresh }]),
+    );
+    const recounted = { ...entry, ...fresh, ...(entry.gapStreaks ? { gapStreaks } : {}) };
+    this.entries.set(key, recounted);
+    return { ...recounted };
+  }
+
   clear(): void {
     this.entries.clear();
   }
@@ -592,16 +604,17 @@ export function groupDivergences(tracked: TrackedDisagreement[]): DivergenceGrou
     .sort((a, b) => compareText(a.signature, b.signature));
 }
 
-export interface OpenDivergence {
-  group?: DivergenceGroup;
+export interface OpenDivergence<G = DivergenceGroup> {
+  group?: G;
+  observed?: G;
   lastCountedAt: number;
   clean: number;
 }
 
-export function settleOpenDivergences(input: {
-  open: Map<string, OpenDivergence>;
+export function settleOpenDivergences<G extends { signature: string } = DivergenceGroup>(input: {
+  open: Map<string, OpenDivergence<G>>;
   openSignatures: Iterable<string>;
-  confirmed: DivergenceGroup[];
+  confirmed: G[];
   pendingSignatures: ReadonlySet<string>;
   comparable: boolean;
   at: number;
