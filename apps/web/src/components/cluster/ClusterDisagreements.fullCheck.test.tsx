@@ -30,7 +30,9 @@ function slotLine(patch: Partial<DisagreementLine> = {}): DisagreementLine {
     id: 'slot_owner:s000p|s001p',
     kind: 'slot_owner',
     severity: 'critical',
+    open: true,
     confirmed: false,
+    resolvedByHand: false,
     eventId: null,
     eventType: null,
     eventAt: null,
@@ -266,6 +268,10 @@ describe('ClusterDisagreements full check', () => {
     expect(full).toHaveAttribute('aria-pressed', 'true');
     expect(screen.queryByRole('article', { name: SAMPLED_TEXT })).not.toBeInTheDocument();
     const line = screen.getByRole('article', { name: FULL_TEXT });
+    expect(screen.getByText('Disagreements (1)')).toBeInTheDocument();
+    expect(
+      screen.queryByRole('region', { name: 'Not confirmed this round' }),
+    ).not.toBeInTheDocument();
     expect(within(line).getByText('497 views')).toBeInTheDocument();
     expect(within(line).getByText('One-off check, not tracked')).toBeInTheDocument();
     expect(within(line).queryByText(/^since /)).not.toBeInTheDocument();
