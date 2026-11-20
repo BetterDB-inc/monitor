@@ -689,6 +689,7 @@ interface TopologyEventStore {
   firstSeen: Map<string, Map<string, number>>;
   active: Map<string, Set<string>>;
   eventIds: Map<string, Map<string, string>>;
+  closedByHand: Map<string, Set<string>>;
 }
 
 interface FanoutSocket {
@@ -899,8 +900,8 @@ export class AnomalyService
   private partialMembershipOpen = new Map<string, Map<string, OpenDivergence<PartialMembership>>>();
   private partialMembershipRounds = new Map<string, PartialMembershipRound>();
   private readonly topologyEventStores: Record<'divergence' | 'partial', TopologyEventStore> = {
-    divergence: { firstSeen: new Map(), active: new Map(), eventIds: new Map() },
-    partial: { firstSeen: new Map(), active: new Map(), eventIds: new Map() },
+    divergence: { firstSeen: new Map(), active: new Map(), eventIds: new Map(), closedByHand: new Map() },
+    partial: { firstSeen: new Map(), active: new Map(), eventIds: new Map(), closedByHand: new Map() },
   };
   private readonly allTopologyEventStores = Object.values(this.topologyEventStores);
   private topologyDivergenceAnchors = new Map<string, string>();
@@ -7581,7 +7582,10 @@ export class AnomalyService
       ctx.connectionId,
       () => new Map<string, string>(),
     );
-    const partial = this.partialMembershipOf(round, partialEventIds);
+    const partial = this.partialMembershipOf(round, [
+      ...partialEventIds.keys(),
+      ...(partialStore.closedByHand.get(ctx.connectionId) ?? []),
+    ]);
     const settledSlots = this.topologyDivergenceSettledSlots.get(clusterKey);
     for (const key of partial.flatMap((finding) => finding.slotDisputeKeys)) {
       this.topologyDivergence.restart(clusterKey, key);
@@ -7698,6 +7702,12 @@ export class AnomalyService
       const entry = open.get(finding.signature);
       if (entry && !entry.group && eventIds.has(finding.signature)) entry.observed = finding;
     }
+    const closedByHand = store.closedByHand.get(ctx.connectionId) ?? new Set<string>();
+    const shown = new Set((params.observed ?? confirmed).map((finding) => finding.signature));
+    for (const signature of [...closedByHand]) {
+      const gone = round.status === 'ok' && !shown.has(signature);
+      if (gone || eventIds.has(signature)) closedByHand.delete(signature);
+    }
   }
 
   private trackedTopologyEventIds(): Set<string> {
@@ -7706,10 +7716,7 @@ export class AnomalyService
     );
   }
 
-  private partialMembershipOf(
-    round: DivergenceRoundResult,
-    eventIds: ReadonlyMap<string, string>,
-  ): PartialMembership[] {
+  private partialMembershipOf(round: DivergenceRoundResult, openSignatures: string[]): PartialMembership[] {
     const { clusterKey } = round;
     const previous = this.partialMembershipRounds.get(clusterKey);
     if (round.status !== 'ok') {
@@ -7719,23 +7726,20 @@ export class AnomalyService
       this.partialMembershipRounds.set(clusterKey, { found: held, sides: previous?.sides ?? new Map() });
       return held;
     }
-    const found = this.partiallyKnownNodesOf(round, eventIds);
+    const found = this.partiallyKnownNodesOf(round, openSignatures);
     const sides = membershipSides(round.disagreements, found, round.at, previous?.sides);
     const switched = [...sides].filter(([key, side]) => (previous?.sides.get(key) ?? side) !== side);
     this.topologyDivergence.recount(
       round,
       switched.map(([key]) => key),
     );
-    const counted = switched.length > 0 ? this.partiallyKnownNodesOf(round, eventIds) : found;
+    const counted = switched.length > 0 ? this.partiallyKnownNodesOf(round, openSignatures) : found;
     this.partialMembershipRounds.set(clusterKey, { found: counted, sides });
     return counted;
   }
 
-  private partiallyKnownNodesOf(
-    round: DivergenceRoundResult,
-    eventIds: ReadonlyMap<string, string>,
-  ): PartialMembership[] {
-    const openNodeIds = [...eventIds.keys()]
+  private partiallyKnownNodesOf(round: DivergenceRoundResult, openSignatures: string[]): PartialMembership[] {
+    const openNodeIds = openSignatures
       .map(partialMembershipNodeId)
       .filter((nodeId): nodeId is string => nodeId !== null);
     return partiallyKnownNodes({
@@ -7797,9 +7801,11 @@ export class AnomalyService
     const firstSeen = store.firstSeen.get(from);
     const active = store.active.get(from);
     const eventIds = store.eventIds.get(from);
+    const closedByHand = store.closedByHand.get(from);
     store.firstSeen.delete(from);
     store.active.delete(from);
     store.eventIds.delete(from);
+    store.closedByHand.delete(from);
     if (firstSeen) {
       const mine = this.connectionClaims(store.firstSeen, to, () => new Map<string, number>());
       for (const [signature, at] of firstSeen) {
@@ -7809,6 +7815,10 @@ export class AnomalyService
     if (active) {
       const mine = this.connectionClaims(store.active, to, () => new Set<string>());
       for (const signature of active) mine.add(signature);
+    }
+    if (closedByHand) {
+      const mine = this.connectionClaims(store.closedByHand, to, () => new Set<string>());
+      for (const signature of closedByHand) mine.add(signature);
     }
     if (eventIds) {
       const mine = this.connectionClaims(store.eventIds, to, () => new Map<string, string>());
@@ -8014,6 +8024,7 @@ export class AnomalyService
       store.firstSeen.delete(connectionId);
       store.active.delete(connectionId);
       store.eventIds.delete(connectionId);
+      store.closedByHand.delete(connectionId);
     }
     const tracked = this.trackedTopologyEventIds();
     for (const [eventId, owner] of [...this.topologyDivergenceEventOwners]) {
@@ -13674,6 +13685,7 @@ export class AnomalyService
           if (tracked !== eventId) continue;
           eventIds.delete(signature);
           store.active.get(connectionId)?.delete(signature);
+          this.connectionClaims(store.closedByHand, connectionId, () => new Set<string>()).add(signature);
         }
       }
     }

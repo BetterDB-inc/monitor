@@ -29399,6 +29399,84 @@ describe('AnomalyService', () => {
         expect(partialEvents().map((event) => event.value)).toEqual([2]);
       });
 
+      it('keeps a finding that only its open event held once that event is closed by hand', async () => {
+        const kept = () =>
+          [...(service as any).partialMembershipRounds.values()].flatMap((round: any) => round.found);
+        knows = { a: ['a', 'b', 'c'], b: EVERYONE, c: ['a', 'b', 'c'], n: EVERYONE };
+        await rounds(19);
+        silent.add('b');
+        silent.add('n');
+        await rounds(1);
+        expect(kept()).toMatchObject([{ nodeId: 'n', confirmed: false, knownBy: [] }]);
+
+        await service.resolveAnomaly(partialEvents()[0].id);
+
+        for (let round = 0; round < 3; round++) {
+          await rounds(1);
+          expect(kept()).toMatchObject([{ nodeId: 'n', confirmed: false }]);
+          expect(report().partialMembership).toMatchObject([{ eventId: null, node: { nodeId: 'n' } }]);
+        }
+      });
+
+      it('raises the event again under the same node when two nodes lack each other', async () => {
+        knows = { a: ['a', 'b', 'c'], b: ['a', 'b'], c: ['a', 'b', 'c'] };
+        await rounds(19);
+        expect(openPartialEvents().map((event) => event.dedupeKey)).toEqual(['partial_membership:c']);
+        knows.c = ['a', 'c'];
+        await rounds(1);
+
+        await service.resolveAnomaly(openPartialEvents()[0].id);
+        expect(report().partialMembership).toMatchObject([{ eventId: null, node: { nodeId: 'c' } }]);
+
+        await rounds(1);
+        expect(openPartialEvents().map((event) => event.dedupeKey)).toEqual(['partial_membership:c']);
+        expect(openPartialEvents()[0].message).toContain('Run `CLUSTER MEET 10.0.0.3 6379` on 10.0.0.2:6379');
+      });
+
+      it('counts a node closed by hand like any other once its finding has gone', async () => {
+        knows = { a: ['a', 'b', 'c'], b: ['a', 'b'], c: ['a', 'b', 'c'] };
+        await rounds(19);
+        await service.resolveAnomaly(openPartialEvents()[0].id);
+        knows.b = ['a', 'b', 'c'];
+        await rounds(1);
+        expect(report().partialMembership).toEqual([]);
+
+        knows.b = ['a', 'b'];
+        knows.c = ['a', 'c'];
+        await rounds(19);
+
+        expect(openPartialEvents().map((event) => event.dedupeKey)).toEqual(['partial_membership:b']);
+      });
+
+      it('keeps the finding under a node closed by hand when another connection takes the cluster over', async () => {
+        const second: ConnectionContext = {
+          ...mockCtx,
+          connectionId: 'conn-2',
+          connectionName: 'Second',
+          client: {
+            ...dbClient,
+            getClusterNodes: jest.fn(async () => MetricsParser.parseClusterNodes(memberView('a'))),
+          } as any,
+        };
+        knows = { a: ['a', 'b', 'c'], b: ['a', 'b'], c: ['a', 'b', 'c'] };
+        for (let i = 0; i < 19; i++) {
+          now += 5_000;
+          await poll(mockCtx);
+          await poll(second);
+        }
+        knows.c = ['a', 'c'];
+        for (let i = 0; i < 19; i++) {
+          now += 5_000;
+          await poll(mockCtx);
+          await poll(second);
+        }
+        await service.resolveAnomaly(openPartialEvents()[0].id);
+
+        await rounds(6, second);
+
+        expect(openPartialEvents().map((event) => event.dedupeKey)).toEqual(['partial_membership:c']);
+      });
+
       it('lists the node as still counted after its event was closed by hand', async () => {
         await rounds(19);
         await service.resolveAnomaly(partialEvents()[0].id);
@@ -30306,6 +30384,24 @@ describe('AnomalyService', () => {
           await rounds(1);
           expect(closed('stored-divergence')).toBe(true);
           expect(report().divergences).toEqual([]);
+        });
+
+        it('keeps the finding of an adopted event under its node once that event is closed by hand', async () => {
+          storedOpen('stored-partial-c', MetricType.PARTIAL_MEMBERSHIP, 'partial_membership:c');
+          knows = { a: ['a', 'b', 'c'], b: ['a', 'b'], c: ['a', 'c'] };
+          await rounds(2);
+          expect(report().partialMembership).toMatchObject([{ eventId: 'stored-partial-c', node: { nodeId: 'c' } }]);
+
+          await service.resolveAnomaly('stored-partial-c');
+
+          for (let round = 0; round < 16; round++) {
+            await rounds(1);
+            expect(report().partialMembership.map((entry) => entry.node.nodeId)).toEqual(['c']);
+          }
+          expect(partialEvents()).toEqual([]);
+
+          await rounds(1);
+          expect(openPartialEvents().map((event) => event.dedupeKey)).toEqual(['partial_membership:c']);
         });
 
         it('keeps one event open while the finding moves to the peer of two nodes that lacked each other', async () => {
