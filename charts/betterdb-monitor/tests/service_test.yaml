@@ -130,6 +130,28 @@ tests:
             app.kubernetes.io/name: betterdb-monitor
             app.kubernetes.io/instance: RELEASE-NAME
 
+  - it: keeps the chart's value when service.labels repeats a chart label
+    set:
+      service.labels:
+        app.kubernetes.io/name: custom
+        team: databases
+    asserts:
+      - equal:
+          path: metadata.labels["app.kubernetes.io/name"]
+          value: betterdb-monitor
+      - equal:
+          path: metadata.labels.team
+          value: databases
+
+  - it: renders loadBalancerClass as a string
+    set:
+      service.type: LoadBalancer
+      service.loadBalancerClass: "null"
+    asserts:
+      - equal:
+          path: spec.loadBalancerClass
+          value: "null"
+
   - it: rejects an unknown service key such as a lower-case nodeport
     set:
       service.nodeport: 30301

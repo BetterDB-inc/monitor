@@ -12,7 +12,16 @@ metadata:
   name: {{ include "betterdb-monitor.fullname" . }}
   labels:
     {{- include "betterdb-monitor.labels" . | nindent 4 }}
-    {{- with .Values.service.labels }}
+    {{- /* The chart's labels win: a service.labels key that repeats one is
+    dropped, so no key is emitted twice and the selector labels stay intact. */}}
+    {{- $chartLabels := include "betterdb-monitor.labels" . | fromYaml }}
+    {{- $extraLabels := dict }}
+    {{- range $key, $value := .Values.service.labels }}
+    {{- if not (hasKey $chartLabels $key) }}
+    {{- $_ := set $extraLabels $key $value }}
+    {{- end }}
+    {{- end }}
+    {{- with $extraLabels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
   {{- with .Values.service.annotations }}
@@ -26,7 +35,7 @@ spec:
   {{- end }}
   {{- if eq .Values.service.type "LoadBalancer" }}
   {{- with .Values.service.loadBalancerClass }}
-  loadBalancerClass: {{ . }}
+  loadBalancerClass: {{ . | quote }}
   {{- end }}
   {{- with .Values.service.loadBalancerSourceRanges }}
   loadBalancerSourceRanges:
