@@ -109,6 +109,11 @@ export class LogSourceTracker {
   }
 }
 
+function isTimeoutError(error: unknown): boolean {
+  const message = (error instanceof Error ? error.message : String(error ?? '')).toLowerCase();
+  return message.includes('timed out') || message.includes('timeout') || message.includes('etimedout');
+}
+
 /**
  * Context passed to pollConnection() with all relevant connection information
  */
@@ -176,6 +181,7 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
   private knownConnections = new Set<string>();
   // Connections whose poll is still running; a later tick skips them.
   private inFlight = new Set<string>();
+  private slowLane = new Set<string>();
   private polledConnections: ReadonlySet<string> = new Set();
 
   constructor(protected readonly connectionRegistry: ConnectionRegistry) {}
@@ -213,7 +219,9 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
   /**
    * How long a tick waits for one connection's poll. A poll that runs longer
    * keeps running, and that connection is skipped until it settles, so a
-   * stalled server cannot hold up the other connections' polls.
+   * stalled server cannot hold up the other connections' polls. After that,
+   * and after a poll that failed with a timeout, the tick stops waiting for
+   * that connection until one of its polls ends inside this bound.
    */
   protected getPollTimeoutMs(): number {
     return Math.max(this.getIntervalMs() * 2, 10_000);
@@ -334,6 +342,7 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
           this.logger.log(`Connection ${knownId} removed, cleaning up state`);
           this.onConnectionRemoved(knownId);
           this.lastPolledVersion.delete(knownId);
+          this.slowLane.delete(knownId);
         }
       }
       this.knownConnections = currentConnectionIds;
@@ -355,8 +364,12 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
       const covered = new Set<string>();
       const pollPromises = eligible.map(async (conn) => {
         const describe = `${conn.name} (${conn.host}:${conn.port})`;
+        const timeoutMs = this.getPollTimeoutMs();
+        const waitedFor = !this.slowLane.has(conn.id);
+        const startedAt = performance.now();
         this.inFlight.add(conn.id);
         const poll = (async () => {
+          let timedOut = false;
           try {
             const client = this.connectionRegistry.get(conn.id);
             const version = client.sampleVersion?.() ?? null;
@@ -379,19 +392,29 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
             }
             covered.add(conn.id);
           } catch (error) {
+            timedOut = isTimeoutError(error);
             this.logger.warn(`Poll failed for ${describe}: ${error instanceof Error ? error.message : error}`);
           } finally {
             this.inFlight.delete(conn.id);
+            if (timedOut || performance.now() - startedAt >= timeoutMs) {
+              this.markSlow(conn.id, describe);
+            } else if (this.slowLane.delete(conn.id)) {
+              this.logger.log(`${describe} answers in time again; ticks wait for its polls again`);
+            }
             // Removed while this poll ran: its writes landed after the cleanup.
             if (!this.knownConnections.has(conn.id)) {
               this.onConnectionRemoved(conn.id);
               this.lastPolledVersion.delete(conn.id);
+              this.slowLane.delete(conn.id);
             }
           }
         })();
-        const timeoutMs = this.getPollTimeoutMs();
+        if (!waitedFor) {
+          return;
+        }
         await withTimeout(poll, timeoutMs).catch(() => {
           this.logger.warn(`Poll of ${describe} still running after ${timeoutMs}ms; skipping it until it settles`);
+          this.markSlow(conn.id, describe);
         });
       });
 
@@ -403,6 +426,14 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
     } finally {
       this.polling = false;
     }
+  }
+
+  private markSlow(connectionId: string, describe: string): void {
+    if (this.slowLane.has(connectionId)) {
+      return;
+    }
+    this.slowLane.add(connectionId);
+    this.logger.warn(`${describe} is slow or not answering; ticks no longer wait for its polls`);
   }
 
   /**

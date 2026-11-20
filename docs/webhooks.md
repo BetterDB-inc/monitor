@@ -286,6 +286,28 @@ The Slack and Discord formats add a **Node** field: `10.0.1.12:6379 (primary, sh
 }
 ```
 
+BetterDB checks every connection in rounds, and starts the next round 10
+seconds after the previous one ends. A refused or dropped connection raises
+`instance.down` on the first failed check. A database that keeps the
+connection open but does not answer a ping within 5 seconds counts as one
+missed check. Such a check takes the full 5 seconds, so a database that does
+not answer is checked about every 15 seconds. Two of these checks missed in a
+row raise `instance.down` with the reason `Database ping timed out`. A stall
+shorter than 15 seconds does not page anyone; the event usually comes 20 to 35
+seconds after the database stops answering. Health requests from the dashboard
+or the Prometheus poll do not count as checks.
+
+For a connection BetterDB opens itself, every check after the first missed one
+also pings once over a new connection. If that answers, the database is up and
+only BetterDB's own client is busy, for example behind a long search, so
+nothing is raised. If it stays busy for six checks in a row (about 80
+seconds), BetterDB reconnects its client without raising an event. If the new
+connection gets no answer either, BetterDB raises `instance.down`, closes its
+client to that database and reconnects. Agent and external connections keep
+their client and are reported down after two missed checks.
+
+`instance.up` follows the first ping that answers.
+
 #### memory.critical
 
 ```json

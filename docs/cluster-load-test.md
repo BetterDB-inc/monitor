@@ -309,21 +309,57 @@ One failover gives one event per registered connection.
 
 ### Hung nodes
 
-Two nodes accept TCP and stop replying (`--hang 2`):
+Two nodes accept TCP and stop replying (`--hang 2`). "Before" is the state the
+other tables were measured in, on 2026-11-18. "After" has the timeouts for
+silent nodes described below and was measured on 2026-11-20 on the same
+machine, in desktop use with a load average of about 5. Each figure is one
+run, not repeated.
 
-| Run | Anomaly pass p50 / p95 ms | Anomaly passes | Prometheus pass p50 / p95 ms | Commands/s |
+| Run | Figure | Before | After | No hung nodes |
 |---|---|---|---|---|
-| 100 nodes, one connection | 4,023 / 9,038 | 24 | 37 / 4,012 | 94 (365 without) |
-| 30 nodes, every node registered | 5,003 / 5,207 | 19 | 5,002 / 5,003 | 116 (628 without) |
+| 100 nodes, one connection | Anomaly pass p50 / p95 ms | 4,023 / 9,038 | 82 / 97 | 94 / 113 |
+| | Anomaly passes | 24 | 110 | 110 |
+| | Prometheus pass p50 / p95 ms | 37 / 4,012 | 31 / 40 | |
+| | Commands/s | 94 | 357 | 365 |
+| 30 nodes, every node registered | Anomaly pass p50 / p95 ms | 5,003 / 5,207 | 59 / 75 | 78 / 97 |
+| | Anomaly passes | 19 | 112 | 112 |
+| | Prometheus pass p50 / p95 ms | 5,002 / 5,003 | 36 / 44 | |
+| | Commands/s | 116 | 541 | 628 |
+| | Hung connections listed as connected | 2 of 2 | 0 of 2 | |
+| | Error lines in the log | 38 | 0 | 0 |
 
-- Two silent nodes stretch one anomaly pass to 4 to 9 s, so the whole cluster
-  is sampled every 5 to 6 s instead of about every 1.1 s.
-- With every node registered the two hung connections were still listed as
-  connected at the end of the window and no `instance.down` was dispatched in
-  the window. The nodes stopped answering 30 seconds before it started, so an
-  event from that moment would not be counted.
-  The log has 38 "Failed to poll metrics" errors and 51 "still running,
-  skipping" warnings.
+What changed between the two columns:
+
+- A command sent to a single node gives up after 5 seconds
+  (`CLUSTER_NODE_COMMAND_TIMEOUT_MS`). A node that let a command or a connect
+  time out is skipped for 30 seconds and tried again in the background.
+- The health ping has a deadline of 5 seconds. Two pings in a row without an
+  answer report the connection as down.
+- A poller pass waits for a slow connection once. After that the connection is
+  still polled every pass, but the pass does not wait for it until one of its
+  polls ends in time.
+
+How to read it:
+
+- Before, two silent nodes stretched one anomaly pass to 4 to 9 s, so the whole
+  cluster was sampled every 5 to 6 s instead of about every 1.1 s. With every
+  node registered the two hung connections were still listed as connected at
+  the end of the window, and the log had 38 "Failed to poll metrics" errors
+  and 51 "still running, skipping" warnings.
+- After, pass times and pass counts are close to those of the run without
+  hung nodes. The passes are a little faster than in that run, which was
+  measured two days earlier; with one run each that difference is not a
+  finding.
+  The two hung connections are listed as disconnected, and the log has none of
+  those errors or warnings.
+- With every node registered a pass no longer waits for the two hung
+  connections, so its time is that of the 28 healthy ones. That is also why
+  fewer commands are sent than without hung nodes.
+- No `instance.down` is in either window's event count. The nodes stop
+  answering 30 seconds before the window starts. After the change the event
+  is due 20 to 30 seconds after that, which is still before the window.
+- The "Before" pass counts can be one higher, as said at the top of the
+  results. The "After" runs do not count a pass that polled no connection.
 
 ## Limits of the method
 
