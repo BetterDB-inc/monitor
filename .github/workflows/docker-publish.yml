@@ -227,3 +227,24 @@ jobs:
           subject-name: docker.io/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.digest.outputs.digest }}
           push-to-registry: true
+
+  # Publish the Helm chart for this release once BOTH images are on Docker Hub,
+  # so the chart (whose default image is <version>-no-ai) is never visible
+  # before its image. helm-publish.yml fails the release, naming both versions,
+  # if Chart.yaml is not at the tag's version (run scripts/bump-version.mjs in
+  # the release commit). Tag pushes only: a manual image rebuild does not
+  # re-publish the chart; run "Publish Helm Chart" by hand for that.
+  publish-chart:
+    needs: [version, merge-with-ai, merge-without-ai]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+    uses: ./.github/workflows/helm-publish.yml
+    with:
+      ref: ${{ github.ref }}
+      version: ${{ needs.version.outputs.version }}
+    secrets:
+      HELM_PUBLISH_TOKEN: ${{ secrets.HELM_PUBLISH_TOKEN }}
+      HELM_GPG_PRIVATE_KEY: ${{ secrets.HELM_GPG_PRIVATE_KEY }}
+      HELM_GPG_PASSPHRASE: ${{ secrets.HELM_GPG_PASSPHRASE }}
+      HELM_GPG_KEY: ${{ secrets.HELM_GPG_KEY }}

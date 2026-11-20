@@ -1,0 +1,108 @@
+# Checks charts/betterdb-monitor on pull requests, before merge:
+#   - version-sync: the chart's version, appVersion and image annotations
+#     match the app version (scripts/check-chart-version.sh). A release bump
+#     that skips Chart.yaml fails here instead of in the publish job.
+#   - chart: helm lint, the helm-unittest suites in charts/betterdb-monitor/tests,
+#     and helm template | kubeconform -strict for each Service type in
+#     charts/betterdb-monitor/ci/.
+# helm-publish.yml runs the same version check and lint again when a tag is
+# released.
+name: Chart Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to check'
+        required: false
+        type: string
+  pull_request:
+    branches:
+      - master
+    paths:
+      - 'charts/**'
+      - 'package.json'
+      - 'apps/api/package.json'
+      - 'apps/web/package.json'
+      - 'scripts/check-chart-version.sh'
+      - 'scripts/bump-version.mjs'
+      - '.github/workflows/chart-tests.yml'
+      - '.github/workflows/helm-publish.yml'
+      - '.github/workflows/docker-publish.yml'
+
+permissions:
+  contents: read
+
+env:
+  # Pinned so a new Helm or plugin release cannot break unrelated PRs.
+  HELM_VERSION: v4.3.2
+  HELM_UNITTEST_VERSION: v1.2.1
+  KUBECONFORM_VERSION: v0.8.0
+
+jobs:
+  version-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch || github.ref }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Check the chart is at the app version
+        run: scripts/check-chart-version.sh
+
+  chart:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch || github.ref }}
+          persist-credentials: false
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Lint (defaults and every CI values file)
+        run: |
+          helm lint charts/betterdb-monitor
+          for values in charts/betterdb-monitor/ci/*-values.yaml; do
+            helm lint charts/betterdb-monitor -f "$values"
+          done
+
+      # Helm 4 verifies plugin provenance by default; a plugin installed from
+      # its git repository has none, hence --verify=false.
+      - name: Install helm-unittest
+        run: |
+          helm plugin install https://github.com/helm-unittest/helm-unittest \
+            --version "$HELM_UNITTEST_VERSION" --verify=false
+
+      - name: Unit tests
+        run: helm unittest charts/betterdb-monitor
+
+      - name: Install kubeconform
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -sSfL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP/bin" kubeconform
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # One render per Service type, validated against the Kubernetes schemas.
+      - name: Validate rendered manifests
+        run: |
+          for values in default nodeport loadbalancer; do
+            file="charts/betterdb-monitor/ci/${values}-values.yaml"
+            echo "::group::helm template -f ${file}"
+            helm template ci charts/betterdb-monitor --namespace betterdb -f "$file" \
+              | kubeconform -strict -summary
+            echo "::endgroup::"
+          done
