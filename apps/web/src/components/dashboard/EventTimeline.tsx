@@ -22,6 +22,9 @@ import type {
   StoredLatencySnapshot,
 } from '../../types/metrics';
 
+import type { ServedClusterNodeRef } from '@betterdb/shared';
+import { TimelineAnomalyRow, type TimelineAnomalyItem } from './TimelineAnomalyRow';
+
 const BUCKET_COUNT = 60;
 const ONE_HOUR_MS = 3_600_000;
 const LABEL_WIDTH = 80;
@@ -32,11 +35,13 @@ interface AnomalyEvent {
   metricType: string;
   zScore?: number;
   value?: number;
+  connectionId?: string;
+  node?: ServedClusterNodeRef;
 }
 
 type SelectedEvent =
   | { type: 'slowlog'; items: Array<{ timestamp: number; command: string; duration: number; clientAddress: string }> }
-  | { type: 'anomaly'; items: Array<{ timestamp: number; severity: string; metricType: string; zScore: number }> }
+  | { type: 'anomaly'; items: TimelineAnomalyItem[] }
   | { type: 'latency'; items: Array<{ timestamp: number; eventName: string; maxLatency: number }> };
 
 interface TimelineBucket {
@@ -358,6 +363,8 @@ export function EventTimeline({ startTime: propStart, endTime: propEnd }: Props)
         severity: a.severity || 'warning',
         metricType: a.metricType || 'unknown',
         zScore: a.zScore ?? 0,
+        connectionId: a.connectionId,
+        node: a.node,
       })),
     });
   };
@@ -627,23 +634,7 @@ export function EventTimeline({ startTime: propStart, endTime: propEnd }: Props)
                   </tr>
                 ))}
                 {selectedEvent.type === 'anomaly' && selectedEvent.items.map((item, i) => (
-                  <tr key={i}>
-                    <td className="py-1.5 pr-3 w-1">
-                      <span className={`inline-block w-2 h-2 rounded-full ${
-                        item.severity === 'critical' ? 'bg-red-500' : 'bg-amber-500'
-                      }`} />
-                    </td>
-                    <td className="py-1.5 pr-3 whitespace-nowrap font-medium capitalize">
-                      {item.severity}
-                    </td>
-                    <td className="py-1.5 pr-3">{item.metricType}</td>
-                    <td className="py-1.5 pr-3 text-muted-foreground tabular-nums whitespace-nowrap">
-                      z: {item.zScore.toFixed(2)}
-                    </td>
-                    <td className="py-1.5 text-xs text-muted-foreground whitespace-nowrap text-right">
-                      {timeAgo(item.timestamp)}
-                    </td>
-                  </tr>
+                  <TimelineAnomalyRow key={i} item={item} age={timeAgo(item.timestamp)} />
                 ))}
                 {selectedEvent.type === 'latency' && selectedEvent.items.map((item, i) => (
                   <tr key={i}>

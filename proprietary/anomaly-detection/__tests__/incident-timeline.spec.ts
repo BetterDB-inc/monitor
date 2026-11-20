@@ -1703,3 +1703,15 @@ describe('IncidentTimelineBuilder', () => {
     });
   });
 });
+
+describe('toTimelineEntry', () => {
+  it('carries the failing node of the event', () => {
+    const node = { nodeId: 'primary-a', address: '10.0.0.1:6379', role: 'primary' as const, shardId: 'shard-a' };
+
+    expect(toTimelineEntry(event({ node })).node).toEqual(node);
+  });
+
+  it('carries no node for an event without one', () => {
+    expect(toTimelineEntry(event())).not.toHaveProperty('node');
+  });
+});

@@ -231,6 +231,49 @@ X-Webhook-Delivery-Id: <delivery-id>
 X-Webhook-Event: <event-type>
 ```
 
+### Failing node on cluster alerts
+
+On a cluster connection, an alert that is about one node names it in `node`:
+
+```json
+"node": {
+  "nodeId": "e7d1eecce10fd6bb5eb35b9f99a514335d9ba9ca",
+  "address": "10.0.1.12:6379",
+  "role": "primary",
+  "shardId": "8f3c1d5e0a9b4c7d2e6f1a0b3c4d5e6f7a8b9c0d",
+  "availabilityZone": "eu-west-1a",
+  "collected": true,
+  "connectionId": "conn-7"
+},
+"nodeUrl": "https://monitor.example.com/cluster?tab=nodes&node=e7d1eecce10fd6bb5eb35b9f99a514335d9ba9ca&connection=conn-1"
+```
+
+| Field | Meaning |
+| --- | --- |
+| `node.nodeId` | The node's cluster id |
+| `node.address` | `host:port` as the cluster reports it |
+| `node.role` | `primary`, `replica`, or `unknown` for a node that is still joining or has left the cluster view |
+| `node.shardId` | From `CLUSTER SHARDS`. Absent on servers without that command |
+| `node.availabilityZone` | From the server, or from the connection's zone map. Absent when neither gives one |
+| `node.collected` | `false` when no connection of the monitor points at this node, so its own metrics are not gathered. This is the usual case for the other nodes of a cluster with auto-registration off |
+| `node.connectionId` | The connection that collects the node. Absent when `collected` is `false` |
+| `nodeUrl` | Opens that node on the Cluster page. Only on `anomaly.detected` and `anomaly.sequence.detected`, and only when `FRONTEND_URL` is set |
+
+Which alerts carry it:
+
+| Event | `node` |
+| --- | --- |
+| `anomaly.detected` | The node of the anomaly event. See [which node each event type names](./anomaly-detection.md#failing-node-on-cluster-events), including the types that name none |
+| `anomaly.sequence.detected` | `nodes`: every node named by the events of the sequence, each once, in the order of the events. Left out when none of them names a node. `nodeUrl` opens the node of the first event |
+| `failover.started`, `failover.completed` | The node that changed role, with the role it changed to |
+| `data.loss.detected` | The node that was read |
+| `retry_amplification.detected` | The primary the finding was read on |
+| `replication.divergence`, `replication.recovered` | The replica in `replica`, not the primary in `instance`. `replication.recovered` names the node stored on the divergence event it closes, so both name the same node and role when the replica's address was reused or its role changed in between. This holds while BetterDB still has that event in memory (the recent events and incidents of the connection) and for an event a restart left open. For an older event it names the node at the replica's address in the current cluster view, with `role` `unknown` when that view is old |
+
+`node` is left out on a standalone or Sentinel connection, and when the node cannot be found in the cluster view. `replication.lag`, `cluster.failover`, `cluster.demoted.writes` and `cluster.bus.corruption` do not carry it yet.
+
+The Slack and Discord formats add a **Node** field: `10.0.1.12:6379 (primary, shard 8f3c1d5e, eu-west-1a)`, with `not collected` at the end when it applies. A sequence alert lists up to 5 nodes under **Nodes**.
+
 ### Event-Specific Payloads
 
 #### instance.down / instance.up
@@ -379,6 +422,8 @@ An alert only counts once its delivery succeeds, so a failed or dropped delivery
 
 `replicaView` is what the replica itself reported when the monitor could read it: `gapBytes` from its `slave_repl_offset`, `linkStatus` from `master_link_status`, and `applyBacklogBytes`, the data it has received but not applied (`null` when the server does not report `slave_read_repl_offset`). It is `null` when the replica could not be read. A divergence is not sent when the replica reports its link is up and it is less than 1 MiB behind, except a `not_acking` one: that is still sent, and its message says the replica's acknowledgements are not reaching the primary. See [Replica cross-check](./anomaly-detection.md#replication_divergence).
 
+On a cluster the payload also carries `node`, the replica in `replica` (see [Failing node on cluster alerts](#failing-node-on-cluster-alerts)).
+
 Detection works on windows of at least 30 seconds, or three poll intervals if that's longer. If polling stops for longer than a window and more than twice the previous gap between polls, the monitor treats it as an outage: every streak restarts, so an alert can take several windows to fire after polling resumes. A divergence that was already open stays open. Polling that stays steadily slower than a window is not an outage, and detection continues on longer windows.
 
 ```json
@@ -455,6 +500,8 @@ If the replica alerts again, the old event closes with no `replication.recovered
 
 `incidentUrl` opens the incident that holds the event. It is only present when `FRONTEND_URL` is set.
 
+On a cluster the payload also carries `node` and `nodeUrl` for an event that is about one node (see [Failing node on cluster alerts](#failing-node-on-cluster-alerts)).
+
 A finding on a primary that a cluster connection reads but that is not registered, such as `reshard_shard_skew` or `hot_shard`, also carries `nodeAddr`, and its `sourceHost` and `sourcePort` are that primary's address rather than the registered node's. A `topology_divergence` event carries them too when exactly one node disagrees with the rest; when several nodes stand on each side it has no `nodeAddr`, and the nodes are named in the `message` (see [topology_divergence](anomaly-detection.md#topology_divergence)). A `partial_membership` event carries the address of the node that has only partly joined; its `message` names the peers that know it, those that do not, and the `CLUSTER MEET` command to run, and its `value` is the number of peers it has a broken link with (see [partial_membership](anomaly-detection.md#partial_membership)). When no view has an address for the node, the event has no `nodeAddr`. The `message` then says so and gives no command, as it does when the address is a host name or no peer that showed the gap gave a view.
 
 **Key names in `hot_shard` messages.** On a cluster with an LFU `maxmemory-policy`, the `message` of a `hot_shard` event names up to 3 of the hottest keys it sampled on the shard, for example `Hot keys: "user:42" (freq 255), "cart:{9}" (freq 201).` (see [hot keys](anomaly-detection.md#hot_shard)). The sample is the first 500 names of each of the shard's top three slots, so a hotter key can be missing. If your key names hold personal or otherwise sensitive data, such as an email address or a session token, check where the webhook delivers before you subscribe a chat channel or a third-party tool to `anomaly.detected`. Each name is cut to 64 characters, and control and invisible characters are written as `\xNN` or `\u{NNNN}`, so a name cannot add a line. The Slack and Discord formats also escape mentions, links and markdown. The generic format carries the text as it is in a JSON string, so escape it yourself if you forward it to a chat tool.
@@ -493,6 +540,9 @@ Notes:
 - `incidentUrl` opens the incident that holds the sequence. It is only present
   when `FRONTEND_URL` is set.
 - `values` is only present when the match carries settings to change.
+- On a cluster, `nodes` lists the nodes the events of the sequence name and
+  `nodeUrl` opens the node of the first event (see
+  [Failing node on cluster alerts](#failing-node-on-cluster-alerts)).
 - Sent once per recorded match, and again when a compound rule replaces it
   with a more severe diagnosis. Nothing is sent on recovery.
 
@@ -609,7 +659,7 @@ This event replaces the generic `anomaly.detected` for retry amplification, so o
 
 `trigger` is the stress signal that showed up first: `latency`, `errors` or `churn`. `loadRatio` is commands per client against baseline; `value` is the same ratio rounded to two decimals against a `baseline` of 1, which is what Slack and Discord show. `topContributors` lists up to 5 clients grouped by name, then user, then IP; a connection captured before it ran `CLIENT SETNAME` counts under the name it set later, and BetterDB's own connections are left out. `commandRateGrowth` compares each client's command rate during the episode with its rate just before the episode and needs CLIENT LIST `tot-cmds` (Valkey 8+). It is `null` for a client with no reading from before the episode. On older servers it is `null` for every client, and clients are ranked by `newConnections` (reconnects seen in client snapshots). `topContributors` is `null` when neither source could be read.
 
-On a cluster or Sentinel connection the finding can come from another primary the connection reads rather than the registered node. `instance` is then that primary's address, `connectionId` stays the cluster or Sentinel connection, and `topContributors` is `null`.
+On a cluster or Sentinel connection the finding can come from another primary the connection reads rather than the registered node. `instance` is then that primary's address, `connectionId` stays the cluster or Sentinel connection, and `topContributors` is `null`. On a cluster `node` names that primary (see [Failing node on cluster alerts](#failing-node-on-cluster-alerts)).
 
 ```json
 {

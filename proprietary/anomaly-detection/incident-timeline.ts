@@ -1,5 +1,6 @@
 import type { RegressionKind } from '../latency-regression/types';
 import { createHash } from 'crypto';
+import type { ClusterNodeRef, ServedClusterNodeRef } from '@betterdb/shared';
 import {
   AnomalyEvent,
   AnomalyPattern,
@@ -17,6 +18,7 @@ export interface IncidentTimelineEntry {
   anomalyId: string;
   connectionId: string;
   nodeAddr?: string;
+  node?: ClusterNodeRef | ServedClusterNodeRef;
   timestamp: number;
   metricType: MetricType;
   severity: AnomalySeverity;
@@ -338,6 +340,7 @@ export function toTimelineEntry(event: AnomalyEvent): IncidentTimelineEntry {
     anomalyId: event.id,
     connectionId: event.connectionId ?? '',
     ...(event.nodeAddr ? { nodeAddr: event.nodeAddr } : {}),
+    ...(event.node ? { node: event.node } : {}),
     timestamp: event.timestamp,
     metricType: event.metricType,
     severity: event.severity,

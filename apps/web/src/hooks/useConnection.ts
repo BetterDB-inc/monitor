@@ -40,6 +40,7 @@ export interface Connection {
     isSentinel?: boolean;
   };
   connectionType?: 'direct' | 'agent' | 'external';
+  dialsDataNodes?: boolean;
   autoRegisterNodes?: boolean;
   membership?: TopologyMembership;
   nodeAvailabilityZones?: Record<string, string>;

@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   slots, hot keys and a suggested slot rebalance (which slot ranges to move
   to which shards, and the projected load), or the reason no move is
   suggested. Read-only; nothing is moved.
+- `get_anomalies`, `get_incident_timeline` and `get_hot_shards` name the
+  cluster node an event or hot shard is about in `node`: its id, address,
+  role, shard and zone when known, and `collected`, which is false when no
+  connection of the monitor points at that node.
+- `get_cluster_nodes` returns `collected` for each node, with the
+  `connectionId` of the connection that collects it.
 
 ### Changed
 

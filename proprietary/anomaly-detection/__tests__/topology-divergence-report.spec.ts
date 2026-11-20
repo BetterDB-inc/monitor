@@ -76,6 +76,16 @@ describe('toDivergenceNode', () => {
   it('still names a node no view describes', () => {
     expect(toDivergenceNode('gone', NODES)).toEqual({ nodeId: 'gone', address: '', role: 'unknown' });
   });
+
+  it('gives a node that is neither a primary nor a replica an unknown role, as events do', () => {
+    const joining = clusterNode('j', '10.0.8.8', undefined, { flags: ['handshake'] });
+
+    expect(toDivergenceNode('j', new Map([['j', joining]]))).toEqual({
+      nodeId: 'j',
+      address: '10.0.8.8:6379',
+      role: 'unknown',
+    });
+  });
 });
 
 describe('divergenceMessage', () => {
