@@ -1,6 +1,9 @@
+import { toClusterNodeRef } from '@app/cluster/node-ref';
 import type { ClusterNode } from '@app/common/types/metrics.types';
 
-export type DivergenceKind = 'slot_owner' | 'config_epoch' | 'failure_flags' | 'membership';
+const ROLE_RECOVERY_ROUNDS = 2;
+
+export type DivergenceKind = 'slot_owner' | 'config_epoch' | 'failure_flags' | 'membership' | 'role';
 
 export interface TopologyView {
   observerId: string;
@@ -171,12 +174,20 @@ function perNodeDisagreements(indexes: ViewIndex[]): TopologyDisagreement[] {
     const membership = new Map<string, string[]>();
     const epochs = new Map<string, string[]>();
     const failures = new Map<string, string[]>();
+    const roles = new Map<string, string[]>();
+    const selfNode = indexes.find((index) => index.observerId === subject)?.known.get(subject);
+    const canCompareRole =
+      !!selfNode && !isFlaggedFailing(selfNode) && toClusterNodeRef(selfNode).role !== 'unknown';
 
     for (const index of indexes) {
       vote(membership, index.status.get(subject) ?? 'missing', index.observerId);
       const node = index.known.get(subject);
       if (!node) continue;
       vote(epochs, String(node.configEpoch), index.observerId);
+      if (canCompareRole && !isFlaggedFailing(node) && node.configEpoch >= selfNode.configEpoch) {
+        const role = toClusterNodeRef(node).role;
+        if (role !== 'unknown') vote(roles, role, index.observerId);
+      }
       if (index.observerId === subject) continue;
       vote(failures, isFlaggedFailing(node) ? 'failing' : 'ok', index.observerId);
     }
@@ -185,6 +196,7 @@ function perNodeDisagreements(indexes: ViewIndex[]): TopologyDisagreement[] {
       ['membership', membership],
       ['config_epoch', epochs],
       ['failure_flags', failures],
+      ['role', roles],
     ];
     for (const [kind, votes] of kinds) {
       if (votes.size < 2) continue;
@@ -635,8 +647,10 @@ export function settleOpenDivergences(input: {
       kept.add(signature);
       continue;
     }
+    const hasRole = entry.group?.disagreements.some((d) => d.kind === 'role') ?? false;
+    const recoveryRounds = hasRole ? ROLE_RECOVERY_ROUNDS : input.minRounds;
     entry.clean += 1;
-    if (entry.clean < input.minRounds) kept.add(signature);
+    if (entry.clean < recoveryRounds) kept.add(signature);
   }
   return kept;
 }

@@ -295,6 +295,7 @@ import {
   TOPOLOGY_DIVERGENCE_DEFAULTS,
   TOPOLOGY_DIVERGENCE_MAX_MIGRATION_CHECKS,
   TOPOLOGY_DIVERGENCE_MEMBERSHIP_MIN_AGE_MS,
+  TOPOLOGY_DIVERGENCE_ROLE_MIN_AGE_MS,
   TOPOLOGY_DIVERGENCE_NODE_TIMEOUT_FALLBACK_MS,
   TOPOLOGY_DIVERGENCE_NODE_TIMEOUT_REFRESH_MS,
   TopologyDivergenceMonitor,
@@ -876,6 +877,7 @@ export class AnomalyService
   private topologyDivergenceEventIds = new Map<string, Map<string, string>>();
   private topologyDivergenceEventOwners = new Map<string, string>();
   private topologyDivergenceEventSeverity = new Map<string, AnomalySeverity>();
+  private topologyDivergenceEventKinds = new Map<string, Set<string>>();
   private topologyDivergenceOpen = new Map<string, Map<string, OpenDivergence>>();
   private topologyDivergenceAnchors = new Map<string, string>();
   private topologyDivergenceNodeTimeouts = new Map<string, { ms: number; readAt: number }>();
@@ -7537,6 +7539,7 @@ export class AnomalyService
       minAgeMs: {
         failure_flags: countsFailures ? await this.clusterNodeTimeoutMs(ctx, clusterKey, timestamp) : 0,
         membership: TOPOLOGY_DIVERGENCE_MEMBERSHIP_MIN_AGE_MS,
+        role: TOPOLOGY_DIVERGENCE_ROLE_MIN_AGE_MS,
       },
     };
     const confirmed = comparable
@@ -7596,6 +7599,7 @@ export class AnomalyService
       if (tracked.has(eventId)) continue;
       this.topologyDivergenceEventOwners.delete(eventId);
       this.topologyDivergenceEventSeverity.delete(eventId);
+      this.topologyDivergenceEventKinds.delete(eventId);
     }
   }
 
@@ -7607,7 +7611,13 @@ export class AnomalyService
     for (const group of groups) {
       const eventId = eventIds.get(group.signature);
       const raised = eventId ? this.topologyDivergenceEventSeverity.get(eventId) : undefined;
-      if (!eventId || !raised || !outranksSeverity(divergenceSeverity(group), raised)) continue;
+      const raisedKinds = eventId ? this.topologyDivergenceEventKinds.get(eventId) : undefined;
+      const roleConfirmed =
+        raisedKinds !== undefined &&
+        !raisedKinds.has('role') &&
+        group.disagreements.some((d) => d.kind === 'role');
+      const escalated = !!raised && outranksSeverity(divergenceSeverity(group), raised);
+      if (!eventId || (!escalated && !roleConfirmed)) continue;
       eventIds.delete(group.signature);
       this.activeTopologyDivergences.get(connectionId)?.delete(group.signature);
       try {
@@ -7776,6 +7786,7 @@ export class AnomalyService
     const severity = divergenceSeverity(group);
     this.topologyDivergenceEventOwners.set(id, ctx.connectionId);
     this.topologyDivergenceEventSeverity.set(id, severity);
+    this.topologyDivergenceEventKinds.set(id, new Set(group.disagreements.map((d) => d.kind)));
     return {
       id,
       timestamp,
@@ -7821,6 +7832,7 @@ export class AnomalyService
       if (owner !== connectionId) continue;
       this.topologyDivergenceEventOwners.delete(eventId);
       this.topologyDivergenceEventSeverity.delete(eventId);
+      this.topologyDivergenceEventKinds.delete(eventId);
     }
     const watched = new Set(this.connectionClusterKeys.values());
     for (const [clusterKey, anchor] of [...this.topologyDivergenceAnchors]) {

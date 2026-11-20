@@ -24,7 +24,9 @@ import { ClusterSlowlog } from '../components/cluster/ClusterSlowlog';
 import { ReplicationLag } from '../components/cluster/ReplicationLag';
 import { SlotMigrations } from '../components/cluster/SlotMigrations';
 import { RaftHealthPanel } from '../components/cluster/RaftHealthPanel';
+import { TopologyDivergenceBanner } from '../components/anomalies/TopologyDivergenceBanner';
 import { buildSlotNodeMap } from '../types/cluster';
+import type { TopologyDivergenceReport } from '../types/metrics';
 import { formatBytes, formatDurationUs } from '../lib/utils';
 
 export function ClusterDashboard() {
@@ -35,7 +37,9 @@ export function ClusterDashboard() {
     error,
     info,
     nodes,
-    masters,
+    primaries,
+    emptyPrimaries,
+    failedPrimaries,
     replicas,
     slotStats,
     slotStatsFailedNodes,
@@ -85,6 +89,13 @@ export function ClusterDashboard() {
     refetchKey: currentConnection?.id,
   });
   const raftOutageActive = (raftHealthEvents ?? []).some((e) => e.severity === 'critical');
+
+  const { data: topologyDivergenceReport } = usePolling<TopologyDivergenceReport>({
+    fetcher: () => metricsApi.getTopologyDivergence(),
+    interval: 5000,
+    enabled: isClusterMode,
+    refetchKey: currentConnection?.id,
+  });
 
   const [tab, setTab] = useClusterTab();
   const [searchParams] = useSearchParams();
@@ -214,8 +225,32 @@ export function ClusterDashboard() {
         <div>
           <h1 className="text-3xl font-bold">Cluster Overview</h1>
           <p className="text-muted-foreground">
-            Monitoring {masters.length} master nodes and {replicas.length} replicas
+            Monitoring {primaries.length} {primaries.length === 1 ? 'primary' : 'primaries'} and{' '}
+            {replicas.length} {replicas.length === 1 ? 'replica' : 'replicas'}
           </p>
+          {emptyPrimaries.length > 0 && (
+            <p
+              className="text-xs text-muted-foreground mt-0.5"
+              title="Normal for under a minute while a node joins; if it persists, check the topology divergence finding."
+            >
+              {emptyPrimaries.length}{' '}
+              {emptyPrimaries.length === 1 ? 'slotless primary' : 'slotless primaries'} (
+              {emptyPrimaries
+                .map((n) => `${n.address.split('@')[0]}, ${n.id.slice(0, 7)}…`)
+                .join('; ')}
+              )
+            </p>
+          )}
+          {failedPrimaries.length > 0 && (
+            <p className="text-xs text-destructive mt-0.5">
+              {failedPrimaries.length}{' '}
+              {failedPrimaries.length === 1 ? 'failed primary' : 'failed primaries'} (
+              {failedPrimaries
+                .map((n) => `${n.address.split('@')[0]}, ${n.id.slice(0, 7)}…`)
+                .join('; ')}
+              )
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {currentConnection && currentConnection.connectionType !== 'agent' && (
@@ -258,6 +293,8 @@ export function ClusterDashboard() {
 
         {/* Overview Tab */}
         <TabsContent value="overview" className="space-y-4">
+          <TopologyDivergenceBanner report={topologyDivergenceReport ?? undefined} />
+
           {/* Raft (Cluster V2) health — self-hides in legacy gossip mode */}
           <RaftHealthPanel clusterInfo={info} outageActive={raftOutageActive} />
 
@@ -266,7 +303,9 @@ export function ClusterDashboard() {
             <div className="md:col-span-1">
               <ClusterHealthCard
                 health={health}
-                masterCount={masters.length}
+                masterCount={primaries.length}
+                emptyMasterCount={emptyPrimaries.length}
+                failedMasterCount={failedPrimaries.length}
                 replicaCount={replicas.length}
               />
             </div>

@@ -19,6 +19,7 @@ import { Badge } from '../ui/badge';
 import { Network, ZoomIn, ZoomOut, Maximize } from 'lucide-react';
 import { formatBytes } from '../../lib/utils';
 import { countSlots } from '../../types/cluster';
+import { classifyClusterNodes } from '../../hooks/useCluster';
 import type { ClusterNode } from '../../types/metrics';
 import type { NodeStats } from '../../types/cluster';
 import { graphNodeHealth, graphNodeStatus, type GraphNodeHealth } from './nodeHealth';
@@ -85,9 +86,16 @@ export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTo
     return () => resizeObserver.disconnect();
   }, []);
 
-  const { graphNodes, graphLinks } = useMemo(() => {
+  const { graphNodes, graphLinks, masterCount, emptyMasterCount, failedMasterCount, replicaCount } = useMemo(() => {
     if (!nodes || nodes.length === 0) {
-      return { graphNodes: [], graphLinks: [] };
+      return {
+        graphNodes: [],
+        graphLinks: [],
+        masterCount: 0,
+        emptyMasterCount: 0,
+        failedMasterCount: 0,
+        replicaCount: 0,
+      };
     }
 
     const width = containerWidth;
@@ -95,20 +103,15 @@ export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTo
     const centerX = width / 2;
     const centerY = height / 2;
 
-    // Separate masters and replicas for circular layout
-    const masters: ClusterNode[] = [];
-    const replicas: ClusterNode[] = [];
-    nodes.forEach((n) => {
-      if (n.flags.includes('master')) {
-        masters.push(n);
-      } else {
-        replicas.push(n);
-      }
-    });
+    const { primaries, emptyPrimaries, failedPrimaries, replicas } = classifyClusterNodes(nodes);
+    const masters = primaries;
+    const offRingMasters = [...emptyPrimaries, ...failedPrimaries];
 
     // Map masterId -> index for circular placement
     const masterIndexMap = new Map<string, number>();
     masters.forEach((m, i) => masterIndexMap.set(m.id, i));
+    const offRingIndexMap = new Map<string, number>();
+    offRingMasters.forEach((m, i) => offRingIndexMap.set(m.id, i));
 
     const masterRadius = Math.min(width, height) * 0.2;
     const replicaOffset = LINK_DISTANCE * 0.5;
@@ -133,6 +136,13 @@ export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTo
       if (saved) return saved;
 
       if (node.flags.includes('master')) {
+        const offRingIdx = offRingIndexMap.get(node.id);
+        if (offRingIdx !== undefined) {
+          return {
+            x: 60 + offRingIdx * 70,
+            y: height - 50,
+          };
+        }
         const angle = getMasterAngle(masterIndexMap.get(node.id) ?? 0);
         return {
           x: centerX + masterRadius * Math.cos(angle),
@@ -182,7 +192,14 @@ export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTo
       }
     }
 
-    return { graphNodes, graphLinks };
+    return {
+      graphNodes,
+      graphLinks,
+      masterCount: primaries.length,
+      emptyMasterCount: emptyPrimaries.length,
+      failedMasterCount: failedPrimaries.length,
+      replicaCount: replicas.length,
+    };
   }, [nodes, nodeStats, containerWidth]);
 
   useEffect(() => {
@@ -360,9 +377,6 @@ export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTo
     return <EmptyState title="No cluster nodes available" />;
   }
 
-  const masterCount = graphNodes.filter((n) => n.role === 'master').length;
-  const replicaCount = graphNodes.filter((n) => n.role === 'replica').length;
-
   return (
     <Card>
       <CardHeader>
@@ -376,6 +390,16 @@ export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTo
               <Badge variant="outline" className="bg-[var(--chart-1)]/10 text-[var(--chart-1)] border-[var(--chart-1)]/20">
                 {masterCount} Masters
               </Badge>
+              {emptyMasterCount > 0 && (
+                <Badge variant="outline" className="text-muted-foreground">
+                  {emptyMasterCount} Not serving slots
+                </Badge>
+              )}
+              {failedMasterCount > 0 && (
+                <Badge variant="outline" className="border-destructive/40 text-destructive">
+                  {failedMasterCount} Failed
+                </Badge>
+              )}
               <Badge variant="outline" className="bg-[var(--chart-5)]/10 text-[var(--chart-5)] border-[var(--chart-5)]/20">
                 {replicaCount} Replicas
               </Badge>
