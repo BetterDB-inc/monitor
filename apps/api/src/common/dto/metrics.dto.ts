@@ -416,6 +416,16 @@ export class DiscoveredNodeDto {
     example: '7c9e1b0f5a3d4e6f8a2b1c0d9e8f7a6b5c4d3e2f',
   })
   shardId?: string;
+
+  @ApiProperty({
+    description:
+      'True when a connection of the monitor points at this node, so its metrics and events are collected',
+    example: true,
+  })
+  collected: boolean;
+
+  @ApiPropertyOptional({ description: 'Id of the connection that collects this node, when one does' })
+  connectionId?: string;
 }
 
 export class NodeStatsDto {

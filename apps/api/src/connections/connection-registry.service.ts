@@ -137,6 +137,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   private readonly encryption: EnvelopeEncryptionService | null;
   private startupConnectionErrors: Array<{ name: string; host: string; port: number; error: string }> = [];
   private readonly seedLocks = new Map<string, Promise<unknown>>();
+  private readonly observedNodeIds = new Map<string, string>();
+  private readonly outsideCluster = new Set<string>();
   private readonly removalListeners = new Set<ConnectionRemovalListener>();
   // Connections whose in-memory secrets came from the environment because the
   // stored (encrypted) record could not be decrypted and no cipher is available.
@@ -1016,6 +1018,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
     this.connections.delete(id);
     this.configs.delete(id);
+    this.observedNodeIds.delete(id);
+    this.outsideCluster.delete(id);
     this.runtimeCapabilityTracker.removeConnection(id);
     this.externalMetricsStore.clear(id);
     await this.storage.deleteConnection(id);
@@ -1216,6 +1220,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         credentialStatus: config.credentialStatus,
         credentialError: config.credentialError,
         connectionType: config.host === 'agent' ? 'agent' : (config.connectionType ?? 'direct'),
+        dialsDataNodes: dialsDataNodes(this.zoneMapOwner(config)),
         autoRegisterNodes: config.autoRegisterNodes,
         membership: config.membership,
         nodeAvailabilityZones: this.zoneMapOwner(config).nodeAvailabilityZones,
@@ -1362,6 +1367,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     this.connections.delete(id);
     this.configs.delete(id);
     this.serverlessAgentIds.delete(id);
+    this.observedNodeIds.delete(id);
+    this.outsideCluster.delete(id);
     this.runtimeCapabilityTracker.removeConnection(id);
 
     if (this.defaultId === id) {
@@ -1396,6 +1403,41 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   isListed(id: string): boolean {
     const config = this.configs.get(id);
     return config !== undefined && !isRetiredAuto(config);
+  }
+
+  isRegisteredClient(id: string, client: DatabasePort): boolean {
+    return this.connections.get(id) === client;
+  }
+
+  noteObservedNodeId(id: string, nodeId: string | undefined): void {
+    if (nodeId) {
+      this.observedNodeIds.set(id, nodeId);
+    } else {
+      this.observedNodeIds.delete(id);
+    }
+  }
+
+  getObservedNodeId(id: string): string | undefined {
+    return this.observedNodeIds.get(id);
+  }
+
+  noteOutsideCluster(id: string, outside: boolean): void {
+    if (outside) {
+      this.outsideCluster.add(id);
+    } else {
+      this.outsideCluster.delete(id);
+    }
+  }
+
+  isOutsideCluster(id: string): boolean {
+    return this.outsideCluster.has(id);
+  }
+
+  findIdObservingNode(nodeId: string): string | null {
+    for (const [id, observed] of this.observedNodeIds) {
+      if (observed === nodeId && this.isListed(id)) return id;
+    }
+    return null;
   }
 
   /** True when `id` was registered automatically from a cluster or Sentinel seed. */
@@ -1518,6 +1560,58 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     return config.id;
   }
 
+  async addNodeConnection(sourceId: string, node: { host: string; port: number }): Promise<string> {
+    const source = this.configs.get(sourceId);
+    if (!source) {
+      throw new NotFoundException(`Connection '${sourceId}' not found.`);
+    }
+    const now = Date.now();
+    const config: DatabaseConnectionConfig = {
+      id: randomUUID(),
+      name: `${source.name} · ${node.host}:${node.port}`,
+      host: node.host,
+      port: node.port,
+      ...dataNodeCredentialsOf(source),
+      dbIndex: 0,
+      tls: source.tls,
+      tlsConfig: source.tlsConfig,
+      authMode: source.authMode,
+      connectionType: 'direct',
+      autoRegisterNodes: false,
+      isDefault: false,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const adapter = this.createAdapter(config);
+    try {
+      await connectWithin(adapter, CHILD_CONNECT_TIMEOUT_MS);
+    } catch (error) {
+      await adapter.disconnect().catch(() => { });
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(`Could not connect to ${node.host}:${node.port}: ${errorMsg}`);
+    }
+    try {
+      if (this.secretsAreMemoryOnly(source)) {
+        this.memoryOnlySecrets.add(config.id);
+        this.logger.warn(`${config.name}: connected in memory only (ENCRYPTION_KEY is not set; inherited secrets are not written)`);
+      } else {
+        await this.storage.saveConnection(this.encryptConfig(config));
+      }
+      this.configs.set(config.id, { ...config, credentialStatus: 'valid' });
+      this.connections.set(config.id, adapter);
+    } catch (error) {
+      this.memoryOnlySecrets.delete(config.id);
+      this.configs.delete(config.id);
+      this.connections.delete(config.id);
+      await adapter.disconnect().catch(() => { });
+      this.logger.error(`Failed to persist node connection ${config.name}: ${error instanceof Error ? error.message : error}`);
+      throw error;
+    }
+    this.discoveredInstances?.forget(config.host, config.port);
+    this.logger.log(`Connected cluster node ${config.name}`);
+    return config.id;
+  }
+
   async adoptChild(id: string, seedId: string, node: DesiredNode): Promise<void> {
     await this.setMembership(id, { seedId, origin: 'adopted', ...membershipFields(node) });
     // The adopted connection keeps its configured dbIndex: whether SELECT on a
@@ -1529,6 +1623,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
   async refreshChild(id: string, node: DesiredNode): Promise<void> {
     const previous = this.requireMembership(id);
+    if (this.observedNodeIds.get(id) !== node.nodeId) this.observedNodeIds.delete(id);
     const { seedId, origin, retiredAt, hostname } = previous;
     const membershipOf = (target: DesiredNode): TopologyMembership => ({
       seedId,
@@ -1555,6 +1650,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
   async retireChild(id: string): Promise<void> {
     const membership = this.requireMembership(id);
+    this.observedNodeIds.delete(id);
     if (membership.origin === 'auto') {
       const adapter = this.connections.get(id);
       try {
@@ -1572,6 +1668,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
   async reactivateChild(id: string, node: DesiredNode): Promise<void> {
     const membership = this.requireMembership(id);
+    this.observedNodeIds.delete(id);
     const config = this.configs.get(id)!;
     if (membership.origin === 'auto') {
       const adapter = this.createAdapter({ ...config, membership: { ...membership, hostname: node.hostname } });
