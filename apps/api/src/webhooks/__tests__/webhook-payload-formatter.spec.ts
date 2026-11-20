@@ -252,3 +252,99 @@ describe('webhook-payload-formatter: incident links', () => {
     expect(colour(events[1])).toBe(colour(events[0]));
   });
 });
+
+describe('webhook-payload-formatter: failing node', () => {
+  const node = {
+    nodeId: 'e7d1eecce10fd6bb5eb35b9f99a514335d9ba9ca',
+    address: '10.0.1.12:6379',
+    role: 'primary',
+    shardId: '8f3c1d5e0a9b4c7d2e6f1a0b3c4d5e6f7a8b9c0d',
+    availabilityZone: 'eu-west-1a',
+    collected: true,
+    connectionId: 'conn-7',
+  };
+  const withData = (data: Record<string, unknown>): WebhookPayload => ({ ...base, data: { ...base.data, ...data } });
+  const slackFields = (payload: WebhookPayload) =>
+    (toSlack(payload)['blocks'] as Array<{ fields?: Array<{ text: string }> }>)
+      .flatMap((block) => block.fields ?? [])
+      .map((field) => field.text);
+  const discordFields = (payload: WebhookPayload) =>
+    (toDiscord(payload) as { embeds: Array<{ fields: Array<{ name: string; value: string }> }> }).embeds[0].fields;
+  const discordField = (payload: WebhookPayload, name: string) =>
+    discordFields(payload).find((field) => field.name === name)?.value;
+
+  it('names the node with its role, shard and zone in Slack', () => {
+    expect(slackFields(withData({ node }))).toContain('*Node:*\n10.0.1.12:6379 (primary, shard 8f3c1d5e, eu-west-1a)');
+  });
+
+  it('names the node with its role, shard and zone in Discord', () => {
+    expect(discordField(withData({ node }), 'Node')).toBe('10.0.1.12:6379 \\(primary, shard 8f3c1d5e, eu-west-1a\\)');
+  });
+
+  it('says when the node is not collected', () => {
+    const payload = withData({ node: { ...node, collected: false, connectionId: undefined } });
+
+    expect(slackFields(payload)).toContain(
+      '*Node:*\n10.0.1.12:6379 (primary, shard 8f3c1d5e, eu-west-1a), not collected',
+    );
+    expect(discordField(payload, 'Node')).toContain(', not collected');
+  });
+
+  it('names a node of unknown role by its address alone', () => {
+    const payload = withData({ node: { nodeId: 'gone', address: '10.0.0.9:6379', role: 'unknown', collected: false } });
+
+    expect(slackFields(payload)).toContain('*Node:*\n10.0.0.9:6379, not collected');
+  });
+
+  it('adds no node field without a node', () => {
+    expect(slackFields(base).some((text) => text.startsWith('*Node'))).toBe(false);
+    expect(discordFields(base).some((field) => field.name.startsWith('Node'))).toBe(false);
+  });
+
+  it('ignores a node that is not an object with an address', () => {
+    expect(slackFields(withData({ node: 'primA' })).some((text) => text.startsWith('*Node'))).toBe(false);
+    expect(slackFields(withData({ node: { nodeId: 'x' } })).some((text) => text.startsWith('*Node'))).toBe(false);
+  });
+
+  it('lists the nodes of a sequence alert', () => {
+    const replica = { nodeId: 'r', address: '10.0.1.13:6379', role: 'replica', collected: false };
+    const payload = withData({ nodes: [node, replica] });
+
+    expect(slackFields(payload)).toContain(
+      '*Nodes:*\n10.0.1.12:6379 (primary, shard 8f3c1d5e, eu-west-1a)\n10.0.1.13:6379 (replica), not collected',
+    );
+    expect(discordField(payload, 'Nodes')).toContain('10.0.1.13:6379');
+  });
+
+  it('lists five nodes of a sequence alert and counts the rest', () => {
+    const nodes = Array.from({ length: 7 }, (_, i) => ({ nodeId: `n${i}`, address: `10.0.2.${i}:6379`, role: 'primary' }));
+
+    const [text] = slackFields(withData({ nodes })).filter((field) => field.startsWith('*Nodes'));
+
+    expect(text.split('\n')).toHaveLength(7);
+    expect(text.endsWith('\nand 2 more')).toBe(true);
+  });
+
+  it('keeps the node field inside the Slack and Discord field limits', () => {
+    const nodes = Array.from({ length: 5 }, (_, i) => ({
+      nodeId: `n${i}`,
+      address: `${'h'.repeat(250)}.example.com:6379`,
+      role: 'primary',
+      availabilityZone: '('.repeat(400),
+    }));
+    const payload = withData({ nodes });
+
+    const [slack] = slackFields(payload).filter((field) => field.startsWith('*Nodes'));
+
+    expect(slack.length).toBeLessThanOrEqual(2000);
+    expect(discordField(payload, 'Nodes')!.length).toBeLessThanOrEqual(1024);
+    expect(discordField(payload, 'Nodes')!.endsWith('\\')).toBe(false);
+  });
+
+  it('neutralises markup in what the cluster reports for a node', () => {
+    const payload = withData({ node: { ...node, address: '<!channel>:6379', availabilityZone: '[x](https://evil)' } });
+
+    expect(slackFields(payload).join('\n')).not.toContain('<!channel>');
+    expect(discordField(payload, 'Node')).not.toContain('[x](https://evil)');
+  });
+});

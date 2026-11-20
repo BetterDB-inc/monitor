@@ -20,7 +20,7 @@ import { AnomalyService } from './anomaly.service';
 import { IncidentTimeline } from './incident-timeline';
 import {
   AnomalyEvent,
-  CorrelatedAnomalyGroup,
+  ServedCorrelatedAnomalyGroup,
   BufferStats,
   AnomalySummary,
   FanoutCoverage,
@@ -28,7 +28,7 @@ import {
   AnomalyPattern,
 } from './types';
 import { ReplicaDivergenceHistory } from './replication-divergence-detector';
-import { HotShardDetail } from './hot-shard-detector';
+import { ServedHotShardDetail } from './hot-shard-detector';
 import { TopologyDivergenceReport } from './topology-divergence-report';
 import { TopologyDisagreementSummary } from './topology-disagreements';
 import { type RebalanceRunView, parseConfirmedMoves } from './slot-rebalance-run';
@@ -111,7 +111,7 @@ export class AnomalyController {
     @Query('pattern') pattern?: AnomalyPattern,
     @Query('startTime') startTime?: string,
     @Query('endTime') endTime?: string,
-  ): Promise<CorrelatedAnomalyGroup[]> {
+  ): Promise<ServedCorrelatedAnomalyGroup[]> {
     const parsedLimit = limit ? parseInt(limit, 10) : 50;
     const { parsedStartTime, parsedEndTime } = parseTimeRange(startTime, endTime);
 
@@ -179,7 +179,7 @@ export class AnomalyController {
   @UseGuards(LicenseGuard)
   @RequiresFeature(Feature.ANOMALY_DETECTION)
   @ApiHeader({ name: CONNECTION_ID_HEADER, required: true, description: 'Connection ID of the cluster' })
-  getHotShards(@ConnectionId({ required: true }) connectionId: string): HotShardDetail[] {
+  getHotShards(@ConnectionId({ required: true }) connectionId: string): ServedHotShardDetail[] {
     return this.anomalyService.getHotShards(connectionId);
   }
 

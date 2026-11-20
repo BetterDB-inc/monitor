@@ -1,6 +1,6 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { WebhookDispatcherService } from '@app/webhooks/webhook-dispatcher.service';
-import { WebhookEventType } from '@betterdb/shared';
+import { WebhookEventType, type ClusterNodeRef } from '@betterdb/shared';
 import type { RecommendationValue } from '../anomaly-detection/types';
 
 export interface AnomalySequenceAlert {
@@ -16,6 +16,8 @@ export interface AnomalySequenceAlert {
   timestamp: number;
   message: string;
   incidentUrl?: string;
+  nodes?: ClusterNodeRef[];
+  nodeUrl?: string;
   connectionId?: string;
 }
 
@@ -51,6 +53,8 @@ export class WebhookProService implements OnModuleInit {
     threshold: number;
     message: string;
     timestamp: number;
+    node?: ClusterNodeRef;
+    nodeUrl?: string;
     connectionId?: string;
   }): Promise<void> {
     const { connectionId, ...eventData } = data;

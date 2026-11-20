@@ -105,6 +105,30 @@ describe('TopologyDivergenceMonitor', () => {
     ]);
   });
 
+  it('keeps how each view lists a node whose membership is in dispute and the node that lacks it', async () => {
+    const { poll, answers } = harness();
+    answers.set(
+      'b1',
+      viewOf(
+        'b1',
+        {},
+        IDS.filter((id) => id !== 'a2'),
+      ),
+    );
+
+    const round = await poll('conn-1', 'a1', 0);
+
+    expect([...(round?.sightings.keys() ?? [])]).toEqual(['a2', 'b1']);
+    expect(round?.sightings.get('a2')?.map((sighting) => sighting.observerId)).toEqual(['a1', 'c1']);
+    expect(round?.sightings.get('b1')?.map((sighting) => sighting.observerId)).toEqual(['a1', 'b1', 'c1']);
+  });
+
+  it('keeps no sightings while every view lists the same nodes', async () => {
+    const { poll } = harness();
+    const round = await poll('conn-1', 'a1', 0);
+    expect(round?.sightings.size).toBe(0);
+  });
+
   it('runs the rounds of a cluster on one connection only', async () => {
     const { poll, asked } = harness();
 
@@ -324,6 +348,63 @@ describe('TopologyDivergenceMonitor', () => {
 
     expect(round?.observers).toContain('b1');
     expect(round?.disagreements).toMatchObject([{ key: 'failure_flags:c2', rounds: 1 }]);
+  });
+
+  it('keeps asking a node that lacked a member through the rounds it gives no view', async () => {
+    const { poll, answers } = harness();
+    const withoutA2 = IDS.filter((id) => id !== 'a2');
+    answers.set('b1', viewOf('b1', {}, withoutA2));
+    answers.set('c1', viewOf('c1', {}, withoutA2));
+
+    await poll('conn-1', 'a1', 0);
+    answers.set('b1', null);
+    await poll('conn-1', 'a1', INTERVAL);
+    const round = await poll('conn-1', 'a1', 2 * INTERVAL);
+
+    expect(round?.observers).toContain('b1');
+    expect(round?.disagreements).toMatchObject([
+      {
+        key: 'membership:a2',
+        gapStreaks: { b1: { firstSeenAt: 0, rounds: 1 }, c1: { firstSeenAt: 0, rounds: 3 } },
+      },
+    ]);
+  });
+
+  it('lets go of a held gap once every answering view flags the node that gives no view as failed', async () => {
+    const { poll, answers } = harness();
+    const withoutA2 = IDS.filter((id) => id !== 'a2');
+    const dead = { b1: { flags: ['master', 'fail'] } };
+    answers.set('b1', viewOf('b1', {}, withoutA2));
+    answers.set('c1', viewOf('c1', {}, withoutA2));
+
+    await poll('conn-1', 'a1', 0);
+    answers.set('b1', null);
+    answers.set('c1', viewOf('c1'));
+    const held = await poll('conn-1', 'a1', INTERVAL);
+    answers.set('c1', viewOf('c1', dead));
+    const round = await poll('conn-1', 'a1', 2 * INTERVAL, dead);
+
+    expect(held?.disagreements).toMatchObject([{ key: 'membership:a2', lastSeenAt: 0 }]);
+    expect(round?.disagreements).toEqual([]);
+  });
+
+  it('counts a view that still lacks the member as an answer while the disagreement is held', async () => {
+    const { poll, answers } = harness();
+    const withoutA2 = IDS.filter((id) => id !== 'a2');
+    answers.set('b1', viewOf('b1', {}, withoutA2));
+    const lacking = (at: number) => poll('conn-1', 'a1', at, {}, true, withoutA2);
+
+    await lacking(0);
+    answers.set('c1', null);
+    const round = await lacking(INTERVAL);
+
+    expect(round?.disagreements.find((entry) => entry.key === 'membership:a2')).toMatchObject({
+      lastSeenAt: 0,
+      gapStreaks: {
+        a1: { firstSeenAt: 0, lastAnsweredAt: INTERVAL },
+        b1: { firstSeenAt: 0, lastAnsweredAt: INTERVAL },
+      },
+    });
   });
 
   it('keeps asking an accused node once it is part of a disagreement', async () => {

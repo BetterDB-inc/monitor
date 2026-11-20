@@ -4,7 +4,7 @@ import {
   compareText,
   countSlots,
   intersectSlotRanges,
-  isMember,
+  isKnownMember,
   matchDivergence,
   type DivergenceGroup,
   type DivergenceKind,
@@ -296,7 +296,7 @@ export function summarizeDisagreements(
   const listed = (ids: string[]) => ids.slice(0, DISAGREEMENT_LIST_LIMIT).map(named);
   const nameOf = (id: string) => named(id).address || id.slice(0, SHORT_ID_LENGTH);
 
-  const members = [...nodes.values()].filter(isMember);
+  const members = [...nodes.values()].filter(isKnownMember);
   const shards = shardsOf(members, nodes);
   const compared = round.status === 'ok';
   const silent = new Set(round.unanswered);
@@ -312,7 +312,7 @@ export function summarizeDisagreements(
     const touched = new Set<string>();
     for (const id of subjectIds) {
       const node = nodes.get(id);
-      if (node && isMember(node)) touched.add(shardKeyOf(node, nodes));
+      if (node && isKnownMember(node)) touched.add(shardKeyOf(node, nodes));
     }
     if (slots) {
       for (const shard of shards) {

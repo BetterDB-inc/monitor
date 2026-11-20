@@ -16,8 +16,24 @@ import {
   StoredCommandLogEntry,
   CommandLogType,
 } from '../../common/interfaces/storage-port.interface';
-import { WebhookPayloadFormat } from '@betterdb/shared';
+import { WebhookPayloadFormat, type ClusterNodeRef, type ClusterNodeRole } from '@betterdb/shared';
 import { normalizeDetectorConfigMap } from '../../anomaly/anomaly.types';
+
+const NODE_ROLES: readonly ClusterNodeRole[] = ['primary', 'replica', 'unknown'];
+
+function parseNodeRef(raw: unknown): ClusterNodeRef | undefined {
+  const parsed = typeof raw === 'string' ? safeJsonParse<unknown>(raw) : undefined;
+  if (typeof parsed !== 'object' || parsed === null) return undefined;
+  const { nodeId, address, role, shardId, availabilityZone } = parsed as Record<string, unknown>;
+  if (typeof nodeId !== 'string' || typeof address !== 'string') return undefined;
+  return {
+    nodeId,
+    address,
+    role: NODE_ROLES.find((known) => known === role) ?? 'unknown',
+    ...(typeof shardId === 'string' ? { shardId } : {}),
+    ...(typeof availabilityZone === 'string' ? { availabilityZone } : {}),
+  };
+}
 
 /**
  * SQL dialect abstraction for database-specific operations.
@@ -204,6 +220,7 @@ export class RowMappers {
       relatedMetrics: this.dialect.fromArray(row.related_metrics),
       replicaAddr: row.replica_addr ?? undefined,
       nodeAddr: row.node_addr ?? undefined,
+      node: parseNodeRef(row.node),
       dedupeKey: row.dedupe_key ?? undefined,
       kind: row.kind ?? undefined,
       retryTrigger: row.retry_trigger ?? undefined,

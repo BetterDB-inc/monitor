@@ -30,6 +30,8 @@ export interface DiscoveredNode {
   healthy: boolean;
   availabilityZone?: string;
   shardId?: string;
+  collected?: boolean;
+  connectionId?: string;
 }
 
 export interface NodeStats {
