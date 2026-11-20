@@ -1,4 +1,5 @@
 import { useMemo } from 'react';
+import { clusterNodeState } from '@betterdb/shared';
 import { usePolling } from './usePolling';
 import { useCapabilities } from './useCapabilities';
 import { metricsApi } from '../api/metrics';
@@ -8,23 +9,29 @@ import { CLUSTER_TOTAL_SLOTS, type ClusterHealth } from '../types/cluster';
 export function classifyClusterNodes(nodes: ClusterNode[] | null | undefined): {
   primaries: ClusterNode[];
   emptyPrimaries: ClusterNode[];
+  failedPrimaries: ClusterNode[];
   replicas: ClusterNode[];
 } {
-  if (!nodes) return { primaries: [], emptyPrimaries: [], replicas: [] };
+  if (!nodes) return { primaries: [], emptyPrimaries: [], failedPrimaries: [], replicas: [] };
 
   const primaries: ClusterNode[] = [];
   const emptyPrimaries: ClusterNode[] = [];
+  const failedPrimaries: ClusterNode[] = [];
   const replicas: ClusterNode[] = [];
 
   for (const node of nodes) {
     if (node.flags.includes('master')) {
-      const dead = node.flags.includes('fail') || node.flags.includes('noaddr');
+      const state = clusterNodeState(node.flags);
+      if (state !== 'healthy') {
+        failedPrimaries.push(node);
+        continue;
+      }
       const hasSlots = node.slots.length > 0;
       const hasMigration =
         (node.migratingSlots?.length ?? 0) > 0 || (node.importingSlots?.length ?? 0) > 0;
-      if (!dead && hasSlots) {
+      if (hasSlots || hasMigration) {
         primaries.push(node);
-      } else if (!hasSlots && !hasMigration) {
+      } else {
         emptyPrimaries.push(node);
       }
     } else if (node.flags.includes('slave') || node.flags.includes('replica')) {
@@ -32,7 +39,7 @@ export function classifyClusterNodes(nodes: ClusterNode[] | null | undefined): {
     }
   }
 
-  return { primaries, emptyPrimaries, replicas };
+  return { primaries, emptyPrimaries, failedPrimaries, replicas };
 }
 
 export function useCluster() {
@@ -104,7 +111,7 @@ export function useCluster() {
     ? serverInfoError || (isClusterMode ? (infoError || nodesError) : null)
     : null;
 
-  const { primaries, emptyPrimaries, replicas } = useMemo(
+  const { primaries, emptyPrimaries, failedPrimaries, replicas } = useMemo(
     () => classifyClusterNodes(nodes),
     [nodes],
   );
@@ -166,6 +173,7 @@ export function useCluster() {
     nodes: nodes || [],
     primaries,
     emptyPrimaries,
+    failedPrimaries,
     masters: primaries,
     replicas,
     slotStats: slotStatsResult?.stats || null,

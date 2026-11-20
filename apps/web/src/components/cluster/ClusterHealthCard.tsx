@@ -7,6 +7,7 @@ interface ClusterHealthCardProps {
   health: ClusterHealth;
   masterCount: number;
   emptyMasterCount?: number;
+  failedMasterCount?: number;
   replicaCount: number;
 }
 
@@ -14,6 +15,7 @@ export function ClusterHealthCard({
   health,
   masterCount,
   emptyMasterCount = 0,
+  failedMasterCount = 0,
   replicaCount,
 }: ClusterHealthCardProps) {
   const statusConfig = {
@@ -91,6 +93,9 @@ export function ClusterHealthCard({
             <div className="text-2xl font-bold">{masterCount}</div>
             {emptyMasterCount > 0 && (
               <div className="text-xs text-muted-foreground">Empty: {emptyMasterCount}</div>
+            )}
+            {failedMasterCount > 0 && (
+              <div className="text-xs text-destructive">Failed: {failedMasterCount}</div>
             )}
           </div>
           <div className="space-y-1">

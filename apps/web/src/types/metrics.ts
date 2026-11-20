@@ -232,8 +232,41 @@ export interface ClusterNode {
   hostname?: string;
   availabilityZone?: string;
   shardId?: string;
-  migratingSlots?: Array<{ slot: number; toNodeId: string }>;
-  importingSlots?: Array<{ slot: number; fromNodeId: string }>;
+  migratingSlots?: Array<{ slot: number; targetNodeId: string }>;
+  importingSlots?: Array<{ slot: number; sourceNodeId: string }>;
+}
+
+export interface TopologyDivergenceNode {
+  nodeId: string;
+  address: string;
+  role: 'primary' | 'replica' | 'unknown';
+  shardId?: string;
+  availabilityZone?: string;
+}
+
+export interface TopologyDivergenceDisagreement {
+  kind: 'slot_owner' | 'config_epoch' | 'failure_flags' | 'membership' | 'role';
+  subject: TopologyDivergenceNode[];
+  slots?: number[][];
+  positions: Array<{ value: string; observers: TopologyDivergenceNode[] }>;
+  rounds: number;
+  since: number;
+}
+
+export interface TopologyDivergenceDetail {
+  eventId: string | null;
+  confirmed: boolean;
+  since: number;
+  sides: Array<{ nodes: TopologyDivergenceNode[] }>;
+  disagreements: TopologyDivergenceDisagreement[];
+}
+
+export interface TopologyDivergenceReport {
+  status: 'ok' | 'insufficient_views' | 'not_sampled';
+  sampledAt: number | null;
+  observers: TopologyDivergenceNode[];
+  unanswered: TopologyDivergenceNode[];
+  divergences: TopologyDivergenceDetail[];
 }
 
 export interface SlotStatsMetric {

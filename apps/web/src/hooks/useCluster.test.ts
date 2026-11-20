@@ -37,27 +37,30 @@ describe('classifyClusterNodes', () => {
     expect(result.replicas).toHaveLength(23);
   });
 
-  it('excludes fail and noaddr masters from primaries', () => {
+  it('puts fail, fail?, and noaddr masters into failedPrimaries regardless of slots', () => {
     const nodes: ClusterNode[] = [
       makeNode('p1', ['master'], [[0, 100]]),
       makeNode('p2', ['master', 'fail'], [[101, 200]]),
       makeNode('p3', ['master', 'noaddr'], [[201, 300]]),
+      makeNode('p4', ['master', 'fail?'], [[301, 400]]),
+      makeNode('p5', ['master', 'fail'], []),
     ];
 
     const result = classifyClusterNodes(nodes);
     expect(result.primaries.map((n) => n.id)).toEqual(['p1']);
     expect(result.emptyPrimaries).toEqual([]);
+    expect(result.failedPrimaries.map((n) => n.id)).toEqual(['p2', 'p3', 'p4', 'p5']);
   });
 
   it('excludes slotless masters with migrating or importing slots from emptyPrimaries', () => {
     const nodes: ClusterNode[] = [
-      makeNode('p1', ['master'], [], { importingSlots: [{ slot: 5, fromNodeId: 'p0' }] }),
-      makeNode('p2', ['master'], [], { migratingSlots: [{ slot: 6, toNodeId: 'p0' }] }),
+      makeNode('p1', ['master'], [], { importingSlots: [{ slot: 5, sourceNodeId: 'p0' }] }),
+      makeNode('p2', ['master'], [], { migratingSlots: [{ slot: 6, targetNodeId: 'p0' }] }),
       makeNode('p3', ['master'], []),
     ];
 
     const result = classifyClusterNodes(nodes);
-    expect(result.primaries).toEqual([]);
+    expect(result.primaries.map((n) => n.id)).toEqual(['p1', 'p2']);
     expect(result.emptyPrimaries.map((n) => n.id)).toEqual(['p3']);
   });
 });

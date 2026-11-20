@@ -1,4 +1,7 @@
+import { toClusterNodeRef } from '@app/cluster/node-ref';
 import type { ClusterNode } from '@app/common/types/metrics.types';
+
+const ROLE_RECOVERY_ROUNDS = 2;
 
 export type DivergenceKind = 'slot_owner' | 'config_epoch' | 'failure_flags' | 'membership' | 'role';
 
@@ -163,12 +166,6 @@ function vote(votes: Map<string, string[]>, value: string, observerId: string): 
   else votes.set(value, [observerId]);
 }
 
-function roleOf(node: ClusterNode): 'master' | 'replica' | null {
-  if (node.flags.includes('master')) return 'master';
-  if (node.flags.includes('slave') || node.flags.includes('replica')) return 'replica';
-  return null;
-}
-
 function perNodeDisagreements(indexes: ViewIndex[]): TopologyDisagreement[] {
   const subjects = sortedUnique(indexes.flatMap((index) => [...index.known.keys()]));
   const found: TopologyDisagreement[] = [];
@@ -178,15 +175,18 @@ function perNodeDisagreements(indexes: ViewIndex[]): TopologyDisagreement[] {
     const epochs = new Map<string, string[]>();
     const failures = new Map<string, string[]>();
     const roles = new Map<string, string[]>();
+    const selfNode = indexes.find((index) => index.observerId === subject)?.known.get(subject);
+    const canCompareRole =
+      !!selfNode && !isFlaggedFailing(selfNode) && toClusterNodeRef(selfNode).role !== 'unknown';
 
     for (const index of indexes) {
       vote(membership, index.status.get(subject) ?? 'missing', index.observerId);
       const node = index.known.get(subject);
       if (!node) continue;
       vote(epochs, String(node.configEpoch), index.observerId);
-      if (!isFlaggedFailing(node)) {
-        const role = roleOf(node);
-        if (role) vote(roles, role, index.observerId);
+      if (canCompareRole && !isFlaggedFailing(node) && node.configEpoch >= selfNode.configEpoch) {
+        const role = toClusterNodeRef(node).role;
+        if (role !== 'unknown') vote(roles, role, index.observerId);
       }
       if (index.observerId === subject) continue;
       vote(failures, isFlaggedFailing(node) ? 'failing' : 'ok', index.observerId);
@@ -647,8 +647,10 @@ export function settleOpenDivergences(input: {
       kept.add(signature);
       continue;
     }
+    const hasRole = entry.group?.disagreements.some((d) => d.kind === 'role') ?? false;
+    const recoveryRounds = hasRole ? ROLE_RECOVERY_ROUNDS : input.minRounds;
     entry.clean += 1;
-    if (entry.clean < input.minRounds) kept.add(signature);
+    if (entry.clean < recoveryRounds) kept.add(signature);
   }
   return kept;
 }

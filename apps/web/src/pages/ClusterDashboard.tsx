@@ -26,6 +26,7 @@ import { SlotMigrations } from '../components/cluster/SlotMigrations';
 import { RaftHealthPanel } from '../components/cluster/RaftHealthPanel';
 import { TopologyDivergenceBanner } from '../components/anomalies/TopologyDivergenceBanner';
 import { buildSlotNodeMap } from '../types/cluster';
+import type { TopologyDivergenceReport } from '../types/metrics';
 import { formatBytes, formatDurationUs } from '../lib/utils';
 
 export function ClusterDashboard() {
@@ -36,10 +37,10 @@ export function ClusterDashboard() {
     error,
     info,
     nodes,
-    masters = [],
-    primaries = masters,
-    emptyPrimaries = [],
-    replicas = [],
+    primaries,
+    emptyPrimaries,
+    failedPrimaries,
+    replicas,
     slotStats,
     slotStatsFailedNodes,
     hasSlotStats,
@@ -89,10 +90,8 @@ export function ClusterDashboard() {
   });
   const raftOutageActive = (raftHealthEvents ?? []).some((e) => e.severity === 'critical');
 
-  const { data: topologyDivergenceEvents } = usePolling<
-    Array<{ id: string; timestamp: number; metricType: string; severity: string; message: string; resolved?: boolean }>
-  >({
-    fetcher: () => metricsApi.getAnomalyEvents({ metricType: 'topology_divergence', activeOnly: true }),
+  const { data: topologyDivergenceReport } = usePolling<TopologyDivergenceReport>({
+    fetcher: () => metricsApi.getTopologyDivergence(),
     interval: 5000,
     enabled: isClusterMode,
     refetchKey: currentConnection?.id,
@@ -242,6 +241,16 @@ export function ClusterDashboard() {
               )
             </p>
           )}
+          {failedPrimaries.length > 0 && (
+            <p className="text-xs text-destructive mt-0.5">
+              {failedPrimaries.length}{' '}
+              {failedPrimaries.length === 1 ? 'failed primary' : 'failed primaries'} (
+              {failedPrimaries
+                .map((n) => `${n.address.split('@')[0]}, ${n.id.slice(0, 7)}…`)
+                .join('; ')}
+              )
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {currentConnection && currentConnection.connectionType !== 'agent' && (
@@ -284,7 +293,7 @@ export function ClusterDashboard() {
 
         {/* Overview Tab */}
         <TabsContent value="overview" className="space-y-4">
-          <TopologyDivergenceBanner events={topologyDivergenceEvents ?? undefined} />
+          <TopologyDivergenceBanner report={topologyDivergenceReport ?? undefined} />
 
           {/* Raft (Cluster V2) health — self-hides in legacy gossip mode */}
           <RaftHealthPanel clusterInfo={info} outageActive={raftOutageActive} />
@@ -296,6 +305,7 @@ export function ClusterDashboard() {
                 health={health}
                 masterCount={primaries.length}
                 emptyMasterCount={emptyPrimaries.length}
+                failedMasterCount={failedPrimaries.length}
                 replicaCount={replicas.length}
               />
             </div>

@@ -461,6 +461,8 @@ export const metricsApi = {
   // Scoped to the current connection by the connection header.
   getAnomalyCoverage: () => fetchApi<FanoutCoverage[]>('/anomaly/coverage'),
 
+  getTopologyDivergence: () => fetchApi<import('../types/metrics').TopologyDivergenceReport>('/anomaly/topology-divergence'),
+
   getHotShards: () => fetchApi<HotShardDetail[]>('/anomaly/hot-shards'),
 
   runRebalance: (shardId: string, moves: Array<Pick<RebalanceMove, 'targetShardId' | 'ranges'>>) =>

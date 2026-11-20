@@ -4,6 +4,7 @@ import { EmptyState } from '../ui/empty-state';
 import { Badge } from '../ui/badge';
 import { Server, ChevronDown, ChevronUp, Grid3x3, Network } from 'lucide-react';
 import { clusterNodeState } from '@betterdb/shared';
+import { classifyClusterNodes } from '../../hooks/useCluster';
 import type { ClusterNode } from '../../types/metrics';
 import type { NodeStats } from '../../types/cluster';
 import { formatSlotRanges, countSlots } from '../../types/cluster';
@@ -21,33 +22,29 @@ export function ClusterTopology({ nodes, nodeStats }: ClusterTopologyProps) {
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
 
   // Organize nodes by master-replica relationships
-  const { topology, emptyMasters } = useMemo(() => {
-    const masters = nodes.filter((n) => n.flags.includes('master'));
+  const { topology, emptyMasters, failedMasters } = useMemo(() => {
+    const { primaries, emptyPrimaries, failedPrimaries, replicas } = classifyClusterNodes(nodes);
     const replicaMap = new Map<string, ClusterNode[]>();
 
-    // Group replicas by their master
-    nodes.forEach((node) => {
-      if (node.flags.includes('slave') || node.flags.includes('replica')) {
-        const masterId = node.master;
-        if (!replicaMap.has(masterId)) {
-          replicaMap.set(masterId, []);
-        }
-        replicaMap.get(masterId)!.push(node);
+    for (const node of replicas) {
+      const masterId = node.master;
+      if (!replicaMap.has(masterId)) {
+        replicaMap.set(masterId, []);
       }
-    });
-
-    const serving: Array<{ master: ClusterNode; replicas: ClusterNode[] }> = [];
-    const empty: ClusterNode[] = [];
-    for (const master of masters) {
-      const attached = replicaMap.get(master.id) || [];
-      if (master.slots.length === 0 && attached.length === 0) {
-        empty.push(master);
-      } else {
-        serving.push({ master, replicas: attached });
-      }
+      replicaMap.get(masterId)!.push(node);
     }
 
-    return { topology: serving, emptyMasters: empty };
+    const withReplicas = (list: ClusterNode[]) =>
+      list.map((master) => ({
+        master,
+        replicas: replicaMap.get(master.id) || [],
+      }));
+
+    return {
+      topology: withReplicas(primaries),
+      emptyMasters: withReplicas(emptyPrimaries),
+      failedMasters: withReplicas(failedPrimaries),
+    };
   }, [nodes]);
 
   const toggleNode = (nodeId: string) => {
@@ -287,13 +284,48 @@ export function ClusterTopology({ nodes, nodeStats }: ClusterTopologyProps) {
                 <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
                   Not serving slots ({emptyMasters.length})
                 </div>
-                <div className="space-y-2">
-                  {emptyMasters.map((node) => renderNode(node, true))}
+                <div className="space-y-4">
+                  {emptyMasters.map(({ master, replicas }) => (
+                    <div key={master.id} className="space-y-2">
+                      {renderNode(master, true)}
+                      {replicas.length > 0 && (
+                        <div className="pl-6 border-l-2 border-muted space-y-2">
+                          <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                            Replicas ({replicas.length})
+                          </div>
+                          {replicas.map((replica) => renderNode(replica, false))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
                 </div>
               </div>
             )}
 
-            {topology.length === 0 && emptyMasters.length === 0 && (
+            {failedMasters.length > 0 && (
+              <div className="space-y-3 pt-2 border-t">
+                <div className="text-xs font-medium text-destructive uppercase tracking-wide">
+                  Failed / Unreachable ({failedMasters.length})
+                </div>
+                <div className="space-y-4">
+                  {failedMasters.map(({ master, replicas }) => (
+                    <div key={master.id} className="space-y-2">
+                      {renderNode(master, true)}
+                      {replicas.length > 0 && (
+                        <div className="pl-6 border-l-2 border-muted space-y-2">
+                          <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                            Replicas ({replicas.length})
+                          </div>
+                          {replicas.map((replica) => renderNode(replica, false))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {topology.length === 0 && emptyMasters.length === 0 && failedMasters.length === 0 && (
               <EmptyState variant="inline" icon={Server} title="No cluster nodes found" />
             )}
           </div>
