@@ -30,6 +30,7 @@ jest.mock('iovalkey', () => {
 const POOL_LIMIT = 512;
 const NODE_COUNT = 600;
 const COMMAND_TIMEOUT_MS = 5000;
+const IDLE_MS = 30_000;
 const STEP_MS = 20;
 const CONNECT_MS = 50;
 const START = 1_000_000;
@@ -163,6 +164,31 @@ describe('ClusterDiscoveryService node client limit', () => {
 
     expect(service.getConnectionPoolSize()).toBe(POOL_LIMIT);
     expect(openClients()).toBe(POOL_LIMIT);
+  });
+
+  it('does not make a caller wait for idle clients of silent nodes to close', async () => {
+    jest.useFakeTimers({ now: START });
+    await Promise.all(nodes.slice(0, POOL_LIMIT).map((node) => service.getNodeConnection(node.id, 'seed')));
+    const idle = (Valkey as unknown as jest.Mock).mock.results.slice(0, 3).map((result) => result.value);
+    for (const client of idle) {
+      client.quit.mockImplementation(
+        () => new Promise<void>((resolve) => setTimeout(resolve, COMMAND_TIMEOUT_MS)),
+      );
+    }
+    jest.setSystemTime(START + IDLE_MS + 1);
+    let served = false;
+    const asking = service.getNodeConnection(spare.id, 'seed').then(() => {
+      served = true;
+    });
+
+    await jest.advanceTimersByTimeAsync(0);
+    const servedWithoutWaiting = served;
+    await jest.advanceTimersByTimeAsync(COMMAND_TIMEOUT_MS * idle.length);
+    await asking;
+
+    expect(servedWithoutWaiting).toBe(true);
+    expect(idle.map((client) => client.quit.mock.calls.length)).toEqual([1, 1, 1]);
+    expect(service.getConnectionPoolSize()).toBe(1);
   });
 
   it('gives the slot back when a connect fails', async () => {

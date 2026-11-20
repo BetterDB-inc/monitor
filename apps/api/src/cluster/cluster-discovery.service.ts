@@ -966,8 +966,8 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       for (const nodeId of toRemove) {
         const connection = this.discoveredNodes.get(nodeId);
         if (connection) {
-          await this.closeNodeClient(connection.client);
           this.discoveredNodes.delete(nodeId);
+          void this.closeNodeClient(connection.client).catch(() => undefined);
         }
       }
     }
