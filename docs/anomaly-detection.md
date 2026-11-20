@@ -549,6 +549,7 @@ Which node each event type names:
 | `slot_migration`, `slot_migration_stuck` | The source node of the migration |
 | `config_drift`, `acl_drift` | A drift between nodes: the first node the event lists, which is the connection the event is filed under. The event compares the nodes and does not say which one is wrong, so this node may hold the value the others share; the message lists every node with its value. An ACL reload: the node whose ruleset changed |
 | `topology_divergence` | The node whose view differs when one node disagrees with the others. None when several nodes stand on each side: `GET /api/anomaly/topology-divergence` lists every node of both sides |
+| `partial_membership` | The node that has only partly joined. None when no view has an address for it |
 | `cluster_state` | None. `cluster_state:fail` is a state of the whole cluster, not of one node |
 | `raft_health` | None. Elections and quorum are a state of the cluster's Raft group, not a fault of one node |
 | `sentinel_endpoint_drift`, `sentinel_loop_stall` | None. These are about a Sentinel process, which is not a cluster node |

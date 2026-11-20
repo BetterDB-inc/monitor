@@ -174,6 +174,16 @@ describe('nodeOfEvent', () => {
     expect(resolve({ metricType: MetricType.TOPOLOGY_DIVERGENCE })).toBeUndefined();
   });
 
+  it('names the node that has only partly joined on a partial membership', () => {
+    expect(resolve({ metricType: MetricType.PARTIAL_MEMBERSHIP, nodeAddr: '10.0.0.3:6379' })?.nodeId).toBe(
+      'primary-b',
+    );
+  });
+
+  it('names no node on a partial membership whose node has no address', () => {
+    expect(resolve({ metricType: MetricType.PARTIAL_MEMBERSHIP })).toBeUndefined();
+  });
+
   it('keeps a node the event already carries', () => {
     const node = { nodeId: 'x', address: '1.1.1.1:1', role: 'unknown' as const };
     expect(resolve({ node })).toBe(node);

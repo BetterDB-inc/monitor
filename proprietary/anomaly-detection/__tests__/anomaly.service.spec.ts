@@ -29162,6 +29162,12 @@ describe('AnomalyService', () => {
         expect(partialEvents()).toHaveLength(1);
       });
 
+      it('names the node that has only partly joined as the node of the event', async () => {
+        await rounds(19);
+
+        expect(partialEvents().map((event) => event.node)).toMatchObject([{ nodeId: 'n', address: '10.0.0.7:6379' }]);
+      });
+
       it('keeps an unbracketed IPv6 address whole in the node address and the webhook source', async () => {
         const ipv4 = MEMBERS.n;
         MEMBERS.n = { ...ipv4, host: '2001:db8::7' };
