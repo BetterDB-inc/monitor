@@ -13806,6 +13806,7 @@ export class AnomalyService
         anomaly.resolved = true;
         this.incidentsDirty = true;
         anomaly.resolvedAt ??= resolvedAt;
+        this.untrackTopologyEvent(anomaly.id);
         continue;
       }
       let persisted = false;
@@ -13818,6 +13819,7 @@ export class AnomalyService
         anomaly.resolved = true;
         this.incidentsDirty = true;
         anomaly.resolvedAt ??= resolvedAt;
+        this.untrackTopologyEvent(anomaly.id);
       } else {
         allResolved = false;
       }

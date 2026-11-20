@@ -29464,6 +29464,70 @@ describe('AnomalyService', () => {
         expect(openPartialEvents()[0].message).toContain('Run `CLUSTER MEET 10.0.0.3 6379` on 10.0.0.2:6379');
       });
 
+      it('raises the event again under the same node after it was resolved with its group', async () => {
+        knows = { a: ['a', 'b', 'c'], b: ['a', 'b'], c: ['a', 'b', 'c'] };
+        await rounds(19);
+        expect(openPartialEvents().map((event) => event.dedupeKey)).toEqual(['partial_membership:c']);
+        knows.c = ['a', 'c'];
+        await rounds(1);
+
+        (service as any).recentGroups = [{ correlationId: 'grp-partial', anomalies: [openPartialEvents()[0]] }];
+        expect(await service.resolveGroup('grp-partial')).toBe(true);
+        expect(report().partialMembership).toMatchObject([{ eventId: null, node: { nodeId: 'c' } }]);
+
+        await rounds(1);
+        expect(openPartialEvents().map((event) => event.dedupeKey)).toEqual(['partial_membership:c']);
+        expect(openPartialEvents()[0].message).toContain('Run `CLUSTER MEET 10.0.0.3 6379` on 10.0.0.2:6379');
+      });
+
+      it('keeps a finding that only its open event held once that event is resolved with its group', async () => {
+        const kept = () =>
+          [...(service as any).partialMembershipRounds.values()].flatMap((round: any) => round.found);
+        knows = { a: ['a', 'b', 'c'], b: EVERYONE, c: ['a', 'b', 'c'], n: EVERYONE };
+        await rounds(19);
+        silent.add('b');
+        silent.add('n');
+        await rounds(1);
+        (service as any).recentGroups = [{ correlationId: 'grp-partial', anomalies: [partialEvents()[0]] }];
+
+        expect(await service.resolveGroup('grp-partial')).toBe(true);
+
+        for (let round = 0; round < 3; round++) {
+          await rounds(1);
+          expect(kept()).toMatchObject([{ nodeId: 'n', confirmed: false }]);
+          expect(report().partialMembership).toMatchObject([{ eventId: null, node: { nodeId: 'n' } }]);
+        }
+      });
+
+      it('lists the finding as still counted once its event, gone from memory, is closed with its group', async () => {
+        knows = { a: ['a', 'b', 'c'], b: ['a', 'b'], c: ['a', 'b', 'c'] };
+        await rounds(19);
+        knows.c = ['a', 'c'];
+        await rounds(1);
+        const [event] = openPartialEvents();
+        (service as any).recentGroups = [{ correlationId: 'grp-partial', anomalies: [event] }];
+        (service as any).recentAnomalies = (service as any).recentAnomalies.filter((e: AnomalyEvent) => e !== event);
+        (service as any).incidentEventsById.delete(event.id);
+
+        expect(await service.resolveGroup('grp-partial')).toBe(true);
+        expect(report().partialMembership).toMatchObject([{ eventId: null, node: { nodeId: 'c' } }]);
+
+        await rounds(1);
+        expect(openPartialEvents().map((e) => e.dedupeKey)).toEqual(['partial_membership:c']);
+        expect(openPartialEvents()[0].id).not.toBe(event.id);
+      });
+
+      it('keeps the event of a group member whose resolve was not stored', async () => {
+        await rounds(19);
+        const [event] = openPartialEvents();
+        (service as any).recentGroups = [{ correlationId: 'grp-partial', anomalies: [event] }];
+        storage.resolveAnomaly.mockResolvedValueOnce(false);
+
+        expect(event.persisted).toBe(true);
+        expect(await service.resolveGroup('grp-partial')).toBe(false);
+        expect(report().partialMembership).toMatchObject([{ eventId: event.id, node: { nodeId: 'n' } }]);
+      });
+
       it('counts a node closed by hand like any other once its finding has gone', async () => {
         knows = { a: ['a', 'b', 'c'], b: ['a', 'b'], c: ['a', 'b', 'c'] };
         await rounds(19);
