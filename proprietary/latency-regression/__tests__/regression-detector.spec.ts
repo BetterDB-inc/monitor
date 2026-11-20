@@ -1,4 +1,6 @@
+import { matchesCommandPattern } from '@betterdb/shared';
 import {
+  ADMIN_COMMANDS,
   RegressionDetector,
   isTopologyRefreshCorrelated,
   median,
@@ -652,5 +654,157 @@ describe('RegressionDetector — sustained degradation', () => {
     // (matching upgrade retry), not stall on the "count physical samples" guard.
     sim.detector.revert(findings[0]);
     expect(sim.repoll()).toHaveLength(1);
+  });
+});
+
+describe('matchesCommandPattern', () => {
+  it.each([
+    ['client|list', ['client|*'], true],
+    ['client|setname', ['client|*'], true],
+    ['clientx', ['client|*'], false],
+    ['client', ['client|*'], false],
+    ['info', ['info'], true],
+    ['info|foo', ['info'], false],
+    ['cluster|shards', ['cluster|shards'], true],
+    ['cluster|shardsx', ['cluster|shards'], false],
+    ['cluster|slots', ['cluster|shards'], false],
+    ['CLUSTER|Nodes', ['cluster|nodes'], true],
+    ['config|get', ['CONFIG|GET'], true],
+    ['config|set', ['config|get'], false],
+    ['hget', [], false],
+  ])('%s against %j is %s', (command, patterns, expected) => {
+    expect(matchesCommandPattern(command, patterns)).toBe(expected);
+  });
+
+  it('keeps every built-in admin command lower-case', () => {
+    for (const command of ADMIN_COMMANDS) expect(command).toBe(command.toLowerCase());
+  });
+});
+
+describe('RegressionDetector — ignored admin commands', () => {
+  /**
+   * The sustained-degradation fixture for any set of commands: 40 baseline samples at
+   * `baseline` over [now-50m, now-11m], then CONSECUTIVE_REQUIRED polls at `degraded`.
+   * Returns every finding raised along the way.
+   */
+  function runSustained(
+    detector: RegressionDetector,
+    callsPerMin: Map<string, number>,
+    commands: string[],
+    { baseline = 1000, degraded = 4600, clusterRefreshDeltas = [] as ClusterRefreshPoint[] } = {},
+  ): RegressionFinding[] {
+    let now = START;
+    const samples: CommandP99Point[] = [];
+    const add = (p99Us: number, capturedAt: number) => {
+      for (const command of commands) {
+        samples.push({ command, p99Us, serverVersion: '8.1.0', capturedAt });
+      }
+    };
+    const evaluate = () =>
+      detector.evaluate({ nowMs: now, samples, callsPerMin, clusterRefreshDeltas });
+
+    for (let i = 0; i < 40; i++) add(baseline, now - (50 - i) * MINUTE);
+    add(baseline, now);
+    const findings = evaluate();
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) {
+      now += MINUTE;
+      add(degraded, now);
+      findings.push(...evaluate());
+    }
+    return findings;
+  }
+
+  const COMMANDS = ['hget', 'cluster|shards', 'cluster|nodes', 'info', 'client|list'];
+
+  it.each(COMMANDS)('by default reports %s only if it is a data command', (command) => {
+    const findings = runSustained(new RegressionDetector(), new Map([[command, 100]]), [command]);
+
+    if (command === 'hget') {
+      expect(findings).toHaveLength(1);
+      expect(findings[0]).toMatchObject({ kind: 'sustained_degradation', severity: 'critical' });
+      expect(findings[0].commands[0]).toMatchObject({ command: 'hget', degradationFactor: 4.6 });
+    } else {
+      expect(findings).toEqual([]);
+    }
+  });
+
+  it.each(COMMANDS)('with an empty ignore set reports %s', (command) => {
+    const findings = runSustained(
+      new RegressionDetector({ ignoreCommands: new Set() }),
+      new Map([[command, 100]]),
+      [command],
+    );
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ kind: 'sustained_degradation', severity: 'critical' });
+    expect(findings[0].commands[0].command).toBe(command);
+  });
+
+  it('uses a custom ignore set in place of the built-in list', () => {
+    const detector = new RegressionDetector({ ignoreCommands: new Set(['hget']) });
+    const findings = runSustained(
+      detector,
+      new Map([
+        ['hget', 100],
+        ['info', 100],
+      ]),
+      ['hget', 'info'],
+    );
+
+    expect(findings.map((f) => f.commands[0].command)).toEqual(['info']);
+  });
+
+  it('drops admin commands before the top-20 cut, so they do not use up slots', () => {
+    const admin = ['info', 'ping', 'cluster|nodes', 'cluster|shards', 'client|list', 'config|get'];
+    const data = Array.from({ length: 19 }, (_, i) => `data${i}`);
+    // The admin commands have the highest volume, so they would take the first 6 slots.
+    const callsPerMin = new Map<string, number>([
+      ...admin.map((command) => [command, 10_000] as [string, number]),
+      ...data.map((command) => [command, 60] as [string, number]),
+    ]);
+
+    const findings = runSustained(new RegressionDetector(), callsPerMin, [...admin, ...data]);
+
+    expect(findings.map((f) => f.commands[0].command).sort()).toEqual([...data].sort());
+  });
+
+  it('still correlates a data-command regression with cluster|shards bursts', () => {
+    const firedAt = START + CONSECUTIVE_REQUIRED * MINUTE;
+    const clusterRefreshDeltas: ClusterRefreshPoint[] = [
+      ...Array.from({ length: 30 }, (_, j) => ({
+        capturedAt: firedAt - j * MINUTE,
+        callsDelta: 1,
+      })),
+      { capturedAt: firedAt, callsDelta: 40 },
+    ];
+
+    const findings = runSustained(
+      new RegressionDetector(),
+      new Map([
+        ['hget', 100],
+        ['cluster|shards', 100],
+      ]),
+      ['hget', 'cluster|shards'],
+      { clusterRefreshDeltas },
+    );
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0].commands[0].command).toBe('hget');
+    expect(findings[0].topologyRefreshCorrelated).toBe(true);
+  });
+
+  it('does not report an admin command through the upgrade rule either', () => {
+    const sim = new Sim();
+    sim.callsPerMin = new Map([['cluster|shards', 100]]);
+    for (let i = 0; i < 6; i++) {
+      sim.now += MINUTE;
+      sim.addSample(2000, '8.1.0', sim.now, 'cluster|shards');
+      expect(sim.evaluate()).toEqual([]);
+    }
+    for (let i = 0; i < 10; i++) {
+      sim.now += MINUTE;
+      sim.addSample(6000, '9.0.0', sim.now, 'cluster|shards');
+      expect(sim.evaluate()).toEqual([]);
+    }
   });
 });

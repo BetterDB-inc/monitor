@@ -14,7 +14,13 @@ import {
   AnomalyEventSink,
   ANOMALY_EVENT_SINK,
 } from '../anomaly-detection/types';
-import { RegressionDetector, parseMajorVersion, STALE_SAMPLE_MS } from './regression-detector';
+import { csvList } from '@app/common/utils/csv-list';
+import {
+  ADMIN_COMMANDS,
+  RegressionDetector,
+  parseMajorVersion,
+  STALE_SAMPLE_MS,
+} from './regression-detector';
 import { ClusterRefreshPoint, DetectorInput, RegressionFinding } from './types';
 
 const POLL_INTERVAL_MS = 60_000;
@@ -27,6 +33,20 @@ const CLUSTER_DELTA_WINDOW_MS = 60 * 60 * 1000;
 const CLUSTER_REFRESH_COMMANDS = ['cluster|slots', 'cluster|shards'];
 
 /**
+ * Commands the detector skips. LATENCY_REGRESSION_IGNORE_COMMANDS replaces the
+ * built-in ADMIN_COMMANDS (set but empty turns the filter off), and
+ * LATENCY_REGRESSION_EXTRA_IGNORE_COMMANDS is added to whichever list applies.
+ */
+export function latencyRegressionIgnoreCommands(
+  env: Record<string, string | undefined> = process.env,
+): Set<string> {
+  const replace = env.LATENCY_REGRESSION_IGNORE_COMMANDS;
+  const base = replace === undefined ? ADMIN_COMMANDS : csvList(replace);
+  const extra = csvList(env.LATENCY_REGRESSION_EXTRA_IGNORE_COMMANDS);
+  return new Set([...base, ...extra].map((command) => command.toLowerCase()));
+}
+
+/**
  * Pro guard for per-command P99 latency regressions (valkey/valkey#3527).
  * Feeds stored INFO latencystats samples into a pure per-connection
  * RegressionDetector and turns findings into anomaly events + webhooks.
@@ -36,6 +56,8 @@ export class LatencyRegressionService extends MultiConnectionPoller implements O
   protected readonly logger = new Logger(LatencyRegressionService.name);
 
   private detectors = new Map<string, RegressionDetector>();
+  // Read once at startup, like the slowlog ignore lists.
+  private readonly ignoreCommands = latencyRegressionIgnoreCommands();
 
   constructor(
     connectionRegistry: ConnectionRegistry,
@@ -120,7 +142,7 @@ export class LatencyRegressionService extends MultiConnectionPoller implements O
 
     let detector = this.detectors.get(ctx.connectionId);
     if (!detector) {
-      detector = new RegressionDetector();
+      detector = new RegressionDetector({ ignoreCommands: this.ignoreCommands });
       this.detectors.set(ctx.connectionId, detector);
     }
 

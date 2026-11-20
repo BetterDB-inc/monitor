@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { TrendingUp } from 'lucide-react';
+import { isAdminCommand } from '@betterdb/shared';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert.tsx';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { metricsApi } from '@/api/metrics';
 
@@ -11,6 +13,10 @@ export interface LatencyRegressionEvent {
   severity: string;
   message: string;
   resolved?: boolean;
+  /** Degradation factor of the worst command. */
+  threshold?: number;
+  /** Regressed commands, as latencystats names. Absent on older events. */
+  commands?: string[];
 }
 
 const RUNBOOK = [
@@ -21,9 +27,37 @@ const RUNBOOK = [
   'After an upgrade, consider holding the rollout; track valkey/valkey#3527 and #3451 for upstream fixes.',
 ];
 
+// Admin and monitoring commands are ignored by the guard unless an operator opts
+// them back in. When they do show up, they go after the data commands.
+function isAdminEvent(event: LatencyRegressionEvent): boolean {
+  const commands = event.commands ?? [];
+  return commands.length > 0 && commands.every(isAdminCommand);
+}
+
+function compareEvents(a: LatencyRegressionEvent, b: LatencyRegressionEvent): number {
+  const admin = Number(isAdminEvent(a)) - Number(isAdminEvent(b));
+  if (admin !== 0) return admin;
+  const critical = Number(b.severity === 'critical') - Number(a.severity === 'critical');
+  if (critical !== 0) return critical;
+  return (b.threshold ?? 0) - (a.threshold ?? 0);
+}
+
+function countCommands(events: LatencyRegressionEvent[]): number {
+  const commands = new Set<string>();
+  let unnamed = 0;
+  for (const event of events) {
+    if (event.commands && event.commands.length > 0) {
+      for (const command of event.commands) commands.add(command);
+    } else {
+      unnamed += 1;
+    }
+  }
+  return commands.size + unnamed;
+}
+
 /**
- * Banner shown when a per-command P99 latency regression is active
- * (post-upgrade or sustained). See valkey/valkey#3527.
+ * One banner for every active per-command P99 latency regression (post-upgrade or
+ * sustained), one line per event. See valkey/valkey#3527.
  */
 export function LatencyRegressionBanner({
   events,
@@ -31,10 +65,11 @@ export function LatencyRegressionBanner({
   events: LatencyRegressionEvent[] | undefined;
 }) {
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
+  const [showRunbook, setShowRunbook] = useState(false);
 
-  const active = (events ?? []).filter(
-    (e) => e.metricType === 'command_p99' && !e.resolved && !dismissed.has(e.id),
-  );
+  const active = (events ?? [])
+    .filter((e) => e.metricType === 'command_p99' && !e.resolved && !dismissed.has(e.id))
+    .sort(compareEvents);
 
   if (active.length === 0) return null;
 
@@ -51,34 +86,65 @@ export function LatencyRegressionBanner({
     });
   };
 
+  const critical = active.some((e) => e.severity === 'critical');
+  const count = countCommands(active);
+
   return (
-    <div className="space-y-2">
-      {active.map((event) => (
-        <Alert
-          key={event.id}
-          variant={event.severity === 'critical' ? 'destructive' : 'default'}
-          className={event.severity === 'critical' ? 'border-destructive' : undefined}
-        >
-          <TrendingUp className="w-4 h-4" />
-          <AlertTitle>P99 latency regression detected</AlertTitle>
-          <AlertDescription>
-            <p className="font-medium">{event.message}</p>
-            <div className="mt-2">
-              <p className="font-semibold">Remediation runbook</p>
-              <ol className="list-decimal pl-4 space-y-1 mt-1">
-                {RUNBOOK.map((step, i) => (
-                  <li key={i}>{step}</li>
-                ))}
-              </ol>
-            </div>
-            <div className="mt-2">
-              <Button size="sm" variant="outline" onClick={() => dismiss(event.id)}>
+    <Alert
+      variant={critical ? 'destructive' : 'default'}
+      className={critical ? 'border-destructive' : undefined}
+    >
+      <TrendingUp className="w-4 h-4" />
+      <AlertTitle>
+        P99 latency regression on {count} {count === 1 ? 'command' : 'commands'}
+      </AlertTitle>
+      <AlertDescription>
+        <ul className="divide-y">
+          {active.map((event) => (
+            <li key={event.id} className="flex items-start justify-between gap-2 py-1.5">
+              <div className="min-w-0">
+                {event.commands && event.commands.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-mono font-medium">{event.commands.join(', ')}</span>
+                    {isAdminEvent(event) && (
+                      <Badge variant="outline" className="text-muted-foreground font-normal">
+                        monitoring/admin command
+                      </Badge>
+                    )}
+                  </div>
+                )}
+                <p className={isAdminEvent(event) ? 'text-muted-foreground' : undefined}>
+                  {event.message}
+                </p>
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                className="shrink-0"
+                onClick={() => dismiss(event.id)}
+              >
                 Mark resolved
               </Button>
-            </div>
-          </AlertDescription>
-        </Alert>
-      ))}
-    </div>
+            </li>
+          ))}
+        </ul>
+        <Button
+          size="sm"
+          variant="link"
+          className="px-0"
+          aria-expanded={showRunbook}
+          onClick={() => setShowRunbook((open) => !open)}
+        >
+          {showRunbook ? 'Hide remediation steps' : 'Show remediation steps'}
+        </Button>
+        {showRunbook && (
+          <ol className="list-decimal pl-4 space-y-1">
+            {RUNBOOK.map((step, i) => (
+              <li key={i}>{step}</li>
+            ))}
+          </ol>
+        )}
+      </AlertDescription>
+    </Alert>
   );
 }
