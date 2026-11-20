@@ -297,6 +297,41 @@ describe('summarizeDisagreements', () => {
       expect(summary.coverage.unanswered.map((entry) => entry.nodeId)).toEqual(['s002p']);
     });
 
+    it('lists the node that holds a membership gap open as unanswered when it is on neither side any more', () => {
+      const nodes = cluster(3);
+      const membership = (lacking: string) => ({
+        key: 'membership:s002r0',
+        kind: 'membership' as const,
+        subjectIds: ['s002r0'],
+        positions: [
+          { value: 'known', observers: ['s000p', 's001p'] },
+          { value: 'missing', observers: [lacking] },
+        ],
+      });
+      const everyNode = new Set(nodes.map((entry) => entry.id));
+      const tracker = new DivergenceTracker();
+      tracker.observe({ at: AT - 10_000, disagreements: [membership('s000r0')], unanswered: [], views: 3 });
+      tracker.observe({ at: AT - 5_000, disagreements: [membership('s001r0')], unanswered: ['s000r0'], views: 3 });
+      tracker.observe({
+        at: AT,
+        disagreements: [],
+        unanswered: ['s000r0'],
+        views: 3,
+        members: new Map(['s000p', 's001p', 's001r0'].map((id) => [id, everyNode])),
+      });
+
+      const summary = summarizeDisagreements(
+        round(nodes, { observers: ['s000p', 's001p', 's001r0'], disagreements: tracker.tracked() }),
+        noEvent,
+      );
+
+      expect(summary.disagreements).toMatchObject([
+        { id: 'membership:s002r0', stale: true, lastSeenAt: AT - 5_000, positions: [] },
+      ]);
+      expect(summary.coverage).toMatchObject({ asked: 3, answered: 3, complete: false, unansweredCount: 1 });
+      expect(summary.coverage.unanswered.map((entry) => entry.nodeId)).toEqual(['s000r0']);
+    });
+
     it('holds every line without counts in a round that could not compare', () => {
       const summary = summarizeDisagreements(
         round(cluster(3), {

@@ -29012,6 +29012,24 @@ describe('AnomalyService', () => {
         ]);
       });
 
+      it('keeps a membership line as stale while a node that does not answer still holds its gap', async () => {
+        views.b = { a: { flags: 'master,handshake' } };
+        views.c = { a: { flags: 'master,handshake' } };
+        await rounds(2);
+        const lastSeenAt = now;
+        views.b = {};
+        silent.add('c');
+
+        await rounds(1);
+
+        const summary = service.getTopologyDisagreements('conn-1');
+        expect(summary.disagreements).toMatchObject([
+          { id: 'membership:a', kind: 'membership', stale: true, lastSeenAt, rounds: 2, positions: [] },
+        ]);
+        expect(summary.coverage).toMatchObject({ asked: 3, answered: 2, unansweredCount: 1 });
+        expect(summary.coverage.unanswered.map((entry) => entry.nodeId)).toEqual(['c']);
+      });
+
       it('keeps a disagreement without counts in a round that could not compare', async () => {
         views.b = { a: { epoch: 9 } };
         await rounds(2);

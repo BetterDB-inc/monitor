@@ -301,9 +301,11 @@ export function summarizeDisagreements(
   const compared = round.status === 'ok';
   const silent = new Set(round.unanswered);
   const answered = new Set(round.observers.filter((id) => !silent.has(id)));
-  const held = [
-    ...new Set(round.disagreements.flatMap((entry) => entry.positions.flatMap((position) => position.observers))),
-  ]
+  const awaited = round.disagreements.flatMap((entry) => [
+    ...entry.positions.flatMap((position) => position.observers),
+    ...Object.keys(entry.gapStreaks ?? {}),
+  ]);
+  const held = [...new Set(awaited)]
     .filter((id) => nodes.has(id) && !answered.has(id) && !silent.has(id))
     .sort(compareText);
   const unanswered = [...round.unanswered, ...held];
