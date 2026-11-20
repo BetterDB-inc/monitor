@@ -438,6 +438,9 @@ export function ClusterDashboard() {
             <ClusterDisagreements
               summary={disagreements.summary}
               error={disagreements.error}
+              onAskEveryNode={disagreements.askEveryNode}
+              asking={disagreements.asking}
+              askError={disagreements.askError}
               connectionId={currentConnection?.id}
             />
           ) : (

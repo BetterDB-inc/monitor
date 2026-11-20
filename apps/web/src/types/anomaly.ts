@@ -393,8 +393,9 @@ export interface DisagreementLine {
   eventType: string | null;
   eventAt: number | null;
   eventConnectionId: string | null;
-  since: number;
-  rounds: number;
+  tracked?: boolean;
+  since?: number;
+  rounds?: number;
   stale: boolean;
   lastSeenAt: number;
   subjects: DivergenceNode[];
@@ -429,4 +430,31 @@ export interface TopologyDisagreementSummary {
   coverage: DisagreementCoverage;
   disagreements: DisagreementLine[];
   shards: DisagreementShard[];
+}
+
+export type FullCheckBlocker =
+  | 'no_direct_access'
+  | 'ssh_tunnel'
+  | 'raft_cluster'
+  | 'no_cluster_view';
+
+export interface FullCheckFailure {
+  at: number;
+  reason: string;
+}
+
+export interface TopologyFullCheck {
+  state: 'none' | 'running' | 'done';
+  unavailable: { reason: FullCheckBlocker; text: string } | null;
+  startedAt: number | null;
+  finishedAt: number | null;
+  asked: number;
+  total: number;
+  retryAt: number | null;
+  lastFailure: FullCheckFailure | null;
+  summary?: TopologyDisagreementSummary;
+}
+
+export interface TopologyDisagreementReport extends TopologyDisagreementSummary {
+  fullCheck?: TopologyFullCheck;
 }

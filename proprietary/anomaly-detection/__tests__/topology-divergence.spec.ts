@@ -6,6 +6,7 @@ import {
   type TopologyDisagreement,
   type TopologyView,
   compareTopologyViews,
+  compareTopologyViewsInSteps,
   confirmedDisagreements,
   dissentOf,
   durationOf,
@@ -17,6 +18,7 @@ import {
   migrationTouchesSlots,
   type OpenDivergence,
   settleOpenDivergences,
+  slotRangesOverlap,
 } from '../topology-divergence';
 
 type NodePatch = Partial<ClusterNode> | null;
@@ -67,6 +69,98 @@ function byKey(disagreements: TopologyDisagreement[], key: string): TopologyDisa
   if (!found) throw new Error(`no disagreement ${key} in ${disagreements.map((d) => d.key).join(', ')}`);
   return found;
 }
+
+describe('slotRangesOverlap', () => {
+  it.each([
+    [[[0, 10]], [[10, 20]], true],
+    [[[0, 9]], [[10, 20]], false],
+    [[[0, 5], [100, 200]], [[50, 60], [150, 150]], true],
+    [[[7]], [[0, 10]], true],
+    [[[7]], [[8]], false],
+    [[], [[0, 16383]], false],
+  ])('says whether %j and %j share a slot', (a, b, shared) => {
+    expect(slotRangesOverlap(a, b)).toBe(shared);
+    expect(slotRangesOverlap(b, a)).toBe(shared);
+  });
+});
+
+describe('compareTopologyViewsInSteps', () => {
+  it('reads one view in a step when a handshake entry needs the addresses of every view', () => {
+    const stuck: ClusterNode = { ...replica('f00d', 6, '-', 0), flags: ['handshake'] };
+    const observers = Array.from({ length: 40 }, (_, at) => `o${String(at).padStart(2, '0')}`);
+    let reads = 0;
+    const views: TopologyView[] = observers.map((observerId, at) => {
+      const { nodes } = at === 0 ? view(observerId, { r3: null }, [stuck]) : view(observerId);
+      return {
+        observerId,
+        get nodes() {
+          reads += 1;
+          return nodes;
+        },
+      };
+    });
+
+    const steps = compareTopologyViewsInSteps(views);
+    let mostInOneStep = 0;
+    let found: TopologyDisagreement[] | undefined;
+    while (!found) {
+      const before = reads;
+      const step = steps.next();
+      mostInOneStep = Math.max(mostInOneStep, reads - before);
+      if (step.done) found = step.value;
+    }
+
+    expect(mostInOneStep).toBeLessThanOrEqual(2);
+    expect(found).toEqual(compareTopologyViews(views));
+    expect(found.find((entry) => entry.key === 'membership:r3')?.positions[0]).toEqual({
+      value: 'handshake',
+      observers: ['o00'],
+    });
+  });
+
+  it('gives each of two comparisons its own result when they are stepped in turn', () => {
+    const running = [
+      compareTopologyViewsInSteps([view('p1', { p3: failing() }), view('p2'), view('r1')]),
+      compareTopologyViewsInSteps([view('p1', { p2: { configEpoch: 9 } }), view('p2'), view('p3')]),
+    ];
+    const found: Array<TopologyDisagreement[] | undefined> = [undefined, undefined];
+    let turns = 0;
+    while (found.includes(undefined)) {
+      running.forEach((steps, at) => {
+        if (found[at]) return;
+        const step = steps.next();
+        if (step.done) found[at] = step.value;
+      });
+      turns += 1;
+    }
+
+    expect(turns).toBeGreaterThan(10);
+    expect(found).toEqual([
+      [
+        {
+          key: 'failure_flags:p3',
+          kind: 'failure_flags',
+          subjectIds: ['p3'],
+          positions: [
+            { value: 'failing', observers: ['p1'] },
+            { value: 'ok', observers: ['p2', 'r1'] },
+          ],
+        },
+      ],
+      [
+        {
+          key: 'config_epoch:p2',
+          kind: 'config_epoch',
+          subjectIds: ['p2'],
+          positions: [
+            { value: '2', observers: ['p2', 'p3'] },
+            { value: '9', observers: ['p1'] },
+          ],
+        },
+      ],
+    ]);
+  });
+});
 
 describe('compareTopologyViews', () => {
   it('reports nothing when every view agrees', () => {

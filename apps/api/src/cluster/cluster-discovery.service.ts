@@ -24,6 +24,8 @@ export interface DiscoveredNode {
   shardId?: string;
 }
 
+type NodeToDial = Pick<DiscoveredNode, 'id' | 'address' | 'hostname'>;
+
 export interface NodeConnection {
   node: DiscoveredNode;
   client: Valkey;
@@ -161,15 +163,18 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   }
 
   async onNodeClientOnce<T>(
-    node: DiscoveredNode,
+    node: NodeToDial,
     connectionId: string | undefined,
     timeoutMs: number,
     run: (client: Valkey) => Promise<T>,
+    signal?: AbortSignal,
   ): Promise<T> {
     const ownerId = connectionId || this.connectionRegistry.getDefaultId() || undefined;
     this.assertDialsDataNodes(ownerId, node.id);
     const parsed = parseNodeAddress(node.address);
     if (!parsed) throw new Error(`Invalid node address: ${node.address}`);
+    const givenUp = () => new Error('The read was given up before the node answered');
+    if (signal?.aborted) throw givenUp();
     const client = new Valkey({
       ...this.nodeClientOptions(ownerId, node, parsed.host, parsed.port),
       ...this.oneShotOptions(timeoutMs),
@@ -178,12 +183,25 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     client.on('error', (err: Error) => {
       refused ??= err;
     });
-    try {
-      await client.connect().catch((err: unknown) => {
+    let onAbort: () => void = () => undefined;
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => reject(givenUp());
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
+    const work = client
+      .connect()
+      .catch((err: unknown) => {
         throw refused ?? err;
+      })
+      .then(() => {
+        if (signal?.aborted) throw givenUp();
+        return run(client);
       });
-      return await run(client);
+    work.catch(() => undefined);
+    try {
+      return await Promise.race([work, aborted]);
     } finally {
+      signal?.removeEventListener('abort', onAbort);
       client.disconnect();
     }
   }
@@ -195,7 +213,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
 
   private nodeClientOptions(
     ownerId: string | undefined,
-    node: DiscoveredNode,
+    node: NodeToDial,
     host: string,
     port: number,
     credentials?: { username: string; password: string },

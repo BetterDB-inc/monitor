@@ -75,6 +75,7 @@ export const UNASSIGNED_SLOT_OWNER = 'unassigned';
 const KNOWN_MEMBER = 'known';
 const FAILING_FLAGS = ['fail', 'fail?'];
 const SLOT_COUNT = 16384;
+const SLOTS_PER_STEP = 256;
 const DURATION_UNITS: Array<[string, number]> = [
   ['d', 86_400],
   ['h', 3_600],
@@ -85,6 +86,8 @@ const FINISHED_MIGRATION_STATES = ['success', 'failed', 'cancelled'];
 export type FailureVote = 'fail' | 'fail?' | 'ok';
 
 type MemberStatus = typeof KNOWN_MEMBER | 'handshake' | 'noaddr';
+
+export type Steps<T> = Generator<void, T, void>;
 
 interface ViewIndex {
   observerId: string;
@@ -124,7 +127,14 @@ export function failureVoteOf(observerId: string, node: ClusterNode): FailureVot
   return node.flags.includes('fail') ? 'fail' : 'fail?';
 }
 
-function indexViews(views: TopologyView[]): ViewIndex[] {
+function finish<T>(steps: Steps<T>): T {
+  for (;;) {
+    const step = steps.next();
+    if (step.done) return step.value;
+  }
+}
+
+function* knownIdsByAddress(views: TopologyView[]): Steps<Map<string, Set<string>>> {
   const idsByAddress = new Map<string, Set<string>>();
   for (const view of views) {
     for (const node of view.nodes) {
@@ -134,29 +144,40 @@ function indexViews(views: TopologyView[]): ViewIndex[] {
       if (ids) ids.add(node.id);
       else idsByAddress.set(address, new Set([node.id]));
     }
+    yield;
   }
+  return idsByAddress;
+}
 
-  return views.map((view) => {
+function* indexViews(views: TopologyView[]): Steps<ViewIndex[]> {
+  let idsByAddress: Map<string, Set<string>> | undefined;
+  const indexes: ViewIndex[] = [];
+  for (const view of views) {
     const known = new Map<string, ClusterNode>();
     const status = new Map<string, MemberStatus>();
+    const handshakes: ClusterNode[] = [];
     for (const node of view.nodes) {
       const nodeStatus = statusOf(node);
       if (nodeStatus === KNOWN_MEMBER) {
         known.set(node.id, node);
         status.set(node.id, KNOWN_MEMBER);
-      } else if (nodeStatus === 'noaddr') {
-        if (!status.has(node.id)) status.set(node.id, 'noaddr');
+      } else if (nodeStatus === 'handshake') {
+        handshakes.push(node);
+      } else if (!status.has(node.id)) {
+        status.set(node.id, 'noaddr');
       }
     }
-    for (const node of view.nodes) {
-      if (statusOf(node) !== 'handshake') continue;
-      const ids = idsByAddress.get(hostPort(node.address));
+    if (handshakes.length > 0) idsByAddress ??= yield* knownIdsByAddress(views);
+    for (const node of handshakes) {
+      const ids = idsByAddress?.get(hostPort(node.address));
       if (ids?.size !== 1) continue;
       const [realId] = ids;
       if (!status.has(realId)) status.set(realId, 'handshake');
     }
-    return { observerId: view.observerId, known, status };
-  });
+    indexes.push({ observerId: view.observerId, known, status });
+    yield;
+  }
+  return indexes;
 }
 
 function positionsOf(votes: Map<string, string[]>): DivergencePosition[] {
@@ -171,7 +192,7 @@ function vote(votes: Map<string, string[]>, value: string, observerId: string): 
   else votes.set(value, [observerId]);
 }
 
-function perNodeDisagreements(indexes: ViewIndex[]): TopologyDisagreement[] {
+function* perNodeDisagreements(indexes: ViewIndex[]): Steps<TopologyDisagreement[]> {
   const subjects = sortedUnique(indexes.flatMap((index) => [...index.known.keys()]));
   const found: TopologyDisagreement[] = [];
 
@@ -198,17 +219,19 @@ function perNodeDisagreements(indexes: ViewIndex[]): TopologyDisagreement[] {
       if (votes.size < 2) continue;
       found.push({ key: `${kind}:${subject}`, kind, subjectIds: [subject], positions: positionsOf(votes) });
     }
+    yield;
   }
 
   return found;
 }
 
-function slotOwners(index: ViewIndex, ids: Map<string, number>): Int32Array {
+function slotOwners(index: ViewIndex, ids: Map<string, number>, epochs: Float64Array): Int32Array {
   const owners = new Int32Array(SLOT_COUNT).fill(-1);
-  const epochs = new Float64Array(SLOT_COUNT).fill(-1);
-  const claimants = [...index.known.values()].sort((a, b) => compareText(a.id, b.id));
+  epochs.fill(-1);
+  const claimants = [...index.known.values()]
+    .filter((node) => node.slots.length > 0)
+    .sort((a, b) => compareText(a.id, b.id));
   for (const node of claimants) {
-    if (node.slots.length === 0) continue;
     let ordinal = ids.get(node.id);
     if (ordinal === undefined) {
       ordinal = ids.size;
@@ -234,25 +257,45 @@ function slotDisputeOwners(disagreement: TopologyDisagreement): string {
   return sortedUnique(disagreement.positions.map((position) => position.value)).join('|');
 }
 
-function slotDisagreements(indexes: ViewIndex[]): TopologyDisagreement[] {
+interface SlotDispute {
+  owners: string;
+  slots: number[][];
+  votes: Map<string, string[]>;
+}
+
+function* slotDisagreements(indexes: ViewIndex[]): Steps<TopologyDisagreement[]> {
   const ids = new Map<string, number>();
-  const owners = indexes.map((index) => slotOwners(index, ids));
+  const epochs = new Float64Array(SLOT_COUNT);
+  const owners: Int32Array[] = [];
+  for (const index of indexes) {
+    owners.push(slotOwners(index, ids, epochs));
+    yield;
+  }
   const names = [...ids.keys()];
   const nameOf = (ordinal: number) => (ordinal < 0 ? UNASSIGNED_SLOT_OWNER : names[ordinal]);
-  const claims = new Map<string, { owners: string; slots: number[][]; votes: Map<string, string[]> }>();
+  const claims = new Map<string, SlotDispute>();
+  let before: SlotDispute | undefined;
 
   for (let slot = 0; slot < SLOT_COUNT; slot++) {
+    if (slot % SLOTS_PER_STEP === 0) yield;
     const first = owners[0][slot];
-    if (owners.every((view) => view[slot] === first)) continue;
-
-    const claim = owners.map((view) => view[slot]).join(',');
-    let dispute = claims.get(claim);
-    if (!dispute) {
-      const votes = new Map<string, string[]>();
-      owners.forEach((view, at) => vote(votes, nameOf(view[slot]), indexes[at].observerId));
-      dispute = { owners: sortedUnique([...votes.keys()]).join('|'), slots: [], votes };
-      claims.set(claim, dispute);
+    if (owners.every((view) => view[slot] === first)) {
+      before = undefined;
+      continue;
     }
+
+    let dispute = before && owners.every((view) => view[slot] === view[slot - 1]) ? before : undefined;
+    if (!dispute) {
+      const claim = owners.map((view) => view[slot]).join(',');
+      dispute = claims.get(claim);
+      if (!dispute) {
+        const votes = new Map<string, string[]>();
+        owners.forEach((view, at) => vote(votes, nameOf(view[slot]), indexes[at].observerId));
+        dispute = { owners: sortedUnique([...votes.keys()]).join('|'), slots: [], votes };
+        claims.set(claim, dispute);
+      }
+    }
+    before = dispute;
     const lastRange = dispute.slots[dispute.slots.length - 1];
     if (lastRange && lastRange[1] === slot - 1) lastRange[1] = slot;
     else dispute.slots.push([slot, slot]);
@@ -273,12 +316,16 @@ function slotDisagreements(indexes: ViewIndex[]): TopologyDisagreement[] {
   });
 }
 
-export function compareTopologyViews(views: TopologyView[]): TopologyDisagreement[] {
+export function* compareTopologyViewsInSteps(views: TopologyView[]): Steps<TopologyDisagreement[]> {
   if (views.length < 2) return [];
-  const indexes = indexViews(views);
-  return [...perNodeDisagreements(indexes), ...slotDisagreements(indexes)].sort((a, b) =>
-    compareText(a.key, b.key),
-  );
+  const indexes = yield* indexViews(views);
+  const perNode = yield* perNodeDisagreements(indexes);
+  const perSlot = yield* slotDisagreements(indexes);
+  return [...perNode, ...perSlot].sort((a, b) => compareText(a.key, b.key));
+}
+
+export function compareTopologyViews(views: TopologyView[]): TopologyDisagreement[] {
+  return finish(compareTopologyViewsInSteps(views));
 }
 
 export function intersectSlotRanges(a: number[][], b: number[][]): number[][] {
@@ -291,6 +338,10 @@ export function intersectSlotRanges(a: number[][], b: number[][]): number[][] {
     }
   }
   return shared.sort((x, y) => x[0] - y[0]);
+}
+
+export function slotRangesOverlap(a: number[][], b: number[][]): boolean {
+  return a.some(([aStart, aEnd = aStart]) => b.some(([bStart, bEnd = bStart]) => aStart <= bEnd && bStart <= aEnd));
 }
 
 export function countSlots(ranges: number[][]): number {

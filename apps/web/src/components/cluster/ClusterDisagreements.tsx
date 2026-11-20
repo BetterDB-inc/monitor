@@ -1,7 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { INCIDENT_LOOKBACK_MS, incidentEventPath } from '@betterdb/shared';
+import { ApiError } from '@/api/client';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -14,6 +16,8 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { useCanMutate } from '@/hooks/useCanMutate';
+import { useNow } from '@/hooks/useNow';
 import { nodeHref } from '@/lib/clusterNodeHref';
 import { CONNECTION_PARAM } from '@/lib/connectionParam';
 import { formatSlotRanges } from '@/types/cluster';
@@ -25,12 +29,36 @@ import type {
   DisagreementShard,
   DisagreementShardState,
   DivergenceNode,
+  FullCheckFailure,
+  TopologyDisagreementReport,
   TopologyDisagreementSummary,
+  TopologyFullCheck,
 } from '@/types/anomaly';
 
 const SHORT_ID_LENGTH = 8;
 const MAX_LISTED_RANGES = 3;
 const EVENTS_PATH = '/anomalies';
+const FULL_CHECK_FRESH_MS = 60_000;
+const MINUTE_MS = 60_000;
+const CLOCK_TICK_MS = 10_000;
+const TOO_MANY_REQUESTS = 429;
+
+type ResultShown = 'sampled' | 'full';
+
+interface AwaitedCheck {
+  after: number | null;
+  failedAt: number | null;
+  error: Error | null;
+}
+
+interface ClusterDisagreementsProps {
+  summary: TopologyDisagreementReport | undefined;
+  error?: Error | null;
+  connectionId?: string;
+  onAskEveryNode?: () => void;
+  asking?: boolean;
+  askError?: Error | null;
+}
 
 const SEVERITY_BADGE: Record<
   AnomalySeverity,
@@ -124,11 +152,39 @@ function coverageText(coverage: DisagreementCoverage): string {
   return `${coverage.asked} of ${plural(coverage.nodes, 'node')} asked, ${coverage.answered} answered`;
 }
 
-function unconfirmedText(line: DisagreementLine): string {
-  if (!line.resolvedByHand) return `Not confirmed yet, seen in ${plural(line.rounds, 'round')}`;
-  return line.stale
-    ? 'Event resolved by hand; the disagreement itself was not checked again'
-    : 'Event resolved by hand, the disagreement is still seen';
+function LineStanding({
+  line,
+  asOf,
+  connectionId,
+}: {
+  line: DisagreementLine;
+  asOf: number | null;
+  connectionId?: string;
+}) {
+  if (line.confirmed && line.eventId) {
+    return (
+      <Link to={eventHref(line, asOf, connectionId)} className="text-xs underline">
+        Open event
+      </Link>
+    );
+  }
+  if (line.resolvedByHand) {
+    return (
+      <span className="text-xs text-muted-foreground">
+        {line.stale
+          ? 'Event resolved by hand; the disagreement itself was not checked again'
+          : 'Event resolved by hand, the disagreement is still seen'}
+      </span>
+    );
+  }
+  if (line.tracked === false || line.rounds === undefined) {
+    return <span className="text-xs text-muted-foreground">One-off check, not tracked</span>;
+  }
+  return (
+    <span className="text-xs text-muted-foreground">
+      Not confirmed yet, seen in {plural(line.rounds, 'round')}
+    </span>
+  );
 }
 
 function DisagreementCard({
@@ -151,18 +207,18 @@ function DisagreementCard({
       <div className="flex flex-wrap items-start gap-2">
         <Badge variant={badge.variant}>{badge.label}</Badge>
         <p className="min-w-0 flex-1 text-sm font-medium">{line.text}</p>
-        <span className="text-xs text-muted-foreground">
-          {line.stale
-            ? `Last seen ${new Date(line.lastSeenAt).toLocaleTimeString()}, not checked again this round`
-            : `since ${new Date(line.since).toLocaleTimeString()}`}
-        </span>
-        {line.confirmed && line.eventId ? (
-          <Link to={eventHref(line, asOf, connectionId)} className="text-xs underline">
-            Open event
-          </Link>
+        {line.stale ? (
+          <span className="text-xs text-muted-foreground">
+            Last seen {new Date(line.lastSeenAt).toLocaleTimeString()}, not checked again this round
+          </span>
         ) : (
-          <span className="text-xs text-muted-foreground">{unconfirmedText(line)}</span>
+          line.since !== undefined && (
+            <span className="text-xs text-muted-foreground">
+              since {new Date(line.since).toLocaleTimeString()}
+            </span>
+          )
         )}
+        <LineStanding line={line} asOf={asOf} connectionId={connectionId} />
       </div>
       {line.kind !== 'slot_owner' && (
         <div
@@ -346,6 +402,151 @@ export function ClusterDisagreementsLocked() {
   );
 }
 
+function takenText(finishedAt: number, now: number): string {
+  const age = now - finishedAt;
+  if (age <= FULL_CHECK_FRESH_MS) {
+    return `One-off check taken ${new Date(finishedAt).toLocaleTimeString()}. It does not update.`;
+  }
+  return `Taken ${plural(Math.floor(age / MINUTE_MS), 'minute')} ago. The cluster may have changed since.`;
+}
+
+function TakenLine({ takenAt }: { takenAt: number }) {
+  const now = useNow(true, CLOCK_TICK_MS);
+  return <p className="text-sm text-muted-foreground">{takenText(takenAt, now)}</p>;
+}
+
+function failureText(check: TopologyFullCheck, failure: FullCheckFailure): string {
+  const failed = `The last full check failed at ${new Date(failure.at).toLocaleTimeString()}: ${failure.reason}.`;
+  if (check.state !== 'done' || check.finishedAt === null) return failed;
+  const earlier = new Date(check.finishedAt).toLocaleTimeString();
+  return `${failed} The full check on offer is the one before it, taken ${earlier}.`;
+}
+
+function isTooSoon(error: Error | null | undefined): error is ApiError {
+  return error instanceof ApiError && error.status === TOO_MANY_REQUESTS;
+}
+
+function retryAtOf(error: ApiError): number {
+  const retryAt = (error.payload as { retryAt?: unknown } | null)?.retryAt;
+  return typeof retryAt === 'number' ? retryAt : 0;
+}
+
+function useWaitingUntil(until: number): boolean {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (now >= until) return;
+    const timer = setTimeout(() => setNow(Date.now()), Math.max(0, until - Date.now()));
+    return () => clearTimeout(timer);
+  }, [until, now]);
+  return now < until;
+}
+
+function AskEveryNode({
+  check,
+  canAsk,
+  asking,
+  waiting,
+  onAsk,
+}: {
+  check: TopologyFullCheck;
+  canAsk: boolean;
+  asking: boolean;
+  waiting: boolean;
+  onAsk: () => void;
+}) {
+  if (check.unavailable) {
+    return <p className="text-sm text-muted-foreground">{check.unavailable.text}</p>;
+  }
+  if (!canAsk) {
+    return (
+      <p className="text-sm text-muted-foreground">Only a workspace admin can ask every node.</p>
+    );
+  }
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      disabled={asking || waiting || check.state === 'running'}
+      onClick={onAsk}
+    >
+      Ask every node
+    </Button>
+  );
+}
+
+function FullCheckBar({
+  check,
+  shown,
+  onShow,
+  onAsk,
+  canAsk,
+  asking,
+  waiting,
+  askError,
+}: {
+  check: TopologyFullCheck;
+  shown: ResultShown;
+  onShow: (shown: ResultShown) => void;
+  onAsk: () => void;
+  canAsk: boolean;
+  asking: boolean;
+  waiting: boolean;
+  askError?: Error | null;
+}) {
+  const result = check.state === 'done' ? check.summary : undefined;
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        {result && check.finishedAt !== null ? (
+          <div role="group" aria-label="Result shown" className="flex flex-wrap gap-1">
+            <Button
+              size="sm"
+              variant={shown === 'sampled' ? 'secondary' : 'ghost'}
+              aria-pressed={shown === 'sampled'}
+              onClick={() => onShow('sampled')}
+            >
+              Sampled (live)
+            </Button>
+            <Button
+              size="sm"
+              variant={shown === 'full' ? 'secondary' : 'ghost'}
+              aria-pressed={shown === 'full'}
+              onClick={() => onShow('full')}
+            >
+              Full check {new Date(check.finishedAt).toLocaleTimeString()} ·{' '}
+              {result.coverage.answered} of {result.coverage.nodes} answered
+            </Button>
+          </div>
+        ) : (
+          <span />
+        )}
+        <AskEveryNode
+          check={check}
+          canAsk={canAsk}
+          asking={asking}
+          waiting={waiting}
+          onAsk={onAsk}
+        />
+      </div>
+      {check.state === 'running' && (
+        <p role="status" aria-label="Full check progress" className="text-sm text-muted-foreground">
+          Asking every node: {check.asked} of {check.total} asked
+        </p>
+      )}
+      {askError && (
+        <p role="alert" className="text-sm text-destructive">
+          {askError.message}
+        </p>
+      )}
+      {check.lastFailure && (
+        <p role="alert" className="text-sm text-destructive">
+          {failureText(check, check.lastFailure)}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function RefreshError() {
   return (
     <p role="alert" className="text-sm text-destructive">
@@ -354,26 +555,17 @@ function RefreshError() {
   );
 }
 
-export function ClusterDisagreements({
+function Result({
   summary,
+  takenAt,
   error,
   connectionId,
 }: {
-  summary: TopologyDisagreementSummary | undefined;
+  summary: TopologyDisagreementSummary;
+  takenAt: number | null;
   error?: Error | null;
   connectionId?: string;
 }) {
-  if (!summary) {
-    if (error) {
-      return (
-        <p role="alert" className="text-sm text-destructive">
-          The disagreements could not be loaded. This does not mean the views agree.
-        </p>
-      );
-    }
-    return <ClusterDisagreementsLoading />;
-  }
-
   if (summary.status === 'not_sampled') {
     return (
       <div className="space-y-3">
@@ -390,6 +582,7 @@ export function ClusterDisagreements({
   const compared = summary.status === 'ok';
   const disagreements = summary.disagreements.filter((line) => line.open);
   const unconfirmed = summary.disagreements.filter((line) => !line.open);
+  const oneOff = takenAt !== null;
 
   return (
     <div className="space-y-4">
@@ -398,10 +591,11 @@ export function ClusterDisagreements({
           <CardTitle>Disagreements ({disagreements.length})</CardTitle>
           <p className="text-sm text-muted-foreground">
             <span>{coverageText(coverage)}</span>
-            {summary.sampledAt !== null && (
+            {!oneOff && summary.sampledAt !== null && (
               <span> · last round {new Date(summary.sampledAt).toLocaleTimeString()}</span>
             )}
           </p>
+          {oneOff && <TakenLine takenAt={takenAt} />}
         </CardHeader>
         <CardContent className="space-y-3">
           {error && <RefreshError />}
@@ -412,7 +606,9 @@ export function ClusterDisagreements({
           )}
           {compared && !coverage.complete && (
             <p className="text-sm text-muted-foreground">
-              Counts are over the views that answered. Nodes that were not asked may disagree too.
+              {oneOff
+                ? 'Counts are over the nodes that answered. A node that gave no answer is not counted as agreeing.'
+                : 'Counts are over the views that answered. Nodes that were not asked may disagree too.'}
             </p>
           )}
           {coverage.unansweredCount > 0 && (
@@ -468,6 +664,84 @@ export function ClusterDisagreements({
         </CardContent>
       </Card>
       {shards.length > 0 && <Shards shards={shards} connectionId={connectionId} />}
+    </div>
+  );
+}
+
+export function ClusterDisagreements(props: ClusterDisagreementsProps) {
+  return <ConnectionDisagreements key={props.connectionId ?? ''} {...props} />;
+}
+
+function ConnectionDisagreements({
+  summary,
+  error,
+  connectionId,
+  onAskEveryNode,
+  asking = false,
+  askError,
+}: ClusterDisagreementsProps) {
+  const canAsk = useCanMutate();
+  const [pickedCheck, setPickedCheck] = useState<number | null>(null);
+  const [awaited, setAwaited] = useState<AwaitedCheck | null>(null);
+  const check = summary?.fullCheck;
+  const finishedAt = check?.state === 'done' ? check.finishedAt : null;
+  const failedAt = check?.lastFailure?.at ?? null;
+  const full = check?.state === 'done' ? check.summary : undefined;
+  const tooSoon = isTooSoon(askError);
+  const retryAt = Math.max(check?.retryAt ?? 0, tooSoon ? retryAtOf(askError) : 0);
+  const waiting = useWaitingUntil(retryAt);
+  const waitIsOver = retryAt > 0 && !waiting;
+
+  if (awaited && askError && askError !== awaited.error) {
+    setAwaited(null);
+  } else if (awaited && failedAt !== null && failedAt !== awaited.failedAt) {
+    setAwaited(null);
+  } else if (awaited && finishedAt !== null && finishedAt !== awaited.after) {
+    setPickedCheck(finishedAt);
+    setAwaited(null);
+  }
+
+  if (!summary) {
+    if (error) {
+      return (
+        <p role="alert" className="text-sm text-destructive">
+          The disagreements could not be loaded. This does not mean the views agree.
+        </p>
+      );
+    }
+    return <ClusterDisagreementsLoading />;
+  }
+
+  const shown: ResultShown =
+    full && finishedAt !== null && pickedCheck === finishedAt ? 'full' : 'sampled';
+  const show = (result: ResultShown) => {
+    setAwaited(null);
+    setPickedCheck(result === 'full' ? finishedAt : null);
+  };
+  const ask = () => {
+    setAwaited({ after: finishedAt, failedAt, error: askError ?? null });
+    onAskEveryNode?.();
+  };
+
+  return (
+    <div className="space-y-4">
+      {check && (
+        <FullCheckBar
+          check={check}
+          shown={shown}
+          onShow={show}
+          onAsk={ask}
+          canAsk={canAsk}
+          asking={asking}
+          waiting={waiting}
+          askError={tooSoon && waitIsOver ? null : askError}
+        />
+      )}
+      {shown === 'full' && full ? (
+        <Result summary={full} takenAt={finishedAt} connectionId={connectionId} />
+      ) : (
+        <Result summary={summary} takenAt={null} error={error} connectionId={connectionId} />
+      )}
     </div>
   );
 }

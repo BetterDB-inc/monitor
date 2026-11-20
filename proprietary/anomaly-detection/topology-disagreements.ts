@@ -3,9 +3,9 @@ import {
   UNASSIGNED_SLOT_OWNER,
   compareText,
   countSlots,
-  intersectSlotRanges,
   isKnownMember,
   matchDivergence,
+  slotRangesOverlap,
   type DivergenceGroup,
   type DivergenceKind,
   type DivergencePosition,
@@ -53,12 +53,15 @@ export function eventOfRaised(raised: readonly RaisedDivergence[]): Disagreement
   return (disagreement) => matchDivergence(candidates, disagreement)?.event;
 }
 
+export type RoundDisagreement = TopologyDisagreement &
+  Partial<Pick<TrackedDisagreement, 'firstSeenAt' | 'lastSeenAt' | 'rounds' | 'gapStreaks'>>;
+
 export interface DisagreementRound {
   status: 'ok' | 'insufficient_views';
   at: number;
   observers: string[];
   unanswered: string[];
-  disagreements: TrackedDisagreement[];
+  disagreements: RoundDisagreement[];
   nodes: ReadonlyMap<string, ClusterNode>;
   failureFlags: ReadonlyMap<string, FailureFlagViews>;
 }
@@ -91,8 +94,9 @@ export interface DisagreementLine {
   eventType: MetricType | null;
   eventAt: number | null;
   eventConnectionId: string | null;
-  since: number;
-  rounds: number;
+  tracked: boolean;
+  since?: number;
+  rounds?: number;
   stale: boolean;
   lastSeenAt: number;
   subjects: DivergenceNode[];
@@ -137,7 +141,7 @@ export interface TopologyDisagreementSummary {
 }
 
 interface Draft {
-  disagreement: TrackedDisagreement;
+  disagreement: RoundDisagreement;
   positions: DivergencePosition[];
   event: DisagreementEvent | undefined;
   stale: boolean;
@@ -194,7 +198,7 @@ function primaryOf(members: ClusterNode[]): ClusterNode | undefined {
 }
 
 function splitFailing(
-  disagreement: TrackedDisagreement,
+  disagreement: RoundDisagreement,
   failureFlags: ReadonlyMap<string, FailureFlagViews>,
 ): DivergencePosition[] {
   if (disagreement.kind !== 'failure_flags') return disagreement.positions;
@@ -322,7 +326,7 @@ export function summarizeDisagreements(
     }
     if (slots) {
       for (const shard of shards) {
-        if (intersectSlotRanges(shard.slots, slots).length > 0) touched.add(shard.shardId);
+        if (slotRangesOverlap(shard.slots, slots)) touched.add(shard.shardId);
       }
     }
     return [...touched].sort(compareText);
@@ -396,6 +400,9 @@ export function summarizeDisagreements(
     }));
     const resolvedByHand = first.event?.resolvedByHand === true;
     const event = resolvedByHand ? undefined : first.event;
+    const seen = drafts.flatMap((draft) => draft.disagreement.firstSeenAt ?? []);
+    const counted = drafts.flatMap((draft) => draft.disagreement.rounds ?? []);
+    const tracked = seen.length === drafts.length && counted.length === drafts.length;
 
     return {
       id: merged ? `${first.disagreement.key}+${drafts.length - 1}` : first.disagreement.key,
@@ -408,10 +415,10 @@ export function summarizeDisagreements(
       eventType: event?.eventType ?? null,
       eventAt: event?.eventAt ?? null,
       eventConnectionId: event?.connectionId ?? null,
-      since: Math.min(...drafts.map((draft) => draft.disagreement.firstSeenAt)),
-      rounds: Math.max(...drafts.map((draft) => draft.disagreement.rounds)),
+      tracked,
+      ...(tracked ? { since: Math.min(...seen), rounds: Math.max(...counted) } : {}),
       stale,
-      lastSeenAt: first.disagreement.lastSeenAt,
+      lastSeenAt: first.disagreement.lastSeenAt ?? round.at,
       subjects: listed(subjectIds),
       subjectCount: subjectIds.length,
       ...(kind === 'slot_owner' ? { slots, slotCount: countSlots(slots) } : {}),
@@ -440,7 +447,7 @@ export function summarizeDisagreements(
     disagreement,
     positions: splitFailing(disagreement, round.failureFlags),
     event: eventOf(disagreement),
-    stale: !compared || disagreement.lastSeenAt < round.at,
+    stale: !compared || (disagreement.lastSeenAt ?? round.at) < round.at,
   }));
   const disagreements = mergeDrafts(drafts)
     .map(lineOf)
@@ -450,7 +457,7 @@ export function summarizeDisagreements(
         Number(a.stale) - Number(b.stale) ||
         SEVERITY_ORDER.indexOf(b.severity) - SEVERITY_ORDER.indexOf(a.severity) ||
         Number(b.confirmed) - Number(a.confirmed) ||
-        a.since - b.since ||
+        (a.since ?? 0) - (b.since ?? 0) ||
         compareText(a.id, b.id),
     );
 
@@ -520,7 +527,7 @@ function totalsOf(shards: ShardLine[]): ShardTotals {
   };
 }
 
-export function withDisputedShardsOnly(summary: TopologyDisagreementSummary): TopologyDisagreementSummary {
+export function withDisputedShardsOnly<T extends TopologyDisagreementSummary>(summary: T): T {
   return {
     ...summary,
     shards: summary.shards.filter((shard) => shard.state === 'disputed'),

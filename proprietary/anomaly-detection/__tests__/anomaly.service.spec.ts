@@ -28993,6 +28993,7 @@ describe('AnomalyService', () => {
           shards: [],
           shardTotals: { total: 0, disputed: 0, undisputed: 0, notCompared: 0 },
           shardsListed: 'all',
+          fullCheck: expect.objectContaining({ state: 'none' }),
         });
       });
 
@@ -29387,6 +29388,453 @@ describe('AnomalyService', () => {
         expect(summary.status).toBe('insufficient_views');
         expect(summary.coverage.complete).toBe(false);
         expect(summary.shards.map((shard) => shard.state)).toEqual(['not_compared', 'not_compared', 'not_compared']);
+      });
+    });
+
+    describe('full check', () => {
+      let once: jest.Mock;
+
+      async function finished(): Promise<void> {
+        for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+      }
+
+      function fullCheck(connectionId = 'conn-1') {
+        return service.getTopologyDisagreements(connectionId).fullCheck;
+      }
+
+      beforeEach(() => {
+        once = jest.fn(
+          async (
+            node: { id: string },
+            _connectionId: string,
+            _timeoutMs: number,
+            run: (client: unknown) => Promise<unknown>,
+          ) => {
+            if (silent.has(node.id)) throw new Error('ECONNREFUSED');
+            return run({ call: jest.fn(async () => rawView(node.id, views[node.id])) });
+          },
+        );
+        (discovery as any).onNodeClientOnce = once;
+        (service as any).connectionRegistry.get.mockReturnValue(dbClient);
+        (service as any).connectionRegistry.getConfig.mockImplementation((id: string) => ({ id, host: 'seed' }));
+      });
+
+      it('is not offered before a cluster view was read on the connection', async () => {
+        expect(fullCheck()).toEqual({
+          state: 'none',
+          unavailable: { reason: 'no_cluster_view', text: 'No cluster view has been read on this connection yet.' },
+          startedAt: null,
+          finishedAt: null,
+          asked: 0,
+          total: 0,
+          retryAt: null,
+          lastFailure: null,
+        });
+        expect(await service.startTopologyFullCheck('conn-1')).toMatchObject({
+          result: 'unavailable',
+          reason: 'no_cluster_view',
+        });
+        expect(once).not.toHaveBeenCalled();
+      });
+
+      it('asks every node over a socket of its own and leaves the shared pool alone', async () => {
+        await rounds(1);
+        discovery.getNodeConnection.mockClear();
+
+        expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'started' });
+        await finished();
+
+        expect(once.mock.calls.map(([node, connectionId, timeoutMs]) => [connectionId, node.id, timeoutMs])).toEqual([
+          ['conn-1', 'a', 2_000],
+          ['conn-1', 'b', 2_000],
+          ['conn-1', 'c', 2_000],
+        ]);
+        expect(discovery.getNodeConnection).not.toHaveBeenCalled();
+        expect(fullCheck()).toMatchObject({
+          state: 'done',
+          unavailable: null,
+          startedAt: now,
+          finishedAt: now,
+          asked: 3,
+          total: 3,
+          retryAt: now + 30_000,
+          summary: {
+            status: 'ok',
+            coverage: { nodes: 3, asked: 3, answered: 3, complete: true },
+            disagreements: [],
+          },
+        });
+      });
+
+      it('hands every read a signal, so its socket is closed when the check gives up on the node', async () => {
+        await rounds(1);
+
+        await service.startTopologyFullCheck('conn-1');
+        await finished();
+
+        const signals = once.mock.calls.map((call) => call[4]);
+        expect(signals).toHaveLength(3);
+        expect(signals.every((signal) => signal instanceof AbortSignal)).toBe(true);
+      });
+
+      it('counts every node on each side and links the event that tracks the disagreement', async () => {
+        views.b = { a: { epoch: 9 } };
+        await rounds(4);
+        const [event] = divergenceEvents();
+
+        await service.startTopologyFullCheck('conn-1');
+        await finished();
+
+        const [line] = fullCheck().summary?.disagreements ?? [];
+        expect(line).toMatchObject({ id: 'config_epoch:a', tracked: false, confirmed: true, eventId: event.id });
+        expect(line.positions.map((position) => [position.value, position.count])).toEqual([
+          ['1', 2],
+          ['9', 1],
+        ]);
+        expect(line).not.toHaveProperty('rounds');
+      });
+
+      it('leaves the tracked rounds and the events as they were', async () => {
+        views.b = { a: { epoch: 9 } };
+        await rounds(4);
+        const before = service.getTopologyDisagreements('conn-1').disagreements;
+
+        await service.startTopologyFullCheck('conn-1');
+        await finished();
+
+        expect(service.getTopologyDisagreements('conn-1').disagreements).toEqual(before);
+        expect(divergenceEvents()).toHaveLength(1);
+      });
+
+      it('lists a node that did not answer and does not call the check complete', async () => {
+        await rounds(1);
+        silent.add('c');
+
+        await service.startTopologyFullCheck('conn-1');
+        await finished();
+
+        expect(fullCheck().summary?.coverage).toMatchObject({
+          nodes: 3,
+          asked: 3,
+          answered: 2,
+          complete: false,
+          unanswered: [{ nodeId: 'c' }],
+        });
+      });
+
+      it('does not ask a node that is in handshake or has no address', async () => {
+        views.a = { c: { flags: 'master,noaddr' } };
+        await rounds(1);
+
+        await service.startTopologyFullCheck('conn-1');
+        await finished();
+
+        expect(once.mock.calls.map(([node]) => node.id)).toEqual(['a', 'b']);
+        expect(fullCheck()).toMatchObject({
+          state: 'done',
+          asked: 2,
+          total: 3,
+          summary: { coverage: { nodes: 3, asked: 2, complete: false } },
+        });
+      });
+
+      it('shows a running check and joins it on a second request', async () => {
+        await rounds(1);
+        once.mockImplementation(() => new Promise(() => undefined));
+
+        expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'started' });
+        expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'running' });
+
+        expect(fullCheck()).toMatchObject({ state: 'running', startedAt: now, asked: 0, total: 3, finishedAt: null });
+        expect(once).toHaveBeenCalledTimes(3);
+      });
+
+      it('refuses a new check within 30 seconds of the last one', async () => {
+        await rounds(1);
+        await service.startTopologyFullCheck('conn-1');
+        await finished();
+        const finishedAt = now;
+
+        now += 10_000;
+        expect(await service.startTopologyFullCheck('conn-1')).toEqual({
+          result: 'too_soon',
+          retryAt: finishedAt + 30_000,
+        });
+
+        now += 20_000;
+        expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'started' });
+      });
+
+      it('answers for every connection that watches the cluster', async () => {
+        const second: ConnectionContext = {
+          ...mockCtx,
+          connectionId: 'conn-2',
+          connectionName: 'Second',
+          client: clusterClient('b') as any,
+        };
+        await rounds(1);
+        await rounds(1, second);
+
+        await service.startTopologyFullCheck('conn-1');
+        await finished();
+
+        expect(fullCheck('conn-2')).toMatchObject({ state: 'done', total: 3 });
+        expect(await service.startTopologyFullCheck('conn-2')).toMatchObject({ result: 'too_soon' });
+      });
+
+      it('is not offered on a connection that reaches the cluster through an agent', async () => {
+        await rounds(1);
+        (service as any).connectionRegistry.getConfig.mockReturnValue({ host: 'agent' });
+
+        expect(await service.startTopologyFullCheck('conn-1')).toMatchObject({
+          result: 'unavailable',
+          reason: 'no_direct_access',
+        });
+        expect(fullCheck().unavailable?.reason).toBe('no_direct_access');
+        expect(once).not.toHaveBeenCalled();
+      });
+
+      it('is not offered on a connection that goes through an SSH tunnel', async () => {
+        await rounds(1);
+        (service as any).connectionRegistry.getConfig.mockReturnValue({
+          host: 'seed',
+          sshTunnel: { enabled: true, host: 'bastion' },
+        });
+
+        expect(await service.startTopologyFullCheck('conn-1')).toEqual({
+          result: 'unavailable',
+          reason: 'ssh_tunnel',
+          text: 'This connection goes through an SSH tunnel, so the monitor cannot reach every node.',
+        });
+        expect(fullCheck().unavailable?.reason).toBe('ssh_tunnel');
+        expect(once).not.toHaveBeenCalled();
+      });
+
+      it('is still offered when the SSH tunnel of the connection is switched off', async () => {
+        await rounds(1);
+        (service as any).connectionRegistry.getConfig.mockReturnValue({
+          host: 'seed',
+          sshTunnel: { enabled: false, host: 'bastion' },
+        });
+
+        expect(fullCheck().unavailable).toBeNull();
+        expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'started' });
+      });
+
+      it('does not know a connection that is not registered', async () => {
+        await rounds(1);
+        (service as any).connectionRegistry.getConfig.mockReturnValue(null);
+
+        expect(await service.startTopologyFullCheck('ghost')).toEqual({ result: 'unknown_connection' });
+        expect(once).not.toHaveBeenCalled();
+      });
+
+      it('says that the last check failed and keeps the result before it', async () => {
+        await rounds(1);
+        await service.startTopologyFullCheck('conn-1');
+        await finished();
+        const earlier = fullCheck();
+        const clusterKey = (service as any).connectionClusterKeys.get('conn-1');
+
+        (service as any).topologyFullChecks.start(clusterKey, Date.now() + 40_000, 3, () =>
+          Promise.reject(new Error('boom')),
+        );
+        await finished();
+
+        expect(fullCheck()).toMatchObject({
+          state: 'done',
+          finishedAt: earlier.finishedAt,
+          summary: { status: 'ok' },
+          lastFailure: { at: expect.any(Number), reason: 'boom' },
+        });
+        expect(earlier.lastFailure).toBeNull();
+      });
+
+      it('is not offered on a Raft cluster', async () => {
+        await rounds(1);
+        (service as any).raftMode.set('conn-1', true);
+
+        expect(await service.startTopologyFullCheck('conn-1')).toMatchObject({
+          result: 'unavailable',
+          reason: 'raft_cluster',
+        });
+        expect(once).not.toHaveBeenCalled();
+      });
+
+      it('runs while the divergence detector is switched off', async () => {
+        (service as any).topologyDivergenceSettings.enabled = false;
+        await rounds(1);
+
+        expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'started' });
+        await finished();
+
+        expect(service.getTopologyDisagreements('conn-1')).toMatchObject({
+          status: 'not_sampled',
+          fullCheck: { state: 'done', total: 3, summary: { status: 'ok' } },
+        });
+      });
+
+      it('gives the full check on its own, the one the report carries', async () => {
+        await rounds(1);
+        await service.startTopologyFullCheck('conn-1');
+        await finished();
+
+        const alone = service.getTopologyFullCheck('conn-1');
+
+        expect(alone).toMatchObject({ state: 'done', asked: 3, total: 3, summary: { status: 'ok' } });
+        expect(alone).toEqual(fullCheck());
+        expect(service.getTopologyFullCheck('conn-1').summary).toBe(alone.summary);
+      });
+
+      it('keeps the event links of a finished check as they were when it finished', async () => {
+        views.b = { a: { epoch: 9 } };
+        await rounds(4);
+        const [event] = divergenceEvents();
+        await service.startTopologyFullCheck('conn-1');
+        await finished();
+
+        delete views.b;
+        await rounds(1);
+
+        expect(service.getTopologyDisagreements('conn-1').disagreements).toEqual([]);
+        expect(fullCheck().summary?.disagreements).toMatchObject([{ id: 'config_epoch:a', eventId: event.id }]);
+      });
+
+      it('makes the next check wait after one that broke', async () => {
+        await rounds(1);
+        const clusterKey = (service as any).connectionClusterKeys.get('conn-1');
+        (service as any).topologyFullChecks.start(clusterKey, now, 3, () => Promise.reject(new Error('boom')));
+        await finished();
+
+        now += 10_000;
+
+        expect(await service.startTopologyFullCheck('conn-1')).toMatchObject({ result: 'too_soon' });
+        expect(fullCheck()).toMatchObject({ state: 'none', retryAt: expect.any(Number), lastFailure: { reason: 'boom' } });
+        expect(once).not.toHaveBeenCalled();
+      });
+
+      it('does not start for a connection that was removed while the node list was read', async () => {
+        const second: ConnectionContext = {
+          ...mockCtx,
+          connectionId: 'conn-2',
+          connectionName: 'Second',
+          client: clusterClient('b') as any,
+        };
+        await rounds(1);
+        await rounds(1, second);
+        const clusterKey = (service as any).connectionClusterKeys.get('conn-1');
+        let answer: (nodes: unknown) => void = () => undefined;
+        const listed = clusterClient('a').getClusterNodes;
+        dbClient.getClusterNodes = jest.fn(
+          () =>
+            new Promise((resolve) => {
+              answer = resolve;
+            }),
+        );
+
+        const starting = service.startTopologyFullCheck('conn-1');
+        await finished();
+        (service as any).onConnectionRemoved('conn-1');
+        (service as any).connectionRegistry.getConfig.mockImplementation((id: string) =>
+          id === 'conn-1' ? null : { id, host: 'seed' },
+        );
+        answer(await listed());
+
+        expect(await starting).toEqual({ result: 'unknown_connection' });
+        await finished();
+        expect(once).not.toHaveBeenCalled();
+        expect((service as any).topologyFullChecks.state(clusterKey, now)).toEqual({ state: 'none' });
+        expect((service as any).topologyFullCheckOwners.has(clusterKey)).toBe(false);
+        expect(fullCheck('conn-2')).toMatchObject({ state: 'none', retryAt: null });
+      });
+
+      it('does not start when the connection moved to another cluster while the node list was read', async () => {
+        await rounds(1);
+        const clusterKey = (service as any).connectionClusterKeys.get('conn-1');
+        let answer: (nodes: unknown) => void = () => undefined;
+        const listed = clusterClient('a').getClusterNodes;
+        dbClient.getClusterNodes = jest.fn(
+          () =>
+            new Promise((resolve) => {
+              answer = resolve;
+            }),
+        );
+
+        const starting = service.startTopologyFullCheck('conn-1');
+        await finished();
+        (service as any).connectionClusterKeys.set('conn-1', 'another-cluster');
+        answer(await listed());
+
+        expect(await starting).toEqual({ result: 'view_unreadable' });
+        expect(once).not.toHaveBeenCalled();
+        expect((service as any).topologyFullChecks.state(clusterKey, now)).toEqual({ state: 'none' });
+      });
+
+      it('does not start when the seed lists the nodes of another cluster than the one it was bound to', async () => {
+        await rounds(1);
+        const clusterKey = (service as any).connectionClusterKeys.get('conn-1');
+        const listed: ClusterNode[] = await clusterClient('a').getClusterNodes();
+        const renamed = (id: string) => (id === '-' ? id : `other-${id}`);
+        dbClient.getClusterNodes = jest.fn(async () =>
+          listed.map((node) => ({ ...node, id: renamed(node.id), master: renamed(node.master) })),
+        );
+
+        expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'view_unreadable' });
+        await finished();
+
+        expect(once).not.toHaveBeenCalled();
+        expect((service as any).topologyFullChecks.state(clusterKey, now)).toEqual({ state: 'none' });
+      });
+
+      it('does not start when the seed lists only nodes the cluster has left, though their ids give its key', async () => {
+        await rounds(1);
+        const clusterKey = (service as any).connectionClusterKeys.get('conn-1');
+        const listed: ClusterNode[] = await clusterClient('a').getClusterNodes();
+        const member = (id: string): ClusterNode => ({ ...listed[0], id, slots: [] });
+        (service as any).rememberClusterKey('conn-1', [listed[2], member('d'), member('e')]);
+        (service as any).rememberClusterKey('conn-1', [member('d'), member('e')]);
+        expect((service as any).connectionClusterKeys.get('conn-1')).toBe(clusterKey);
+        expect(listed.map((node) => (service as any).clusterKeyByNode.get(node.id))).toEqual([
+          undefined,
+          undefined,
+          undefined,
+        ]);
+
+        expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'view_unreadable' });
+        await finished();
+
+        expect(once).not.toHaveBeenCalled();
+        expect((service as any).topologyFullChecks.state(clusterKey, now)).toEqual({ state: 'none' });
+      });
+
+      it('still starts when the seed lists a node the last round did not have', async () => {
+        await rounds(1);
+        const listed: ClusterNode[] = await clusterClient('a').getClusterNodes();
+        dbClient.getClusterNodes = jest.fn(async () => [...listed, { ...listed[0], id: 'joined', slots: [] }]);
+
+        expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'started' });
+        await finished();
+
+        expect(once.mock.calls.map(([node]) => node.id)).toEqual(['a', 'b', 'c', 'joined']);
+      });
+
+      it('says so when the node list cannot be read', async () => {
+        await rounds(1);
+        dbClient.getClusterNodes = jest.fn().mockRejectedValue(new Error('Connection is closed.'));
+
+        expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'view_unreadable' });
+        expect(fullCheck().state).toBe('none');
+      });
+
+      it('drops the check together with the connection that ran it', async () => {
+        await rounds(1);
+        const clusterKey = (service as any).connectionClusterKeys.get('conn-1');
+        await service.startTopologyFullCheck('conn-1');
+        await finished();
+
+        (service as any).onConnectionRemoved('conn-1');
+
+        expect((service as any).topologyFullChecks.state(clusterKey, now)).toEqual({ state: 'none' });
       });
     });
   });

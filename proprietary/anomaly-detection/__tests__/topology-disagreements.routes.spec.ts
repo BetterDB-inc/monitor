@@ -30,6 +30,26 @@ function member(id: string, shard: number, primary?: string): ClusterNode {
 
 const NODES = [0, 1, 2].flatMap((shard) => [member(`p${shard}`, shard), member(`r${shard}`, shard, `p${shard}`)]);
 
+const NO_CHECK = {
+  state: 'none' as const,
+  unavailable: null,
+  startedAt: null,
+  finishedAt: null,
+  asked: 0,
+  total: 0,
+  retryAt: null,
+  lastFailure: null,
+};
+
+function reportOf(connectionId: string) {
+  const summary = summaryOf(connectionId);
+  if (summary.status !== 'ok') return { ...summary, fullCheck: NO_CHECK };
+  return {
+    ...summary,
+    fullCheck: { ...NO_CHECK, state: 'done' as const, startedAt: AT, finishedAt: AT, asked: 6, total: 6, summary },
+  };
+}
+
 function summaryOf(connectionId: string) {
   if (connectionId !== 'conn-1') return summarizeDisagreements(undefined, () => undefined);
   return summarizeDisagreements(
@@ -62,7 +82,11 @@ function summaryOf(connectionId: string) {
 describe('topology disagreement routes', () => {
   let app: NestFastifyApplication;
   let licensed: boolean;
-  const service = { getTopologyDisagreements: jest.fn(summaryOf) };
+  const service = {
+    getTopologyDisagreements: jest.fn(reportOf),
+    getTopologyFullCheck: jest.fn((connectionId: string) => reportOf(connectionId).fullCheck),
+    startTopologyFullCheck: jest.fn(),
+  };
   const registry = {
     get: jest.fn((id: string) => {
       if (id !== 'conn-1') throw new NotFoundException(`Connection ${id} not found`);
@@ -141,6 +165,41 @@ describe('topology disagreement routes', () => {
     });
   });
 
+  describe('POST /anomaly/topology-disagreements/full-check', () => {
+    const url = '/anomaly/topology-disagreements/full-check';
+
+    it('answers 202 with the state of the check that was started', async () => {
+      service.startTopologyFullCheck.mockResolvedValue({ result: 'started' });
+
+      const res = await app.inject({ method: 'POST', url, headers: { 'x-connection-id': 'conn-1' } });
+
+      expect(res.statusCode).toBe(202);
+      expect(res.json()).toMatchObject({ state: 'done', asked: 6, total: 6, lastFailure: null });
+    });
+
+    it('answers 404 for a connection that is not registered', async () => {
+      service.startTopologyFullCheck.mockResolvedValue({ result: 'unknown_connection' });
+
+      const res = await app.inject({ method: 'POST', url, headers: { 'x-connection-id': 'ghost' } });
+
+      expect(res.statusCode).toBe(404);
+      expect(res.json()).toMatchObject({ message: 'Connection ghost not found' });
+    });
+
+    it('answers 409 with the reason for a connection that goes through an SSH tunnel', async () => {
+      service.startTopologyFullCheck.mockResolvedValue({
+        result: 'unavailable',
+        reason: 'ssh_tunnel',
+        text: 'This connection goes through an SSH tunnel, so the monitor cannot reach every node.',
+      });
+
+      const res = await app.inject({ method: 'POST', url, headers: { 'x-connection-id': 'conn-1' } });
+
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toMatchObject({ reason: 'ssh_tunnel' });
+    });
+  });
+
   describe('GET /mcp/instance/:id/anomalies/topology-disagreements', () => {
     const url = '/mcp/instance/conn-1/anomalies/topology-disagreements';
 
@@ -155,6 +214,19 @@ describe('topology disagreement routes', () => {
         shardsListed: 'disputed',
       });
       expect(res.json().shards.map((shard: { shardId: string }) => shard.shardId)).toEqual(['s1']);
+    });
+
+    it('trims the shards of the full check the same way', async () => {
+      const trimmed = (await app.inject({ method: 'GET', url })).json().fullCheck;
+      const whole = (await app.inject({ method: 'GET', url: `${url}?shards=all` })).json().fullCheck;
+
+      expect(trimmed).toMatchObject({ state: 'done', asked: 6, total: 6 });
+      expect(trimmed.summary).toMatchObject({
+        shardsListed: 'disputed',
+        shardTotals: { total: 3, disputed: 1, undisputed: 2, notCompared: 0 },
+      });
+      expect(trimmed.summary.shards).toHaveLength(1);
+      expect(whole.summary.shards).toHaveLength(3);
     });
 
     it('returns every shard when asked for all', async () => {
