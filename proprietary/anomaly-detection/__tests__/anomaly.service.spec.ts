@@ -29786,6 +29786,27 @@ describe('AnomalyService', () => {
         expect((service as any).topologyFullChecks.state(clusterKey, now)).toEqual({ state: 'none' });
       });
 
+      it('does not start when the seed lists only nodes the cluster has left, though their ids give its key', async () => {
+        await rounds(1);
+        const clusterKey = (service as any).connectionClusterKeys.get('conn-1');
+        const listed: ClusterNode[] = await clusterClient('a').getClusterNodes();
+        const member = (id: string): ClusterNode => ({ ...listed[0], id, slots: [] });
+        (service as any).rememberClusterKey('conn-1', [listed[2], member('d'), member('e')]);
+        (service as any).rememberClusterKey('conn-1', [member('d'), member('e')]);
+        expect((service as any).connectionClusterKeys.get('conn-1')).toBe(clusterKey);
+        expect(listed.map((node) => (service as any).clusterKeyByNode.get(node.id))).toEqual([
+          undefined,
+          undefined,
+          undefined,
+        ]);
+
+        expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'view_unreadable' });
+        await finished();
+
+        expect(once).not.toHaveBeenCalled();
+        expect((service as any).topologyFullChecks.state(clusterKey, now)).toEqual({ state: 'none' });
+      });
+
       it('still starts when the seed lists a node the last round did not have', async () => {
         await rounds(1);
         const listed: ClusterNode[] = await clusterClient('a').getClusterNodes();

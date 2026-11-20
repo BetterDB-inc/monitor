@@ -9973,6 +9973,11 @@ export class AnomalyService
     return nodes.map((node) => this.clusterKeyByNode.get(node.id)).find(Boolean) ?? liveKey;
   }
 
+  private holdsNodeOfCluster(nodes: readonly ClusterNode[], clusterKey: string): boolean {
+    if (this.clusterKeyOfNodes(nodes) !== clusterKey) return false;
+    return nodes.some((node) => this.clusterKeyByNode.get(node.id) === clusterKey);
+  }
+
   private releaseClusterNodes(nodeIds: ReadonlySet<string>): void {
     const views = [...this.clusterViews.values()];
     for (const nodeId of nodeIds) {
@@ -11231,7 +11236,7 @@ export class AnomalyService
     }
     if (!this.connectionRegistry.getConfig(connectionId)) return { result: 'unknown_connection' };
     if (this.connectionClusterKeys.get(connectionId) !== clusterKey) return { result: 'view_unreadable' };
-    if (this.clusterKeyOfNodes(nodes) !== clusterKey) return { result: 'view_unreadable' };
+    if (!this.holdsNodeOfCluster(nodes, clusterKey)) return { result: 'view_unreadable' };
 
     const started = this.topologyFullChecks.start(clusterKey, Date.now(), nodes.length, async (onProgress) => {
       const outcome = await runFullCheck({
