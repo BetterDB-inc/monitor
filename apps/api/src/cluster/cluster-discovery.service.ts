@@ -793,7 +793,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       }
 
       await this.closeNodeClient(client);
-      if ([connectError, lastError].some(isConnectTimeout)) this.markNodeUnresponsive(address);
+      if (!opening.released && [connectError, lastError].some(isConnectTimeout)) this.markNodeUnresponsive(address);
 
       throw error;
     }

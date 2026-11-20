@@ -352,6 +352,21 @@ describe('ClusterDiscoveryService unresponsive node', () => {
       expect(service.getConnectionPoolSize()).toBe(1);
     });
 
+    it('keeps serving the node when the connect of a released connection times out after a new one connected', async () => {
+      nextConnect = () => new Promise<void>(() => undefined);
+      const stale = service.getNodeConnection(healthy.id, 'seed');
+      const failed = expect(stale).rejects.toThrow('Connection timeout');
+      await jest.advanceTimersByTimeAsync(0);
+      await service.releaseConnection('seed');
+      const fresh = await service.getNodeConnection(healthy.id, 'seed');
+
+      await jest.advanceTimersByTimeAsync(CONNECT_TIMEOUT_MS);
+      await failed;
+
+      await expect(service.getNodeConnection(healthy.id, 'seed')).resolves.toBe(fresh);
+      expect(created[0].status).toBe('end');
+    });
+
     it('does not store a client whose connection was released while it closed the client it replaces', async () => {
       holdNextConnect();
       const first = service.getNodeConnection(healthy.id, 'seed');
