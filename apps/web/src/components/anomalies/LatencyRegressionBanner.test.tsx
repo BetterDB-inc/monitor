@@ -104,6 +104,34 @@ describe('LatencyRegressionBanner', () => {
     expect(tags[0].closest('li')).toHaveTextContent('cluster|shards');
   });
 
+  it('lists the admin commands of a mixed upgrade event after its data commands', () => {
+    render(
+      <LatencyRegressionBanner
+        events={[
+          sustained('e1', 'zadd', 'warning', 2.5),
+          {
+            ...regressionEvent,
+            id: 'e2',
+            threshold: 3,
+            commands: ['cluster|shards', 'hget', 'info'],
+          },
+          sustained('e3', 'cluster|nodes', 'critical', 4.6),
+        ]}
+      />,
+    );
+
+    // The mixed event has a data command, so it sorts with the data events.
+    expect(lineCommands()).toEqual(['hget', 'zadd', 'cluster|nodes']);
+    const mixed = screen.getAllByRole('listitem')[0];
+    const spans = [...mixed.querySelectorAll('.font-mono')].map((span) => span.textContent);
+    expect(spans).toEqual(['hget', 'cluster|shards, info']);
+    expect(within(mixed).getByText('monitoring/admin command')).toBeInTheDocument();
+    expect(screen.getAllByText('monitoring/admin command')).toHaveLength(2);
+
+    fireEvent.click(within(mixed).getByRole('button', { name: /mark resolved/i }));
+    expect(metricsApi.resolveAnomalyEvent).toHaveBeenCalledWith('e2');
+  });
+
   it('also renders warning-severity events (non-destructive variant)', () => {
     render(<LatencyRegressionBanner events={[{ ...regressionEvent, severity: 'warning' }]} />);
     expect(screen.getByText('P99 latency regression on 1 command')).toBeInTheDocument();

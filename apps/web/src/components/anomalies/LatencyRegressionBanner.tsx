@@ -28,10 +28,21 @@ const RUNBOOK = [
 ];
 
 // Admin and monitoring commands are ignored by the guard unless an operator opts
-// them back in. When they do show up, they go after the data commands.
-function isAdminEvent(event: LatencyRegressionEvent): boolean {
+// them back in. When they do show up, they go after the data commands: an event
+// made only of admin commands sorts after the others, and inside an upgrade event
+// that mixes both, the admin commands are listed last with the tag. A mixed event
+// sorts with the data events, since its data commands need looking at.
+function splitCommands(event: LatencyRegressionEvent): { data: string[]; admin: string[] } {
   const commands = event.commands ?? [];
-  return commands.length > 0 && commands.every(isAdminCommand);
+  return {
+    data: commands.filter((command) => !isAdminCommand(command)),
+    admin: commands.filter(isAdminCommand),
+  };
+}
+
+function isAdminEvent(event: LatencyRegressionEvent): boolean {
+  const { data, admin } = splitCommands(event);
+  return data.length === 0 && admin.length > 0;
 }
 
 function compareEvents(a: LatencyRegressionEvent, b: LatencyRegressionEvent): number {
@@ -100,33 +111,47 @@ export function LatencyRegressionBanner({
       </AlertTitle>
       <AlertDescription>
         <ul className="divide-y">
-          {active.map((event) => (
-            <li key={event.id} className="flex items-start justify-between gap-2 py-1.5">
-              <div className="min-w-0">
-                {event.commands && event.commands.length > 0 && (
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-mono font-medium">{event.commands.join(', ')}</span>
-                    {isAdminEvent(event) && (
-                      <Badge variant="outline" className="text-muted-foreground font-normal">
-                        monitoring/admin command
-                      </Badge>
-                    )}
-                  </div>
-                )}
-                <p className={isAdminEvent(event) ? 'text-muted-foreground' : undefined}>
-                  {event.message}
-                </p>
-              </div>
-              <Button
-                size="sm"
-                variant="outline"
-                className="shrink-0"
-                onClick={() => dismiss(event.id)}
-              >
-                Mark resolved
-              </Button>
-            </li>
-          ))}
+          {active.map((event) => {
+            const { data, admin } = splitCommands(event);
+            return (
+              <li key={event.id} className="flex items-start justify-between gap-2 py-1.5">
+                <div className="min-w-0">
+                  {(data.length > 0 || admin.length > 0) && (
+                    <div className="flex flex-wrap items-center gap-2">
+                      {data.length > 0 && (
+                        <span className="font-mono font-medium">{data.join(', ')}</span>
+                      )}
+                      {admin.length > 0 && (
+                        <>
+                          <span className="font-mono text-muted-foreground">
+                            {admin.join(', ')}
+                          </span>
+                          <Badge variant="outline" className="text-muted-foreground font-normal">
+                            monitoring/admin command
+                          </Badge>
+                        </>
+                      )}
+                    </div>
+                  )}
+                  <p
+                    className={
+                      data.length === 0 && admin.length > 0 ? 'text-muted-foreground' : undefined
+                    }
+                  >
+                    {event.message}
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="shrink-0"
+                  onClick={() => dismiss(event.id)}
+                >
+                  Mark resolved
+                </Button>
+              </li>
+            );
+          })}
         </ul>
         <Button
           size="sm"
