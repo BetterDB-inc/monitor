@@ -465,12 +465,12 @@ function keepsSidesOf(
 
 function sharedWithGroup(group: DivergenceGroup, disagreement: TopologyDisagreement): number {
   const dissent = new Set(group.dissent);
-  return Math.max(
-    0,
-    ...group.disagreements
-      .filter((entry) => keepsSidesOf(entry, dissent, disagreement))
-      .map((entry) => sharedWith(entry, disagreement)),
-  );
+  let most = 0;
+  for (const entry of group.disagreements) {
+    const shared = sharedWith(entry, disagreement);
+    if (shared > most && keepsSidesOf(entry, dissent, disagreement)) most = shared;
+  }
+  return most;
 }
 
 export interface DivergenceCandidate {

@@ -906,6 +906,26 @@ describe('matchDivergence', () => {
 
     expect(matchDivergence([small, large], dispute('slot_owner:A|B', [[0, 99]], ['b']))?.id).toBe('e2');
   });
+
+  it('looks at the sides of a group entry only when it is about the same thing as the line', () => {
+    const subjects = Array.from({ length: 200 }, (_, at) => `n${at}`);
+    const [group] = groupDivergences(subjects.map((subject) => epoch(subject, ['b'])));
+    const sidesRead: string[] = [];
+    const counted = {
+      ...group,
+      disagreements: group.disagreements.map((entry) => ({
+        ...entry,
+        get positions() {
+          sidesRead.push(entry.key);
+          return entry.positions;
+        },
+      })),
+    };
+
+    expect(counted.disagreements).toHaveLength(200);
+    expect(matchDivergence([{ id: 'e1', group: counted }], epoch('n7', ['b']))?.id).toBe('e1');
+    expect(sidesRead).toEqual(['config_epoch:n7']);
+  });
 });
 
 describe('migrationTouchesSlots', () => {
