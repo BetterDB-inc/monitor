@@ -1259,6 +1259,12 @@ describe('memoryWarnings', () => {
     expect(memoryWarnings(plan(), memory)).toEqual([{ code: 'memory_unlimited', shardId: 'b' }]);
   });
 
+  it('says the target has no memory limit even when the source could not be read', () => {
+    const memory = new Map([['b', { usedBytes: GB, maxBytes: 0, keyCount: 9 }]]);
+
+    expect(memoryWarnings(plan(), memory)).toEqual([{ code: 'memory_unlimited', shardId: 'b' }]);
+  });
+
   it.each([
     ['the target could not be read', { a: source }],
     ['the source could not be read', { b: { usedBytes: GB, maxBytes: 8 * GB, keyCount: 9 } }],

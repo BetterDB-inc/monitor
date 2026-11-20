@@ -816,11 +816,14 @@ export function memoryWarnings(
             : undefined,
         );
     });
-    if (!target || arriving.includes(undefined)) {
+    if (!target) {
       return [{ code: 'memory_unknown', shardId: move.targetShardId }];
     }
     if (target.maxBytes <= 0) {
       return [{ code: 'memory_unlimited', shardId: move.targetShardId }];
+    }
+    if (arriving.includes(undefined)) {
+      return [{ code: 'memory_unknown', shardId: move.targetShardId }];
     }
     const bytes = arriving.reduce<number>((total, each) => total + (each ?? 0), 0);
     const memoryShare = (target.usedBytes + bytes) / target.maxBytes;
