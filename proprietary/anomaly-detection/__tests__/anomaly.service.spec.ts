@@ -27512,6 +27512,26 @@ describe('AnomalyService', () => {
         ]);
       });
 
+      it('points a line at the event confirmed last when another that covers it is only being counted', async () => {
+        views.b = { a: { epoch: 9 } };
+        await rounds(3);
+        const [first] = divergenceEvents();
+        silent.add('c');
+        await rounds(1);
+        const second = divergenceEvents().find((event) => event.id !== first.id);
+        silent.delete('c');
+        views.a = { b: { epoch: 9 } };
+
+        await rounds(1);
+
+        expect(first.resolved).toBe(false);
+        expect(second?.resolved).toBe(false);
+        expect(service.getTopologyDisagreements('conn-1').disagreements).toMatchObject([
+          { id: 'config_epoch:a', confirmed: true, eventId: first.id },
+          { id: 'config_epoch:b', confirmed: false, eventId: null },
+        ]);
+      });
+
       it('points a line at its open event when an outgoing one that covers it was resolved by hand', async () => {
         views.b = { a: { epoch: 9 } };
         await rounds(3);

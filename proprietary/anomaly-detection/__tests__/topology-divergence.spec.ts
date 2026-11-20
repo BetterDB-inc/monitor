@@ -1,5 +1,6 @@
 import type { ClusterNode } from '@app/common/types/metrics.types';
 import {
+  type DivergenceGroup,
   DivergenceTracker,
   TOPOLOGY_DIVERGENCE_BLIND_MS,
   type TopologyDisagreement,
@@ -967,6 +968,64 @@ describe('matchDivergence', () => {
 
     expect(matchDivergence([small, large], dispute('slot_owner:A|B', [[0, 99]], ['b']))?.id).toBe('e2');
   });
+
+  it('takes the group that was confirmed last when an older one that covers the line is still being counted', () => {
+    const membership = (positions: TopologyDisagreement['positions']) => ({
+      ...tracked('membership:n1', positions),
+      kind: 'membership' as const,
+    });
+    const wide = membership([
+      { value: 'known', observers: ['a', 'd', 'e'] },
+      { value: 'handshake', observers: ['b'] },
+      { value: 'missing', observers: ['c'] },
+    ]);
+    const narrow = membership([
+      { value: 'known', observers: ['a', 'c', 'd', 'e'] },
+      { value: 'handshake', observers: ['b'] },
+    ]);
+    const [both] = groupDivergences([wide]);
+    const [alone] = groupDivergences([narrow]);
+    const open = new Map<string, OpenDivergence>();
+    const settle = (at: number, openSignatures: string[], confirmed: DivergenceGroup[], pending: string[] = []) =>
+      settleOpenDivergences({
+        open,
+        openSignatures,
+        confirmed,
+        pendingSignatures: new Set(pending),
+        comparable: true,
+        at,
+        minRounds: 3,
+      });
+    settle(1000, [both.signature], [both]);
+    settle(2000, [both.signature, alone.signature], [alone]);
+    settle(3000, [both.signature, alone.signature], [both], [alone.signature]);
+
+    const raised = [...open.values()].flatMap(({ group, confirmedAt }) => (group ? [{ group, confirmedAt }] : []));
+
+    expect(raised.map((entry) => entry.group.signature)).toEqual(['topology_divergence:b,c', 'topology_divergence:b']);
+    expect(matchDivergence(raised, wide)?.group.signature).toBe('topology_divergence:b,c');
+    expect(matchDivergence([...raised].reverse(), wide)?.group.signature).toBe('topology_divergence:b,c');
+  });
+
+  it('looks at the sides of a group entry only when it is about the same thing as the line', () => {
+    const subjects = Array.from({ length: 200 }, (_, at) => `n${at}`);
+    const [group] = groupDivergences(subjects.map((subject) => epoch(subject, ['b'])));
+    const sidesRead: string[] = [];
+    const counted = {
+      ...group,
+      disagreements: group.disagreements.map((entry) => ({
+        ...entry,
+        get positions() {
+          sidesRead.push(entry.key);
+          return entry.positions;
+        },
+      })),
+    };
+
+    expect(counted.disagreements).toHaveLength(200);
+    expect(matchDivergence([{ id: 'e1', group: counted }], epoch('n7', ['b']))?.id).toBe('e1');
+    expect(sidesRead).toEqual(['config_epoch:n7']);
+  });
 });
 
 describe('migrationTouchesSlots', () => {
@@ -1125,6 +1184,26 @@ describe('settleOpenDivergences', () => {
     expect(settle(open, 0).has(SIGNATURE)).toBe(true);
     expect(settle(open, 5000).has(SIGNATURE)).toBe(true);
     expect(settle(open, 10000).has(SIGNATURE)).toBe(false);
+  });
+
+  it('keeps the confirm time of a group that is only being counted', () => {
+    const WIDER = 'topology_divergence:a,b';
+    const widerGroup = { signature: WIDER, dissent: ['a', 'b'], others: ['c'], disagreements: [] };
+    const open = new Map<string, OpenDivergence>();
+    const both = { openSignatures: [WIDER, SIGNATURE] };
+    settle(open, 1000, { openSignatures: [WIDER], confirmed: [widerGroup] });
+    settle(open, 2000, { ...both, confirmed: [confirmedGroup] });
+    settle(open, 3000, { ...both, confirmed: [widerGroup], pendingSignatures: new Set([SIGNATURE]) });
+
+    expect(open.get(SIGNATURE)).toMatchObject({ group: confirmedGroup, confirmedAt: 2000, lastCountedAt: 3000 });
+    expect(open.get(WIDER)).toMatchObject({ group: widerGroup, confirmedAt: 3000, lastCountedAt: 3000 });
+  });
+
+  it('gives no confirm time to an event whose group it has not seen confirmed', () => {
+    const open = new Map<string, OpenDivergence>();
+    settle(open, 1000, { pendingSignatures: new Set([SIGNATURE]) });
+
+    expect(open.get(SIGNATURE)).toEqual({ lastCountedAt: 1000, clean: 0 });
   });
 
   it('forgets an event that is no longer open', () => {
