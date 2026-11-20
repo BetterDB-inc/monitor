@@ -7532,7 +7532,7 @@ export class AnomalyService
 
     for (const group of groups) {
       if (eventIds.has(group.signature) && !open.get(group.signature)?.group) {
-        open.set(group.signature, { group, lastCountedAt: round.at, clean: 0 });
+        open.set(group.signature, { group, confirmedAt: round.at, lastCountedAt: round.at, clean: 0 });
       }
     }
     const tracked = new Set([...this.topologyDivergenceEventIds.values()].flatMap((ids) => [...ids.values()]));
@@ -11010,7 +11010,7 @@ export class AnomalyService
     const eventIds = this.topologyDivergenceEventIds.get(round.anchorConnectionId);
     const raised: RaisedDivergence[] = [];
     const reachable = new Set(this.scopeConnectionIds(connectionId));
-    for (const [signature, { group, lastCountedAt }] of this.topologyDivergenceOpen.get(clusterKey) ?? []) {
+    for (const [signature, { group, confirmedAt }] of this.topologyDivergenceOpen.get(clusterKey) ?? []) {
       const eventId = eventIds?.get(signature);
       if (eventId === undefined || !group) continue;
       const event = this.eventInMemory(eventId) ?? this.findIncidentEvent(eventId);
@@ -11026,7 +11026,7 @@ export class AnomalyService
           connectionId: reachable.has(holder) ? connectionId : holder,
           resolvedByHand: event?.resolved === true,
         },
-        confirmedAt: lastCountedAt,
+        confirmedAt: confirmedAt ?? 0,
       });
     }
     return summarizeDisagreements(round, eventOfRaised(raised));
