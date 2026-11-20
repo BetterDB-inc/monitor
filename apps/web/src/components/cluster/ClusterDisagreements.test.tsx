@@ -340,7 +340,58 @@ describe('ClusterDisagreements', () => {
 
     expect(
       within(lineOf(slotLine().text)).getByRole('link', { name: 'Open event' }),
-    ).toHaveAttribute('href', '/anomalies');
+    ).toHaveAttribute('href', '/anomalies?connection=conn-1');
+  });
+
+  it('opens the anomalies page under the connection that holds an old event', () => {
+    const eventAt = AT - INCIDENT_LOOKBACK_MS - 1;
+    const line = slotLine({ eventAt, eventConnectionId: 'conn-anchor' });
+    render(
+      <MemoryRouter>
+        <ClusterDisagreements
+          summary={summaryOf({ sampledAt: AT, disagreements: [line] })}
+          connectionId="conn-current"
+        />
+      </MemoryRouter>,
+    );
+
+    expect(within(lineOf(line.text)).getByRole('link', { name: 'Open event' })).toHaveAttribute(
+      'href',
+      '/anomalies?connection=conn-anchor',
+    );
+  });
+
+  it('opens the anomalies page under the current connection when the event names none', () => {
+    const eventAt = AT - INCIDENT_LOOKBACK_MS - 1;
+    const line = slotLine({ eventAt, eventConnectionId: null });
+    render(
+      <MemoryRouter>
+        <ClusterDisagreements
+          summary={summaryOf({ sampledAt: AT, disagreements: [line] })}
+          connectionId="conn-current"
+        />
+      </MemoryRouter>,
+    );
+
+    expect(within(lineOf(line.text)).getByRole('link', { name: 'Open event' })).toHaveAttribute(
+      'href',
+      '/anomalies?connection=conn-current',
+    );
+  });
+
+  it('links to the plain anomalies page when no connection is known', () => {
+    const eventAt = AT - INCIDENT_LOOKBACK_MS - 1;
+    const line = slotLine({ eventAt, eventConnectionId: null });
+    render(
+      <MemoryRouter>
+        <ClusterDisagreements summary={summaryOf({ sampledAt: AT, disagreements: [line] })} />
+      </MemoryRouter>,
+    );
+
+    expect(within(lineOf(line.text)).getByRole('link', { name: 'Open event' })).toHaveAttribute(
+      'href',
+      '/anomalies',
+    );
   });
 
   it('still opens an event at the edge of the incident history', () => {
@@ -360,7 +411,7 @@ describe('ClusterDisagreements', () => {
 
     expect(
       within(lineOf(slotLine().text)).getByRole('link', { name: 'Open event' }),
-    ).toHaveAttribute('href', '/anomalies');
+    ).toHaveAttribute('href', '/anomalies?connection=conn-1');
   });
 
   it('tells suspected from failed on a failure line', () => {
@@ -407,6 +458,37 @@ describe('ClusterDisagreements', () => {
     const [first, second] = sidesOf(line);
     expect(within(first).getByText('Side 1')).toBeInTheDocument();
     expect(within(second).getByText('Side 2')).toBeInTheDocument();
+  });
+
+  it('says how many more nodes have epochs than the table lists', () => {
+    const merged: DisagreementLine = {
+      ...flagsLine(),
+      id: 'config_epoch:s001p+47',
+      kind: 'config_epoch',
+      subjects: [node('s001p'), node('s001r')],
+      subjectCount: 48,
+      positions: [
+        { value: null, count: 2, observerCount: 2, observers: [node('s000p'), node('s000r')] },
+        { value: null, count: 1, observerCount: 1, observers: [node('s002p')] },
+      ],
+      epochs: [
+        { node: node('s001p'), values: ['7', '4'] },
+        { node: node('s001r'), values: ['9', '2'] },
+      ],
+      text: 'Config epoch of 48 nodes: 2 views against 1 view.',
+    };
+
+    show(summaryOf({ disagreements: [merged] }));
+
+    const rows = within(
+      within(lineOf(merged.text)).getByRole('table', { name: 'Epochs per node' }),
+    ).getAllByRole('row');
+    expect(rows.map((row) => row.textContent)).toEqual([
+      'NodeSide 1Side 2',
+      's001p.internal:637974',
+      's001r.internal:637992',
+      '+46 more',
+    ]);
   });
 
   it('says how many more nodes a line is about than it lists', () => {
@@ -493,7 +575,7 @@ describe('ClusterDisagreements', () => {
     );
     const card = within(held).getByRole('article', { name: stale.text });
     expect(card).toHaveTextContent(
-      `Last seen ${new Date(AT - 60_000).toLocaleTimeString()}, not confirmed this round`,
+      `Last seen ${new Date(AT - 60_000).toLocaleTimeString()}, not checked again this round`,
     );
     expect(within(card).queryAllByRole('listitem')).toHaveLength(0);
     expect(within(card).getByText('Not confirmed yet, seen in 6 rounds')).toBeInTheDocument();
@@ -516,7 +598,7 @@ describe('ClusterDisagreements', () => {
     expect(screen.queryByText(/^No disagreements among/)).not.toBeInTheDocument();
     const card = lineOf(stale.text);
     expect(card).toHaveTextContent(
-      `Last seen ${new Date(AT - 60_000).toLocaleTimeString()}, not confirmed this round`,
+      `Last seen ${new Date(AT - 60_000).toLocaleTimeString()}, not checked again this round`,
     );
     expect(within(card).getByRole('link', { name: 'Open event' })).toBeInTheDocument();
   });
@@ -614,7 +696,11 @@ describe('ClusterDisagreements', () => {
     show(summaryOf({ disagreements: [line] }));
 
     const card = lineOf(line.text);
-    expect(within(card).getByText('Event resolved by hand')).toBeInTheDocument();
+    expect(
+      within(card).getByText(
+        'Event resolved by hand; the disagreement itself was not checked again',
+      ),
+    ).toBeInTheDocument();
     expect(within(card).queryByText(/Not confirmed yet/)).not.toBeInTheDocument();
   });
 
