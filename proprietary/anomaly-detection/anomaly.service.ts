@@ -273,7 +273,7 @@ import {
   parseSlotMigrationJobs,
 } from '@app/cluster/cluster-metrics.service';
 import { withConfiguredZones, withShardMetadata } from '@app/cluster/shard-metadata';
-import { resolveNodeRef, type NodeSubject } from '@app/cluster/node-ref';
+import { resolveNodeRef, toClusterNodeRef, type NodeSubject } from '@app/cluster/node-ref';
 import {
   ClusterNodeViews,
   nodeOfEvent,
@@ -7978,7 +7978,7 @@ export class AnomalyService
   ): AnomalyEvent {
     const id = randomUUID();
     this.topologyDivergenceEventOwners.set(id, ctx.connectionId);
-    return {
+    const event: AnomalyEvent = {
       id,
       timestamp,
       metricType: MetricType.PARTIAL_MEMBERSHIP,
@@ -7995,6 +7995,17 @@ export class AnomalyService
       ...(finding.address ? { nodeAddr: finding.address } : {}),
       dedupeKey: finding.signature,
     };
+    const inOwnView = this.nodeInClusterView(event, ctx.connectionId);
+    if (finding.address && inOwnView?.nodeId !== finding.nodeId) {
+      event.node = this.partlyJoinedNodeOf(round, finding);
+    }
+    return event;
+  }
+
+  private partlyJoinedNodeOf(round: DivergenceRoundResult, finding: PartialMembership): ClusterNodeRef {
+    const seen = round.selves.get(finding.nodeId) ?? round.nodes.get(finding.nodeId);
+    const known = seen ? toClusterNodeRef(seen) : { role: 'unknown' as const };
+    return { ...known, nodeId: finding.nodeId, address: finding.address };
   }
 
   private adoptTopologyDivergenceEvents(

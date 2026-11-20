@@ -29168,6 +29168,37 @@ describe('AnomalyService', () => {
         expect(partialEvents().map((event) => event.node)).toMatchObject([{ nodeId: 'n', address: '10.0.0.7:6379' }]);
       });
 
+      it('names the node on the event and the webhook when the connection sits on a node that lacks it', async () => {
+        knows = { a: ['a', 'b', 'c'], b: ['a', 'b', 'c'], c: EVERYONE, n: EVERYONE };
+        await rounds(19);
+
+        const node = { nodeId: 'n', address: '10.0.0.7:6379', role: 'primary' };
+        expect(partialEvents()).toMatchObject([{ nodeAddr: '10.0.0.7:6379', dedupeKey: 'partial_membership:n', node }]);
+        expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledWith(
+          expect.objectContaining({ dedupeKey: 'partial_membership:n', node: expect.objectContaining(node) }),
+        );
+      });
+
+      it('names the node and not another one the connection lists at its address', async () => {
+        knows = { a: ['a', 'b', 'c'], b: ['a', 'b', 'c'], c: EVERYONE, n: EVERYONE };
+        extraLines = { a: ['x 10.0.0.7:6379@16379 master,fail - 0 0 0 connected'] };
+        await rounds(19);
+
+        const event = partialEvents().find((e) => e.dedupeKey === 'partial_membership:n');
+        expect(event?.node).toMatchObject({ nodeId: 'n', address: '10.0.0.7:6379' });
+      });
+
+      it('takes the role of that node from a peer that knows it when the node gives no view', async () => {
+        knows = { a: ['a', 'b', 'c'], b: ['a', 'b', 'c'], c: EVERYONE, n: EVERYONE };
+        flagsBy = { c: { n: 'slave' } };
+        silent.add('n');
+        await rounds(19);
+
+        expect(partialEvents().map((event) => event.node)).toEqual([
+          { nodeId: 'n', address: '10.0.0.7:6379', role: 'replica' },
+        ]);
+      });
+
       it('keeps an unbracketed IPv6 address whole in the node address and the webhook source', async () => {
         const ipv4 = MEMBERS.n;
         MEMBERS.n = { ...ipv4, host: '2001:db8::7' };
