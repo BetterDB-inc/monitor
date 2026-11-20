@@ -30236,6 +30236,33 @@ describe('AnomalyService', () => {
         expect(partialEvents()).toHaveLength(1);
       });
 
+      it('raises the event again through another connection once the one that holds it is removed', async () => {
+        const second: ConnectionContext = {
+          ...mockCtx,
+          connectionId: 'conn-2',
+          connectionName: 'Second',
+          client: {
+            ...dbClient,
+            getClusterNodes: jest.fn(async () => MetricsParser.parseClusterNodes(memberView('b'))),
+          } as any,
+        };
+        knows.b = EVERYONE;
+        for (let i = 0; i < 19; i++) {
+          now += 5_000;
+          await poll(mockCtx);
+          await poll(second);
+        }
+        const [{ id }] = partialEvents();
+
+        (service as any).onConnectionRemoved('conn-1');
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(storage.resolveAnomaly.mock.calls.map(([eventId]) => eventId)).toContain(id);
+        await rounds(1, second);
+
+        expect(partialEvents().find((event) => event.id === id)?.resolved).toBe(true);
+        expect(openPartialEvents().filter((event) => event.id !== id)).toHaveLength(1);
+      });
+
       it('raises nothing through an agent connection that cannot read other nodes', async () => {
         const getConfig = (service as any).connectionRegistry.getConfig as jest.Mock;
         const configOf = getConfig.getMockImplementation();
