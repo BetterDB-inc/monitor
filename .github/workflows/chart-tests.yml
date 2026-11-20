@@ -97,7 +97,10 @@ jobs:
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       # One render per Service type, validated against the Kubernetes schemas.
+      # shell: bash adds pipefail, so a failed helm template is not hidden by
+      # kubeconform passing on empty input.
       - name: Validate rendered manifests
+        shell: bash
         run: |
           for values in default nodeport loadbalancer; do
             file="charts/betterdb-monitor/ci/${values}-values.yaml"

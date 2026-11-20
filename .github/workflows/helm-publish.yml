@@ -62,9 +62,12 @@ jobs:
   release:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # queue: max keeps every pending publish (by default a newer pending run
+    # replaces an older one, which would skip that release's chart).
     concurrency:
       group: helm-publish
       cancel-in-progress: false
+      queue: max
     env:
       SOURCE_REF: ${{ inputs.ref || github.ref }}
       RELEASE_VERSION: ${{ inputs.version }}
