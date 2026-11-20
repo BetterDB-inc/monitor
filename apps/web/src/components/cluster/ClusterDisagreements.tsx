@@ -19,6 +19,7 @@ import {
 import { useCanMutate } from '@/hooks/useCanMutate';
 import { useNow } from '@/hooks/useNow';
 import { nodeHref } from '@/lib/clusterNodeHref';
+import { CONNECTION_PARAM } from '@/lib/connectionParam';
 import { formatSlotRanges } from '@/types/cluster';
 import type {
   AnomalySeverity,
@@ -134,10 +135,16 @@ function NodeChips({
   );
 }
 
+function eventsHref(connectionId?: string): string {
+  if (!connectionId) return EVENTS_PATH;
+  return `${EVENTS_PATH}?${new URLSearchParams({ [CONNECTION_PARAM]: connectionId }).toString()}`;
+}
+
 function eventHref(line: DisagreementLine, asOf: number | null, connectionId?: string): string {
-  if (line.eventId === null || line.eventAt === null) return EVENTS_PATH;
-  if ((asOf ?? line.lastSeenAt) - line.eventAt > INCIDENT_LOOKBACK_MS) return EVENTS_PATH;
-  return incidentEventPath(line.eventId, line.eventAt, line.eventConnectionId ?? connectionId);
+  const holder = line.eventConnectionId ?? connectionId;
+  if (line.eventId === null || line.eventAt === null) return eventsHref(holder);
+  if ((asOf ?? line.lastSeenAt) - line.eventAt > INCIDENT_LOOKBACK_MS) return eventsHref(holder);
+  return incidentEventPath(line.eventId, line.eventAt, holder);
 }
 
 function coverageText(coverage: DisagreementCoverage): string {
@@ -165,7 +172,7 @@ function LineStanding({
     return (
       <span className="text-xs text-muted-foreground">
         {line.stale
-          ? 'Event resolved by hand'
+          ? 'Event resolved by hand; the disagreement itself was not checked again'
           : 'Event resolved by hand, the disagreement is still seen'}
       </span>
     );
@@ -190,6 +197,7 @@ function DisagreementCard({
   connectionId?: string;
 }) {
   const badge = SEVERITY_BADGE[line.severity] ?? SEVERITY_BADGE.info;
+  const hiddenEpochs = line.subjectCount - (line.epochs?.length ?? 0);
   return (
     <article
       id={`disagreement-${line.id}`}
@@ -201,7 +209,7 @@ function DisagreementCard({
         <p className="min-w-0 flex-1 text-sm font-medium">{line.text}</p>
         {line.stale ? (
           <span className="text-xs text-muted-foreground">
-            Last seen {new Date(line.lastSeenAt).toLocaleTimeString()}, not confirmed this round
+            Last seen {new Date(line.lastSeenAt).toLocaleTimeString()}, not checked again this round
           </span>
         ) : (
           line.since !== undefined && (
@@ -260,6 +268,16 @@ function DisagreementCard({
                 ))}
               </TableRow>
             ))}
+            {hiddenEpochs > 0 && (
+              <TableRow>
+                <TableCell
+                  colSpan={line.positions.length + 1}
+                  className="text-xs text-muted-foreground"
+                >
+                  +{hiddenEpochs} more
+                </TableCell>
+              </TableRow>
+            )}
           </TableBody>
         </Table>
       )}
