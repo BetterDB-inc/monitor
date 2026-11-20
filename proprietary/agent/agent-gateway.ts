@@ -112,7 +112,7 @@ export class AgentGateway {
 
     ws.on('close', () => {
       clearTimeout(helloTimeout);
-      this.unregisterAgent(connectionId);
+      this.unregisterAgent(connectionId, ws);
     });
 
     ws.on('error', (err) => {
@@ -127,6 +127,13 @@ export class AgentGateway {
       `(cluster: ${hello.valkey.cluster}, auth: ${hello.authMode ?? 'password'}, ` +
       `capabilities: ${hello.capabilities.join(', ')})`,
     );
+
+    const previous = this.agents.get(agent.id);
+    if (previous && previous !== agent) {
+      this.retireAgent(previous);
+      previous.ws.close(4003, 'Replaced by a new connection');
+      this.logger.log(`Agent ${agent.id} reconnected, closed its previous socket`);
+    }
 
     // Create the DatabaseAdapter
     agent.adapter = new AgentDatabaseAdapter(agent.ws, hello);
@@ -144,6 +151,7 @@ export class AgentGateway {
       this.logger.log(`Agent ${agent.id} registered as connection`);
     } catch (err: any) {
       this.logger.error(`Failed to register agent ${agent.id}: ${err.message}`);
+      if (previous) this.connectionRegistry.removeAgentConnection(agent.id);
       agent.ws.close(4002, 'Registration failed');
       return;
     }
@@ -162,22 +170,31 @@ export class AgentGateway {
     }, 30000);
   }
 
-  private unregisterAgent(connectionId: string): void {
+  private unregisterAgent(connectionId: string, ws: WebSocket): void {
     const agent = this.agents.get(connectionId);
-    if (!agent) return;
+    if (!agent || agent.ws !== ws) return;
 
+    this.retireAgent(agent);
+
+    // Remove from ConnectionRegistry
+    this.connectionRegistry.removeAgentConnection(connectionId);
+
+    this.logger.log(`Agent ${connectionId} disconnected and unregistered`);
+  }
+
+  private retireAgent(agent: AgentConnection): void {
     if (agent.pingTimer) clearInterval(agent.pingTimer);
     if (agent.pongTimer) clearTimeout(agent.pongTimer);
+    agent.pingTimer = null;
+    agent.pongTimer = null;
 
     if (agent.adapter) {
       agent.adapter.markDisconnected();
     }
 
-    // Remove from ConnectionRegistry
-    this.connectionRegistry.removeAgentConnection(connectionId);
-
-    this.agents.delete(connectionId);
-    this.logger.log(`Agent ${connectionId} disconnected and unregistered`);
+    if (this.agents.get(agent.id) === agent) {
+      this.agents.delete(agent.id);
+    }
   }
 
   getConnectedAgents(): AgentConnectionInfo[] {
