@@ -311,20 +311,20 @@ One failover gives one event per registered connection.
 
 Two nodes accept TCP and stop replying (`--hang 2`). "Before" is the state the
 other tables were measured in, on 2026-11-18. "After" has the timeouts for
-silent nodes described below and was measured on 2026-11-19 on the same
-machine, in desktop use with a load average of about 3.4. Each figure is one
+silent nodes described below and was measured on 2026-11-20 on the same
+machine, in desktop use with a load average of about 5. Each figure is one
 run, not repeated.
 
 | Run | Figure | Before | After | No hung nodes |
 |---|---|---|---|---|
-| 100 nodes, one connection | Anomaly pass p50 / p95 ms | 4,023 / 9,038 | 95 / 111 | 94 / 113 |
-| | Anomaly passes | 24 | 109 | 110 |
-| | Prometheus pass p50 / p95 ms | 37 / 4,012 | 39 / 46 | |
-| | Commands/s | 94 | 354 | 365 |
-| 30 nodes, every node registered | Anomaly pass p50 / p95 ms | 5,003 / 5,207 | 71 / 91 | 78 / 97 |
+| 100 nodes, one connection | Anomaly pass p50 / p95 ms | 4,023 / 9,038 | 82 / 97 | 94 / 113 |
+| | Anomaly passes | 24 | 110 | 110 |
+| | Prometheus pass p50 / p95 ms | 37 / 4,012 | 31 / 40 | |
+| | Commands/s | 94 | 357 | 365 |
+| 30 nodes, every node registered | Anomaly pass p50 / p95 ms | 5,003 / 5,207 | 59 / 75 | 78 / 97 |
 | | Anomaly passes | 19 | 112 | 112 |
-| | Prometheus pass p50 / p95 ms | 5,002 / 5,003 | 45 / 51 | |
-| | Commands/s | 116 | 548 | 628 |
+| | Prometheus pass p50 / p95 ms | 5,002 / 5,003 | 36 / 44 | |
+| | Commands/s | 116 | 541 | 628 |
 | | Hung connections listed as connected | 2 of 2 | 0 of 2 | |
 | | Error lines in the log | 38 | 0 | 0 |
 
@@ -347,7 +347,9 @@ How to read it:
   the end of the window, and the log had 38 "Failed to poll metrics" errors
   and 51 "still running, skipping" warnings.
 - After, pass times and pass counts are close to those of the run without
-  hung nodes.
+  hung nodes. The passes are a little faster than in that run, which was
+  measured two days earlier; with one run each that difference is not a
+  finding.
   The two hung connections are listed as disconnected, and the log has none of
   those errors or warnings.
 - With every node registered a pass no longer waits for the two hung
