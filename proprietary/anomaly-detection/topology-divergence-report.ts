@@ -4,6 +4,7 @@ import type { ClusterNode } from '@app/common/types/metrics.types';
 import {
   type DivergenceGroup,
   type DivergenceKind,
+  type TopologyDisagreement,
   type TrackedDisagreement,
   compareText,
   durationOf,
@@ -215,23 +216,36 @@ export function buildDivergenceDetail(
   };
 }
 
+export interface HeldFinding {
+  finding: PartialMembership;
+  eventId: string | null;
+}
+
+export function findingThatHolds(
+  findings: readonly HeldFinding[],
+  disagreement: Pick<TopologyDisagreement, 'key' | 'subjectIds'>,
+): HeldFinding | undefined {
+  const holds = ({ finding }: HeldFinding) =>
+    finding.disagreementKeys.includes(disagreement.key) || finding.slotDisputeKeys.includes(disagreement.key);
+  const about = (finding: PartialMembership) => Number(disagreement.subjectIds.includes(finding.nodeId));
+  const [holder] = findings
+    .filter(holds)
+    .sort(
+      (a, b) =>
+        Number(b.eventId !== null) - Number(a.eventId !== null) ||
+        about(b.finding) - about(a.finding) ||
+        compareText(a.finding.nodeId, b.finding.nodeId),
+    );
+  return holder;
+}
+
 export function disagreementsByFinding(
-  findings: Array<{ finding: PartialMembership; eventId: string | null }>,
+  findings: HeldFinding[],
   disagreements: TrackedDisagreement[],
 ): Map<string, TrackedDisagreement[]> {
   const listed = new Map<string, TrackedDisagreement[]>();
   for (const disagreement of disagreements) {
-    const holds = ({ finding }: { finding: PartialMembership }) =>
-      finding.disagreementKeys.includes(disagreement.key) || finding.slotDisputeKeys.includes(disagreement.key);
-    const about = (finding: PartialMembership) => Number(disagreement.subjectIds.includes(finding.nodeId));
-    const [holder] = findings
-      .filter(holds)
-      .sort(
-        (a, b) =>
-          Number(b.eventId !== null) - Number(a.eventId !== null) ||
-          about(b.finding) - about(a.finding) ||
-          compareText(a.finding.nodeId, b.finding.nodeId),
-      );
+    const holder = findingThatHolds(findings, disagreement);
     if (!holder) continue;
     const own = listed.get(holder.finding.signature);
     if (own) own.push(disagreement);

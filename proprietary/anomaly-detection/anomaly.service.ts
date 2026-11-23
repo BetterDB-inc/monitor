@@ -318,6 +318,7 @@ import {
   buildPartialMembershipDetail,
   closingPartialMembershipDetail,
   disagreementsByFinding,
+  findingThatHolds,
   divergenceMessage,
   divergenceSeverity,
   outranksSeverity,
@@ -325,6 +326,8 @@ import {
   toDivergenceNode,
 } from './topology-divergence-report';
 import {
+  type DisagreementEvent,
+  type DisagreementEventOf,
   type RaisedDivergence,
   eventOfRaised,
   summarizeDisagreements,
@@ -8002,6 +8005,7 @@ export class AnomalyService
   ): AnomalyEvent {
     const id = randomUUID();
     this.topologyDivergenceEventOwners.set(id, ctx.connectionId);
+    this.topologyDivergenceEventAt.set(id, timestamp);
     const event: AnomalyEvent = {
       id,
       timestamp,
@@ -11428,7 +11432,7 @@ export class AnomalyService
         return [{ signature, eventId, group }];
       });
 
-    const tracked = groupDivergences(unclaimedByPartialMembership(round.disagreements, found));
+    const tracked = this.countedTopologyDivergences(clusterKey);
     const trackedBySignature = new Map(tracked.map((group) => [group.signature, group]));
     const raisedGroups = shown(
       this.topologyDivergenceOpen.get(clusterKey),
@@ -11482,7 +11486,7 @@ export class AnomalyService
   getTopologyDisagreements(connectionId: string): TopologyDisagreementReport {
     const clusterKey = this.connectionClusterKeys.get(connectionId);
     const round = clusterKey ? this.topologyDivergence.lastRound(clusterKey) : undefined;
-    const eventOf = eventOfRaised(clusterKey ? this.topologyDisagreementEvents(clusterKey, connectionId) : []);
+    const eventOf = clusterKey ? this.topologyDisagreementEventOf(clusterKey, connectionId) : eventOfRaised([]);
     return { ...summarizeDisagreements(round, eventOf), fullCheck: this.getTopologyFullCheck(connectionId) };
   }
 
@@ -11520,54 +11524,86 @@ export class AnomalyService
         now: () => Date.now(),
         onProgress,
       });
-      return fullCheckResult(outcome, eventOfRaised(this.topologyDisagreementEvents(clusterKey, connectionId)));
+      return fullCheckResult(outcome, this.topologyDisagreementEventOf(clusterKey, connectionId));
     });
     if (started.result === 'started') this.topologyFullCheckOwners.set(clusterKey, connectionId);
     return started;
   }
 
-  private topologyDisagreementEvents(clusterKey: string, connectionId: string): RaisedDivergence[] {
-    const raised: RaisedDivergence[] = [];
+  private topologyDisagreementEventOf(clusterKey: string, connectionId: string): DisagreementEventOf {
     const anchor = this.topologyDivergence.lastRound(clusterKey)?.anchorConnectionId;
+    const lineEvent = this.topologyLineEventOf(connectionId, anchor);
+    const ofGroup = eventOfRaised(this.topologyDisagreementEvents(clusterKey, anchor, lineEvent));
+    const store = this.topologyEventStores.partial;
+    const eventIds = anchor === undefined ? undefined : store.eventIds.get(anchor);
+    const closedByHand = anchor === undefined ? undefined : store.closedByHand.get(anchor);
+    const findings = (this.partialMembershipRounds.get(clusterKey)?.found ?? []).map((finding) => ({
+      finding,
+      eventId: eventIds?.get(finding.signature) ?? null,
+    }));
+    return (disagreement) => {
+      const holder = findingThatHolds(findings, disagreement);
+      if (!holder) return ofGroup(disagreement);
+      if (holder.eventId !== null) return lineEvent(holder.eventId, MetricType.PARTIAL_MEMBERSHIP);
+      return closedByHand?.has(holder.finding.signature) ? lineEvent(null, MetricType.PARTIAL_MEMBERSHIP) : undefined;
+    };
+  }
+
+  private topologyLineEventOf(
+    connectionId: string,
+    anchor: string | undefined,
+  ): (eventId: string | null, raisedAs: MetricType) => DisagreementEvent {
+    const reachable = new Set(this.scopeConnectionIds(connectionId));
+    return (eventId, raisedAs) => {
+      if (eventId === null) {
+        return { eventId: '', eventType: raisedAs, eventAt: null, connectionId, resolvedByHand: true };
+      }
+      const event = this.eventInMemory(eventId) ?? this.findIncidentEvent(eventId);
+      const holder = this.topologyDivergenceEventOwners.get(eventId) ?? anchor ?? connectionId;
+      return {
+        eventId,
+        eventType: event?.metricType ?? raisedAs,
+        eventAt: this.topologyDivergenceEventAt.get(eventId) ?? event?.timestamp ?? null,
+        connectionId: reachable.has(holder) ? connectionId : holder,
+        resolvedByHand: event?.resolved === true,
+      };
+    };
+  }
+
+  private topologyDisagreementEvents(
+    clusterKey: string,
+    anchor: string | undefined,
+    lineEvent: (eventId: string | null, raisedAs: MetricType) => DisagreementEvent,
+  ): RaisedDivergence[] {
+    const raised: RaisedDivergence[] = [];
     const store = this.topologyEventStores.divergence;
     const eventIds = anchor === undefined ? undefined : store.eventIds.get(anchor);
     const closedByHand = anchor === undefined ? undefined : store.closedByHand.get(anchor);
-    const reachable = new Set(this.scopeConnectionIds(connectionId));
-    for (const [signature, { group, confirmedAt }] of this.topologyDivergenceOpen.get(clusterKey) ?? []) {
+    const open = this.topologyDivergenceOpen.get(clusterKey);
+    for (const [signature, { group, confirmedAt }] of open ?? []) {
       if (!group) continue;
-      const eventId = eventIds?.get(signature);
-      if (eventId === undefined) {
-        if (!closedByHand?.has(signature)) continue;
-        raised.push({
-          group,
-          event: {
-            eventId: '',
-            eventType: MetricType.TOPOLOGY_DIVERGENCE,
-            eventAt: null,
-            connectionId,
-            resolvedByHand: true,
-          },
-          confirmedAt: confirmedAt ?? 0,
-        });
-        continue;
-      }
-      const event = this.eventInMemory(eventId) ?? this.findIncidentEvent(eventId);
-      const eventType = event?.metricType ?? MetricType.TOPOLOGY_DIVERGENCE;
-      const eventAt = this.topologyDivergenceEventAt.get(eventId) ?? event?.timestamp ?? null;
-      const holder = this.topologyDivergenceEventOwners.get(eventId) ?? anchor ?? connectionId;
+      const eventId = eventIds?.get(signature) ?? null;
+      if (eventId === null && !closedByHand?.has(signature)) continue;
       raised.push({
         group,
-        event: {
-          eventId,
-          eventType,
-          eventAt,
-          connectionId: reachable.has(holder) ? connectionId : holder,
-          resolvedByHand: event?.resolved === true,
-        },
+        event: lineEvent(eventId, MetricType.TOPOLOGY_DIVERGENCE),
         confirmedAt: confirmedAt ?? 0,
       });
     }
+    const dropped = [...(closedByHand ?? [])].filter((signature) => !open?.get(signature)?.group);
+    if (dropped.length === 0) return raised;
+    const counted = new Map(this.countedTopologyDivergences(clusterKey).map((group) => [group.signature, group]));
+    for (const signature of dropped) {
+      const group = counted.get(signature);
+      if (group) raised.push({ group, event: lineEvent(null, MetricType.TOPOLOGY_DIVERGENCE), confirmedAt: 0 });
+    }
     return raised;
+  }
+
+  private countedTopologyDivergences(clusterKey: string): DivergenceGroup[] {
+    const round = this.topologyDivergence.lastRound(clusterKey);
+    const found = this.partialMembershipRounds.get(clusterKey)?.found ?? [];
+    return round ? groupDivergences(unclaimedByPartialMembership(round.disagreements, found)) : [];
   }
 
   private topologyFullCheckBlocker(connectionId: string): FullCheckBlocker | null {

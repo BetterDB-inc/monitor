@@ -29831,8 +29831,97 @@ describe('AnomalyService', () => {
         }
       });
 
+      describe('in the disagreements summary', () => {
+        const lines = () => service.getTopologyDisagreements('conn-1').disagreements;
+
+        it('leaves the line of the node without an event while the finding is still counted', async () => {
+          await rounds(6);
+
+          expect(lines()).toMatchObject([
+            { id: 'membership:n', open: true, confirmed: false, eventId: null, eventType: null, resolvedByHand: false },
+          ]);
+        });
+
+        it('points the line of the node at the event of the finding', async () => {
+          await rounds(19);
+
+          const [event] = partialEvents();
+          expect(lines()).toMatchObject([
+            {
+              id: 'membership:n',
+              open: true,
+              confirmed: true,
+              resolvedByHand: false,
+              eventId: event.id,
+              eventType: MetricType.PARTIAL_MEMBERSHIP,
+              eventAt: event.timestamp,
+              eventConnectionId: 'conn-1',
+            },
+          ]);
+        });
+
+        it('keeps the time of the event once the event is no longer held in memory', async () => {
+          await rounds(19);
+          const [event] = partialEvents();
+
+          (service as any).recentAnomalies = [];
+          (service as any).incidentEventsById.clear();
+
+          expect(lines()).toMatchObject([{ id: 'membership:n', eventId: event.id, eventAt: event.timestamp }]);
+        });
+
+        it('says that the event of the finding was resolved by hand until it is raised again', async () => {
+          await rounds(19);
+          const [first] = openPartialEvents();
+
+          await service.resolveAnomaly(first.id);
+          expect(lines()).toMatchObject([
+            { id: 'membership:n', open: true, confirmed: false, eventId: null, eventType: null, resolvedByHand: true },
+          ]);
+
+          await rounds(1);
+          const [again] = openPartialEvents();
+          expect(again.id).not.toBe(first.id);
+          expect(lines()).toMatchObject([
+            { id: 'membership:n', confirmed: true, eventId: again.id, resolvedByHand: false },
+          ]);
+        });
+
+        it('gives the line of a full check the event of the finding', async () => {
+          await rounds(19);
+          const [event] = partialEvents();
+          (discovery as any).onNodeClientOnce = jest.fn(
+            async (node: { id: string }, _connectionId: string, _timeoutMs: number, run: (client: unknown) => unknown) =>
+              run({ call: jest.fn(async () => memberView(node.id)) }),
+          );
+          (service as any).connectionRegistry.get.mockReturnValue(dbClient);
+          (service as any).connectionRegistry.getConfig.mockImplementation((id: string) => ({ id, host: 'seed' }));
+
+          expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'started' });
+          for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+
+          expect(service.getTopologyDisagreements('conn-1').fullCheck).toMatchObject({
+            state: 'done',
+            summary: {
+              disagreements: [
+                {
+                  id: 'membership:n',
+                  confirmed: true,
+                  eventId: event.id,
+                  eventType: MetricType.PARTIAL_MEMBERSHIP,
+                },
+              ],
+            },
+          });
+        });
+      });
+
       describe('with two nodes half joined at once', () => {
         const everyone = [...EVERYONE, 'm'];
+        const lineEvents = () =>
+          service
+            .getTopologyDisagreements('conn-1')
+            .disagreements.map((line) => [line.id, line.eventId, line.eventType, line.resolvedByHand]);
         const listed = () =>
           Object.fromEntries(
             report().partialMembership.map((entry) => [
@@ -29885,6 +29974,22 @@ describe('AnomalyService', () => {
             expect(listed()).toEqual({ m: ['membership:m', 'membership:n'], n: [] });
             expect(eventIdsOf('membership', 'n')).toEqual([kept!.id]);
           });
+
+          it('points each line of the summary at the event the report lists it under', async () => {
+            await rounds(19);
+            const ids = Object.fromEntries(openPartialEvents().map((e) => [e.dedupeKey, e.id]));
+            expect(lineEvents()).toEqual([
+              ['membership:m', ids['partial_membership:m'], MetricType.PARTIAL_MEMBERSHIP, false],
+              ['membership:n', ids['partial_membership:n'], MetricType.PARTIAL_MEMBERSHIP, false],
+            ]);
+
+            await service.resolveAnomaly(ids['partial_membership:n']);
+
+            expect(lineEvents()).toEqual([
+              ['membership:m', ids['partial_membership:m'], MetricType.PARTIAL_MEMBERSHIP, false],
+              ['membership:n', ids['partial_membership:m'], MetricType.PARTIAL_MEMBERSHIP, false],
+            ]);
+          });
         });
 
         describe('that lack the same slot owner', () => {
@@ -29903,6 +30008,19 @@ describe('AnomalyService', () => {
             expect(report().partialMembership).toMatchObject([
               { node: { nodeId: 'm' }, ownViewMissing: [{ nodeId: 'b' }] },
               { node: { nodeId: 'n' }, ownViewMissing: [{ nodeId: 'b' }], command: 'CLUSTER MEET 10.0.0.7 6379' },
+            ]);
+          });
+
+          it('points the lines about the owner at the event of the finding that holds them', async () => {
+            await rounds(19);
+
+            const ids = Object.fromEntries(openPartialEvents().map((e) => [e.dedupeKey, e.id]));
+            const held = service
+              .getTopologyDisagreements('conn-1')
+              .disagreements.map((line) => [line.kind, line.eventId, line.eventType]);
+            expect(held).toEqual([
+              ['slot_owner', ids['partial_membership:m'], MetricType.PARTIAL_MEMBERSHIP],
+              ['membership', ids['partial_membership:m'], MetricType.PARTIAL_MEMBERSHIP],
             ]);
           });
         });
@@ -29984,6 +30102,18 @@ describe('AnomalyService', () => {
           ]);
         });
 
+        it('leaves the line of the summary without an event while the event of the finding closes', async () => {
+          await rounds(1);
+
+          expect(openPartialEvents()).toHaveLength(1);
+          expect(
+            service
+              .getTopologyDisagreements('conn-1')
+              .disagreements.filter((line) => line.kind === 'membership')
+              .map((line) => [line.id, line.confirmed, line.eventId]),
+          ).toEqual([['membership:n', false, null]]);
+        });
+
         it('keeps its event and raises no other when the flag clears within the configured rounds', async () => {
           await rounds(2);
           flagsBy = {};
@@ -30028,6 +30158,21 @@ describe('AnomalyService', () => {
             .filter((disagreement) => disagreement.kind === 'membership');
           expect(lines).toHaveLength(1);
           expect(report().partialMembership).toMatchObject([{ eventId: null, node: { nodeId: 'n' } }]);
+        });
+
+        it('takes the line of the summary off the divergence event once the finding holds it', async () => {
+          const [event] = divergenceEvents().filter((e) => !e.resolved);
+          const membership = () =>
+            service
+              .getTopologyDisagreements('conn-1')
+              .disagreements.filter((line) => line.kind === 'membership')
+              .map((line) => [line.id, line.confirmed, line.eventId]);
+          expect(membership()).toEqual([['membership:n', true, event.id]]);
+
+          await rounds(1);
+
+          expect(event.resolved).toBe(false);
+          expect(membership()).toEqual([['membership:n', false, null]]);
         });
 
         it('keeps its open event in the report until that event closes', async () => {
@@ -30843,6 +30988,27 @@ describe('AnomalyService', () => {
         const raisedAgain = divergenceEvents().find((event) => !event.resolved);
         expect(service.getTopologyDisagreements('conn-1').disagreements).toMatchObject([
           { id: 'config_epoch:a', confirmed: true, eventId: raisedAgain?.id, resolvedByHand: false },
+        ]);
+      });
+
+      it('still says that the event was resolved by hand when the next round cannot check the line again', async () => {
+        views.b = { a: { epoch: 9 } };
+        await rounds(3);
+        await service.resolveAnomaly(divergenceEvents()[0].id);
+        silent.add('b');
+
+        await rounds(1);
+
+        expect(divergenceEvents().filter((event) => !event.resolved)).toEqual([]);
+        expect(service.getTopologyDisagreements('conn-1').disagreements).toMatchObject([
+          { id: 'config_epoch:a', stale: true, open: false, confirmed: false, eventId: null, resolvedByHand: true },
+        ]);
+
+        silent.delete('b');
+        await rounds(1);
+        const raisedAgain = divergenceEvents().find((event) => !event.resolved);
+        expect(service.getTopologyDisagreements('conn-1').disagreements).toMatchObject([
+          { id: 'config_epoch:a', stale: false, confirmed: true, eventId: raisedAgain?.id, resolvedByHand: false },
         ]);
       });
 
