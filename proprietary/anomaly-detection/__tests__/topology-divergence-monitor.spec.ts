@@ -502,4 +502,59 @@ describe('TopologyDivergenceMonitor', () => {
 
     expect(await poll('conn-2', 'b1', INTERVAL)).toMatchObject({ anchorConnectionId: 'conn-2' });
   });
+
+  it('records which views show a node as fail? and which as fail', async () => {
+    const { poll, answers } = harness();
+    answers.set('b1', viewOf('b1', { c2: { flags: ['master', 'fail'] } }));
+
+    const round = await poll('conn-1', 'a1', 0, { c2: failing });
+
+    expect([...(round?.failureFlags ?? [])]).toEqual([['c2', { suspected: ['a1'], failed: ['b1'] }]]);
+  });
+
+  it('leaves out what a node says of itself and entries without an address', async () => {
+    const { poll, answers } = harness();
+    answers.set('b1', viewOf('b1', { b1: failing, c2: { flags: ['master', 'fail', 'noaddr'] } }));
+
+    const round = await poll('conn-1', 'a1', 0);
+
+    expect(round?.failureFlags.size).toBe(0);
+    expect(round?.disagreements.map((d) => d.key)).not.toContain('failure_flags:c2');
+  });
+
+  it('keeps the entry of a view that lists a node as a member over one without an address', async () => {
+    const { poll } = harness();
+
+    const round = await poll('conn-1', 'a1', 0, { c2: { flags: ['master', 'noaddr'], address: ':0@0' } });
+
+    expect(round?.nodes.get('c2')).toMatchObject({ flags: ['master'], address: 'c2.internal:6379@16379' });
+    expect(round?.nodes.get('b2')).toMatchObject({ flags: ['master'] });
+  });
+
+  it('keeps the shard and the zone of a node whose entry is taken from another view', async () => {
+    const { poll, answers } = harness();
+    const bare = (observerId: string) =>
+      viewOf(observerId).map(({ availabilityZone: _zone, ...node }) => node);
+    answers.set('b1', bare('b1'));
+    answers.set('c1', bare('c1'));
+
+    const round = await poll('conn-1', 'a1', 0, {
+      c2: { flags: ['master', 'noaddr'], address: ':0@0', shardId: 'shard-c2' },
+    });
+
+    expect(round?.nodes.get('c2')).toMatchObject({
+      flags: ['master'],
+      address: 'c2.internal:6379@16379',
+      shardId: 'shard-c2',
+      availabilityZone: 'c',
+    });
+  });
+
+  it('records no failure flags in a round that cannot compare', async () => {
+    const { poll } = harness();
+
+    const round = await poll('agent', 'a1', 0, { c2: failing }, false);
+
+    expect(round?.failureFlags.size).toBe(0);
+  });
 });

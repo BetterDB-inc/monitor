@@ -150,5 +150,8 @@ after an update can exceed, restarting the pod again and again. Check with
 
 The default image tag is pinned to the chart's `appVersion` (the `-no-ai`
 variant), so `helm upgrade` after a `repo update` moves you to the release the
-chart was published for — no `:latest` surprises. Release notes:
+chart was published for — no `:latest` surprises. The chart version equals
+the monitor version it deploys (chart 0.56.0 runs monitor 0.56.0), and a new
+chart is published with every monitor release, so `helm search repo betterdb
+--versions` lists which release each chart deploys. Release notes:
 [Updating](../updating.md).

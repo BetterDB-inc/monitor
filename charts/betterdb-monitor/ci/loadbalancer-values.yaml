@@ -1,0 +1,12 @@
+# CI render matrix (chart-tests.yml): a cloud LoadBalancer Service with
+# every LoadBalancer option set.
+service:
+  type: LoadBalancer
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+    external-dns.alpha.kubernetes.io/hostname: monitor.example.com
+  loadBalancerClass: service.k8s.aws/nlb
+  loadBalancerSourceRanges:
+    - 203.0.113.0/24
+    - 2001:db8::/32
+  externalTrafficPolicy: Local

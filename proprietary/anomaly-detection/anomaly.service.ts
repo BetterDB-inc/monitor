@@ -322,6 +322,12 @@ import {
   raisedDivergenceGroup,
   toDivergenceNode,
 } from './topology-divergence-report';
+import {
+  type RaisedDivergence,
+  type TopologyDisagreementSummary,
+  eventOfRaised,
+  summarizeDisagreements,
+} from './topology-disagreements';
 import { ShardLoadService } from '@app/cluster/shard-load.service';
 import type { ShardLoadSample, SlotLoadRate } from '@app/cluster/shard-load';
 import { parseNodeAddress } from '@app/topology/membership-diff';
@@ -7695,7 +7701,7 @@ export class AnomalyService
     });
     for (const finding of confirmed) {
       if (eventIds.has(finding.signature) && !open.get(finding.signature)?.group) {
-        open.set(finding.signature, { group: finding, lastCountedAt: round.at, clean: 0 });
+        open.set(finding.signature, { group: finding, confirmedAt: round.at, lastCountedAt: round.at, clean: 0 });
       }
     }
     for (const finding of params.observed ?? []) {
@@ -11446,6 +11452,37 @@ export class AnomalyService
       divergences: [...raised, ...counting],
       partialMembership: [...raisedPartial, ...countingPartial],
     };
+  }
+
+  getTopologyDisagreements(connectionId: string): TopologyDisagreementSummary {
+    const clusterKey = this.connectionClusterKeys.get(connectionId);
+    const round = clusterKey ? this.topologyDivergence.lastRound(clusterKey) : undefined;
+    if (!clusterKey || !round) return summarizeDisagreements(undefined, () => undefined);
+    const store = this.topologyEventStores.divergence;
+    const eventIds = store.eventIds.get(round.anchorConnectionId);
+    const closedByHand = store.closedByHand.get(round.anchorConnectionId);
+    const raised: RaisedDivergence[] = [];
+    for (const [signature, { group, confirmedAt }] of this.topologyDivergenceOpen.get(clusterKey) ?? []) {
+      if (!group) continue;
+      const eventId = eventIds?.get(signature);
+      if (eventId === undefined) {
+        if (!closedByHand?.has(signature)) continue;
+        raised.push({
+          group,
+          event: { eventId: '', eventType: MetricType.TOPOLOGY_DIVERGENCE, resolvedByHand: true },
+          confirmedAt: confirmedAt ?? 0,
+        });
+        continue;
+      }
+      const event = this.eventInMemory(eventId) ?? this.findIncidentEvent(eventId);
+      const eventType = event?.metricType ?? MetricType.TOPOLOGY_DIVERGENCE;
+      raised.push({
+        group,
+        event: { eventId, eventType, resolvedByHand: event?.resolved === true },
+        confirmedAt: confirmedAt ?? 0,
+      });
+    }
+    return summarizeDisagreements(round, eventOfRaised(raised));
   }
 
   getRecentEvents(limit = 100, metricType?: MetricType): AnomalyEvent[] {

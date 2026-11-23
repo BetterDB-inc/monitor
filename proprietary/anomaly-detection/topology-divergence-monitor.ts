@@ -3,8 +3,10 @@ import {
   DivergenceTracker,
   type TopologyView,
   type TrackedDisagreement,
+  compareText,
   compareTopologyViews,
   failingForEveryView,
+  failureVoteOf,
   isFlaggedFailing,
   isKnownMember,
   membersByObserver,
@@ -39,6 +41,11 @@ export interface DivergencePoll {
   readView: (node: ClusterNode) => Promise<ClusterNode[] | null>;
 }
 
+export interface FailureFlagViews {
+  suspected: string[];
+  failed: string[];
+}
+
 export interface DivergenceRoundResult {
   clusterKey: string;
   anchorConnectionId: string;
@@ -49,6 +56,7 @@ export interface DivergenceRoundResult {
   disagreements: TrackedDisagreement[];
   nodes: Map<string, ClusterNode>;
   selves: Map<string, ClusterNode>;
+  failureFlags: Map<string, FailureFlagViews>;
   sightings: Map<string, MembershipSighting[]>;
 }
 
@@ -76,6 +84,16 @@ interface ClusterRounds {
 
 function myselfOf(nodes: ClusterNode[]): ClusterNode | undefined {
   return nodes.find((node) => node.flags.includes('myself'));
+}
+
+function withMetadataOf(kept: ClusterNode, node: ClusterNode): ClusterNode {
+  const shardId = node.shardId ?? kept.shardId;
+  const availabilityZone = node.availabilityZone ?? kept.availabilityZone;
+  return {
+    ...node,
+    ...(shardId === undefined ? {} : { shardId }),
+    ...(availabilityZone === undefined ? {} : { availabilityZone }),
+  };
 }
 
 function isAccused(node: ClusterNode): boolean {
@@ -190,6 +208,7 @@ export class TopologyDivergenceMonitor {
       disagreements: state.tracker.tracked(),
       nodes: new Map(input.nodes.map((node) => [node.id, node])),
       selves: new Map([[self.id, self]]),
+      failureFlags: new Map(),
       sightings: new Map(),
     };
     return state.last;
@@ -280,7 +299,9 @@ export class TopologyDivergenceMonitor {
     const selves = new Map<string, ClusterNode>();
     for (const view of views) {
       for (const node of view.nodes) {
-        if (!nodes.has(node.id)) nodes.set(node.id, node);
+        const kept = nodes.get(node.id);
+        if (!kept) nodes.set(node.id, node);
+        else if (!isKnownMember(kept) && isKnownMember(node)) nodes.set(node.id, withMetadataOf(kept, node));
         if (node.id === view.observerId) selves.set(node.id, node);
       }
     }
@@ -296,6 +317,7 @@ export class TopologyDivergenceMonitor {
       disagreements,
       nodes,
       selves,
+      failureFlags: this.failureFlagsBy(views),
       sightings: membershipSightings(views, disagreements),
     };
   }
@@ -317,6 +339,24 @@ export class TopologyDivergenceMonitor {
     return (state.backoff.get(id)?.retryAt ?? -Infinity) > at;
   }
 
+  private failureFlagsBy(views: TopologyView[]): Map<string, FailureFlagViews> {
+    const flagged = new Map<string, FailureFlagViews>();
+    for (const view of views) {
+      for (const node of view.nodes) {
+        const failure = failureVoteOf(view.observerId, node);
+        if (!failure || failure === 'ok') continue;
+        const entry = flagged.get(node.id) ?? { suspected: [], failed: [] };
+        (failure === 'fail' ? entry.failed : entry.suspected).push(view.observerId);
+        flagged.set(node.id, entry);
+      }
+    }
+    for (const entry of flagged.values()) {
+      entry.suspected.sort();
+      entry.failed.sort();
+    }
+    return new Map([...flagged].sort((a, b) => compareText(a[0], b[0])));
+  }
+
   private accusedBy(views: TopologyView[]): string[] {
     const accusers = new Map<string, number>();
     for (const view of views) {
@@ -325,7 +365,7 @@ export class TopologyDivergenceMonitor {
       }
     }
     return [...accusers.entries()]
-      .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
+      .sort((a, b) => b[1] - a[1] || compareText(a[0], b[0]))
       .map(([id]) => id);
   }
 }

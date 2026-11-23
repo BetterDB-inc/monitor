@@ -79,7 +79,7 @@ export const DIVERGENCE_SEVERITY_BY_KIND: Record<DivergenceKind, AnomalySeverity
   config_epoch: AnomalySeverity.WARNING,
 };
 
-const SEVERITY_ORDER = [AnomalySeverity.INFO, AnomalySeverity.WARNING, AnomalySeverity.CRITICAL];
+export const SEVERITY_ORDER = [AnomalySeverity.INFO, AnomalySeverity.WARNING, AnomalySeverity.CRITICAL];
 const MAX_LISTED_NODES = 5;
 const MAX_LISTED_RANGES = 3;
 const SHORT_ID_LENGTH = 8;

@@ -201,8 +201,11 @@ jobs:
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=semver,pattern={{version}}-no-ai
-            type=raw,value=${{ needs.version.outputs.version }}-no-ai,enable=${{ github.event_name == 'workflow_dispatch' }}
+            # Not type=semver,pattern={{version}}-no-ai: for a SemVer prerelease
+            # metadata-action replaces the pattern with the bare version, so
+            # v1.2.3-rc.1 would push :1.2.3-rc.1 (the AI image's tag) and no
+            # :1.2.3-rc.1-no-ai, which the chart defaults to.
+            type=raw,value=${{ needs.version.outputs.version }}-no-ai
             # `latest` tracks the no-ai image (the smaller, default variant).
             # Only stable releases move `latest`; SemVer prereleases (which contain a `-`) are excluded.
             type=raw,value=latest,enable=${{ github.ref == format('refs/tags/v{0}', needs.version.outputs.version) && !contains(needs.version.outputs.version, '-') }}
@@ -227,3 +230,24 @@ jobs:
           subject-name: docker.io/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.digest.outputs.digest }}
           push-to-registry: true
+
+  # Publish the Helm chart for this release once BOTH images are on Docker Hub,
+  # so the chart (whose default image is <version>-no-ai) is never visible
+  # before its image. helm-publish.yml fails the release, naming both versions,
+  # if Chart.yaml is not at the tag's version (run scripts/bump-version.mjs in
+  # the release commit). Tag pushes only: a manual image rebuild does not
+  # re-publish the chart; run "Publish Helm Chart" by hand for that.
+  publish-chart:
+    needs: [version, merge-with-ai, merge-without-ai]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+    uses: ./.github/workflows/helm-publish.yml
+    with:
+      ref: ${{ github.ref }}
+      version: ${{ needs.version.outputs.version }}
+    secrets:
+      HELM_PUBLISH_TOKEN: ${{ secrets.HELM_PUBLISH_TOKEN }}
+      HELM_GPG_PRIVATE_KEY: ${{ secrets.HELM_GPG_PRIVATE_KEY }}
+      HELM_GPG_PASSPHRASE: ${{ secrets.HELM_GPG_PASSPHRASE }}
+      HELM_GPG_KEY: ${{ secrets.HELM_GPG_KEY }}

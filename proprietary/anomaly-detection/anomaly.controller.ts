@@ -30,6 +30,7 @@ import {
 import { ReplicaDivergenceHistory } from './replication-divergence-detector';
 import { ServedHotShardDetail } from './hot-shard-detector';
 import { TopologyDivergenceReport } from './topology-divergence-report';
+import { TopologyDisagreementSummary } from './topology-disagreements';
 import { type RebalanceRunView, parseConfirmedMoves } from './slot-rebalance-run';
 import type { RequestWithActor } from '../../apps/api/src/auth/guards/actor.guard';
 import { LicenseGuard, RequiresFeature, Feature } from '@proprietary/licenses';
@@ -267,6 +268,20 @@ export class AnomalyController {
   @ApiHeader({ name: CONNECTION_ID_HEADER, required: true, description: 'Connection ID of the cluster' })
   getTopologyDivergence(@ConnectionId({ required: true }) connectionId: string): TopologyDivergenceReport {
     return this.anomalyService.getTopologyDivergence(connectionId);
+  }
+
+  @Get('topology-disagreements')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
+  @ApiOperation({
+    summary: 'Where the cluster views disagree, with one line per shard',
+    description:
+      'Counts are over the views that answered in the last round, not over every node: coverage says how many ' +
+      'nodes there are, how many were asked and how many answered. Node lists are capped at 25, the counts are exact.',
+  })
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: true, description: 'Connection ID of the cluster' })
+  getTopologyDisagreements(@ConnectionId({ required: true }) connectionId: string): TopologyDisagreementSummary {
+    return this.anomalyService.getTopologyDisagreements(connectionId);
   }
 
   @Post('events/:id/resolve')

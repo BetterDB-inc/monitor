@@ -826,7 +826,7 @@ Each new plan is checked together with the plans before it: with all of them app
 
 A later hot shard that gets no plan from the loads the earlier plans leave is planned once more from the measured loads alone. When that gives a plan, the answer is `conflicts_with_other_plan`. When it does not, the answer is the one from the measured loads, `key_level` for example, so a reason and its `pinnedSlots` never describe loads that exist only after plans that nobody has applied.
 
-A plan lists `warnings`, none of which block it: `source_fork` (the hot shard forks for the snapshot while it is the busiest node), `fewer_replicas` (the target has fewer replicas than the hot shard), `target_memory` (the keys moved, at the hot shard's average key size, would take the target past 80% of its `maxmemory`; `memoryShare` is the estimate) and `memory_unknown` (the target has no `maxmemory`, or `INFO` could not be read on it or on the hot shard). The estimate of a plan with `plannedAfter` also counts the keys those earlier plans bring to the same target, each at the average key size of its own hot shard, and is `memory_unknown` when one of those hot shards cannot be read.
+A plan lists `warnings`, none of which block it: `source_fork` (the hot shard forks for the snapshot while it is the busiest node), `fewer_replicas` (the target has fewer replicas than the hot shard), `target_memory` (the keys moved, at the hot shard's average key size, would take the target past 80% of its `maxmemory`; `memoryShare` is the estimate), `memory_unlimited` (the target has no `maxmemory` limit, so there is nothing to check the moved keys against) and `memory_unknown` (`INFO` could not be read on the target or on the hot shard, or the hot shard reports no keys). The estimate of a plan with `plannedAfter` also counts the keys those earlier plans bring to the same target, each at the average key size of its own hot shard, and is `memory_unknown` when one of those hot shards cannot be read. A target with no `maxmemory` limit is `memory_unlimited` whatever could be read on the hot shards.
 
 A plan also says whether the cluster has one command that does the move, in `support`, and gives the command text in `commands`. BetterDB sends it only when an admin runs the plan (see [Running a plan](#running-a-plan)); otherwise it is there to copy.
 
@@ -949,7 +949,7 @@ Cluster views diverge for 15s: 10.0.1.5:6379 (eu-west-1a) disagrees with 10.0.2.
 
 The time is given in seconds up to two minutes, then in whole minutes, hours or days, rounded down. The same holds for [`partial_membership`](#partial_membership).
 
-It is CRITICAL when slot owners are in dispute, because clients can then be sent to different nodes for the same key, and a WARNING otherwise. When the nodes of an open WARNING start to dispute slot owners as well, the WARNING is closed and a CRITICAL event is raised in its place. An open event is not lowered when the slot dispute ends. When exactly one node stands against the rest, the event carries that node's address as `nodeAddr`. The text is written when the event is raised; [`GET /api/anomaly/topology-divergence`](#get-topology-divergence) returns the current state.
+It is CRITICAL when slot owners are in dispute, because clients can then be sent to different nodes for the same key, and a WARNING otherwise. When the nodes of an open WARNING start to dispute slot owners as well, the WARNING is closed and a CRITICAL event is raised in its place. An open event is not lowered when the slot dispute ends. When exactly one node stands against the rest, the event carries that node's address as `nodeAddr`. The text is written when the event is raised; [`GET /api/anomaly/topology-divergence`](#get-topology-divergence) returns the current state. [`GET /api/anomaly/topology-disagreements`](#get-topology-disagreements) returns the same state as one line per disagreement with the number of views on each side, and one line per shard, which stays readable on a cluster of hundreds of nodes.
 
 **When it closes.** The event closes after the views agree for 3 rounds in a row. A round in which the disagreement shows again starts that count over. A round in which the nodes of one side do not answer, or fewer than two views could be read, is neither agreement nor disagreement: the count is kept as it is and the event stays open. When that lasts 5 minutes the event is closed. A membership disagreement is held in the same way while a node that lacked the member gives no view, also when another node that lacked it has learned it meanwhile: what the silent node would say is not known, so such a gap can keep the event open for those 5 minutes. That hold is not applied for a silent node that every answering view that lists it flags `fail` or `fail?`. Such a node is taken for dead, and the disagreement is judged by the views that answered. An event that is resolved by hand is raised again while the views still differ. The event is closed when the connection that holds it is removed; a connection that still watches the cluster raises it again once the disagreement is confirmed. After a restart the open event is picked up instead of raised a second time.
 
@@ -1520,6 +1520,123 @@ Each entry of `partialMembership` is one node only part of the cluster knows: `n
   ]
 }
 ```
+
+### Get Topology Disagreements
+
+```http
+GET /api/anomaly/topology-disagreements
+X-Connection-ID: <connection-id>
+```
+
+The state of the last [`topology_divergence`](#topology_divergence) round, summarised for large clusters: one line per disagreement with the number of views on each side, and one line per shard. The connection header is required. Any connection that watches the cluster returns the same summary. It is built from the round kept in memory, so it is empty until the first round after a restart. The MCP tool `get_topology_disagreements` returns the same data.
+
+**The counts are over the views that answered, not over every node.** A round asks at most 12 nodes by default, so on a 500-node cluster a line reads "9 views against 3", not "497 against 3". `coverage` says how far the round reached: `nodes` is the number of members of the cluster, `asked` the nodes asked in the round, `answered` those that gave a view, and `complete` is `true` only when every member gave one. `unanswered` lists the nodes that were asked and gave no view, and the nodes a line is waiting for that gave none in this round. The second kind is not counted in `asked`, so `unansweredCount` can be above `asked` minus `answered`. A node that one view lists without an address counts as a member when another view lists it as one, so `complete` is not `true` until it has given a view too. An empty `disagreements` list means only that the views that answered agree with each other. A node that was asked and did not answer gave no view, so it is not known to agree, and with `status: insufficient_views` fewer than two views answered and nothing was compared at all. Read `status` and `coverage` before taking an empty list as agreement; it covers the whole cluster only when `complete` is `true`. `status` has the same meaning as in [Get Topology Divergence](#get-topology-divergence).
+
+Each entry of `disagreements` is one thing the views disagree about:
+
+| Field | Meaning |
+|-------|---------|
+| `kind` | `slot_owner`, `config_epoch`, `failure_flags` or `membership` |
+| `severity` | `critical` for `slot_owner`, `warning` for the others |
+| `open` | `true` for a line of the last round, and for a stale line whose event is still open. The lines that are not open are the stale ones without an open event. A shard is `disputed` only through open lines |
+| `confirmed`, `eventId`, `eventType` | `confirmed` is `true` when an open event covers the line; `eventId` and `eventType` then point at that event. Both are `null` while the disagreement is still being counted, and after the event was resolved by hand. An event covers a line only while the line still shows what the event was raised for: the same node and kind (for `slot_owner` the same owners and at least one slot in common), with the nodes the event names as disagreeing still apart from the others. A new dispute between the same owners on other slots does not take the event of an ended one. When more than one event covers a line, an open one comes before one that was resolved by hand, then the one that shares the most slots, then the one whose disagreement was confirmed last |
+| `resolvedByHand` | `true` when the event of the line was resolved by hand and the disagreement has not been raised again. The line then has no `eventId` and `confirmed` is `false`, although it was confirmed before. A disagreement that is still confirmed is raised again in the next round, so this is mostly seen for one round, or on a stale line |
+| `since`, `rounds` | When it was first seen, and for how many rounds in a row |
+| `stale`, `lastSeenAt` | `stale` is `true` when the line was not seen in the last round; `lastSeenAt` is the round it was last seen in. See below |
+| `subjects`, `subjectCount` | The nodes the line is about. For `slot_owner` these are the nodes claimed as owner |
+| `slots`, `slotCount` | The disputed slot ranges, for `slot_owner` only |
+| `shardIds` | The shards the line touches: those of the subjects, and for `slot_owner` those that own the disputed slots |
+| `positions` | One entry per side, largest first: `value`, `count` (the number of views on that side), `observers` (the nodes that hold it) and `observerCount` (how many nodes hold it, which is the same as `count` unless the line is merged). For `slot_owner` the value is the node id of the owner, repeated as `owner` with its address, or `unassigned`. Empty on a stale line |
+| `epochs` | On a merged `config_epoch` line only: the epoch each side has for each node, in the order of `positions`. The `value` of the positions is then `null` |
+| `text` | The line in words |
+
+For `failure_flags` the value is `ok`, `fail?` (the view suspects the node) or `fail` (the view has it as failed), so a node that part of the cluster only suspects is told apart from one that part of it has failed. What a node says of itself is not counted, so the views on such a line can add up to one less than `answered`. For `membership` the value is `known`, `handshake`, `noaddr` or `missing`.
+
+Lines of the same kind that have the same nodes on the same sides, with the same counts, and differ only in the node they are about are merged into one: `4 nodes: ok in 9 views, fail? in 3 views.` `subjectCount` is then above 1 and the `id` ends in `+N`. The `id` of a merged line changes when the set of merged lines changes, so it is stable only within one response: do not keep it across polls. Slot owner lines are never merged. On a merged line `count` is the number of views on that side for each node of the line, `observers` lists every node that holds the side for at least one node of the line, and `observerCount` is how many those are. When a zone is cut off, each of its nodes is vouched for by the others, so a side reads `ok in 3 views` with 4 observers. A line is not merged into another when a node would then stand on both sides of the merged line. When two halves of a cluster each flag the other as failing, there is one line for each half, so the sides still say who flags whom. Open lines come first, with the lines of the last round before the stale ones; within those the order is critical first, then confirmed before counting, then oldest first.
+
+**A line that could not be checked again is kept, without counts.** When the nodes that hold one side of a disagreement do not answer, or the round could not compare views at all, the disagreement could not be checked in that round. It is kept for up to 5 minutes with `stale: true`: `positions` is empty, `text` says what the views differed on without numbers (`Slots 0-99: views differed on the owner (10.0.0.1:6379, 10.0.0.3:6379).`), and `lastSeenAt` says when it was last seen. A stale line keeps its event. While that event is open the line has `confirmed: true`, the `eventId` and `open: true`, and its shards stay `disputed`: the event was raised and nothing has cleared it. A stale line without an open event has `open: false`: it was neither confirmed nor cleared, comes after the open lines and does not make a shard `disputed`. Stale lines are only merged with lines last seen in the same round.
+
+Each entry of `shards` is one shard: its `primary`, the number of `replicas`, its `zones`, its `slots`, and `ownViews`, the number of its own nodes that gave a view. `state` is `disputed` when an open line touches the shard (the lines are in `disagreementIds`), also in a round that could not compare views; `undisputed` when no line does; and `not_compared` when the round could not compare views or only lines that are not open touch the shard. The lines that are not open and touch a shard are in `staleDisagreementIds`, whatever its state. Undisputed means no view that answered disagrees about the shard. Disputed shards come first, the rest follow in slot order. `shardTotals` counts the shards by state (`total`, `disputed`, `undisputed`, `notCompared`).
+
+The MCP route and tool return only the disputed shards by default, with `shardsListed: "disputed"` and the same `shardTotals`; `shards=all` (tool argument `shards: "all"`) returns one line per shard.
+
+Node lists (`subjects`, `observers`, `unanswered`, `epochs`) hold at most 25 entries; the counts next to them are exact. The number of lines is not capped: every distinct disagreement adds one. A summary of a 500-node cluster with a few disagreements is under 150 KB, and one with many distinct disagreements is larger.
+
+**Response**:
+```json
+{
+  "status": "ok",
+  "sampledAt": 1704067200000,
+  "coverage": {
+    "nodes": 500,
+    "asked": 12,
+    "answered": 12,
+    "complete": false,
+    "unanswered": [],
+    "unansweredCount": 0
+  },
+  "disagreements": [
+    {
+      "id": "slot_owner:3f2a9c1e|9c4e1b7a",
+      "kind": "slot_owner",
+      "severity": "critical",
+      "open": true,
+      "confirmed": true,
+      "resolvedByHand": false,
+      "eventId": "0c1f6f0e-6d0f-4d3e-9a55-0f2f8f3f6a11",
+      "eventType": "topology_divergence",
+      "since": 1704067170000,
+      "rounds": 6,
+      "stale": false,
+      "lastSeenAt": 1704067200000,
+      "subjects": [
+        { "nodeId": "3f2a9c1e", "address": "10.0.0.1:6379", "role": "primary", "availabilityZone": "eu-west-1a" },
+        { "nodeId": "9c4e1b7a", "address": "10.0.0.3:6379", "role": "primary", "availabilityZone": "eu-west-1b" }
+      ],
+      "subjectCount": 2,
+      "slots": [[0, 5460]],
+      "slotCount": 5461,
+      "shardIds": ["3f2a9c1e", "9c4e1b7a"],
+      "positions": [
+        {
+          "value": "3f2a9c1e",
+          "owner": { "nodeId": "3f2a9c1e", "address": "10.0.0.1:6379", "role": "primary", "availabilityZone": "eu-west-1a" },
+          "count": 9,
+          "observerCount": 9,
+          "observers": [{ "nodeId": "3f2a9c1e", "address": "10.0.0.1:6379", "role": "primary" }]
+        },
+        {
+          "value": "9c4e1b7a",
+          "owner": { "nodeId": "9c4e1b7a", "address": "10.0.0.3:6379", "role": "primary", "availabilityZone": "eu-west-1b" },
+          "count": 3,
+          "observerCount": 3,
+          "observers": [{ "nodeId": "9c4e1b7a", "address": "10.0.0.3:6379", "role": "primary" }]
+        }
+      ],
+      "text": "Slots 0-5460: owned by 10.0.0.1:6379 in 9 views, by 10.0.0.3:6379 in 3 views."
+    }
+  ],
+  "shards": [
+    {
+      "shardId": "3f2a9c1e",
+      "primary": { "nodeId": "3f2a9c1e", "address": "10.0.0.1:6379", "role": "primary", "availabilityZone": "eu-west-1a" },
+      "replicas": 1,
+      "zones": ["eu-west-1a", "eu-west-1b"],
+      "slots": [[0, 5460]],
+      "slotCount": 5461,
+      "nodes": 2,
+      "ownViews": 1,
+      "state": "disputed",
+      "disagreementIds": ["slot_owner:3f2a9c1e|9c4e1b7a"],
+      "staleDisagreementIds": []
+    }
+  ],
+  "shardTotals": { "total": 250, "disputed": 2, "undisputed": 248, "notCompared": 0 },
+  "shardsListed": "all"
+}
+```
+
+In the example only the first shard is shown, node ids are shortened and the `observers` lists are cut to one entry each.
 
 ### Resolve Anomaly or Group
 
