@@ -50,6 +50,14 @@ vi.mock('../hooks/useNodeCollection', () => ({
     return { collection: calls.collection, refresh: calls.refreshCollection };
   },
 }));
+vi.mock('../hooks/useClusterDisagreements', () => ({
+  useClusterDisagreements: () => ({
+    licensed: false,
+    licenseLoading: false,
+    summary: undefined,
+    error: null,
+  }),
+}));
 vi.mock('../components/cluster/ClusterHealthCard', () => ({ ClusterHealthCard: () => null }));
 vi.mock('../components/cluster/ClusterTopology', () => ({ ClusterTopology: () => null }));
 vi.mock('../components/cluster/SlotHeatmap', () => ({ SlotHeatmap: () => null }));
