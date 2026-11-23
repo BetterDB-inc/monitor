@@ -2,11 +2,14 @@ import type { ClusterNode } from '@app/common/types/metrics.types';
 import {
   PARTIAL_MEMBERSHIP_MIN_AGE_MS,
   type PartialMembership,
+  membershipSides,
   membershipSightings,
   partialMembershipMessage,
   partialMembershipNodeId,
   partialMembershipSignature,
   partiallyKnownNodes,
+  inheritedPartialMemberships,
+  renamedPartialMemberships,
   unclaimedByPartialMembership,
 } from '../partial-membership';
 import {
@@ -1460,5 +1463,122 @@ describe('partialMembershipMessage', () => {
     const views = [view('p1'), view('p2'), view('p3', { n1: withoutAddress(NEW_NODE) })];
     const { found } = judge(every(views, 0, 95_000));
     expect(partialMembershipMessage(found[0], 95_000)).toContain('Not known by 10.0.0.3:6379 (no address).');
+  });
+});
+
+describe('membershipSides', () => {
+  const { found, tracked } = judge(every(KNOWN_BY_P1_ONLY, 0, LONG_ENOUGH));
+
+  it('puts a disagreement a finding holds on the side of its event', () => {
+    expect([...membershipSides(tracked, found, LONG_ENOUGH)]).toEqual([['membership:n1', 'partial_membership']]);
+  });
+
+  it('puts a disagreement no finding holds on the side of the cluster view divergence event', () => {
+    expect([...membershipSides(tracked, [], LONG_ENOUGH)]).toEqual([['membership:n1', 'topology_divergence']]);
+  });
+
+  it('keeps the side a disagreement had while it is not seen', () => {
+    const before = new Map([['membership:n1', 'partial_membership' as const]]);
+
+    expect([...membershipSides(tracked, [], LONG_ENOUGH + ROUND_MS, before)]).toEqual([
+      ['membership:n1', 'partial_membership'],
+    ]);
+  });
+
+  it('leaves out the other kinds of disagreement', () => {
+    const epochs = [view('p1'), view('p2', { p3: { configEpoch: 9 } }), view('p3')];
+    const round = judge(every(epochs, 0, LONG_ENOUGH));
+
+    expect(round.tracked.length).toBeGreaterThan(0);
+    expect(membershipSides(round.tracked, round.found, LONG_ENOUGH).size).toBe(0);
+  });
+});
+
+describe('renamedPartialMemberships', () => {
+  const [finding] = judge(every(KNOWN_BY_P1_ONLY, 0, LONG_ENOUGH)).found;
+  const underOldName = { ...finding, signature: partialMembershipSignature('p9'), nodeId: 'p9' };
+  const lacking = underOldName.notKnownBy.map((peer) => peer.nodeId);
+  const answered = new Set(['p9', ...lacking]);
+
+  it('names an open finding whose disagreements another finding now holds', () => {
+    const open = new Map([[underOldName.signature, { group: underOldName }]]);
+    expect(renamedPartialMemberships(open, [finding], answered)).toEqual(['partial_membership:p9']);
+  });
+
+  it('leaves a finding whose node gave no view in the round', () => {
+    const open = new Map([[underOldName.signature, { group: underOldName }]]);
+    expect(renamedPartialMemberships(open, [finding], new Set(lacking))).toEqual([]);
+  });
+
+  it('leaves a finding while a peer that lacked its node gave no view in the round', () => {
+    const open = new Map([[underOldName.signature, { group: underOldName }]]);
+    expect(lacking.length).toBeGreaterThan(0);
+    expect(renamedPartialMemberships(open, [finding], new Set(['p9', ...lacking.slice(1)]))).toEqual([]);
+  });
+
+  it('leaves a finding while the finding that now holds its disagreements is not confirmed', () => {
+    const open = new Map([[underOldName.signature, { group: underOldName }]]);
+    expect(finding.confirmed).toBe(true);
+    expect(renamedPartialMemberships(open, [{ ...finding, confirmed: false }], answered)).toEqual([]);
+  });
+
+  it('leaves a finding that is still found', () => {
+    const open = new Map([[finding.signature, { group: finding }]]);
+    expect(renamedPartialMemberships(open, [finding], answered)).toEqual([]);
+  });
+
+  it('leaves a finding whose disagreements no finding holds', () => {
+    const open = new Map([[underOldName.signature, { group: underOldName }]]);
+    const elsewhere = [{ ...finding, disagreementKeys: ['membership:p8'] }];
+    expect(renamedPartialMemberships(open, [], answered)).toEqual([]);
+    expect(renamedPartialMemberships(open, elsewhere, answered)).toEqual([]);
+  });
+
+  it('names an event picked up after a restart by the finding it last saw for it', () => {
+    const open = new Map([[underOldName.signature, { observed: underOldName }]]);
+    expect(renamedPartialMemberships(open, [finding], answered)).toEqual(['partial_membership:p9']);
+    expect(renamedPartialMemberships(open, [finding], new Set(lacking))).toEqual([]);
+    expect(renamedPartialMemberships(open, [{ ...finding, confirmed: false }], answered)).toEqual([]);
+  });
+
+  it('leaves an open event whose finding it never saw', () => {
+    expect(renamedPartialMemberships(new Map([[underOldName.signature, {}]]), [finding], answered)).toEqual([]);
+  });
+});
+
+describe('inheritedPartialMemberships', () => {
+  const [finding] = judge(every(KNOWN_BY_P1_ONLY, 0, LONG_ENOUGH)).found;
+  const underOldName = { ...finding, signature: partialMembershipSignature('p9'), nodeId: 'p9' };
+  const counted = { ...finding, confirmed: false };
+
+  it('names an open finding whose disagreements a finding that is still counted now holds', () => {
+    const open = new Map([[underOldName.signature, { group: underOldName }]]);
+    expect(inheritedPartialMemberships(open, [counted])).toEqual(['partial_membership:p9']);
+  });
+
+  it('leaves a finding whose disagreements a confirmed finding holds', () => {
+    const open = new Map([[underOldName.signature, { group: underOldName }]]);
+    expect(inheritedPartialMemberships(open, [finding])).toEqual([]);
+  });
+
+  it('leaves a finding that is still found', () => {
+    const open = new Map([[counted.signature, { group: finding }]]);
+    expect(inheritedPartialMemberships(open, [counted])).toEqual([]);
+  });
+
+  it('leaves a finding whose disagreements no finding holds', () => {
+    const open = new Map([[underOldName.signature, { group: underOldName }]]);
+    expect(inheritedPartialMemberships(open, [])).toEqual([]);
+    expect(inheritedPartialMemberships(open, [{ ...counted, disagreementKeys: ['membership:p8'] }])).toEqual([]);
+  });
+
+  it('names an event picked up after a restart by the finding it last saw for it', () => {
+    const open = new Map([[underOldName.signature, { observed: underOldName }]]);
+    expect(inheritedPartialMemberships(open, [counted])).toEqual(['partial_membership:p9']);
+    expect(inheritedPartialMemberships(open, [finding])).toEqual([]);
+  });
+
+  it('leaves an open event whose finding it never saw', () => {
+    expect(inheritedPartialMemberships(new Map([[underOldName.signature, {}]]), [counted])).toEqual([]);
   });
 });
