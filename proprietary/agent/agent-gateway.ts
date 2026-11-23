@@ -1,11 +1,23 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { WebSocketServer, WebSocket } from 'ws';
+import { WebSocketServer, WebSocket, RawData } from 'ws';
 import { IncomingMessage } from 'http';
 import { Socket } from 'net';
 import { AgentTokensService } from './agent-tokens.service';
 import { AgentDatabaseAdapter } from './agent-database-adapter';
 import { ConnectionRegistry } from '../../apps/api/src/connections/connection-registry.service';
 import type { AgentHelloMessage, AgentConnectionInfo } from '@betterdb/shared';
+
+const LIVENESS_CHECK_MS = 5000;
+
+type ConnectionIdClaim = 'free' | 'replaced' | 'taken' | 'closed';
+
+function isPong(data: RawData): boolean {
+  try {
+    return JSON.parse(data.toString()).type === 'pong';
+  } catch {
+    return false;
+  }
+}
 
 interface AgentConnection {
   id: string;
@@ -128,11 +140,12 @@ export class AgentGateway {
       `capabilities: ${hello.capabilities.join(', ')})`,
     );
 
-    const previous = this.agents.get(agent.id);
-    if (previous && previous !== agent) {
-      this.retireAgent(previous);
-      previous.ws.close(4003, 'Replaced by a new connection');
-      this.logger.log(`Agent ${agent.id} reconnected, closed its previous socket`);
+    const claim = await this.claimConnectionId(agent);
+    if (claim === 'closed') return;
+    if (claim === 'taken') {
+      this.logger.warn(`Agent ${agent.id}: another agent is already connected with this token, turning the new one away`);
+      agent.ws.close(4003, 'Another agent is connected with this token');
+      return;
     }
 
     // Create the DatabaseAdapter
@@ -151,7 +164,7 @@ export class AgentGateway {
       this.logger.log(`Agent ${agent.id} registered as connection`);
     } catch (err: any) {
       this.logger.error(`Failed to register agent ${agent.id}: ${err.message}`);
-      if (previous) this.connectionRegistry.removeAgentConnection(agent.id);
+      if (claim === 'replaced') this.connectionRegistry.removeAgentConnection(agent.id);
       agent.ws.close(4002, 'Registration failed');
       return;
     }
@@ -168,6 +181,46 @@ export class AgentGateway {
         }, 10000);
       }
     }, 30000);
+  }
+
+  private async claimConnectionId(agent: AgentConnection): Promise<ConnectionIdClaim> {
+    for (;;) {
+      const previous = this.agents.get(agent.id);
+      if (!previous) return 'free';
+
+      const answered = await this.answersPing(previous.ws);
+      if (agent.ws.readyState !== WebSocket.OPEN) return 'closed';
+      if (this.agents.get(agent.id) !== previous) continue;
+      if (answered) return 'taken';
+
+      this.retireAgent(previous);
+      previous.ws.close(4003, 'Replaced by a new connection');
+      previous.ws.terminate();
+      this.logger.log(`Agent ${agent.id} reconnected, dropped its previous socket`);
+      return 'replaced';
+    }
+  }
+
+  private answersPing(ws: WebSocket): Promise<boolean> {
+    if (ws.readyState !== WebSocket.OPEN) return Promise.resolve(false);
+
+    return new Promise((resolve) => {
+      const finish = (answered: boolean) => {
+        clearTimeout(timer);
+        ws.off('message', onMessage);
+        ws.off('close', onClose);
+        resolve(answered);
+      };
+      const onMessage = (data: RawData) => {
+        if (isPong(data)) finish(true);
+      };
+      const onClose = () => finish(false);
+      const timer = setTimeout(() => finish(false), LIVENESS_CHECK_MS);
+
+      ws.on('message', onMessage);
+      ws.on('close', onClose);
+      ws.send(JSON.stringify({ type: 'ping', ts: Date.now() }));
+    });
   }
 
   private unregisterAgent(connectionId: string, ws: WebSocket): void {
