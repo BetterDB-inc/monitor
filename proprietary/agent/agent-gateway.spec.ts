@@ -18,6 +18,8 @@ class FakeSocket extends EventEmitter {
   sent: Array<{ type: string; ts?: number }> = [];
   closes: Array<{ code?: number; reason?: string }> = [];
 
+  closesAfterPong = false;
+
   constructor(private readonly answersPings: boolean) {
     super();
   }
@@ -28,6 +30,7 @@ class FakeSocket extends EventEmitter {
     if (msg.type === 'ping' && this.answersPings) {
       void Promise.resolve().then(() => {
         this.emit('message', Buffer.from(JSON.stringify({ type: 'pong', ts: msg.ts })));
+        if (this.closesAfterPong) this.readyState = 2;
       });
     }
   }
@@ -163,6 +166,24 @@ describe('AgentGateway reconnects', () => {
     expect(oldSocket.terminated).toBe(false);
     expect(registry.isRegisteredClient(CONNECTION_ID, oldAdapter)).toBe(true);
     expect(oldAdapter.isConnected()).toBe(true);
+    expect(gateway.getConnectedAgents()).toHaveLength(1);
+    expect(jest.getTimerCount()).toBe(1);
+  });
+
+  it('replaces an agent that answers the check but is already closing', async () => {
+    const { registry, gateway, connect } = build();
+    const oldSocket = await connect(true);
+    const oldAdapter = registry.get(CONNECTION_ID);
+    oldSocket.closesAfterPong = true;
+    const newSocket = await connect(true);
+
+    await jest.advanceTimersByTimeAsync(0);
+    oldSocket.drop();
+
+    expect(newSocket.closes).toHaveLength(0);
+    expect(oldSocket.terminated).toBe(true);
+    expect(registry.isListed(CONNECTION_ID)).toBe(true);
+    expect(registry.isRegisteredClient(CONNECTION_ID, oldAdapter)).toBe(false);
     expect(gateway.getConnectedAgents()).toHaveLength(1);
     expect(jest.getTimerCount()).toBe(1);
   });

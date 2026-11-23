@@ -204,7 +204,7 @@ export class AgentGateway {
       const answered = await this.answersPing(previous.ws, agent.ws);
       if (agent.ws.readyState !== WebSocket.OPEN) return 'closed';
       if (this.agents.get(agent.id) !== previous) continue;
-      if (answered) return 'taken';
+      if (answered && previous.ws.readyState === WebSocket.OPEN) return 'taken';
 
       this.retireAgent(previous);
       previous.ws.close(4003, 'Replaced by a new connection');
