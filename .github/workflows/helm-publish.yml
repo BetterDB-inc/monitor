@@ -19,7 +19,9 @@
 # in lockstep with the app (chart version == appVersion == app version, set by
 # scripts/bump-version.mjs), so there is no publish on master pushes: a chart
 # change ships with the next app release. Run it by hand (workflow_dispatch)
-# to re-publish, e.g. after a failed run.
+# with a release tag to re-publish, e.g. after a failed run. Manual runs only
+# take a v* tag: packaging a branch would publish whatever chart is on it under
+# the release version, and the already-published guard would make that permanent.
 #
 # The chart is packaged from the release ref, but the tarballs and index.yaml
 # are rebuilt over master's docs/charts, so a release cut from an older commit
@@ -50,8 +52,8 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: 'Tag or branch to package the chart from (e.g. v0.57.0). Empty = the branch this run is started on.'
-        required: false
+        description: 'Release tag to package the chart from (e.g. v0.57.0)'
+        required: true
         type: string
 
 # The commit to master is made with HELM_PUBLISH_TOKEN, not GITHUB_TOKEN.
@@ -69,13 +71,25 @@ jobs:
       cancel-in-progress: false
       queue: max
     env:
-      SOURCE_REF: ${{ inputs.ref || github.ref }}
+      SOURCE_REF: ${{ inputs.ref }}
       RELEASE_VERSION: ${{ inputs.version }}
     steps:
+      # Both callers pass a release tag; refuse anything else (a branch, a SHA)
+      # and check out refs/tags/<tag> so a same-named branch cannot shadow it.
+      - name: Resolve release tag
+        id: tag
+        run: |
+          tag="${SOURCE_REF#refs/tags/}"
+          if [[ ! "$tag" =~ ^v[0-9] ]]; then
+            echo "::error::ref must be a release tag like v0.57.0 (got '${SOURCE_REF}')."
+            exit 1
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
       - name: Checkout chart source
         uses: actions/checkout@v4
         with:
-          ref: ${{ env.SOURCE_REF }}
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
           persist-credentials: false
 
       # Only docs/charts is needed from master: the published tarballs the
@@ -96,16 +110,14 @@ jobs:
         id: preflight
         env:
           HELM_PUBLISH_TOKEN: ${{ secrets.HELM_PUBLISH_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           if [ -z "$HELM_PUBLISH_TOKEN" ]; then
             echo "::error::HELM_PUBLISH_TOKEN is not set — required to commit the chart + index to protected master (a fine-grained PAT with contents:write from a user who bypasses branch protection). Set the secret and rerun."
             exit 1
           fi
-          expected="$RELEASE_VERSION"
-          # A manual run on a tag (v1.2.3 or refs/tags/v1.2.3) must match it too.
-          if [ -z "$expected" ] && [[ "$SOURCE_REF" =~ ^(refs/tags/)?v[0-9] ]]; then
-            expected="${SOURCE_REF#refs/tags/}"
-          fi
+          # A manual run has no version input; the tag pins it instead.
+          expected="${RELEASE_VERSION:-$TAG}"
           scripts/check-chart-version.sh "$expected"
           version=$(grep '^version:' charts/betterdb-monitor/Chart.yaml | sed 's/.*: *//; s/"//g')
           echo "version=${version}" >> "$GITHUB_OUTPUT"
