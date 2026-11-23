@@ -172,6 +172,20 @@ describe('ClusterDiscoveryService unresponsive node', () => {
     await expect(service.getNodeConnection(silent.id, 'seed')).resolves.toBe(client);
   });
 
+  it('does not hold a QUIT without a reply against the node', async () => {
+    const client = (await service.getNodeConnection(silent.id, 'seed')) as unknown as FakeClient;
+    client.quit.mockImplementation(() =>
+      client.sendCommand({ name: 'quit', promise: Promise.reject(new Error('Command timed out')) }),
+    );
+
+    await service.releaseConnection('seed');
+    const next = await service.getNodeConnection(silent.id, 'seed');
+
+    expect(next).toBe(created[1]);
+    expect(client.status).toBe('end');
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('is not answering'));
+  });
+
   it('refuses a node whose connect timed out', async () => {
     nextConnect = () => new Promise<void>(() => undefined);
     const connecting = service.getNodeConnection(silent.id, 'seed');

@@ -78,6 +78,7 @@ const UNRESPONSIVE_NODE_COOL_OFF_MS = 30_000;
 const MAX_UNRESPONSIVE_NODES = 512;
 const COMMAND_TIMED_OUT = 'Command timed out';
 const CONNECTION_TIMED_OUT = 'Connection timeout';
+const CLOSING_COMMAND = 'quit';
 
 function isConnectTimeout(error: unknown): boolean {
   return error instanceof Error && (error.message === CONNECTION_TIMED_OUT || error.message.includes('ETIMEDOUT'));
@@ -105,12 +106,15 @@ class NodeClient extends Valkey {
   }
 
   sendCommand(...args: Parameters<Valkey['sendCommand']>): ReturnType<Valkey['sendCommand']> {
-    args[0].promise.then(
-      () => this.report('answered'),
-      (error: unknown) => {
-        if (error instanceof Error && error.message === COMMAND_TIMED_OUT) this.report('timedOut');
-      },
-    );
+    const [command] = args;
+    if (command.name !== CLOSING_COMMAND) {
+      command.promise.then(
+        () => this.report('answered'),
+        (error: unknown) => {
+          if (error instanceof Error && error.message === COMMAND_TIMED_OUT) this.report('timedOut');
+        },
+      );
+    }
     return super.sendCommand(...args);
   }
 }
