@@ -19,7 +19,12 @@ import { withTimeout } from '../common/utils/with-timeout';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
 import { CaptureWriter, CaptureWriterResult, MonitorSource } from './capture-writer';
-import { assertCap, assertDuration } from './capture-limits';
+import {
+  assertCap,
+  assertDuration,
+  DEFAULT_MAX_BYTE_CAP,
+  DEFAULT_MAX_LINE_CAP,
+} from './capture-limits';
 import { CaptureSessionReconciler } from './capture-session-reconciler';
 import { createIovalkeyMonitorSource } from './iovalkey-monitor-source';
 
@@ -30,11 +35,27 @@ export const DEFAULT_DURATION_MS = 30_000;
 const COMMUNITY_BYTE_CAP = 50 * 1024 * 1024; // 50 MB
 const COMMUNITY_LINE_CAP = 5_000_000;
 
-export const DEFAULT_BYTE_CAP = parsePositiveInt(process.env.MONITOR_DEFAULT_BYTE_CAP, COMMUNITY_BYTE_CAP);
-export const DEFAULT_LINE_CAP = parsePositiveInt(process.env.MONITOR_DEFAULT_LINE_CAP, COMMUNITY_LINE_CAP);
+// Fallbacks come from capture-limits.ts, the same constants env.schema.ts defaults to.
+export const MAX_BYTE_CAP = parsePositiveInt(process.env.MONITOR_MAX_BYTE_CAP, DEFAULT_MAX_BYTE_CAP);
+export const MAX_LINE_CAP = parsePositiveInt(process.env.MONITOR_MAX_LINE_CAP, DEFAULT_MAX_LINE_CAP);
 
-export const MAX_BYTE_CAP = parsePositiveInt(process.env.MONITOR_MAX_BYTE_CAP, 10 * COMMUNITY_BYTE_CAP);
-export const MAX_LINE_CAP = parsePositiveInt(process.env.MONITOR_MAX_LINE_CAP, 10 * COMMUNITY_LINE_CAP);
+/** A default above the max would let a capture without explicit caps exceed the limit, so clamp it. */
+function clampDefault(name: string, value: number, max: number): number {
+  if (value <= max) return value;
+  new Logger('MonitorCaptureService').warn(`${name} (${value}) exceeds the maximum (${max}); using ${max}`);
+  return max;
+}
+
+export const DEFAULT_BYTE_CAP = clampDefault(
+  'MONITOR_DEFAULT_BYTE_CAP',
+  parsePositiveInt(process.env.MONITOR_DEFAULT_BYTE_CAP, COMMUNITY_BYTE_CAP),
+  MAX_BYTE_CAP,
+);
+export const DEFAULT_LINE_CAP = clampDefault(
+  'MONITOR_DEFAULT_LINE_CAP',
+  parsePositiveInt(process.env.MONITOR_DEFAULT_LINE_CAP, COMMUNITY_LINE_CAP),
+  MAX_LINE_CAP,
+);
 
 function parsePositiveInt(raw: string | undefined, fallback: number): number {
   if (!raw) return fallback;

@@ -2,6 +2,9 @@ import { BadRequestException } from '@nestjs/common';
 
 export const MIN_DURATION_MS = 500;
 export const MAX_DURATION_MS = 15 * 60 * 1000;
+/** Single source for the default manual-capture caps; env.schema.ts and the service both use these. */
+export const DEFAULT_MAX_BYTE_CAP = 500 * 1024 * 1024;
+export const DEFAULT_MAX_LINE_CAP = 50_000_000;
 /** Running rows older than this, and not owned by this process, cannot be live. */
 export const ORPHAN_AGE_MS = MAX_DURATION_MS + 2 * 60 * 1000;
 

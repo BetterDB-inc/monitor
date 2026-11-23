@@ -12,6 +12,7 @@ import {
 import { parseActivityRetentionDays } from '../activity/activity-config';
 import { isCloudModeValue } from '../common/utils/cloud-mode';
 import { isNegativeEnvValue } from '../common/utils/env-bool';
+import { DEFAULT_MAX_BYTE_CAP, DEFAULT_MAX_LINE_CAP } from '../monitor/capture-limits';
 import { parseAllowedCidrs, parseAllowedHosts } from '../common/utils/outbound-url-guard';
 import { DEFAULT_AUTH_BROKER_URL, isTrueFlag, normalizeOptionalUrl } from './env-normalize';
 
@@ -318,8 +319,8 @@ export const envSchema = z
       .number()
       .int()
       .min(1)
-      .default(500 * 1024 * 1024),
-    MONITOR_MAX_LINE_CAP: z.coerce.number().int().min(1).default(50_000_000),
+      .default(DEFAULT_MAX_BYTE_CAP),
+    MONITOR_MAX_LINE_CAP: z.coerce.number().int().min(1).default(DEFAULT_MAX_LINE_CAP),
 
     // Sentinel loop-stall / TILT RTT-proxy thresholds (valkey-sentinel-tilt-repro).
     // Defaults bracket the 2000ms sentinel_tilt_trigger: warn well below it so the

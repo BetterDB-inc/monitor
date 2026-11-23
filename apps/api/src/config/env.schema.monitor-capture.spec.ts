@@ -1,4 +1,5 @@
 import { envSchema } from './env.schema';
+import { MAX_BYTE_CAP, MAX_LINE_CAP } from '../monitor/monitor-capture.service';
 
 describe('monitor capture env vars', () => {
   it('has defaults', () => {
@@ -19,5 +20,11 @@ describe('monitor capture env vars', () => {
     expect(envSchema.parse({ MONITOR_MAX_BYTE_CAP: '1000' }).MONITOR_MAX_BYTE_CAP).toBe(1000);
     expect(() => envSchema.parse({ MONITOR_MAX_LINE_CAP: '0' })).toThrow();
     expect(() => envSchema.parse({ MONITOR_MAX_BYTE_CAP: 'abc' })).toThrow();
+  });
+
+  it('agrees with the capture service on the default maximums', () => {
+    const parsed = envSchema.parse({});
+    expect(MAX_BYTE_CAP).toBe(parsed.MONITOR_MAX_BYTE_CAP);
+    expect(MAX_LINE_CAP).toBe(parsed.MONITOR_MAX_LINE_CAP);
   });
 });
