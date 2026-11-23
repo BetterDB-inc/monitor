@@ -1018,9 +1018,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
     this.connections.delete(id);
     this.configs.delete(id);
-    this.observedNodeIds.delete(id);
-    this.outsideCluster.delete(id);
-    this.runtimeCapabilityTracker.removeConnection(id);
+    this.resetSessionState(id);
     this.externalMetricsStore.clear(id);
     await this.storage.deleteConnection(id);
     this.notifyRemoved(id);
@@ -1345,6 +1343,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
     this.connections.set(id, adapter);
     this.configs.set(id, config);
+    this.resetSessionState(id);
     if (options.serverless === true) {
       this.serverlessAgentIds.add(id);
     } else {
@@ -1366,10 +1365,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   removeAgentConnection(id: string): void {
     this.connections.delete(id);
     this.configs.delete(id);
-    this.serverlessAgentIds.delete(id);
-    this.observedNodeIds.delete(id);
-    this.outsideCluster.delete(id);
-    this.runtimeCapabilityTracker.removeConnection(id);
+    this.resetSessionState(id);
 
     if (this.defaultId === id) {
       const remaining = Array.from(this.configs.keys());
@@ -1377,6 +1373,13 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     }
 
     this.logger.log(`Removed agent connection: ${id}`);
+  }
+
+  private resetSessionState(id: string): void {
+    this.serverlessAgentIds.delete(id);
+    this.observedNodeIds.delete(id);
+    this.outsideCluster.delete(id);
+    this.runtimeCapabilityTracker.removeConnection(id);
   }
 
   getStartupConnectionErrors(): Array<{ name: string; host: string; port: number; error: string }> {
