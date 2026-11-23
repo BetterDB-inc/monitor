@@ -934,6 +934,10 @@ export interface StoragePort {
   getCaptureSessions(options?: CaptureSessionQueryOptions): Promise<StoredCaptureSession[]>;
   saveCaptureChunk(chunk: StoredCaptureChunk): Promise<number>;
   getCaptureChunks(sessionId: string): Promise<StoredCaptureChunk[]>;
+  /** Latest chunk last_ts for a session, overall and per node id. Null when no chunks. No chunk bytes are read. */
+  getCaptureChunkLastTs(
+    sessionId: string,
+  ): Promise<{ lastTs: number; byNode: Record<string, number> } | null>;
 
   // Monitor Capture Trigger Methods (Pro+)
   saveCaptureTrigger(trigger: StoredCaptureTrigger): Promise<string>;

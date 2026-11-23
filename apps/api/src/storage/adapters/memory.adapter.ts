@@ -2629,6 +2629,19 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       .map((c) => ({ ...c, bytes: Buffer.from(c.bytes) }));
   }
 
+  async getCaptureChunkLastTs(
+    sessionId: string,
+  ): Promise<{ lastTs: number; byNode: Record<string, number> } | null> {
+    let lastTs: number | null = null;
+    const byNode: Record<string, number> = {};
+    for (const c of this.captureChunks) {
+      if (c.sessionId !== sessionId) continue;
+      lastTs = lastTs === null ? c.lastTs : Math.max(lastTs, c.lastTs);
+      if (c.nodeId) byNode[c.nodeId] = Math.max(byNode[c.nodeId] ?? -Infinity, c.lastTs);
+    }
+    return lastTs === null ? null : { lastTs, byNode };
+  }
+
   async getCaptureSessions(
     options: CaptureSessionQueryOptions = {},
   ): Promise<StoredCaptureSession[]> {

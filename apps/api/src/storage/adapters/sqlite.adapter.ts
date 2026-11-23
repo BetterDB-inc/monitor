@@ -7035,6 +7035,25 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     }));
   }
 
+  async getCaptureChunkLastTs(
+    sessionId: string,
+  ): Promise<{ lastTs: number; byNode: Record<string, number> } | null> {
+    if (!this.db) throw new Error('Database not initialized');
+    const rows = this.db
+      .prepare(
+        'SELECT node_id, MAX(last_ts) AS last_ts FROM capture_chunks WHERE session_id = ? GROUP BY node_id',
+      )
+      .all(sessionId) as Array<{ node_id: string | null; last_ts: number }>;
+    if (rows.length === 0) return null;
+    let lastTs = -Infinity;
+    const byNode: Record<string, number> = {};
+    for (const row of rows) {
+      lastTs = Math.max(lastTs, row.last_ts);
+      if (row.node_id) byNode[row.node_id] = row.last_ts;
+    }
+    return { lastTs, byNode };
+  }
+
   async saveCaptureTrigger(trigger: StoredCaptureTrigger): Promise<string> {
     if (!this.db) throw new Error('Database not initialized');
     this.db

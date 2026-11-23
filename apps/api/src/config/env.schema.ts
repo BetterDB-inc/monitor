@@ -308,6 +308,19 @@ export const envSchema = z
     MONITOR_PERSISTENCE_WARN_SEC: z.coerce.number().int().min(1).default(120),
     MONITOR_PERSISTENCE_CRIT_SEC: z.coerce.number().int().min(1).default(600),
 
+    // Capture session limits. Reconcile-on-startup fails capture rows left
+    // 'running' by a previous process; the max caps bound manual captures.
+    MONITOR_CAPTURE_RECONCILE_ON_STARTUP: z
+      .string()
+      .default('true')
+      .transform((v) => !isNegativeEnvValue(v)),
+    MONITOR_MAX_BYTE_CAP: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .default(500 * 1024 * 1024),
+    MONITOR_MAX_LINE_CAP: z.coerce.number().int().min(1).default(50_000_000),
+
     // Sentinel loop-stall / TILT RTT-proxy thresholds (valkey-sentinel-tilt-repro).
     // Defaults bracket the 2000ms sentinel_tilt_trigger: warn well below it so the
     // leading indicator has room to fire, high at the trigger.

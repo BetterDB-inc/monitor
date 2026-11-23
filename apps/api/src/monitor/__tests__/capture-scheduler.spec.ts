@@ -10,6 +10,7 @@ const CONNECTION_ID = 'conn-1';
 interface FakeCaptureService {
   startSession: jest.Mock;
   hasActiveSessionOn: jest.Mock;
+  whenReady: jest.Mock;
 }
 
 function makeCaptureService(opts: {
@@ -25,6 +26,7 @@ function makeCaptureService(opts: {
       return { id: opts.sessionId ?? 'sess-1', status: 'running' };
     }),
     hasActiveSessionOn: jest.fn().mockReturnValue(opts.active ?? false),
+    whenReady: jest.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -382,6 +384,28 @@ describe('CaptureScheduler', () => {
       const healthGate = makeHealthGate(true);
       const { scheduler } = makeScheduler(captureService, healthGate);
       expect(await scheduler.getSchedule('does-not-exist')).toBeNull();
+    });
+  });
+
+  describe('onModuleInit', () => {
+    it('waits for whenReady() before loading schedules', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const captureService = makeCaptureService();
+      captureService.whenReady.mockReturnValue(gate);
+      const { scheduler, storage } = makeScheduler(captureService, makeHealthGate(true));
+      scheduler.setOptions({ autoStart: true });
+      const spy = jest.spyOn(storage, 'getScheduledCaptures');
+
+      const init = scheduler.onModuleInit();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(spy).not.toHaveBeenCalled();
+
+      release();
+      await init;
+      expect(spy).toHaveBeenCalledTimes(1);
+      scheduler.onModuleDestroy();
     });
   });
 });

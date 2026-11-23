@@ -274,6 +274,14 @@ These thresholds decide when anomaly-triggered and scheduled MONITOR captures ar
 | `MONITOR_REPLICATION_LAG_BYTES`     | No       | `10485760` | Skip when the furthest-behind replica's acked offset is at least this many bytes from the primary offset                                               |
 | `MONITOR_REPLICA_IO_STALE_SEC`      | No       | `30`       | Skip when `master_last_io_seconds_ago` on a replica, or a replica's `lag` on a primary, is greater than this; keep it above `repl-ping-replica-period` |
 
+### Monitor Capture Limits
+
+| Variable | Required | Default | Description |
+| -------- | -------- | ------- | ----------- |
+| `MONITOR_CAPTURE_RECONCILE_ON_STARTUP` | No | `true` | On startup, mark every capture session still `running` that this process does not own as `failed` (`api_restart`). Set `false` on deployments where several API instances share one database; the periodic sweep still fails rows older than the maximum capture duration plus two minutes. |
+| `MONITOR_MAX_BYTE_CAP` | No | `524288000` | Largest `byteCap` a capture request may ask for (500 MB). Larger values are rejected with `400`. |
+| `MONITOR_MAX_LINE_CAP` | No | `50000000` | Largest `lineCap` a capture request may ask for. Larger values are rejected with `400`. |
+
 ### Prometheus Metrics
 
 | Variable                      | Required | Default           | Description                                                                                                                                                                           |

@@ -20,6 +20,7 @@ const ANOMALY = 'spike';
 interface FakeCaptureService {
   startSession: jest.Mock;
   hasActiveSessionOn: jest.Mock;
+  whenReady: jest.Mock;
 }
 
 function makeCaptureService(opts: {
@@ -35,6 +36,7 @@ function makeCaptureService(opts: {
       return { id: opts.sessionId ?? 'sess-1', status: 'running' };
     }),
     hasActiveSessionOn: jest.fn().mockReturnValue(opts.active ?? false),
+    whenReady: jest.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -1114,6 +1116,7 @@ describe('CaptureTriggerRegistry', () => {
           return promise;
         }),
         hasActiveSessionOn: jest.fn().mockReturnValue(false),
+        whenReady: jest.fn().mockResolvedValue(undefined),
       };
       const healthGate = makeHealthGate(true);
       const { registry, storage } = makeRegistry(captureService, healthGate);
@@ -1134,6 +1137,36 @@ describe('CaptureTriggerRegistry', () => {
       startCalls[0].resolve();
       await firstTick;
       expect(captureService.startSession).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('onModuleInit', () => {
+    it('waits for whenReady() before starting the poll loop', async () => {
+      jest.useFakeTimers();
+      try {
+        let release!: () => void;
+        const gate = new Promise<void>((r) => (release = r));
+        const captureService = makeCaptureService();
+        captureService.whenReady.mockReturnValue(gate);
+        const { registry } = makeRegistry(captureService, makeHealthGate(true));
+        registry.setOptions({ autoStart: true, pollIntervalMs: 1000 });
+        const tick = jest
+          .spyOn(registry as unknown as { tick: () => Promise<void> }, 'tick')
+          .mockResolvedValue(undefined);
+
+        const init = registry.onModuleInit();
+        await Promise.resolve();
+        jest.advanceTimersByTime(5000);
+        expect(tick).not.toHaveBeenCalled();
+
+        release();
+        await init;
+        jest.advanceTimersByTime(1000);
+        expect(tick).toHaveBeenCalledTimes(1);
+        registry.onModuleDestroy();
+      } finally {
+        jest.useRealTimers();
+      }
     });
   });
 });

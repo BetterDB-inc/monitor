@@ -175,6 +175,36 @@ describe.each([
     });
   });
 
+  it('getCaptureChunkLastTs returns overall and per-node max without chunk bytes', async () => {
+    const session = makeSession({ status: 'running' });
+    await storage.saveCaptureSession(session, CONNECTION_ID);
+    expect(await storage.getCaptureChunkLastTs(session.id)).toBeNull();
+
+    const base = { sessionId: session.id, bytes: Buffer.from('x'), lineCount: 1 };
+    await storage.saveCaptureChunk({ ...base, chunkIndex: 0, firstTs: 1, lastTs: 10, nodeId: 'a' });
+    await storage.saveCaptureChunk({ ...base, chunkIndex: 1, firstTs: 11, lastTs: 30, nodeId: 'a' });
+    await storage.saveCaptureChunk({ ...base, chunkIndex: 2, firstTs: 2, lastTs: 20, nodeId: 'b' });
+
+    expect(await storage.getCaptureChunkLastTs(session.id)).toEqual({
+      lastTs: 30,
+      byNode: { a: 30, b: 20 },
+    });
+  });
+
+  it('getCaptureChunkLastTs counts chunks without a node id in the overall max only', async () => {
+    const session = makeSession({ status: 'running' });
+    await storage.saveCaptureSession(session, CONNECTION_ID);
+    await storage.saveCaptureChunk({
+      sessionId: session.id,
+      chunkIndex: 0,
+      bytes: Buffer.from('x'),
+      lineCount: 1,
+      firstTs: 1,
+      lastTs: 50,
+    });
+    expect(await storage.getCaptureChunkLastTs(session.id)).toEqual({ lastTs: 50, byNode: {} });
+  });
+
   it('saveCaptureChunk + getCaptureChunks round-trip preserves bytes and order', async () => {
     const session = makeSession();
     await storage.saveCaptureSession(session, CONNECTION_ID);

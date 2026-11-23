@@ -105,6 +105,12 @@ expression.
 `DELETE /api/monitor/schedules/:id`. Disabled rows older than the
 retention cutoff are pruned by the data-retention sweep.
 
+## If the API restarts during a capture
+
+A capture runs inside the API process, so a restart, crash or out-of-memory kill ends it without a final write. On startup the API marks every capture it left `running` as `failed` with `terminationReason: api_restart`. `endedAt` is the time of the last stored chunk (or the restart time when nothing was stored), and the bytes already captured stay available. A background sweep every minute also fails `running` sessions older than 17 minutes that this process does not own. `failed` sessions send no `monitor.session.ended` webhook.
+
+Capture length and size are bounded: `durationMs` must be 500 ms to 15 minutes, and `byteCap` / `lineCap` must be positive and at most `MONITOR_MAX_BYTE_CAP` / `MONITOR_MAX_LINE_CAP`. Out-of-range values answer `400`. See [Configuration](configuration.md).
+
 ## Top keys of a capture
 
 The cross-reference result also carries `topKeys`: the 10 keys with the

@@ -1,4 +1,4 @@
-import { ConflictException } from '@nestjs/common';
+import { BadRequestException, ConflictException } from '@nestjs/common';
 import { WebhookEventType } from '@betterdb/shared';
 import { EventEmitter } from 'events';
 import { MemoryAdapter } from '../../storage/adapters/memory.adapter';
@@ -7,6 +7,7 @@ import type { ConnectionRegistry } from '../../connections/connection-registry.s
 import type { WebhookDispatcherService } from '../../webhooks/webhook-dispatcher.service';
 import { MonitorSource } from '../capture-writer';
 import { MonitorCaptureService } from '../monitor-capture.service';
+import { CaptureSessionReconciler } from '../capture-session-reconciler';
 
 class FakeSource extends EventEmitter implements MonitorSource {
   stopped = false;
@@ -39,7 +40,7 @@ function makeDispatcher(): FakeDispatcher {
   return fake;
 }
 
-function makeService(): {
+function makeService(reconciler?: Partial<CaptureSessionReconciler>): {
   service: MonitorCaptureService;
   storage: MemoryAdapter;
   source: FakeSource;
@@ -58,6 +59,7 @@ function makeService(): {
     registry,
     dispatcher as unknown as WebhookDispatcherService,
     cluster as unknown as ClusterDiscoveryService,
+    (reconciler ?? new CaptureSessionReconciler(storage)) as CaptureSessionReconciler,
   );
   const source = new FakeSource();
   service.setMonitorSourceFactory(async () => source);
@@ -65,6 +67,84 @@ function makeService(): {
 }
 
 describe('MonitorCaptureService', () => {
+  describe('input bounds', () => {
+    it.each([15 * 60_000 + 1, 0, -5, NaN, '30000' as unknown as number, 499, 1.5])(
+      'rejects durationMs %p with 400',
+      async (durationMs) => {
+        const { service } = makeService();
+        await expect(
+          service.startSession({ connectionId: CONNECTION_ID, durationMs }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      },
+    );
+
+    it('accepts the minimum duration', async () => {
+      const { service } = makeService();
+      const session = await service.startSession({ connectionId: CONNECTION_ID, durationMs: 500 });
+      await service.stopSession(session.id);
+    });
+
+    it.each([
+      ['byteCap', 0],
+      ['byteCap', 1e12],
+      ['byteCap', -1],
+      ['lineCap', 0],
+      ['lineCap', 1e12],
+      ['lineCap', '5' as unknown as number],
+    ])('rejects %s %p with 400', async (field, value) => {
+      const { service } = makeService();
+      await expect(
+        service.startSession({ connectionId: CONNECTION_ID, [field]: value }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('passes in-range caps through to the session', async () => {
+      const { service } = makeService();
+      const session = await service.startSession({
+        connectionId: CONNECTION_ID,
+        byteCap: 1024,
+        lineCap: 100,
+      });
+      expect(session).toMatchObject({ byteCap: 1024, lineCap: 100 });
+      await service.stopSession(session.id);
+    });
+  });
+
+  describe('startup reconciliation', () => {
+    it('resolves whenReady() even if the reconciler throws', async () => {
+      const reconciler = {
+        reconcileOnStartup: jest.fn().mockRejectedValue(new Error('boom')),
+        startSweep: jest.fn(),
+        stopSweep: jest.fn(),
+      };
+      const { service } = makeService(reconciler);
+      await service.onModuleInit();
+      await expect(service.whenReady()).resolves.toBeUndefined();
+      expect(reconciler.startSweep).toHaveBeenCalled();
+      service.onModuleDestroy();
+      expect(reconciler.stopSweep).toHaveBeenCalled();
+    });
+
+    it('does not treat a session that is still starting as an orphan', async () => {
+      const { service, storage } = makeService();
+      let release!: (s: FakeSource) => void;
+      service.setMonitorSourceFactory(() => new Promise<FakeSource>((r) => (release = r)));
+      const reconciler = new CaptureSessionReconciler(storage);
+      const ids = () => (service as unknown as { activeIds(): ReadonlySet<string> }).activeIds();
+
+      const starting = service.startSession({ connectionId: CONNECTION_ID });
+      for (let i = 0; i < 20 && ids().size === 0; i++) await new Promise((r) => setImmediate(r));
+      expect(ids().size).toBe(1);
+
+      expect(await reconciler.reconcile('stale', ids, () => true)).toBe(0);
+
+      release(new FakeSource());
+      const session = await starting;
+      expect(ids().has(session.id)).toBe(true);
+      await service.stopSession(session.id);
+    });
+  });
+
   describe('startSession', () => {
     it('inserts the session row with status="running" and registers an active session', async () => {
       const { service, storage } = makeService();
@@ -328,6 +408,7 @@ describe('MonitorCaptureService', () => {
         registry,
         dispatcher as unknown as WebhookDispatcherService,
         cluster as unknown as ClusterDiscoveryService,
+        new CaptureSessionReconciler(storage),
       );
       service.setMonitorSourceFactory(async () => {
         throw new Error('NOPERM monitor not allowed');
@@ -637,6 +718,7 @@ describe('MonitorCaptureService', () => {
         registry,
         dispatcher as unknown as WebhookDispatcherService,
         cluster as unknown as ClusterDiscoveryService,
+        new CaptureSessionReconciler(storage),
       );
       service.setMonitorSourceFactory(async () => {
         throw new Error('boom');

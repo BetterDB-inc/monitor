@@ -7713,6 +7713,26 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     }));
   }
 
+  async getCaptureChunkLastTs(
+    sessionId: string,
+  ): Promise<{ lastTs: number; byNode: Record<string, number> } | null> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      'SELECT node_id, MAX(last_ts) AS last_ts FROM capture_chunks WHERE session_id = $1 GROUP BY node_id',
+      [sessionId],
+    );
+    if (result.rows.length === 0) return null;
+    let lastTs = -Infinity;
+    const byNode: Record<string, number> = {};
+    for (const row of result.rows) {
+      const ts =
+        typeof row.last_ts === 'string' ? parseInt(row.last_ts, 10) : (row.last_ts as number);
+      lastTs = Math.max(lastTs, ts);
+      if (row.node_id) byNode[row.node_id as string] = ts;
+    }
+    return { lastTs, byNode };
+  }
+
   getInvitationRepository(): InvitationRepository {
     return this.invitationRepo;
   }

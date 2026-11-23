@@ -18,14 +18,14 @@ import {
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { HealthGateService } from './health-gate.service';
 import { MonitorCaptureService } from './monitor-capture.service';
+import { assertDuration, MAX_DURATION_MS, MIN_DURATION_MS } from './capture-limits';
 
 const INTERVAL_PREFIX = 'monitor-schedule-interval-';
 const CRON_PREFIX = 'monitor-schedule-cron-';
 
 export const MIN_INTERVAL_SECONDS = 10;
 export const MAX_INTERVAL_SECONDS = 24 * 60 * 60;
-export const MIN_DURATION_MS = 500;
-export const MAX_DURATION_MS = 15 * 60 * 1000;
+export { MIN_DURATION_MS, MAX_DURATION_MS };
 
 export interface CreateScheduleInput {
   connectionId: string;
@@ -74,6 +74,7 @@ export class CaptureScheduler implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleInit(): Promise<void> {
+    await this.captureService.whenReady();
     if (!this.autoStart) {
       return;
     }
@@ -306,11 +307,6 @@ function validateCron(expression: string): void {
 }
 
 function validateDuration(ms: number): void {
-  if (!Number.isFinite(ms) || ms < MIN_DURATION_MS) {
-    throw new BadRequestException(`durationMs must be at least ${MIN_DURATION_MS}`);
-  }
-  if (ms > MAX_DURATION_MS) {
-    throw new BadRequestException(`durationMs must be at most ${MAX_DURATION_MS}`);
-  }
+  assertDuration(ms);
 }
 

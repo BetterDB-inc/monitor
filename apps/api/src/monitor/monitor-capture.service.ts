@@ -1,4 +1,11 @@
-import { ConflictException, Inject, Injectable, Logger } from '@nestjs/common';
+import {
+  ConflictException,
+  Inject,
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  OnModuleInit,
+} from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { CaptureNodeSegment, WebhookEventType } from '@betterdb/shared';
 import {
@@ -12,6 +19,8 @@ import { withTimeout } from '../common/utils/with-timeout';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
 import { CaptureWriter, CaptureWriterResult, MonitorSource } from './capture-writer';
+import { assertCap, assertDuration } from './capture-limits';
+import { CaptureSessionReconciler } from './capture-session-reconciler';
 import { createIovalkeyMonitorSource } from './iovalkey-monitor-source';
 
 /** Default capture duration if the caller does not specify one. Matches the start-session modal default. */
@@ -23,6 +32,9 @@ const COMMUNITY_LINE_CAP = 5_000_000;
 
 export const DEFAULT_BYTE_CAP = parsePositiveInt(process.env.MONITOR_DEFAULT_BYTE_CAP, COMMUNITY_BYTE_CAP);
 export const DEFAULT_LINE_CAP = parsePositiveInt(process.env.MONITOR_DEFAULT_LINE_CAP, COMMUNITY_LINE_CAP);
+
+export const MAX_BYTE_CAP = parsePositiveInt(process.env.MONITOR_MAX_BYTE_CAP, 10 * COMMUNITY_BYTE_CAP);
+export const MAX_LINE_CAP = parsePositiveInt(process.env.MONITOR_MAX_LINE_CAP, 10 * COMMUNITY_LINE_CAP);
 
 function parsePositiveInt(raw: string | undefined, fallback: number): number {
   if (!raw) return fallback;
@@ -85,10 +97,14 @@ export type MonitorSourceFactory = (
 ) => Promise<MonitorSource>;
 
 @Injectable()
-export class MonitorCaptureService {
+export class MonitorCaptureService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(MonitorCaptureService.name);
   private readonly active = new Map<string, ActiveSession>();
   private readonly starting = new Set<string>();
+  /** Session ids inserted but not yet in `active`; never treated as orphans. */
+  private readonly startingSessionIds = new Set<string>();
+  private readyResolve!: () => void;
+  private readonly ready = new Promise<void>((r) => (this.readyResolve = r));
   private monitorSourceFactory: MonitorSourceFactory;
 
   constructor(
@@ -97,6 +113,7 @@ export class MonitorCaptureService {
     private readonly connectionRegistry: ConnectionRegistry,
     private readonly webhookDispatcher: WebhookDispatcherService,
     private readonly clusterDiscovery: ClusterDiscoveryService,
+    private readonly reconciler: CaptureSessionReconciler,
   ) {
     this.monitorSourceFactory = async (connectionId, targetNodeId) => {
       if (targetNodeId) {
@@ -109,6 +126,33 @@ export class MonitorCaptureService {
       const port = this.connectionRegistry.get(connectionId);
       return createIovalkeyMonitorSource(port.getClient());
     };
+  }
+
+  /** Resolves once startup reconciliation of orphaned sessions has finished. */
+  whenReady(): Promise<void> {
+    return this.ready;
+  }
+
+  async onModuleInit(): Promise<void> {
+    try {
+      await this.reconciler.reconcileOnStartup(() => this.activeIds());
+    } catch (err) {
+      this.logger.warn(`Startup reconciliation failed: ${(err as Error).message}`);
+    } finally {
+      this.readyResolve();
+      this.reconciler.startSweep(() => this.activeIds());
+    }
+  }
+
+  onModuleDestroy(): void {
+    this.reconciler.stopSweep();
+  }
+
+  private activeIds(): ReadonlySet<string> {
+    // `active` is keyed by connectionId; the session id is on the value.
+    return new Set(
+      [...this.active.values()].map((a) => a.session.id).concat([...this.startingSessionIds]),
+    );
   }
 
   /** Test seam — overrides the default iovalkey-backed source factory. */
@@ -132,6 +176,14 @@ export class MonitorCaptureService {
    */
   async startSession(input: StartSessionInput): Promise<StoredCaptureSession> {
     const { connectionId } = input;
+    input = {
+      ...input,
+      durationMs: input.durationMs === undefined ? undefined : assertDuration(input.durationMs),
+      byteCap:
+        input.byteCap === undefined ? undefined : assertCap('byteCap', input.byteCap, MAX_BYTE_CAP),
+      lineCap:
+        input.lineCap === undefined ? undefined : assertCap('lineCap', input.lineCap, MAX_LINE_CAP),
+    };
     if (this.hasActiveSessionOn(connectionId)) {
       throw new ConflictException(
         `A capture session is already active on connection ${connectionId}`,
@@ -186,13 +238,24 @@ export class MonitorCaptureService {
       nodeSegments: isFanOut ? initialSegments : undefined,
     };
 
-    await this.saveStartingSession(session);
+    this.startingSessionIds.add(session.id);
+    try {
+      await this.saveStartingSession(session);
 
-    if (isFanOut) {
-      return this.startFanOutSession(session, fanOutNodes, durationMs, byteCap, lineCap);
+      if (isFanOut) {
+        return await this.startFanOutSession(session, fanOutNodes, durationMs, byteCap, lineCap);
+      }
+
+      return await this.startSingleSession(
+        session,
+        input.targetNodeId,
+        durationMs,
+        byteCap,
+        lineCap,
+      );
+    } finally {
+      this.startingSessionIds.delete(session.id);
     }
-
-    return this.startSingleSession(session, input.targetNodeId, durationMs, byteCap, lineCap);
   }
 
   private boundStartStep<T>(step: Promise<T>): Promise<T> {
