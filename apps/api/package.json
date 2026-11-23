@@ -1,6 +1,6 @@
 {
   "name": "api",
-  "version": "0.55.0",
+  "version": "0.56.0",
   "homepage": "https://betterdb.com",
   "private": true,
   "scripts": {
@@ -44,6 +44,7 @@
     "docs:clean": "rm -rf data/docs data/chunks data/vector-store",
     "seed:demo": "ts-node -r tsconfig-paths/register scripts/seed-demo-data.ts",
     "cache-sim:seed": "ts-node -r tsconfig-paths/register scripts/cache-simulator/seed.ts",
+    "load:cluster": "ts-node --transpile-only -r tsconfig-paths/register scripts/cluster-load/run.ts",
     "cache-sim:validate": "ts-node -r tsconfig-paths/register scripts/cache-simulator/validate.ts"
   },
   "dependencies": {

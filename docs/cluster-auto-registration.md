@@ -131,6 +131,62 @@ auto-register toggle is explicitly on, or it already has child connections.
 A connection that merely inherits `CLUSTER_AUTO_REGISTER_NODES=true` is
 adopted by the first seed that discovers it.
 
+## Connecting a single node
+
+With auto-registration off, the other nodes of a cluster have no connection
+of their own. The Nodes tab of the Cluster page marks each of them **Not
+collected**, and so does every alert and incident entry that names one.
+The address on an alert opens that node's row on the Nodes tab. Open the row
+and click **Connect to this node** to add a connection for that one node.
+
+- The new connection reuses the credentials and TLS settings of the cluster
+  connection. Nothing has to be typed.
+- The address comes from the cluster view, and the node is dialed before
+  anything is saved. When it cannot be reached nothing is saved, and the row
+  shows the reason with the address that was tried.
+- It is a normal connection, not an auto-registered child. A sync does not
+  retire it while auto-registration is off, and it does not register the
+  rest of the cluster. If auto-registration is turned on later, the
+  connection is adopted rather than duplicated. That also holds for a node
+  that was auto-registered before auto-registration was turned off: the
+  connection you added is adopted, and the retired child of that node stays
+  retired.
+- One node per click. Every node you connect is polled on its own, and the
+  load that adds grows with the size of the cluster.
+- There is no button when the cluster is read through an agent or OTLP push,
+  because the monitor does not dial the nodes of such a cluster itself. A
+  user who cannot add connections does not get the button either.
+
+Limits:
+
+- The node is dialed at the IP address the cluster announces. On a cluster
+  whose certificates only cover hostnames the connect fails with a
+  certificate error. Use auto-registration there (see
+  [TLS certificates](#tls-certificates)).
+- An SSH tunnel of the cluster connection is not used, so a node that can
+  only be reached through the tunnel cannot be connected.
+- When the secrets of the cluster connection are kept in memory only, the
+  new connection is kept in memory only too and is gone after a restart.
+
+The same action over the API:
+
+```
+POST /api/connections/:id/nodes/:nodeId/connect
+```
+
+`:id` is the cluster connection or any connection that belongs to the
+cluster, `:nodeId` the node id from `CLUSTER NODES`. The response is
+`{ "id": "<connection id>", "created": true }`. `created` is `false` when a
+connection of this cluster already reads the node; its id is returned and
+nothing is added. The call is written to the activity log as
+`connection.connect_node`.
+
+| Status | When |
+|--------|------|
+| 400 | The cluster is read through an agent or OTLP push, the cluster view could not be read, or the node could not be reached. The message names the address that was tried |
+| 404 | The connection does not exist, or the node is not in its cluster view. The view is cached for up to 30 seconds, so a node that has just joined may not be in it yet |
+| 409 | A connection that reads another node, of this cluster or of another one, already points at the address of the node |
+
 ## Nodes leaving and rejoining
 
 When a node drops out of the cluster, its child connection is retired: it

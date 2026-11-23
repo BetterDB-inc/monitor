@@ -122,6 +122,20 @@ export interface ShardMemory {
   keyCount: number;
 }
 
+export type RebalanceExecutionBlocker =
+  | 'flag_off'
+  | 'not_dialed'
+  | 'provider_managed'
+  | 'unsupported_server'
+  | 'migration_running'
+  | 'plan_outdated'
+  | 'server_refused';
+
+export interface RebalanceExecution {
+  available: boolean;
+  blockedBy?: RebalanceExecutionBlocker;
+}
+
 export interface RebalancePlan {
   kind: 'plan';
   action: 'spread';
@@ -136,6 +150,7 @@ export interface RebalancePlan {
   plannedAfter: string[];
   support?: RebalanceSupport;
   commands?: RebalanceCommand[];
+  execution?: RebalanceExecution;
 }
 
 export interface RebalanceNoPlan {

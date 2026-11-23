@@ -105,6 +105,7 @@ import type { CveWebhookFindingSummary } from '../types/cve';
 import type { MetricKind } from '../types/metric-forecasting.types';
 import type { KvCacheEvictionRiskData, KvCacheHitRateLowData } from '../types/kv-cache.types';
 import type { ScalingReadinessLowData } from '../types/scaling-readiness.types';
+import type { ServedClusterNodeRef } from '../utils/cluster-node-link';
 export { Tier };
 
 /**
@@ -368,6 +369,7 @@ export interface ReplicationDivergenceData {
   timestamp: number;
   instance: WebhookInstanceInfo;
   connectionId?: string;
+  node?: ServedClusterNodeRef;
 }
 
 export interface ReplicationReplicaView {
@@ -384,6 +386,7 @@ export interface ReplicationRecoveredData {
   timestamp: number;
   instance: WebhookInstanceInfo;
   connectionId?: string;
+  node?: ServedClusterNodeRef;
 }
 
 /**
@@ -424,6 +427,7 @@ export interface RetryAmplificationDetectedData {
   timestamp: number;
   instance: WebhookInstanceInfo;
   connectionId?: string;
+  node?: ServedClusterNodeRef;
 }
 
 /**
@@ -531,6 +535,7 @@ export interface IWebhookEventsProService {
     timestamp: number;
     instance: WebhookInstanceInfo;
     connectionId?: string;
+    node?: ServedClusterNodeRef;
   }): Promise<void>;
 
   dispatchFailoverCompleted(data: {
@@ -539,6 +544,7 @@ export interface IWebhookEventsProService {
     timestamp: number;
     instance: WebhookInstanceInfo;
     connectionId?: string;
+    node?: ServedClusterNodeRef;
   }): Promise<void>;
 
   dispatchDataLossDetected(data: {
@@ -553,6 +559,7 @@ export interface IWebhookEventsProService {
     timestamp: number;
     instance: WebhookInstanceInfo;
     connectionId?: string;
+    node?: ServedClusterNodeRef;
   }): Promise<void>;
 
   dispatchLatencyRegressionDetected(data: LatencyRegressionDetectedData): Promise<void>;

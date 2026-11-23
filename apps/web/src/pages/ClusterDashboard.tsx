@@ -1,4 +1,6 @@
 import { useMemo, useCallback, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import { CLUSTER_NODE_PARAM } from '@betterdb/shared';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { EmptyState } from '../components/ui/empty-state';
@@ -9,6 +11,8 @@ import { useCluster } from '../hooks/useCluster';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
 import { useConnectionDialog } from '../hooks/useConnectionDialog';
+import { useClusterTab } from '../hooks/useClusterTab';
+import { useNodeCollection } from '../hooks/useNodeCollection';
 import { metricsApi } from '../api/metrics';
 import { ClusterHealthCard } from '../components/cluster/ClusterHealthCard';
 import { ClusterTopology } from '../components/cluster/ClusterTopology';
@@ -81,6 +85,18 @@ export function ClusterDashboard() {
     refetchKey: currentConnection?.id,
   });
   const raftOutageActive = (raftHealthEvents ?? []).some((e) => e.severity === 'critical');
+
+  const [tab, setTab] = useClusterTab();
+  const [searchParams] = useSearchParams();
+  const focusNodeId = searchParams.get(CLUSTER_NODE_PARAM);
+  const { collection, refresh: refreshCollection } = useNodeCollection(
+    currentConnection?.id,
+    shouldPoll && tab === 'nodes',
+  );
+  const handleNodeConnected = useCallback(async () => {
+    await refreshConnections();
+    await refreshCollection();
+  }, [refreshConnections, refreshCollection]);
 
   // Memoize slot-to-node mapping separately for reuse
   const slotNodeMap = useMemo(() => buildSlotNodeMap(nodes), [nodes]);
@@ -232,7 +248,7 @@ export function ClusterDashboard() {
       )}
 
       {/* Tabs */}
-      <Tabs defaultValue="overview" className="space-y-4">
+      <Tabs value={tab} onValueChange={setTab} className="space-y-4">
         <TabsList>
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="nodes">Nodes</TabsTrigger>
@@ -363,7 +379,13 @@ export function ClusterDashboard() {
         {/* Nodes Tab */}
         <TabsContent value="nodes" className="space-y-4">
           <NodeStatsComparison nodeStats={nodeStats || undefined} />
-          <ClusterNodesTable nodes={nodes} />
+          <ClusterNodesTable
+            nodes={nodes}
+            focusNodeId={focusNodeId}
+            collection={collection}
+            clusterConnection={currentConnection}
+            onNodeConnected={handleNodeConnected}
+          />
         </TabsContent>
 
         {/* Replication Tab */}
