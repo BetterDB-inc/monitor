@@ -266,6 +266,7 @@ describe('AnomalyController.startTopologyFullCheck', () => {
     asked: 0,
     total: 500,
     retryAt: null,
+    now: 2000,
     lastFailure: null,
   };
   const service = {
@@ -351,7 +352,10 @@ describe('AnomalyController.startTopologyFullCheck', () => {
     const error = await refusal();
 
     expect(error.getStatus()).toBe(429);
-    expect(error.getResponse()).toMatchObject({ retryAt: 31_000 });
+    expect(error.getResponse()).toMatchObject({
+      retryAt: 31_000,
+      message: 'The last full check ended less than 30 seconds ago',
+    });
   });
 
   it('answers 503 when the node list cannot be read', async () => {

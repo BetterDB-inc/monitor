@@ -38,6 +38,7 @@ const NO_CHECK = {
   asked: 0,
   total: 0,
   retryAt: null,
+  now: 0,
   lastFailure: null,
 };
 

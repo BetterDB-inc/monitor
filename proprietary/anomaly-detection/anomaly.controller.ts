@@ -315,7 +315,7 @@ export class AnomalyController {
       throw new HttpException(
         {
           statusCode: HttpStatus.TOO_MANY_REQUESTS,
-          message: 'The last full check finished less than 30 seconds ago',
+          message: 'The last full check ended less than 30 seconds ago',
           retryAt: started.retryAt,
         },
         HttpStatus.TOO_MANY_REQUESTS,

@@ -38,6 +38,7 @@ const running: TopologyFullCheck = {
   asked: 0,
   total: 500,
   retryAt: null,
+  now: 2000,
   lastFailure: null,
 };
 
@@ -56,6 +57,27 @@ describe('useClusterDisagreements', () => {
     await waitFor(() => expect(result.current.summary).toEqual(summary));
     expect(result.current.licensed).toBe(true);
     expect(result.current.licenseLoading).toBe(false);
+  });
+
+  it('says when the summary arrived, by the clock of the browser', async () => {
+    const before = Date.now();
+    const { result } = renderHookWithQuery(() => useClusterDisagreements('c1', true));
+    expect(result.current.receivedAt).toBeNull();
+
+    await waitFor(() => expect(result.current.summary).toEqual(summary));
+
+    expect(result.current.receivedAt).toBeGreaterThanOrEqual(before);
+    expect(result.current.receivedAt).toBeLessThanOrEqual(Date.now());
+  });
+
+  it('hands on no summary once the licence no longer covers it, though one was loaded', async () => {
+    const { result, rerender } = renderHookWithQuery(() => useClusterDisagreements('c1', true));
+    await waitFor(() => expect(result.current.summary).toEqual(summary));
+
+    state.licensed = false;
+    rerender();
+
+    expect(result.current).toMatchObject({ licensed: false, summary: undefined, receivedAt: null });
   });
 
   it('asks with the id of the connection it was given', async () => {
@@ -127,7 +149,7 @@ describe('useClusterDisagreements', () => {
 
   it('hands on why a full check was refused', async () => {
     startTopologyFullCheck.mockRejectedValue(
-      new Error('The last full check finished less than 30 seconds ago'),
+      new Error('The last full check ended less than 30 seconds ago'),
     );
     const { result } = renderHookWithQuery(() => useClusterDisagreements('c1', true));
     await waitFor(() => expect(result.current.summary).toEqual(summary));
@@ -136,7 +158,7 @@ describe('useClusterDisagreements', () => {
 
     await waitFor(() =>
       expect(result.current.askError?.message).toBe(
-        'The last full check finished less than 30 seconds ago',
+        'The last full check ended less than 30 seconds ago',
       ),
     );
     expect(result.current.asking).toBe(false);

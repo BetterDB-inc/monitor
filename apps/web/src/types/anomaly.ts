@@ -451,6 +451,7 @@ export interface TopologyFullCheck {
   asked: number;
   total: number;
   retryAt: number | null;
+  now: number;
   lastFailure: FullCheckFailure | null;
   summary?: TopologyDisagreementSummary;
 }

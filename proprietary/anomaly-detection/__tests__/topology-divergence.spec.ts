@@ -8,6 +8,7 @@ import {
   compareTopologyViews,
   compareTopologyViewsInSteps,
   confirmedDisagreements,
+  countSharedSlots,
   dissentOf,
   durationOf,
   failingForEveryView,
@@ -81,6 +82,28 @@ describe('slotRangesOverlap', () => {
   ])('says whether %j and %j share a slot', (a, b, shared) => {
     expect(slotRangesOverlap(a, b)).toBe(shared);
     expect(slotRangesOverlap(b, a)).toBe(shared);
+  });
+});
+
+describe('countSharedSlots', () => {
+  it('counts the slots two lists of ranges have in common', () => {
+    expect(countSharedSlots([[0, 99]], [[50, 149]])).toBe(50);
+    expect(countSharedSlots([[0, 99]], [[100, 199]])).toBe(0);
+    expect(countSharedSlots([[0, 9], [20, 29], [40, 49]], [[5, 44]])).toBe(20);
+    expect(countSharedSlots([[7]], [[0, 10]])).toBe(1);
+    expect(countSharedSlots([], [[0, 10]])).toBe(0);
+  });
+
+  it('does not depend on the order of the ranges', () => {
+    expect(countSharedSlots([[40, 49], [0, 9], [20, 29]], [[25, 44], [5, 8]])).toBe(14);
+  });
+
+  it('counts a dispute on every other slot against itself', () => {
+    const everyOther = Array.from({ length: 8192 }, (_, index) => [index * 2, index * 2]);
+
+    expect(countSharedSlots(everyOther, everyOther)).toBe(8192);
+    expect(countSharedSlots(everyOther, [[0, 16383]])).toBe(8192);
+    expect(countSharedSlots(everyOther, everyOther.map(([slot]) => [slot + 1, slot + 1]))).toBe(0);
   });
 });
 

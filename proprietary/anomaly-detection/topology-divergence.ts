@@ -348,6 +348,22 @@ export function countSlots(ranges: number[][]): number {
   return ranges.reduce((total, [start, end = start]) => total + end - start + 1, 0);
 }
 
+export function countSharedSlots(a: number[][], b: number[][]): number {
+  const left = mergeSlotRanges(a);
+  const right = mergeSlotRanges(b);
+  let shared = 0;
+  let i = 0;
+  let j = 0;
+  while (i < left.length && j < right.length) {
+    const start = Math.max(left[i][0], right[j][0]);
+    const end = Math.min(left[i][1], right[j][1]);
+    if (start <= end) shared += end - start + 1;
+    if (left[i][1] < right[j][1]) i += 1;
+    else j += 1;
+  }
+  return shared;
+}
+
 export function mergeSlotRanges(ranges: ReadonlyArray<ReadonlyArray<number>>): number[][] {
   const merged: number[][] = [];
   for (const [start, end = start] of [...ranges].sort((x, y) => x[0] - y[0])) {
@@ -511,7 +527,7 @@ export class DivergenceTracker {
       const owners = slotDisputeOwners(disagreement);
       for (const entry of this.entries.values()) {
         if (!entry.slots || slotDisputeOwners(entry) !== owners) continue;
-        const shared = countSlots(intersectSlotRanges(entry.slots, disagreement.slots));
+        const shared = countSharedSlots(entry.slots, disagreement.slots);
         if (shared > 0) overlaps.push({ disagreement, key: entry.key, shared });
       }
     }
@@ -628,7 +644,7 @@ function sharedWith(entry: TopologyDisagreement, disagreement: TopologyDisagreem
   if (entry.kind !== disagreement.kind) return 0;
   if (!entry.slots || !disagreement.slots) return entry.key === disagreement.key ? 1 : 0;
   if (slotDisputeOwners(entry) !== slotDisputeOwners(disagreement)) return 0;
-  return countSlots(intersectSlotRanges(entry.slots, disagreement.slots));
+  return countSharedSlots(entry.slots, disagreement.slots);
 }
 
 function keepsSidesOf(

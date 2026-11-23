@@ -53,6 +53,7 @@ interface AwaitedCheck {
 
 interface ClusterDisagreementsProps {
   summary: TopologyDisagreementReport | undefined;
+  receivedAt?: number | null;
   error?: Error | null;
   connectionId?: string;
   onAskEveryNode?: () => void;
@@ -410,9 +411,9 @@ function takenText(finishedAt: number, now: number): string {
   return `Taken ${plural(Math.floor(age / MINUTE_MS), 'minute')} ago. The cluster may have changed since.`;
 }
 
-function TakenLine({ takenAt }: { takenAt: number }) {
+function TakenLine({ takenAt, clockAhead }: { takenAt: number; clockAhead: number }) {
   const now = useNow(true, CLOCK_TICK_MS);
-  return <p className="text-sm text-muted-foreground">{takenText(takenAt, now)}</p>;
+  return <p className="text-sm text-muted-foreground">{takenText(takenAt, now - clockAhead)}</p>;
 }
 
 function failureText(check: TopologyFullCheck, failure: FullCheckFailure): string {
@@ -558,11 +559,13 @@ function RefreshError() {
 function Result({
   summary,
   takenAt,
+  clockAhead = 0,
   error,
   connectionId,
 }: {
   summary: TopologyDisagreementSummary;
   takenAt: number | null;
+  clockAhead?: number;
   error?: Error | null;
   connectionId?: string;
 }) {
@@ -595,7 +598,7 @@ function Result({
               <span> · last round {new Date(summary.sampledAt).toLocaleTimeString()}</span>
             )}
           </p>
-          {oneOff && <TakenLine takenAt={takenAt} />}
+          {oneOff && <TakenLine takenAt={takenAt} clockAhead={clockAhead} />}
         </CardHeader>
         <CardContent className="space-y-3">
           {error && <RefreshError />}
@@ -674,6 +677,7 @@ export function ClusterDisagreements(props: ClusterDisagreementsProps) {
 
 function ConnectionDisagreements({
   summary,
+  receivedAt,
   error,
   connectionId,
   onAskEveryNode,
@@ -688,8 +692,9 @@ function ConnectionDisagreements({
   const failedAt = check?.lastFailure?.at ?? null;
   const full = check?.state === 'done' ? check.summary : undefined;
   const tooSoon = isTooSoon(askError);
+  const clockAhead = check && receivedAt != null ? receivedAt - check.now : 0;
   const retryAt = Math.max(check?.retryAt ?? 0, tooSoon ? retryAtOf(askError) : 0);
-  const waiting = useWaitingUntil(retryAt);
+  const waiting = useWaitingUntil(retryAt > 0 ? retryAt + clockAhead : 0);
   const waitIsOver = retryAt > 0 && !waiting;
 
   if (awaited && askError && askError !== awaited.error) {
@@ -738,7 +743,12 @@ function ConnectionDisagreements({
         />
       )}
       {shown === 'full' && full ? (
-        <Result summary={full} takenAt={finishedAt} connectionId={connectionId} />
+        <Result
+          summary={full}
+          takenAt={finishedAt}
+          clockAhead={clockAhead}
+          connectionId={connectionId}
+        />
       ) : (
         <Result summary={summary} takenAt={null} error={error} connectionId={connectionId} />
       )}

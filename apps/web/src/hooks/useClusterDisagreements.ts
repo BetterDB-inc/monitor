@@ -17,7 +17,7 @@ export function useClusterDisagreements(connectionId: string | undefined, enable
   const { license, hasFeature } = useLicense();
   const { loading } = useLicenseStatus();
   const licensed = hasFeature(Feature.ANOMALY_DETECTION);
-  const { data, error, refresh } = usePolling<TopologyDisagreementReport>({
+  const { data, error, lastUpdated, refresh } = usePolling<TopologyDisagreementReport>({
     fetcher: (signal) => metricsApi.getTopologyDisagreements(connectionId as string, signal),
     interval: disagreementsPollInterval,
     enabled: enabled && licensed && !!connectionId,
@@ -38,7 +38,8 @@ export function useClusterDisagreements(connectionId: string | undefined, enable
   return {
     licensed,
     licenseLoading: license === null && loading,
-    summary: data ?? undefined,
+    summary: licensed ? (data ?? undefined) : undefined,
+    receivedAt: licensed && data ? (lastUpdated?.getTime() ?? null) : null,
     error,
     askEveryNode: () => {
       if (connectionId) mutate(connectionId);

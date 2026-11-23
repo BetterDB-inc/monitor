@@ -348,6 +348,26 @@ describe('runFullCheck', () => {
     });
   });
 
+  it('asks no further node once the check has broken', async () => {
+    const nodes = cluster(6);
+    const readView = jest.fn(
+      (asked: ClusterNode) =>
+        new Promise<ClusterNode[]>((resolve) => setImmediate(() => resolve(viewOf(nodes, asked.id)))),
+    );
+    let reported = 0;
+    const onProgress = () => {
+      reported += 1;
+      if (reported === 1) throw new Error('progress could not be stored');
+    };
+
+    await expect(check(nodes, { readView, onProgress, concurrency: 2 })).rejects.toThrow(
+      'progress could not be stored',
+    );
+    for (let i = 0; i < 10; i++) await new Promise((resolve) => setImmediate(resolve));
+
+    expect(readView).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps one copy of the views that say the same thing', async () => {
     const nodes = cluster(250);
     const epochOf = (observerId: string) => (observerId < 's100' ? 1 : observerId < 's200' ? 2 : 3);
@@ -417,7 +437,7 @@ describe('runFullCheck', () => {
 
     expect(result.summary.coverage).toMatchObject({ nodes: 5, asked: 4, answered: 4, complete: false });
     expect(result).toMatchObject({ asked: 4, total: 5 });
-    expect(fullCheckView({ state: 'done', result }, null)).toMatchObject({ asked: 4, total: 5 });
+    expect(fullCheckView({ state: 'done', result }, null, AT)).toMatchObject({ asked: 4, total: 5 });
   });
 
   describe('comparing 500 nodes that all say something different', () => {
@@ -489,8 +509,11 @@ describe('runFullCheck', () => {
 
       const running = check(nodes, { readView });
       setImmediate(turn);
-      await running;
-      watching = false;
+      try {
+        await running;
+      } finally {
+        watching = false;
+      }
 
       expect(turns).toBeGreaterThan(1);
     });
@@ -707,7 +730,7 @@ describe('TopologyFullChecks', () => {
 
 describe('fullCheckView', () => {
   it('is empty when no check was run', () => {
-    expect(fullCheckView({ state: 'none' }, null)).toEqual({
+    expect(fullCheckView({ state: 'none' }, null, AT)).toEqual({
       state: 'none',
       unavailable: null,
       startedAt: null,
@@ -715,54 +738,63 @@ describe('fullCheckView', () => {
       asked: 0,
       total: 0,
       retryAt: null,
+      now: AT,
       lastFailure: null,
     });
+  });
+
+  it('carries the clock of the server in every state, so a reader need not trust its own', async () => {
+    const result = fullCheckResult(await check(cluster(3)), noEvent);
+
+    expect(fullCheckView({ state: 'none' }, null, AT + 5).now).toBe(AT + 5);
+    expect(fullCheckView({ state: 'running', startedAt: AT, asked: 1, total: 3 }, null, AT + 6).now).toBe(AT + 6);
+    expect(fullCheckView({ state: 'done', result }, null, AT + 7).now).toBe(AT + 7);
   });
 
   it('says that the last check failed, with or without an earlier result', async () => {
     const failure = { at: AT + 40_100, reason: 'boom' };
     const result = { ...fullCheckResult(await check(cluster(2)), noEvent), finishedAt: AT + 500 };
 
-    expect(fullCheckView({ state: 'none', failure }, null)).toMatchObject({
+    expect(fullCheckView({ state: 'none', failure }, null, AT)).toMatchObject({
       state: 'none',
       finishedAt: null,
       retryAt: AT + 70_100,
       lastFailure: failure,
     });
-    expect(fullCheckView({ state: 'done', result, failure }, null)).toMatchObject({
+    expect(fullCheckView({ state: 'done', result, failure }, null, AT)).toMatchObject({
       state: 'done',
       finishedAt: AT + 500,
       retryAt: AT + 70_100,
       lastFailure: failure,
     });
-    expect(fullCheckView({ state: 'done', result }, null)).toMatchObject({ retryAt: AT + 30_500, lastFailure: null });
+    expect(fullCheckView({ state: 'done', result }, null, AT)).toMatchObject({ retryAt: AT + 30_500, lastFailure: null });
   });
 
   it('hands out the summary that was built when the check finished', async () => {
     const result = fullCheckResult(await check(cluster(2)), noEvent);
 
-    const first = fullCheckView({ state: 'done', result }, null);
-    const second = fullCheckView({ state: 'done', result }, null);
+    const first = fullCheckView({ state: 'done', result }, null, AT);
+    const second = fullCheckView({ state: 'done', result }, null, AT);
 
     expect(first.summary).toBe(result.summary);
     expect(second.summary).toBe(first.summary);
   });
 
   it('says why a check cannot be run', () => {
-    expect(fullCheckView({ state: 'none' }, 'raft_cluster').unavailable).toEqual({
+    expect(fullCheckView({ state: 'none' }, 'raft_cluster', AT).unavailable).toEqual({
       reason: 'raft_cluster',
       text: 'The nodes of a Raft cluster share one agreed view, so there is nothing to compare.',
     });
-    expect(fullCheckView({ state: 'none' }, 'no_direct_access').unavailable?.reason).toBe('no_direct_access');
-    expect(fullCheckView({ state: 'none' }, 'no_cluster_view').unavailable?.reason).toBe('no_cluster_view');
-    expect(fullCheckView({ state: 'none' }, 'ssh_tunnel').unavailable).toEqual({
+    expect(fullCheckView({ state: 'none' }, 'no_direct_access', AT).unavailable?.reason).toBe('no_direct_access');
+    expect(fullCheckView({ state: 'none' }, 'no_cluster_view', AT).unavailable?.reason).toBe('no_cluster_view');
+    expect(fullCheckView({ state: 'none' }, 'ssh_tunnel', AT).unavailable).toEqual({
       reason: 'ssh_tunnel',
       text: 'This connection goes through an SSH tunnel, so the monitor cannot reach every node.',
     });
   });
 
   it('shows how far a running check is', () => {
-    expect(fullCheckView({ state: 'running', startedAt: AT, asked: 312, total: 500 }, null)).toEqual({
+    expect(fullCheckView({ state: 'running', startedAt: AT, asked: 312, total: 500 }, null, AT)).toEqual({
       state: 'running',
       unavailable: null,
       startedAt: AT,
@@ -770,6 +802,7 @@ describe('fullCheckView', () => {
       asked: 312,
       total: 500,
       retryAt: null,
+      now: AT,
       lastFailure: null,
     });
   });
@@ -793,7 +826,7 @@ describe('fullCheckView', () => {
         ? { eventId: 'e1', eventType: MetricType.TOPOLOGY_DIVERGENCE, eventAt: AT - 60_000, connectionId: 'c1' }
         : undefined,
     );
-    const view = fullCheckView({ state: 'done', result }, null);
+    const view = fullCheckView({ state: 'done', result }, null, AT);
 
     expect(view).toMatchObject({
       state: 'done',
@@ -823,7 +856,7 @@ describe('fullCheckView', () => {
       readView: async (asked) => (asked.id === 's001r' ? null : viewOf(nodes, asked.id)),
     });
 
-    const view = fullCheckView({ state: 'done', result: fullCheckResult(outcome, noEvent) }, null);
+    const view = fullCheckView({ state: 'done', result: fullCheckResult(outcome, noEvent) }, null, AT);
 
     expect(view.summary?.coverage).toMatchObject({ nodes: 6, asked: 6, answered: 5, complete: false, unansweredCount: 1 });
   });

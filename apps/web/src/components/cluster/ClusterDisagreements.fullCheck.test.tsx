@@ -95,6 +95,7 @@ function checkOf(patch: Partial<TopologyFullCheck> = {}): TopologyFullCheck {
     asked: 0,
     total: 0,
     retryAt: null,
+    now: Date.now(),
     lastFailure: null,
     ...patch,
   };
@@ -160,6 +161,7 @@ interface Extra {
   asking?: boolean;
   askError?: Error | null;
   connectionId?: string;
+  receivedAt?: number | null;
 }
 
 function view(report: TopologyDisagreementReport, extra: Extra = {}) {
@@ -243,12 +245,12 @@ describe('ClusterDisagreements full check', () => {
   it('says why a check was refused', () => {
     render(
       view(reportOf(checkOf()), {
-        askError: new Error('The last full check finished less than 30 seconds ago'),
+        askError: new Error('The last full check ended less than 30 seconds ago'),
       }),
     );
 
     expect(screen.getByRole('alert')).toHaveTextContent(
-      'The last full check finished less than 30 seconds ago',
+      'The last full check ended less than 30 seconds ago',
     );
   });
 
@@ -516,7 +518,7 @@ describe('ClusterDisagreements full check', () => {
   });
 
   describe('wait after a check', () => {
-    const TOO_SOON = 'The last full check finished less than 30 seconds ago';
+    const TOO_SOON = 'The last full check ended less than 30 seconds ago';
 
     beforeEach(() => {
       vi.useFakeTimers();
@@ -605,6 +607,60 @@ describe('ClusterDisagreements full check', () => {
       expect(screen.getByRole('alert')).toHaveTextContent(
         'The node list of the cluster could not be read',
       );
+    });
+
+    describe('when the clock of the browser is not the clock of the server', () => {
+      const SKEW = 5 * 60_000;
+
+      it('still waits when the browser is ahead', () => {
+        const serverNow = Date.now() - SKEW;
+        const check = { ...doneCheck(serverNow - 10_000), now: serverNow };
+        render(view(reportOf(check), { receivedAt: Date.now() }));
+        const button = screen.getByRole('button', { name: 'Ask every node' });
+
+        expect(button).toBeDisabled();
+
+        pass(19_000);
+        expect(button).toBeDisabled();
+
+        pass(1_000);
+        expect(button).toBeEnabled();
+      });
+
+      it('keeps a refusal on screen for as long as the server waits', () => {
+        const serverNow = Date.now() - SKEW;
+        const askError = new ApiError(TOO_SOON, 429, { retryAt: serverNow + 12_000 });
+        render(view(reportOf(checkOf({ now: serverNow })), { askError, receivedAt: Date.now() }));
+
+        expect(screen.getByRole('alert')).toHaveTextContent(TOO_SOON);
+        expect(screen.getByRole('button', { name: 'Ask every node' })).toBeDisabled();
+
+        pass(12_000);
+
+        expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Ask every node' })).toBeEnabled();
+      });
+
+      it('does not wait longer when the browser is behind', () => {
+        const serverNow = Date.now() + SKEW;
+        const check = { ...doneCheck(serverNow - 31_000), now: serverNow };
+        render(view(reportOf(check), { receivedAt: Date.now() }));
+
+        expect(screen.getByRole('button', { name: 'Ask every node' })).toBeEnabled();
+      });
+
+      it('measures the age of a full result by the clock of the server', () => {
+        const serverNow = Date.now() - SKEW;
+        const finishedAt = serverNow - 3 * 60_000;
+        const check = { ...doneCheck(finishedAt), now: serverNow };
+        render(view(reportOf(check), { receivedAt: Date.now() }));
+
+        fireEvent.click(screen.getByRole('button', { name: fullButtonName(finishedAt) }));
+
+        expect(
+          screen.getByText('Taken 3 minutes ago. The cluster may have changed since.'),
+        ).toBeInTheDocument();
+      });
     });
 
     it('waits again when a newer check finishes', () => {

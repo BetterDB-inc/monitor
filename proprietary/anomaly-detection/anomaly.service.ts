@@ -331,6 +331,7 @@ import {
   type RaisedDivergence,
   eventOfRaised,
   summarizeDisagreements,
+  withEventConnections,
 } from './topology-disagreements';
 import {
   FULL_CHECK_BLOCKER_TEXT,
@@ -11492,8 +11493,11 @@ export class AnomalyService
 
   getTopologyFullCheck(connectionId: string): TopologyFullCheckView {
     const clusterKey = this.connectionClusterKeys.get(connectionId);
-    const check = clusterKey ? this.topologyFullChecks.state(clusterKey, Date.now()) : ({ state: 'none' } as const);
-    return fullCheckView(check, this.topologyFullCheckBlocker(connectionId));
+    const now = Date.now();
+    const check = clusterKey ? this.topologyFullChecks.state(clusterKey, now) : ({ state: 'none' } as const);
+    const view = fullCheckView(check, this.topologyFullCheckBlocker(connectionId), now);
+    if (!view.summary) return view;
+    return { ...view, summary: withEventConnections(view.summary, this.topologyEventPlaceFor(connectionId)) };
   }
 
   async startTopologyFullCheck(connectionId: string): Promise<TopologyFullCheckStart> {
@@ -11515,6 +11519,8 @@ export class AnomalyService
     }
     if (!this.connectionRegistry.getConfig(connectionId)) return { result: 'unknown_connection' };
     if (this.connectionClusterKeys.get(connectionId) !== clusterKey) return { result: 'view_unreadable' };
+    const blockerNow = this.topologyFullCheckBlocker(connectionId);
+    if (blockerNow) return { result: 'unavailable', reason: blockerNow, text: FULL_CHECK_BLOCKER_TEXT[blockerNow] };
     if (!this.holdsNodeOfCluster(nodes, clusterKey)) return { result: 'view_unreadable' };
 
     const started = this.topologyFullChecks.start(clusterKey, Date.now(), nodes.length, async (onProgress) => {
@@ -11524,15 +11530,24 @@ export class AnomalyService
         now: () => Date.now(),
         onProgress,
       });
-      return fullCheckResult(outcome, this.topologyDisagreementEventOf(clusterKey, connectionId));
+      return fullCheckResult(outcome, this.topologyDisagreementEventOf(clusterKey, connectionId, (holder) => holder));
     });
     if (started.result === 'started') this.topologyFullCheckOwners.set(clusterKey, connectionId);
     return started;
   }
 
-  private topologyDisagreementEventOf(clusterKey: string, connectionId: string): DisagreementEventOf {
+  private topologyEventPlaceFor(connectionId: string): (holder: string) => string {
+    const reachable = new Set(this.scopeConnectionIds(connectionId));
+    return (holder) => (reachable.has(holder) ? connectionId : holder);
+  }
+
+  private topologyDisagreementEventOf(
+    clusterKey: string,
+    connectionId: string,
+    placed: (holder: string) => string = this.topologyEventPlaceFor(connectionId),
+  ): DisagreementEventOf {
     const anchor = this.topologyDivergence.lastRound(clusterKey)?.anchorConnectionId;
-    const lineEvent = this.topologyLineEventOf(connectionId, anchor);
+    const lineEvent = this.topologyLineEventOf(connectionId, anchor, placed);
     const ofGroup = eventOfRaised(this.topologyDisagreementEvents(clusterKey, anchor, lineEvent));
     const store = this.topologyEventStores.partial;
     const eventIds = anchor === undefined ? undefined : store.eventIds.get(anchor);
@@ -11552,8 +11567,8 @@ export class AnomalyService
   private topologyLineEventOf(
     connectionId: string,
     anchor: string | undefined,
+    placed: (holder: string) => string,
   ): (eventId: string | null, raisedAs: MetricType) => DisagreementEvent {
-    const reachable = new Set(this.scopeConnectionIds(connectionId));
     return (eventId, raisedAs) => {
       if (eventId === null) {
         return { eventId: '', eventType: raisedAs, eventAt: null, connectionId, resolvedByHand: true };
@@ -11564,7 +11579,7 @@ export class AnomalyService
         eventId,
         eventType: event?.metricType ?? raisedAs,
         eventAt: this.topologyDivergenceEventAt.get(eventId) ?? event?.timestamp ?? null,
-        connectionId: reachable.has(holder) ? connectionId : holder,
+        connectionId: placed(holder),
         resolvedByHand: event?.resolved === true,
       };
     };

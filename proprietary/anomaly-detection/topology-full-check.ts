@@ -110,6 +110,7 @@ export interface TopologyFullCheckView {
   asked: number;
   total: number;
   retryAt: number | null;
+  now: number;
   lastFailure: FullCheckFailure | null;
   summary?: TopologyDisagreementSummary;
 }
@@ -146,6 +147,7 @@ function retryAfter(
 export function fullCheckView(
   check: FullCheckState,
   blocker: FullCheckBlocker | null,
+  now: number,
   minIntervalMs: number = FULL_CHECK_DEFAULTS.minIntervalMs,
 ): TopologyFullCheckView {
   const unavailable = blocker ? { reason: blocker, text: FULL_CHECK_BLOCKER_TEXT[blocker] } : null;
@@ -158,6 +160,7 @@ export function fullCheckView(
       asked: 0,
       total: 0,
       retryAt: retryAfter(undefined, check.failure, minIntervalMs),
+      now,
       lastFailure: check.failure ?? null,
     };
   }
@@ -170,6 +173,7 @@ export function fullCheckView(
       asked: check.asked,
       total: check.total,
       retryAt: null,
+      now,
       lastFailure: null,
     };
   }
@@ -182,6 +186,7 @@ export function fullCheckView(
     asked: result.asked,
     total: result.total,
     retryAt: retryAfter(result, check.failure, minIntervalMs),
+    now,
     lastFailure: check.failure ?? null,
     summary: result.summary,
   };
@@ -362,6 +367,7 @@ export async function runFullCheck(input: FullCheckRun): Promise<FullCheckOutcom
   try {
     await Promise.all(Array.from({ length: Math.max(1, concurrency) }, worker));
   } finally {
+    timeIsUp = true;
     clearTimeout(limit);
     for (const socket of [...inFlight]) socket.abort();
   }

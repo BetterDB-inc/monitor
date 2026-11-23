@@ -437,6 +437,7 @@ export function ClusterDashboard() {
           ) : disagreements.licensed ? (
             <ClusterDisagreements
               summary={disagreements.summary}
+              receivedAt={disagreements.receivedAt}
               error={disagreements.error}
               onAskEveryNode={disagreements.askEveryNode}
               asking={disagreements.asking}

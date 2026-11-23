@@ -37,9 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lines that differ only in the node they are about are merged, node lists
   are capped at 25 and `coverage` says how many nodes answered. Returns the
   disputed shards and the totals of all of them; `shards: "all"` returns
-  one line per shard. `fullCheck` carries the last check that asked every
-  node, when one was run from the Cluster page; the tool reads it and
-  cannot start one.
+  one line per shard. `fullCheck` carries the last check that set out to
+  ask every node, when one was run from the Cluster page; the tool reads
+  it and cannot start one.
 
 ### Changed
 

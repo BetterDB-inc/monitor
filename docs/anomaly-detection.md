@@ -1658,8 +1658,9 @@ Asks every node of the cluster for its view once, so that the counts are over th
 | `startedAt`, `finishedAt` | When the check started and finished |
 | `asked`, `total` | How many nodes were asked so far, and how many there are. While the check runs, `total` is the number of members the node list had when the check started. When it is done, `total` also counts members that only the replies listed, and is the same as `summary.coverage.nodes` |
 | `retryAt` | When the next check can be started: 30 seconds after the last one finished or broke. `null` when no check is kept |
+| `now` | The clock of the server when it answered. `retryAt`, `finishedAt` and `lastFailure.at` are times of that clock: measure them against `now`, not against the clock of the reader, which may run ahead or behind |
 | `lastFailure` | `null`, or `at` and `reason` of the last check when it broke before it finished. A result from the check before it is still in `summary`, with its own `finishedAt`. Cleared when the next check starts, and after 10 minutes |
-| `summary` | On `done` only: the result, in the shape of the summary above. It is built once, when the check finishes |
+| `summary` | On `done` only: the result, in the shape of the summary above. It is built once, when the check finishes. Only `eventConnectionId` is worked out for the connection that asks, as in the summary above, so a link opens the event under that connection whoever started the check |
 
 In `summary` the counts are over every node that answered, and `coverage.complete` is `true` when all of them did. A node that gave no answer is in `unanswered` and is not counted as agreeing. The lines of a full check are not tracked: `tracked` is `false` and they have no `since` and no `rounds`, because the check is a single reading. They are never `stale`, and `lastSeenAt` is the time of the check. `confirmed`, `eventId` and `eventType` are set when an open event covered the same disagreement at the moment the check finished: the event is matched by what the line is about (the same owners and overlapping slots, or the same dissenting side, or the [`partial_membership`](#partial_membership) finding that holds the line), and the result does not change afterwards, also when the event is closed later. **A full check raises no event and closes none**, and what it found is not kept between rounds: a disagreement that only it sees becomes an event when the rounds see it too.
 
@@ -1695,6 +1696,7 @@ A check cannot be run, and `unavailable` says so, when:
   "asked": 0,
   "total": 500,
   "retryAt": null,
+  "now": 1704067200040,
   "lastFailure": null
 }
 ```

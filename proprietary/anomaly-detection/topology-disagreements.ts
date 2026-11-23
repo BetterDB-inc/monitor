@@ -283,6 +283,20 @@ function slotsLabel(ranges: number[][]): string {
   return `Slots ${listed}${extra > 0 ? ` +${extra} more ranges` : ''}`;
 }
 
+export function withEventConnections(
+  summary: TopologyDisagreementSummary,
+  placed: (holder: string) => string,
+): TopologyDisagreementSummary {
+  let moved = false;
+  const disagreements = summary.disagreements.map((line) => {
+    const holder = line.eventConnectionId;
+    if (holder === null || placed(holder) === holder) return line;
+    moved = true;
+    return { ...line, eventConnectionId: placed(holder) };
+  });
+  return moved ? { ...summary, disagreements } : summary;
+}
+
 export function summarizeDisagreements(
   round: DisagreementRound | undefined,
   eventOf: DisagreementEventOf,
