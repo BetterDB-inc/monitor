@@ -3,8 +3,9 @@ jest.mock('../../database/adapters/unified.adapter');
 import { ConnectionRegistry } from '../connection-registry.service';
 import { ExternalMetricsStore } from '../../external-metrics/external-metrics-store';
 import { DiscoveredInstancesStore } from '../../external-metrics/discovered-instances.store';
+import { RuntimeCapabilityTracker } from '../runtime-capability-tracker.service';
 
-function build() {
+function build(capabilityTracker?: RuntimeCapabilityTracker) {
   const storage = {
     saveConnection: jest.fn().mockResolvedValue(undefined),
     deleteConnection: jest.fn().mockResolvedValue(undefined),
@@ -18,7 +19,7 @@ function build() {
   return new ConnectionRegistry(
     storage as never,
     {} as never,
-    tracker as never,
+    (capabilityTracker ?? tracker) as never,
     {} as never,
     new ExternalMetricsStore(),
     undefined,
@@ -56,5 +57,17 @@ describe('ConnectionRegistry agent connections', () => {
 
     expect(registry.getObservedNodeId('agent-1')).toBeUndefined();
     expect(registry.isOutsideCluster('agent-1')).toBe(false);
+  });
+
+  it('starts a reconnected agent with its runtime capabilities re-enabled', async () => {
+    const tracker = new RuntimeCapabilityTracker();
+    const registry = build(tracker);
+    await registry.registerAgentConnection('agent-1', 'Agent', {} as never);
+    tracker.recordFailure('agent-1', 'canSlowLog', 'NOPERM this user has no permissions');
+    expect(tracker.isAvailable('agent-1', 'canSlowLog')).toBe(false);
+
+    await registry.registerAgentConnection('agent-1', 'Agent', {} as never);
+
+    expect(tracker.isAvailable('agent-1', 'canSlowLog')).toBe(true);
   });
 });
