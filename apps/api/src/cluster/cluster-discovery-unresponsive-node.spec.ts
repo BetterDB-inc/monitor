@@ -61,6 +61,11 @@ const MARK_LIMIT = 512;
 const answered = (): FakeCommand => ({ promise: Promise.resolve('OK') });
 const timedOut = (): FakeCommand => ({ promise: Promise.reject(new Error('Command timed out')) });
 const refusedReply = (): FakeCommand => ({ promise: Promise.reject(new Error('ERR unknown command')) });
+const errorReply = (message: string): FakeCommand => {
+  const error = new Error(message);
+  error.name = 'ReplyError';
+  return { promise: Promise.reject(error) };
+};
 
 describe('ClusterDiscoveryService unresponsive node', () => {
   let service: ClusterDiscoveryService;
@@ -272,6 +277,29 @@ describe('ClusterDiscoveryService unresponsive node', () => {
     await send(second, answered());
 
     await expect(service.getAddressConnection('10.0.0.1', 6379, 'seed')).resolves.toBe(second);
+  });
+
+  it.each(['LOADING Valkey is loading the dataset in memory', 'NOPERM this user has no permissions'])(
+    'serves the node again once a held client gets the error reply %s',
+    async (message) => {
+      const first = await service.getNodeConnection(silent.id, 'seed');
+      const second = await service.getAddressConnection('10.0.0.1', 6379, 'seed');
+      await send(first, timedOut());
+
+      await send(second, errorReply(message));
+
+      await expect(service.getAddressConnection('10.0.0.1', 6379, 'seed')).resolves.toBe(second);
+    },
+  );
+
+  it('keeps refusing the node when a held client fails without a reply', async () => {
+    const first = await service.getNodeConnection(silent.id, 'seed');
+    const second = await service.getAddressConnection('10.0.0.1', 6379, 'seed');
+    await send(first, timedOut());
+
+    await send(second, { promise: Promise.reject(new Error('Connection is closed.')) });
+
+    await expect(service.getAddressConnection('10.0.0.1', 6379, 'seed')).rejects.toThrow('is not answering');
   });
 
   it('still refuses a silent node after another node timed out much later', async () => {
