@@ -58,18 +58,18 @@ describe('WsClient reconnects', () => {
     client.close();
   });
 
-  it('waits the longest delay when another agent took over its token', () => {
+  it('waits the longest delay when another agent uses its token', () => {
     const client = build();
     client.connect();
     mockSockets[0].emit('open');
 
-    mockSockets[0].emit('close', 4003, Buffer.from('Replaced by a new connection'));
+    mockSockets[0].emit('close', 4003, Buffer.from('Another agent is connected with this token'));
     jest.advanceTimersByTime(29_999);
     expect(mockSockets).toHaveLength(1);
 
     jest.advanceTimersByTime(1);
     expect(mockSockets).toHaveLength(2);
-    expect(error).toHaveBeenCalledWith(expect.stringContaining('same token'));
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('Another agent is using the same token'));
     client.close();
   });
 
@@ -80,7 +80,7 @@ describe('WsClient reconnects', () => {
     for (let i = 0; i < 3; i++) {
       const socket = mockSockets[mockSockets.length - 1];
       socket.emit('open');
-      socket.emit('close', 4003, Buffer.from('Replaced by a new connection'));
+      socket.emit('close', 4003, Buffer.from('Another agent is connected with this token'));
       jest.advanceTimersByTime(29_999);
       expect(mockSockets).toHaveLength(i + 1);
       jest.advanceTimersByTime(1);

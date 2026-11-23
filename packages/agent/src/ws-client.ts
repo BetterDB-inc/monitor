@@ -59,8 +59,8 @@ export class WsClient {
       this.options.onClose(code, reason.toString());
       if (code === REPLACED_CLOSE_CODE) {
         console.error(
-          '[Agent] Another agent connected with the same token and replaced this one. ' +
-          'Give each agent its own token.',
+          '[Agent] Another agent is using the same token, so the server turned this one away. ' +
+          'Give each agent its own token. Retrying in 30 s.',
         );
       }
       this.scheduleReconnect(code === REPLACED_CLOSE_CODE);
