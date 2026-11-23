@@ -25,6 +25,10 @@ import {
   ConnectionContext,
 } from '../common/services/multi-connection-poller';
 import { withTimeout } from '../common/utils/with-timeout';
+import { dialsDataNodes } from '../connections/data-node-reach';
+import { DatabasePort } from '../common/interfaces/database-port.interface';
+
+type PingOutcome = 'answered' | 'refused' | 'missed';
 
 @Injectable()
 export class HealthService extends MultiConnectionPoller implements OnModuleInit, OnModuleDestroy {
@@ -35,6 +39,12 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
   private readonly startTime = Date.now();
   private readonly HEALTH_POLL_INTERVAL_MS = 10000; // Check every 10 seconds
   private readonly RECONNECT_TIMEOUT_MS = 3000;
+  private readonly PING_TIMEOUT_MS = 5000;
+  private readonly MISSED_PINGS_BEFORE_DOWN = 2;
+  private readonly MISSED_PINGS_BEFORE_QUIET_RECONNECT = 6;
+  private readonly PING_TIMED_OUT = 'Database ping timed out';
+  private missedPings = new Map<string, number>();
+  private pingsInFlight = new Map<string, Promise<PingOutcome>>();
   private startupTimeout: NodeJS.Timeout | null = null;
 
   constructor(
@@ -78,12 +88,14 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
     if (ctx.connectionType === 'external' && (ctx.client.sampleVersion?.() ?? null) === null) {
       return;
     }
-    await this.getHealth(ctx.connectionId);
+    await this.checkHealth(ctx.connectionId, true);
   }
 
   protected onConnectionRemoved(connectionId: string): void {
     this.instanceUpStates.delete(connectionId);
     this.reconnectLocks.delete(connectionId);
+    this.missedPings.delete(connectionId);
+    this.pingsInFlight.delete(connectionId);
     this.logger.debug(`Cleaned up health state for removed connection: ${connectionId}`);
   }
 
@@ -113,6 +125,94 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
     return withTimeout(raw, this.RECONNECT_TIMEOUT_MS).catch(() => {});
   }
 
+  private ping(connectionId: string, client: DatabasePort): Promise<PingOutcome> {
+    const existing = this.pingsInFlight.get(connectionId);
+    if (existing) {
+      return existing;
+    }
+    const run = this.pingWithinDeadline(connectionId, client).finally(() => {
+      if (this.pingsInFlight.get(connectionId) === run) {
+        this.pingsInFlight.delete(connectionId);
+      }
+    });
+    this.pingsInFlight.set(connectionId, run);
+    return run;
+  }
+
+  private async pingWithinDeadline(connectionId: string, client: DatabasePort): Promise<PingOutcome> {
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<'missed'>((resolve) => {
+      timer = setTimeout(() => resolve('missed'), this.PING_TIMEOUT_MS);
+      timer.unref?.();
+    });
+    let outcome: PingOutcome;
+    try {
+      outcome = await Promise.race([
+        client.ping().then((answered): PingOutcome => (answered ? 'answered' : 'refused')),
+        deadline,
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+    if (outcome === 'answered') {
+      this.missedPings.delete(connectionId);
+    }
+    return outcome;
+  }
+
+  private answersOnNewConnection(
+    connectionId: string,
+    client: DatabasePort,
+    dialsDatabase: boolean,
+  ): Promise<boolean> | undefined {
+    if (!dialsDatabase || !client.pingOnNewConnection || !this.missedPings.has(connectionId)) {
+      return undefined;
+    }
+    return withTimeout(
+      client.pingOnNewConnection(this.PING_TIMEOUT_MS),
+      this.PING_TIMEOUT_MS,
+    ).catch(() => false);
+  }
+
+  private async countMissedCheck(
+    connectionId: string,
+    client: DatabasePort,
+    dropWhenHung: boolean,
+    answersOnNewConnection: Promise<boolean> | undefined,
+  ): Promise<boolean> {
+    const missed = (this.missedPings.get(connectionId) ?? 0) + 1;
+    this.missedPings.set(connectionId, missed);
+    if (missed < this.MISSED_PINGS_BEFORE_DOWN) {
+      return false;
+    }
+    const answeredOnNewConnection = await answersOnNewConnection;
+    if (this.missedPings.get(connectionId) !== missed) {
+      return false;
+    }
+    if (answeredOnNewConnection) {
+      if (missed >= this.MISSED_PINGS_BEFORE_QUIET_RECONNECT) {
+        this.logger.warn(
+          `${connectionId} answers on a new connection but its client got no ping answer for ${missed} checks in a row; reconnecting the client`,
+        );
+        this.missedPings.delete(connectionId);
+        if (client.reconnectClient) {
+          await withTimeout(client.reconnectClient(), this.RECONNECT_TIMEOUT_MS).catch(() => undefined);
+        } else {
+          await withTimeout(client.disconnect(), this.RECONNECT_TIMEOUT_MS).catch(() => undefined);
+          await this.tryReconnect(connectionId);
+        }
+      }
+      return false;
+    }
+    if (dropWhenHung) {
+      this.logger.warn(
+        `No ping answer from ${connectionId} for ${missed} checks in a row; closing its client`,
+      );
+      await withTimeout(client.disconnect(), this.RECONNECT_TIMEOUT_MS).catch(() => undefined);
+    }
+    return true;
+  }
+
   onModuleInit(): void {
     // Delay initial poll to let connections fully initialize
     // This prevents false "down" states on startup
@@ -136,6 +236,13 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
    * Get health for a specific connection or the default connection
    */
   async getHealth(connectionId?: string): Promise<HealthResponse> {
+    return this.checkHealth(connectionId, false);
+  }
+
+  private async checkHealth(
+    connectionId: string | undefined,
+    countsMissedPings: boolean,
+  ): Promise<HealthResponse> {
     const targetId = connectionId || this.connectionRegistry.getDefaultId();
     if (!targetId) {
       // Issue #1: Return empty string for host instead of 'none' to avoid confusion
@@ -211,9 +318,34 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
         };
       }
 
-      const canPing = await client.ping();
+      const dialsDatabase = dialsDataNodes(config);
+      const answersOnNewConnection = countsMissedPings
+        ? this.answersOnNewConnection(targetId, client, dialsDatabase)
+        : undefined;
+      const ping = await this.ping(targetId, client);
 
-      if (!canPing) {
+      if (ping === 'missed') {
+        if (
+          countsMissedPings &&
+          (await this.countMissedCheck(targetId, client, dialsDatabase, answersOnNewConnection))
+        ) {
+          await this.handleInstanceDown(targetId, config.host, config.port, this.PING_TIMED_OUT);
+        }
+        return {
+          status: 'error',
+          database: {
+            type: 'unknown',
+            version: null,
+            host: config.host,
+            port: config.port,
+          },
+          capabilities: null,
+          runtimeCapabilities: null,
+          error: this.PING_TIMED_OUT,
+        };
+      }
+
+      if (ping === 'refused') {
         await this.handleInstanceDown(targetId, config.host, config.port, 'Database ping failed');
         return {
           status: 'error',

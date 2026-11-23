@@ -2,6 +2,8 @@
 // cannot import from the optional proprietary module, so the response shapes
 // are duplicated here. metricType/pattern stay open strings: the server-side
 // enums grow without lockstep frontend releases.
+import type { ServedClusterNodeRef } from '@betterdb/shared';
+
 export type AnomalySeverity = 'info' | 'warning' | 'critical';
 export type AnomalyType = 'spike' | 'drop';
 
@@ -22,6 +24,7 @@ export interface AnomalyEvent {
   resolved: boolean;
   connectionId?: string;
   persisted?: boolean;
+  node?: ServedClusterNodeRef;
 }
 
 export interface CorrelatedAnomalyGroup {
@@ -91,6 +94,187 @@ export interface FanoutCoverage {
   stale: boolean;
 }
 
+export interface HotShardLoad {
+  perSecond: number;
+  share: number;
+  median: number;
+  ratio: number;
+}
+
+export interface HotShardSlot {
+  slot: number;
+  cpuUsecPerSecond: number;
+  networkBytesPerSecond: number;
+  keyCount: number;
+  shareOfShard: number;
+}
+
+export interface HotShardKey {
+  key: string;
+  slot: number;
+  freq: number;
+}
+
+export type RebalanceNoPlanReason =
+  | 'key_level'
+  | 'cluster_hot'
+  | 'no_target'
+  | 'unhealthy_node'
+  | 'migration_running'
+  | 'settling'
+  | 'slots_scattered'
+  | 'too_many_targets'
+  | 'covered_by_other_plan'
+  | 'conflicts_with_other_plan';
+
+export interface RebalanceCoveringShard {
+  shardId: string;
+  nodeAddr: string;
+}
+
+export type RebalanceSupport =
+  | 'valkey_atomic'
+  | 'redis_atomic'
+  | 'none'
+  | 'provider_managed'
+  | 'unknown';
+
+export interface RebalancePinnedSlot {
+  slot: number;
+  shareOfShard: number;
+}
+
+export interface RebalanceMove {
+  targetShardId: string;
+  targetAddr: string;
+  ranges: Array<[number, number]>;
+  slotCount: number;
+  keyCount: number;
+  cpuUsecPerSecond: number;
+  shareOfShard: number;
+}
+
+export interface RebalanceShardLoad {
+  cpuUsecPerSecond: number;
+  share: number;
+  ratio: number;
+}
+
+export interface RebalanceProjection {
+  shardId: string;
+  nodeAddr: string;
+  role: 'source' | 'target' | 'other';
+  before: RebalanceShardLoad;
+  after: RebalanceShardLoad;
+}
+
+export interface RebalanceWarning {
+  code: 'source_fork' | 'fewer_replicas' | 'target_memory' | 'memory_unknown' | 'memory_unlimited';
+  shardId: string;
+  memoryShare?: number;
+}
+
+export interface RebalanceCommand {
+  nodeAddr: string;
+  text: string;
+}
+
+export interface RebalancePlan {
+  kind: 'plan';
+  action: 'spread';
+  effect: 'resolves' | 'headroom';
+  sourceShardId: string;
+  moves: RebalanceMove[];
+  pinnedSlots: RebalancePinnedSlot[];
+  projection: RebalanceProjection[];
+  medianBefore: number;
+  medianAfter: number;
+  warnings: RebalanceWarning[];
+  plannedAfter: string[];
+  support?: RebalanceSupport;
+  commands?: RebalanceCommand[];
+  execution?: RebalanceExecution;
+}
+
+export type RebalanceExecutionBlocker =
+  | 'flag_off'
+  | 'not_dialed'
+  | 'provider_managed'
+  | 'unsupported_server'
+  | 'migration_running'
+  | 'plan_outdated'
+  | 'server_refused';
+
+export interface RebalanceExecution {
+  available: boolean;
+  blockedBy?: RebalanceExecutionBlocker;
+}
+
+export type RebalanceRecheckFailure = 'slots_moved' | 'source_unhealthy' | 'target_unhealthy';
+
+export type RebalanceJobState =
+  | 'starting'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled'
+  | 'unknown';
+
+export interface RebalanceRunJob {
+  targetShardId: string;
+  targetAddr: string;
+  ranges: Array<[number, number]>;
+  state: RebalanceJobState;
+  jobName?: string;
+  phase?: string;
+  message?: string;
+}
+
+export type RebalanceRunState = 'running' | 'succeeded' | 'failed' | 'cancelled' | 'unknown';
+
+export interface RebalanceRun {
+  sourceShardId: string;
+  sourceAddr: string;
+  startedBy: { userId: string | null; email: string | null };
+  startedAt: number;
+  projectedRatio: number;
+  jobs: RebalanceRunJob[];
+  state: RebalanceRunState;
+  endedAt?: number;
+  outcome?: { projectedRatio: number; actualRatio: number; measuredAt: number };
+  outcomeUnavailable?: boolean;
+}
+
+export interface RebalanceNoPlan {
+  kind: 'no_plan';
+  action: 'spread';
+  reason: RebalanceNoPlanReason;
+  pinnedSlots: RebalancePinnedSlot[];
+  coveredBy?: RebalanceCoveringShard[];
+  conflictsWith?: RebalanceCoveringShard[];
+}
+
+export type RebalanceVerdict = RebalancePlan | RebalanceNoPlan;
+
+export interface HotShardDetail {
+  eventId: string;
+  captureAvailable: boolean;
+  shardId: string;
+  nodeAddr: string;
+  slotCount: number;
+  since: number;
+  sampledAt: number;
+  cpu: HotShardLoad;
+  network: Omit<HotShardLoad, 'ratio'>;
+  topSlots: HotShardSlot[];
+  topKeys: HotShardKey[];
+  keySource: 'lfu' | 'unavailable';
+  keyNote?: string;
+  keysSampled: number;
+  keysSampledAt?: number;
+  rebalance?: RebalanceVerdict;
+}
+
 export type ReplicationDivergenceLevel = 'none' | 'behind' | 'warning' | 'critical' | 'unobserved';
 
 export interface ReplicationDivergenceWindow {
@@ -120,6 +304,7 @@ export interface IncidentTimelineEntry {
   anomalyId: string;
   connectionId: string;
   nodeAddr?: string;
+  node?: ServedClusterNodeRef;
   timestamp: number;
   metricType: string;
   severity: AnomalySeverity;
@@ -168,4 +353,80 @@ export interface IncidentTimeline {
     unknownSignals: string[];
     recoveredAt: number | null;
   };
+}
+
+export type DivergenceKind = 'slot_owner' | 'config_epoch' | 'failure_flags' | 'membership';
+
+export interface DivergenceNode {
+  nodeId: string;
+  address: string;
+  role: 'primary' | 'replica' | 'unknown';
+  shardId?: string;
+  availabilityZone?: string;
+}
+
+export interface DisagreementCoverage {
+  nodes: number;
+  asked: number;
+  answered: number;
+  complete: boolean;
+  unanswered: DivergenceNode[];
+  unansweredCount: number;
+}
+
+export interface DisagreementPosition {
+  value: string | null;
+  owner?: DivergenceNode;
+  count: number;
+  observerCount: number;
+  observers: DivergenceNode[];
+}
+
+export interface DisagreementLine {
+  id: string;
+  kind: DivergenceKind;
+  severity: AnomalySeverity;
+  open: boolean;
+  confirmed: boolean;
+  resolvedByHand: boolean;
+  eventId: string | null;
+  eventType: string | null;
+  eventAt: number | null;
+  eventConnectionId: string | null;
+  since: number;
+  rounds: number;
+  stale: boolean;
+  lastSeenAt: number;
+  subjects: DivergenceNode[];
+  subjectCount: number;
+  slots?: number[][];
+  slotCount?: number;
+  shardIds: string[];
+  positions: DisagreementPosition[];
+  epochs?: Array<{ node: DivergenceNode; values: string[] }>;
+  text: string;
+}
+
+export type DisagreementShardState = 'disputed' | 'undisputed' | 'not_compared';
+
+export interface DisagreementShard {
+  shardId: string;
+  primary: DivergenceNode | null;
+  replicas: number;
+  zones: string[];
+  slots: number[][];
+  slotCount: number;
+  nodes: number;
+  ownViews: number;
+  state: DisagreementShardState;
+  disagreementIds: string[];
+  staleDisagreementIds: string[];
+}
+
+export interface TopologyDisagreementSummary {
+  status: 'ok' | 'insufficient_views' | 'not_sampled';
+  sampledAt: number | null;
+  coverage: DisagreementCoverage;
+  disagreements: DisagreementLine[];
+  shards: DisagreementShard[];
 }

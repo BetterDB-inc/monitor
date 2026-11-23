@@ -4,7 +4,7 @@ import { ClusterTopologySource } from '../cluster-topology.source';
 import type { DiscoveredNode } from '../../cluster/cluster-discovery.service';
 
 function discovered(id: string, address: string, flags = ['master']): DiscoveredNode {
-  return { id, address, flags, role: 'master', slots: [], configEpoch: 0, healthy: true };
+  return { id, address, flags, role: 'master', slots: [], configEpoch: 0, state: 'healthy' };
 }
 
 // The seed host resolves to the node that answers discovery (a single-node
@@ -512,6 +512,37 @@ describe('TopologyAutoRegistrationService', () => {
     await Promise.all([runA, runB]);
 
     expect(configs.get('solo')?.membership?.seedId).toBe('a');
+  });
+});
+
+describe('TopologyAutoRegistrationService and a node connected by hand', () => {
+  const connected: DatabaseConnectionConfig = {
+    id: 'node', name: 'prod · 10.0.0.2:7002', host: '10.0.0.2', port: 7002, isDefault: false, createdAt: 1, autoRegisterNodes: false,
+  };
+
+  it('registers nothing from the connected node while the env default is on', async () => {
+    const { service, registry, discovery } = build({ seed: { ...connected, id: 'seed' }, envDefault: 'true', nodes: clusterOf(3) });
+    await service.reconcile('seed');
+    expect(discovery.discoverNodesIsolated).not.toHaveBeenCalled();
+    expect(registry.addManagedChild).not.toHaveBeenCalled();
+  });
+
+  it('adopts the connected node instead of adding it again when auto-registration is turned on', async () => {
+    const { service, registry } = build({ nodes: clusterOf(2) });
+    registry.findConfigByHostPort.mockImplementation((host: string, port: number) =>
+      host === connected.host && port === connected.port ? connected : null,
+    );
+    await service.reconcile('seed');
+    expect(registry.adoptChild.mock.calls).toEqual([['node', 'seed', { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster' }]]);
+    expect(registry.addManagedChild.mock.calls).toEqual([['seed', { host: '10.0.0.3', port: 7003, nodeId: 'n3', source: 'cluster' }]]);
+  });
+
+  it('keeps the connected node when auto-registration is turned off again', async () => {
+    const adopted = { ...connected, membership: { seedId: 'seed', nodeId: 'n2', origin: 'adopted' as const, source: 'cluster' as const } };
+    const { service, registry } = build({ seed: { autoRegisterNodes: false }, members: [adopted, child('c3', '10.0.0.3', 7003)] });
+    await service.reconcile('seed');
+    expect(registry.retireChild.mock.calls).toEqual([['c3']]);
+    expect(registry.removeChild).not.toHaveBeenCalled();
   });
 });
 

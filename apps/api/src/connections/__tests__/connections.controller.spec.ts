@@ -1,4 +1,4 @@
-import { BadRequestException, HttpException, HttpStatus } from '@nestjs/common';
+import { BadRequestException, HttpException, HttpStatus, NotFoundException } from '@nestjs/common';
 import { ConnectionsController } from '../connections.controller';
 import { ROLES_KEY } from '../../auth/guards/roles.decorator';
 import { ConnectionRegistry } from '../connection-registry.service';
@@ -12,7 +12,7 @@ import {
 } from '../../external-metrics/discovered-instances.store';
 import { validate } from 'class-validator';
 import { plainToInstance } from 'class-transformer';
-import { DismissDiscoveredDto } from '../../common/dto/connections.dto';
+import { DismissDiscoveredDto, SetNodeAvailabilityZonesDto } from '../../common/dto/connections.dto';
 import type { DatabaseConnectionConfig } from '@betterdb/shared';
 
 interface AdapterStub {
@@ -32,6 +32,7 @@ function setup(opts: SetupOptions = {}) {
     getConfig: jest.fn().mockReturnValue(opts.hasConfig === false ? undefined : { id: 'conn-1' }),
     get: jest.fn().mockReturnValue(adapter),
     setAutoRegister: jest.fn(),
+    setNodeAvailabilityZones: jest.fn(),
     setDefault: jest.fn(),
     list: jest.fn().mockReturnValue([]),
     getDefaultId: jest.fn().mockReturnValue(null),
@@ -224,6 +225,54 @@ describe('ConnectionsController.setAutoRegister', () => {
     await expect(controller.setAutoRegister('child', { enabled: true })).rejects.toMatchObject({
       status: 400,
     });
+  });
+});
+
+describe('ConnectionsController.setNodeAvailabilityZones', () => {
+  const zones = { '10.0.0.1:7001': 'us-east-1a' };
+
+  it('forwards the map to the registry', async () => {
+    const { controller, registry } = setup();
+
+    await expect(controller.setNodeAvailabilityZones('seed', { zones })).resolves.toEqual({ success: true });
+    expect(registry.setNodeAvailabilityZones).toHaveBeenCalledWith('seed', zones);
+  });
+
+  it('passes a validation rejection through as 400', async () => {
+    const { controller, registry } = setup();
+    (registry.setNodeAvailabilityZones as jest.Mock).mockRejectedValueOnce(
+      new BadRequestException("Invalid node address '10.0.0.1': expected host:port"),
+    );
+
+    await expect(controller.setNodeAvailabilityZones('seed', { zones: { '10.0.0.1': 'a' } })).rejects.toMatchObject({
+      status: 400,
+      message: "Invalid node address '10.0.0.1': expected host:port",
+    });
+  });
+
+  it('passes an unknown connection through as 404', async () => {
+    const { controller, registry } = setup();
+    (registry.setNodeAvailabilityZones as jest.Mock).mockRejectedValueOnce(new NotFoundException("Connection 'x' not found."));
+
+    await expect(controller.setNodeAvailabilityZones('x', { zones })).rejects.toMatchObject({ status: 404 });
+  });
+
+  it('does not report a storage failure as a bad request', async () => {
+    const { controller, registry } = setup();
+    const failure = new Error('disk full');
+    (registry.setNodeAvailabilityZones as jest.Mock).mockRejectedValueOnce(failure);
+
+    await expect(controller.setNodeAvailabilityZones('seed', { zones })).rejects.toBe(failure);
+  });
+
+  it.each([[undefined], ['us-east-1a'], [null]])('rejects a body whose zones are %p', async (value) => {
+    const errors = await validate(plainToInstance(SetNodeAvailabilityZonesDto, { zones: value }));
+
+    expect(errors.map((error) => error.property)).toEqual(['zones']);
+  });
+
+  it('accepts a body with a zone map', async () => {
+    await expect(validate(plainToInstance(SetNodeAvailabilityZonesDto, { zones }))).resolves.toEqual([]);
   });
 });
 

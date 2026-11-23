@@ -9,8 +9,6 @@ import {
   preflightNotes,
   serverlessCheckBlock,
   serverlessCheckNotes,
-  SSH_TUNNEL_BLOCK_MESSAGE,
-  usesSshTunnel,
 } from '../preflight';
 
 function conn(partial: Partial<Connection> & Pick<Connection, 'id'>): Connection {
@@ -147,22 +145,13 @@ describe('planBlock', () => {
     expect(planBlock(child, VALKEY_81)).toBe(CLUSTER_MEMBER_BLOCK_MESSAGE);
   });
 
-  it('blocks an SSH-tunneled connection as source or target', () => {
+  it('allows an SSH-tunneled connection as source or target', () => {
     const tunneled = conn({
       id: 'tunneled',
       sshTunnel: { enabled: true, host: 'bastion', port: 22, username: 'ops', authMethod: 'password' },
     });
-    expect(planBlock(tunneled, VALKEY_81)).toBe(SSH_TUNNEL_BLOCK_MESSAGE);
-    expect(planBlock(REDIS_72, tunneled)).toBe(SSH_TUNNEL_BLOCK_MESSAGE);
-  });
-
-  it('does not block a connection whose saved tunnel is disabled', () => {
-    const tunnelOff = conn({
-      id: 'off',
-      sshTunnel: { enabled: false, host: 'bastion', port: 22, username: 'ops', authMethod: 'password' },
-    });
-    expect(usesSshTunnel(tunnelOff)).toBe(false);
-    expect(planBlock(tunnelOff, VALKEY_81)).toBeNull();
+    expect(planBlock(tunneled, VALKEY_81)).toBeNull();
+    expect(planBlock(REDIS_72, tunneled)).toBeNull();
   });
 
   it('blocks external connections as source or target', () => {
@@ -250,11 +239,14 @@ describe('serverlessCheckBlock', () => {
 
   it('blocks a source that analysis cannot reach directly', () => {
     expect(serverlessCheckBlock(conn({ id: 'p', connectionType: 'external' }))).toBe(EXTERNAL_BLOCK_MESSAGE);
+  });
+
+  it('allows a source reached through an SSH tunnel', () => {
     expect(
       serverlessCheckBlock(
         conn({ id: 't', sshTunnel: { enabled: true, host: 'b', port: 22, username: 'u', authMethod: 'password' } }),
       ),
-    ).toBe(SSH_TUNNEL_BLOCK_MESSAGE);
+    ).toBeNull();
   });
 });
 

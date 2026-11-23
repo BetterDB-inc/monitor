@@ -105,6 +105,22 @@ expression.
 `DELETE /api/monitor/schedules/:id`. Disabled rows older than the
 retention cutoff are pruned by the data-retention sweep.
 
+## Top keys of a capture
+
+The cross-reference result also carries `topKeys`: the 10 keys with the
+most commands in the capture, each with its command count and its share
+of the commands that have a key. It does not depend on the baseline. The
+session page shows it as **Top keys in this capture**.
+
+The first argument of a command counts as its key. `MGET a b c` counts
+`a` only, an `EVAL` counts its script text, and a command without a key,
+such as `CLUSTER NODES`, counts its first word.
+
+On a cluster, a capture runs on one node: the one picked in the start
+dialog, or `targetNodeId` in `POST /api/monitor/sessions`. To find the
+keys behind a hot shard, start it on the hot primary; see
+[`hot_shard`](anomaly-detection.md#hot_shard).
+
 ## Capture-vs-capture diff (Pro+)
 
 `GET /api/monitor/sessions/:id/diff?vs=:otherId` reuses the cross-

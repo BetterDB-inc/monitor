@@ -701,7 +701,7 @@ server.tool(
 
 server.tool(
   'get_anomalies',
-  'Get anomaly detection events from persisted storage. BetterDB continuously runs Z-score analysis on memory, hit rate, CPU, and other metrics — this returns the detected anomalies. Use to investigate what triggered an alert or correlate with an incident.',
+  'Get anomaly detection events from persisted storage. BetterDB continuously runs Z-score analysis on memory, hit rate, CPU, and other metrics — this returns the detected anomalies. On a cluster an event that is about one node names it in `node` (`nodeId`, `address`, `role`, plus `shardId` and `availabilityZone` when known, and `collected`: false when no connection of the monitor points at that node, so its own metrics are not gathered; `connectionId` names the connection that collects it). Use to investigate what triggered an alert or correlate with an incident.',
   {
     limit: z.number().optional().describe('Max events to return'),
     metricType: z.string().optional().describe('Filter by metric type'),
@@ -758,6 +758,66 @@ server.tool(
 );
 
 server.tool(
+  'get_hot_shards',
+  'Get the hot shards open on a cluster right now: each shard that has carried at least twice the median CPU for a minute, with its load, top slots, hot keys when they can be read, and a rebalance suggestion. Each hot shard names its primary in `node` (`nodeId`, `address`, `role`, plus `shardId` and `availabilityZone` when known, and `collected`: false when no connection of the monitor points at that node, so its own metrics are not gathered; `connectionId` names the connection that collects it). `rebalance.kind` is `plan` (slot ranges to move to named target shards, the projected load of every shard before and after, warnings such as a target short on memory or replicas, and in `commands` the command an operator can run for the move when `support` is `valkey_atomic` or `redis_atomic`) or `no_plan` with a `reason`: `key_level` (one or a few slots carry the load, so moving slots will not help), `cluster_hot` (the other shards together have no room), `too_many_targets` (there is room, but not within the 4 shards one suggestion may use), `covered_by_other_plan` (the plan for another hot shard, listed in `coveredBy`, already brings this one near the median: apply that plan first), `conflicts_with_other_plan` (no plan for this shard fits next to the plans for the hot shards listed in `conflictsWith`: apply those first), `no_target`, `unhealthy_node`, `migration_running`, `settling` or `slots_scattered`. The suggestion is read-only: nothing is moved. An empty list means no hot shard event is open; it does not prove the cluster is balanced: a shard must stay hot for a minute first, and the per-slot load must be measured (`cluster-slot-stats-enabled yes` on every primary, on a connection that reaches each node). Use when a cluster looks unbalanced or a hot_shard anomaly is open.',
+  {
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ instanceId }) =>
+    withTelemetry('get_hot_shards', async () => {
+      const id = resolveInstanceId(instanceId);
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/anomalies/hot-shards`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return unavailableOrNotFoundResult(id, 'Anomaly detection');
+        }
+        throw err;
+      }
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
+);
+
+server.tool(
+  'get_topology_disagreements',
+  'Get where the nodes of a cluster disagree about the cluster, summarised for large clusters. `disagreements` has one line per disagreement with the number of views on each side, for example "Slots 0-5460: owned by A in 9 views, by B in 3 views" or "node X: fail? in 2 views, ok in 9 views" (a round asks at most 12 nodes, so the counts never go above 12, whatever the size of the cluster): `kind` is `slot_owner`, `config_epoch`, `failure_flags` or `membership`, `positions` lists each side with its `count` and the nodes that hold it, `subjects` the nodes it is about, `confirmed` and `eventId` tell whether an anomaly event is open for it, `resolvedByHand` is true when its event was resolved by hand and it has not been raised again (it then has no `eventId`), and `text` is the same line in words. Lines that differ only in the node they are about are merged into one. A line with `stale: true` was not seen in the last round because the nodes that hold one of its sides did not answer: it has no `positions` and no counts and `lastSeenAt` says when it was last seen. A stale line whose event is still open keeps `confirmed: true` and its `eventId`; one without an open event was neither confirmed nor cleared. `open` is true for every line of the last round and for a stale line with an open event; read `open` to tell what is in dispute now. On a merged line `count` is the views per node, and a side lists every node that holds it for at least one node of the line, with their number in `observerCount`. `shards` lists the disputed shards, those an open line touches, with their `disagreementIds` (lines that are not open are in `staleDisagreementIds`), and `shardTotals` counts all of them by state (`disputed`, `undisputed`, `notCompared`); pass `shards: "all"` for one line per shard, which is large on a big cluster. Node lists are capped at 25, the counts are exact. The counts are over the views that answered in the last round, not over every node: read `coverage` (`nodes` in the cluster, `asked`, `answered`, `complete`, `unanswered`) before concluding anything. An empty `disagreements` list means only that the views that answered agree with each other, not that the nodes that did not answer or were not asked do; it covers the whole cluster only when `complete` is true. `status` is `not_sampled` before the first round or on a cluster that is not sampled, and `insufficient_views` when fewer than two nodes answered. Read-only. Use when a cluster looks split, a topology_divergence anomaly is open, or to check which nodes see a node as failing.',
+  {
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+    shards: z
+      .enum(['disputed', 'all'])
+      .optional()
+      .describe('Which shard lines to return: `disputed` (default) or `all`'),
+  },
+  async ({ instanceId, shards }) =>
+    withTelemetry('get_topology_disagreements', async () => {
+      const id = resolveInstanceId(instanceId);
+      const query = shards === 'all' ? '?shards=all' : '';
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/anomalies/topology-disagreements${query}`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return unavailableOrNotFoundResult(id, 'Anomaly detection');
+        }
+        throw err;
+      }
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      const text = shards === 'all' ? JSON.stringify(data) : JSON.stringify(data, null, 2);
+      return {
+        content: [{ type: 'text' as const, text }],
+      };
+    }),
+);
+
+server.tool(
   'get_client_activity',
   'Get time-bucketed client activity from persisted snapshots. Shows connection counts, command distribution, and buffer usage over time. Use startTime/endTime to focus on a specific incident window.',
   {
@@ -809,7 +869,7 @@ server.tool(
 
 server.tool(
   'get_cluster_nodes',
-  'Discover all nodes in the Valkey cluster — role (master/replica), address, health status, and slot ranges. Returns an error message if this instance is not running in cluster mode.',
+  'Discover all nodes in the Valkey cluster — role (master/replica), address, state, and slot ranges. Each node has a state: failed when its peers agreed it is down (the fail flag), suspect when they only suspect it (fail?, PFAIL) or it is not a full member yet (handshake, noaddr), and healthy otherwise. The healthy boolean is deprecated: it is true only when state is healthy, use state instead. On Valkey 9.1+ each node also carries shardId, and availabilityZone when the node has one configured. On older versions availabilityZone comes from the zone map set on the connection, if any. `collected` is true when a connection of the monitor points at the node (its address or announced hostname) and is not known to read another node there, or the node is the one this instance reads; `connectionId` then names that connection. A node that is not collected has no connection of its own: its slow log, client list and stored metrics are not gathered. Cluster-wide checks can still raise events about it. Returns an error message if this instance is not running in cluster mode.',
   { instanceId: z.string().optional().describe('Optional instance ID override') },
   async ({ instanceId }) =>
     withTelemetry('get_cluster_nodes', async () => {
@@ -2100,7 +2160,7 @@ server.tool(
 
 server.tool(
   'get_incident_timeline',
-  'Get anomaly incidents as ordered timelines. Anomalies on one instance or topology that follow each other closely are grouped into one incident, in the order they happened, with any matched multi-step sequence pattern and a recovery status (active, recovering, recovered, degraded when signals stay open long after the incident went quiet, or unknown when recovery can no longer be measured, with those metrics in recovery.unknownSignals). A sequence match can carry `values`: the settings its recommendations name, each with the current value and a target computed from the instance (setting, current, target, unit, and nodeAddr when the value is for one node). A hard output-buffer target includes the soft limit when that buffer is already past it. Use to answer "what happened, in what order, and has it recovered".',
+  'Get anomaly incidents as ordered timelines. Anomalies on one instance or topology that follow each other closely are grouped into one incident, in the order they happened, with any matched multi-step sequence pattern and a recovery status (active, recovering, recovered, degraded when signals stay open long after the incident went quiet, or unknown when recovery can no longer be measured, with those metrics in recovery.unknownSignals). An entry that is about one cluster node names it in `node` (`nodeId`, `address`, `role`, plus `shardId` and `availabilityZone` when known, and `collected`: false when no connection of the monitor points at that node, so its own metrics are not gathered; `connectionId` names the connection that collects it). A sequence match can carry `values`: the settings its recommendations name, each with the current value and a target computed from the instance (setting, current, target, unit, and nodeAddr when the value is for one node). A hard output-buffer target includes the soft limit when that buffer is already past it. Use to answer "what happened, in what order, and has it recovered".',
   {
     limit: z.number().optional().describe('Max incidents to return, newest first (default 20)'),
     startTime: z.number().optional().describe('Start time (Unix timestamp ms, default 24h ago)'),

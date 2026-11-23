@@ -7,7 +7,7 @@ import { POSTGRES_LEGACY_ANOMALY_BACKFILL } from './anomaly-kind-backfill';
 import { toIncidentBoundary } from './incident-boundary-row';
 import { otelSpanCap, otelSpanCapCheckInterval, otelSpanLowWaterMark } from '../otel-span-cap';
 import { randomUUID } from 'crypto';
-import { parseSshTunnel, parseMembership, parseTlsConfig } from '@betterdb/shared';
+import { parseSshTunnel, parseMembership, parseTlsConfig, parseNodeAvailabilityZones } from '@betterdb/shared';
 import type {
   StoredScalingReadinessScore,
   ScalingReadinessScoreQuery,
@@ -1770,6 +1770,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
       ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS replica_addr TEXT;
       ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS node_addr TEXT;
+      ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS node TEXT;
       ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS dedupe_key TEXT;
       ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS commands TEXT[];
       ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS event_sequence BIGINT;
@@ -2434,6 +2435,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
       ALTER TABLE connections ADD COLUMN IF NOT EXISTS auto_register_nodes BOOLEAN;
       ALTER TABLE connections ADD COLUMN IF NOT EXISTS membership TEXT;
+      ALTER TABLE connections ADD COLUMN IF NOT EXISTS node_availability_zones TEXT;
       ALTER TABLE connections ADD COLUMN IF NOT EXISTS node_username TEXT;
       ALTER TABLE connections ADD COLUMN IF NOT EXISTS node_password TEXT;
       ALTER TABLE connections ADD COLUMN IF NOT EXISTS node_password_encrypted BOOLEAN;
@@ -2836,16 +2838,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `INSERT INTO anomaly_events (
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics, replica_addr, node_addr, dedupe_key, commands, event_sequence,
+        message, correlation_id, related_metrics, replica_addr, node_addr, node, dedupe_key, commands, event_sequence,
         kind, retry_trigger, resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id, scope_id
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
       ON CONFLICT (id) DO UPDATE SET
         correlation_id = COALESCE(EXCLUDED.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(EXCLUDED.related_metrics, anomaly_events.related_metrics),
         scope_id = COALESCE(anomaly_events.scope_id, EXCLUDED.scope_id),
         replica_addr = COALESCE(EXCLUDED.replica_addr, anomaly_events.replica_addr),
         node_addr = COALESCE(EXCLUDED.node_addr, anomaly_events.node_addr),
+        node = COALESCE(anomaly_events.node, EXCLUDED.node),
         dedupe_key = COALESCE(EXCLUDED.dedupe_key, anomaly_events.dedupe_key),
         commands = COALESCE(anomaly_events.commands, EXCLUDED.commands),
         event_sequence = COALESCE(anomaly_events.event_sequence, EXCLUDED.event_sequence),
@@ -2870,6 +2873,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         event.relatedMetrics ?? null,
         event.replicaAddr ?? null,
         event.nodeAddr ?? null,
+        event.node ? JSON.stringify(event.node) : null,
         event.dedupeKey ?? null,
         event.commands ?? null,
         event.eventSequence ?? null,
@@ -2902,7 +2906,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
-        $${paramIndex++}, $${paramIndex++}
+        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}
       )`);
       values.push(
         event.id,
@@ -2920,6 +2924,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         event.relatedMetrics ?? null,
         event.replicaAddr ?? null,
         event.nodeAddr ?? null,
+        event.node ? JSON.stringify(event.node) : null,
         event.dedupeKey ?? null,
         event.commands ?? null,
         event.eventSequence ?? null,
@@ -2939,7 +2944,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `INSERT INTO anomaly_events (
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics, replica_addr, node_addr, dedupe_key, commands, event_sequence,
+        message, correlation_id, related_metrics, replica_addr, node_addr, node, dedupe_key, commands, event_sequence,
         kind, retry_trigger, resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id, scope_id
       ) VALUES ${placeholders.join(', ')}
@@ -2949,6 +2954,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         scope_id = COALESCE(anomaly_events.scope_id, EXCLUDED.scope_id),
         replica_addr = COALESCE(EXCLUDED.replica_addr, anomaly_events.replica_addr),
         node_addr = COALESCE(EXCLUDED.node_addr, anomaly_events.node_addr),
+        node = COALESCE(anomaly_events.node, EXCLUDED.node),
         dedupe_key = COALESCE(EXCLUDED.dedupe_key, anomaly_events.dedupe_key),
         commands = COALESCE(anomaly_events.commands, EXCLUDED.commands),
         event_sequence = COALESCE(anomaly_events.event_sequence, EXCLUDED.event_sequence),
@@ -3028,7 +3034,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `SELECT
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics, replica_addr, node_addr, dedupe_key, commands, event_sequence,
+        message, correlation_id, related_metrics, replica_addr, node_addr, node, dedupe_key, commands, event_sequence,
         kind, retry_trigger, resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id, scope_id
       FROM anomaly_events
@@ -3274,7 +3280,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `SELECT
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics, replica_addr, node_addr, dedupe_key, commands, event_sequence,
+        message, correlation_id, related_metrics, replica_addr, node_addr, node, dedupe_key, commands, event_sequence,
         kind, retry_trigger, resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id, scope_id
       FROM (
@@ -6456,8 +6462,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     await this.pool.query(
       `
-      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, node_username, node_password, node_password_encrypted, db_index, tls, tls_config, auth_mode, ssh_tunnel, connection_type, auto_register_nodes, membership, is_default, created_at, updated_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, node_username, node_password, node_password_encrypted, db_index, tls, tls_config, auth_mode, ssh_tunnel, connection_type, auto_register_nodes, membership, node_availability_zones, is_default, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
       ON CONFLICT(id) DO UPDATE SET
         name = EXCLUDED.name,
         host = EXCLUDED.host,
@@ -6476,6 +6482,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         connection_type = EXCLUDED.connection_type,
         auto_register_nodes = EXCLUDED.auto_register_nodes,
         membership = EXCLUDED.membership,
+        node_availability_zones = EXCLUDED.node_availability_zones,
         is_default = EXCLUDED.is_default,
         updated_at = EXCLUDED.updated_at
     `,
@@ -6498,6 +6505,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         config.connectionType ?? null,
         config.autoRegisterNodes ?? null,
         config.membership ? JSON.stringify(config.membership) : null,
+        config.nodeAvailabilityZones ? JSON.stringify(config.nodeAvailabilityZones) : null,
         config.isDefault || false,
         config.createdAt,
         config.updatedAt || null,
@@ -6532,6 +6540,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
           ? undefined
           : row.auto_register_nodes,
       membership: parseMembership(row.membership),
+      nodeAvailabilityZones: parseNodeAvailabilityZones(row.node_availability_zones),
       isDefault: row.is_default,
       createdAt: Number(row.created_at),
       updatedAt: row.updated_at ? Number(row.updated_at) : undefined,
@@ -6567,6 +6576,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
           ? undefined
           : row.auto_register_nodes,
       membership: parseMembership(row.membership),
+      nodeAvailabilityZones: parseNodeAvailabilityZones(row.node_availability_zones),
       isDefault: row.is_default,
       createdAt: Number(row.created_at),
       updatedAt: row.updated_at ? Number(row.updated_at) : undefined,
@@ -6624,6 +6634,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if ('membership' in updates) {
       setClauses.push(`membership = $${paramIndex++}`);
       params.push(updates.membership ? JSON.stringify(updates.membership) : null);
+    }
+    if ('nodeAvailabilityZones' in updates) {
+      setClauses.push(`node_availability_zones = $${paramIndex++}`);
+      params.push(updates.nodeAvailabilityZones ? JSON.stringify(updates.nodeAvailabilityZones) : null);
     }
 
     if (setClauses.length === 0) return;

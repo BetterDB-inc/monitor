@@ -16,8 +16,12 @@
  *
  * Topology-refresh correlation (the hourly-spike symptom in #3527) is an annotation on
  * either rule, derived from cluster|slots / cluster|shards call-volume bursts.
+ *
+ * Admin and monitoring commands (ADMIN_COMMANDS, or the `ignoreCommands` option) are
+ * never evaluated by either rule. They still feed topology correlation as a cause.
  */
 
+import { ADMIN_COMMANDS, matchesCommandPattern } from '@betterdb/shared';
 import {
   ClusterRefreshPoint,
   CommandP99Point,
@@ -50,6 +54,16 @@ export const CRITICAL_SUSTAINED_FACTOR = 4;
 export const TOPOLOGY_CORRELATION_WINDOW_MS = CONSECUTIVE_REQUIRED * 60_000;
 export const TOPOLOGY_BURST_MIN_CALLS = 10;
 export const TOPOLOGY_BURST_MEDIAN_FACTOR = 2;
+
+export { ADMIN_COMMANDS };
+
+export interface RegressionDetectorOptions {
+  /**
+   * Lower-case latencystats names the detector skips; `cmd|*` matches every
+   * subcommand. Defaults to ADMIN_COMMANDS; an empty set evaluates every command.
+   */
+  ignoreCommands?: ReadonlySet<string>;
+}
 
 export function median(values: number[]): number {
   if (values.length === 0) return 0;
@@ -142,6 +156,11 @@ export class RegressionDetector {
   private upgrade?: UpgradeWindowState;
   private sustained = new Map<string, SustainedState>();
   private flagged = new Map<string, FlaggedCommand>();
+  private readonly ignoreCommands: ReadonlySet<string>;
+
+  constructor(options: RegressionDetectorOptions = {}) {
+    this.ignoreCommands = options.ignoreCommands ?? new Set(ADMIN_COMMANDS);
+  }
 
   evaluate(input: DetectorInput): RegressionFinding[] {
     const { nowMs, samples } = input;
@@ -321,10 +340,16 @@ export class RegressionDetector {
     this.sustained.clear();
   }
 
-  /** Commands with enough volume, capped to the top-K by volume. */
+  /**
+   * Commands with enough volume, capped to the top-K by volume. Ignored commands are
+   * dropped before ranking so they cannot use up the top-K slots.
+   */
   private eligibleCommands(callsPerMin: Map<string, number>): Set<string> {
     const ranked = [...callsPerMin.entries()]
-      .filter(([, cpm]) => cpm >= MIN_CALLS_PER_MIN)
+      .filter(
+        ([command, cpm]) =>
+          cpm >= MIN_CALLS_PER_MIN && !matchesCommandPattern(command, this.ignoreCommands),
+      )
       .sort((a, b) => b[1] - a[1])
       .slice(0, TOP_K_COMMANDS);
     return new Set(ranked.map(([command]) => command));

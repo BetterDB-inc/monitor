@@ -13,11 +13,12 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { FastifyReply } from 'fastify';
-import { Feature, StoredCaptureTrigger, StoredScheduledCapture } from '@betterdb/shared';
+import { ClusterNodeState, Feature, StoredCaptureTrigger, StoredScheduledCapture } from '@betterdb/shared';
 import { LicenseGuard } from '@proprietary/licenses';
 import { RequiresFeature } from '@proprietary/licenses/requires-feature.decorator';
 import { AllowMembers } from '../auth/guards/roles.decorator';
 import { ClusterDiscoveryService } from '../cluster/cluster-discovery.service';
+import { withHealthy } from '../cluster/node-health-response';
 import { LiveConnectionGuard } from '../external-metrics/live-connection.guard';
 import { StoragePort, StoredCaptureSession } from '../common/interfaces/storage-port.interface';
 import { CaptureScheduler } from './capture-scheduler';
@@ -77,6 +78,7 @@ export interface MonitorNodeDescriptor {
   id: string;
   address: string;
   role: 'master' | 'replica';
+  state: ClusterNodeState;
   healthy: boolean;
 }
 
@@ -181,12 +183,7 @@ export class MonitorController {
       }
       return {
         isCluster: true,
-        nodes: nodes.map((n) => ({
-          id: n.id,
-          address: n.address,
-          role: n.role,
-          healthy: n.healthy,
-        })),
+        nodes: nodes.map((n) => withHealthy({ id: n.id, address: n.address, role: n.role, state: n.state })),
       };
     } catch {
       // Single-instance connections throw when asked for cluster nodes. That's

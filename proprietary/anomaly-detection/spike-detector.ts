@@ -6,6 +6,7 @@ import {
   AnomalySeverity,
   AnomalyType,
   SpikeDetectorConfig,
+  COUNTER_RATE_METRICS,
 } from './types';
 
 export interface SpikeDetectorOptions {
@@ -187,15 +188,17 @@ export class SpikeDetector {
     if (byThreshold) {
       return (
         `${severity.toUpperCase()}: ${this.metricType} above threshold. ` +
-        `Value: ${this.formatBoundary(value)}, Threshold: ${this.formatBoundary(threshold)} ` +
-        `(Baseline: ${this.formatValue(baseline)}, Z-score: ${zScore.toFixed(2)})`
+        `Value: ${this.formatBoundary(value)}${this.unit()}, ` +
+        `Threshold: ${this.formatBoundary(threshold)}${this.unit()} ` +
+        `(Baseline: ${this.formatValue(baseline)}${this.unit()}, Z-score: ${zScore.toFixed(2)})`
       );
     }
     const typeStr = type === AnomalyType.SPIKE ? 'spike' : 'drop';
 
     return (
       `${severity.toUpperCase()}: ${this.metricType} ${typeStr} detected. ` +
-      `Value: ${this.formatValue(value)}, Baseline: ${this.formatValue(baseline)} ` +
+      `Value: ${this.formatValue(value)}${this.unit()}, ` +
+      `Baseline: ${this.formatValue(baseline)}${this.unit()} ` +
       `(${this.describeChange(value, baseline)}, Z-score: ${zScore.toFixed(2)})`
     );
   }
@@ -210,6 +213,10 @@ export class SpikeDetector {
 
   private formatBoundary(value: number): string {
     return String(Number(value.toPrecision(12)));
+  }
+
+  private unit(): string {
+    return COUNTER_RATE_METRICS.has(this.metricType) ? '/s' : '';
   }
 
   private formatValue(value: number): string {
@@ -227,6 +234,11 @@ export class SpikeDetector {
 
     if (value >= 1e6) return `${(value / 1e6).toFixed(2)}M`;
     if (value >= 1e3) return `${(value / 1e3).toFixed(2)}K`;
+
+    // A per-second rate of a rare event (e.g. one denial per 5s poll) is fractional.
+    if (COUNTER_RATE_METRICS.has(this.metricType) && value < 10) {
+      return String(Number(value.toFixed(2)));
+    }
 
     return value.toFixed(0);
   }

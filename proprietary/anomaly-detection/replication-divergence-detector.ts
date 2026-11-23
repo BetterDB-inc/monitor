@@ -1,3 +1,4 @@
+import type { ClusterNodeRef } from '@betterdb/shared';
 import { formatBytes } from '@app/scaling-readiness/dimension-inputs';
 import type { ReplicaViewStatus } from '@app/common/interfaces/storage-port.interface';
 import { median } from '../latency-regression/regression-detector';
@@ -122,6 +123,7 @@ export interface OrphanedDivergence {
   sinceWindow: number;
   claimed: boolean;
   notified?: boolean;
+  node?: ClusterNodeRef;
 }
 
 export interface DivergenceFinding {

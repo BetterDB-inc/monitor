@@ -4,6 +4,7 @@ import type { Webhook, WebhookDelivery, WebhookEventType, DEFAULT_RETRY_POLICY }
 import { Tier, validateEventsForTier, getRequiredTierForEvent, getEventsForTier, getLockedEventsForTier } from '@betterdb/shared';
 import { WebhookPayloadFormat } from '@betterdb/shared';
 import { assertSafeOutboundUrl } from '../common/utils/outbound-url-guard';
+import { webhookNetworkPolicy, webhookPrivateHint } from './webhook-network-policy';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { CreateWebhookDto, UpdateWebhookDto } from '../common/dto/webhook.dto';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
@@ -76,11 +77,25 @@ export class WebhooksService {
   }
 
   /**
+   * Validate a webhook URL for SSRF. With a private-network allowlist the DNS
+   * check runs in every environment, matching the delivery-time guard, so a
+   * webhook that saves also delivers.
+   */
+  private async assertSafeUrl(url: string): Promise<void> {
+    const privateNetworkPolicy = webhookNetworkPolicy();
+    await assertSafeOutboundUrl(url, {
+      label: 'webhook URL',
+      privateNetworkPolicy,
+      privateHint: webhookPrivateHint(),
+      resolveDns: privateNetworkPolicy ? 'always' : 'production',
+    });
+  }
+
+  /**
    * Create a new webhook
    */
   async createWebhook(dto: CreateWebhookDto & { connectionId?: string }): Promise<Webhook> {
-    // Validate URL for SSRF
-    await assertSafeOutboundUrl(dto.url, { label: 'webhook URL', resolveDns: 'production' });
+    await this.assertSafeUrl(dto.url);
 
     // Validate event tier access
     this.validateEventTiers(dto.events);
@@ -165,7 +180,7 @@ export class WebhooksService {
   async updateWebhook(id: string, dto: UpdateWebhookDto): Promise<Webhook> {
     // Validate URL if provided
     if (dto.url) {
-      await assertSafeOutboundUrl(dto.url, { label: 'webhook URL', resolveDns: 'production' });
+      await this.assertSafeUrl(dto.url);
     }
 
     // Validate event tier access if events are being updated

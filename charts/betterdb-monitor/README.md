@@ -40,7 +40,14 @@ The full annotated reference is [values.yaml](values.yaml). The ones that matter
 | `storage.url` | `""` | `postgresql://user:pass@host:5432/db` when `storage.type=postgres`. |
 | `storage.existingSecret` | `""` | Bring-your-own Secret holding the URL (key `storage-url`). |
 | `image.tag` | `""` | Empty = `<appVersion>-no-ai` (standard image). Set `X.Y.Z` for the AI variant. |
-| `service.type` / `service.port` | `ClusterIP` / `3001` | |
+| `service.type` | `ClusterIP` | `ClusterIP`, `NodePort` or `LoadBalancer`. |
+| `service.port` | `3001` | Service port. |
+| `service.nodePort` | `null` | Fixed node port (30000-32767) for `NodePort`/`LoadBalancer`. Empty = allocated by Kubernetes. Ignored for `ClusterIP`. |
+| `service.annotations` | `{}` | Service annotations, e.g. cloud load-balancer settings or ExternalDNS. Values must be strings (use `--set-string`). |
+| `service.labels` | `{}` | Extra Service labels, added to the chart's own. |
+| `service.loadBalancerClass` | `""` | `LoadBalancer` only. Load-balancer implementation, e.g. `service.k8s.aws/nlb`. Empty = cluster default. |
+| `service.loadBalancerSourceRanges` | `[]` | `LoadBalancer` only. Client CIDRs allowed through, e.g. `["203.0.113.0/24"]`. Empty = no restriction. |
+| `service.externalTrafficPolicy` | `""` | `NodePort`/`LoadBalancer` only. `Cluster` or `Local` (keeps the client source IP). Empty = Kubernetes default (`Cluster`). |
 | `ingress.enabled` | `false` | Standard Ingress block (`className`, `hosts`, `tls`). |
 | `persistence.enabled` | `false` | PVC at `/app/data` for license state (see below). |
 | `license.key` | `""` | Online Pro/Enterprise license key. |
@@ -48,7 +55,29 @@ The full annotated reference is [values.yaml](values.yaml). The ones that matter
 | `license.offline.existingSecretKey` | `license.jwt` | Key within that Secret; also the mounted filename. Must match the Secret's key. |
 | `resources` | requests `100m`/`256Mi`, limits `1`/`1Gi` | Pod CPU/memory. The 1Gi limit is a hard cap — raise it for busy instances. |
 | `telemetry` | `true` | Set `false` to disable anonymous telemetry. |
+| `webhooks.allowedPrivateCidrs` | `[]` | Private CIDRs webhooks may deliver to, e.g. `["10.244.0.0/16"]`. Empty = public receivers only. See [docs/webhooks.md](../../docs/webhooks.md#receivers-on-a-private-network). |
+| `webhooks.allowedPrivateHosts` | `[]` | Hostnames (exact or `*.suffix`) that may resolve to a private address, e.g. `["*.svc.cluster.local"]`. |
 | `extraEnv` / `extraEnvFrom` | `[]` | Any other env from [docs/configuration.md](../../docs/configuration.md). |
+
+The `service.*` options are rendered only for the Service types Kubernetes
+accepts them on, so a value set for one type is ignored, not an error, after a
+switch to another. Unknown `service.*` keys are rejected by the values schema
+(a typo such as `--set service.nodeport=30301` fails the install or upgrade)
+instead of being silently ignored.
+
+```bash
+# Fixed NodePort, e.g. behind a kind host-port mapping
+helm install betterdb-monitor betterdb/betterdb-monitor -n betterdb \
+  --set service.type=NodePort --set service.nodePort=30301
+
+# Internal AWS NLB, reachable only from one range, keeping the client IP
+helm install betterdb-monitor betterdb/betterdb-monitor -n betterdb \
+  --set service.type=LoadBalancer \
+  --set service.loadBalancerClass=service.k8s.aws/nlb \
+  --set-string 'service.annotations.service\.beta\.kubernetes\.io/aws-load-balancer-scheme=internal' \
+  --set 'service.loadBalancerSourceRanges={10.0.0.0/8}' \
+  --set service.externalTrafficPolicy=Local
+```
 
 ## Persistence
 
@@ -107,24 +136,47 @@ after an update can exceed, restarting the pod again and again. Check with
 
 ## Releasing the chart (maintainers)
 
-Chart.yaml is not templated, so a few version fields are hand-maintained. On an
-**app release**, bump all of these to the new app version (they must agree with
-`apps/api/package.json` — the publish workflow's preflight fails the build if
-they drift):
+The chart is released **in lockstep with the app**: chart `version` ==
+`appVersion` == the app version, so `helm search repo betterdb --versions`
+shows which monitor release each chart deploys. There are no chart-only
+releases; a chart change merged between releases ships with the next app
+release (or an app patch release).
 
-- `appVersion`
-- both tags under the `artifacthub.io/images` annotation (`<v>-no-ai` and `<v>`)
+1. In the release commit, bump every version field with one command:
 
-On **any chart change** (app release or chart-only fix), also bump `version`
-(the chart's own SemVer) — the workflow skips a version whose tarball is already
-published, so an unbumped `version` is a silent no-op.
+   ```bash
+   node scripts/bump-version.mjs 0.57.0
+   ```
 
-Then merge to `master`. The `helm-publish.yml` workflow packages the chart and
-rebuilds the index directly under `docs/charts/`, committing both to `master`
-(signed, via the GitHub API) so GitHub Pages serves them at
-`https://docs.betterdb.com/charts`. Both the `.tgz` tarballs and `index.yaml`
-live in the repo under `docs/charts/`; there is no separate GitHub Release or
-`gh-pages` branch.
+   It updates `package.json`, `apps/api/package.json`, `apps/web/package.json`
+   and, in `Chart.yaml`, `version`, `appVersion` and both
+   `artifacthub.io/images` tags (`<v>-no-ai` and `<v>`). Do not edit them by
+   hand. `scripts/check-chart-version.sh` checks they agree, and the
+   `chart-tests.yml` workflow runs it on every PR, so a bump that misses the
+   chart fails before it merges.
+2. Merge, then push the tag `v0.57.0`. `docker-publish.yml` builds both images;
+   once both are on Docker Hub its `publish-chart` job calls `helm-publish.yml`,
+   which checks that `Chart.yaml` is at the tag's version (and fails the release
+   naming both versions if not), checks both images exist, then packages, signs
+   and publishes the chart.
+
+`helm-publish.yml` rebuilds the index under `docs/charts/` from master and
+commits the tarball, its `.prov` and `index.yaml` to `master` (signed, via the
+GitHub API) so GitHub Pages serves them at `https://docs.betterdb.com/charts`.
+Both the `.tgz` tarballs and `index.yaml` live in the repo under
+`docs/charts/`; there is no separate GitHub Release or `gh-pages` branch. A
+version whose tarball is already published is skipped. To re-publish by hand
+(for example after a failed run), run the "Publish Helm Chart" workflow from
+the Actions tab, on `master` or with the release tag as `ref`.
+
+Run the chart checks locally with:
+
+```bash
+scripts/check-chart-version.sh
+helm lint charts/betterdb-monitor
+helm plugin install https://github.com/helm-unittest/helm-unittest  # once; Helm 4 also needs --verify=false
+helm unittest charts/betterdb-monitor
+```
 
 The index commit to master requires the `HELM_PUBLISH_TOKEN` repo secret: a
 fine-grained PAT (contents: read/write on this repo) from a user who bypasses

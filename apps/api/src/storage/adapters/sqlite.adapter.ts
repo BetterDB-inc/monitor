@@ -7,7 +7,7 @@ import { otelSpanCap, otelSpanCapCheckInterval, otelSpanLowWaterMark } from '../
 import * as path from 'path';
 import * as fs from 'fs';
 import { randomUUID } from 'crypto';
-import { parseSshTunnel, parseMembership, parseTlsConfig } from '@betterdb/shared';
+import { parseSshTunnel, parseMembership, parseTlsConfig, parseNodeAvailabilityZones } from '@betterdb/shared';
 import type {
   StoredScalingReadinessScore,
   ScalingReadinessScoreQuery,
@@ -848,6 +848,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
     if (!anomalyEventInfo.some((col) => col.name === 'node_addr')) {
       this.db.exec('ALTER TABLE anomaly_events ADD COLUMN node_addr TEXT');
+    }
+    if (!anomalyEventInfo.some((col) => col.name === 'node')) {
+      this.db.exec('ALTER TABLE anomaly_events ADD COLUMN node TEXT');
     }
     if (!anomalyEventInfo.some((col) => col.name === 'dedupe_key')) {
       this.db.exec('ALTER TABLE anomaly_events ADD COLUMN dedupe_key TEXT');
@@ -2006,6 +2009,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         related_metrics TEXT,
         replica_addr TEXT,
         node_addr TEXT,
+        node TEXT,
         dedupe_key TEXT,
         commands TEXT,
         event_sequence INTEGER,
@@ -2905,16 +2909,17 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       INSERT INTO anomaly_events (
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics, replica_addr, node_addr, dedupe_key, commands, event_sequence,
+        message, correlation_id, related_metrics, replica_addr, node_addr, node, dedupe_key, commands, event_sequence,
         kind, retry_trigger, resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id, scope_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         correlation_id = COALESCE(excluded.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(excluded.related_metrics, anomaly_events.related_metrics),
         scope_id = COALESCE(anomaly_events.scope_id, excluded.scope_id),
         replica_addr = COALESCE(excluded.replica_addr, anomaly_events.replica_addr),
         node_addr = COALESCE(excluded.node_addr, anomaly_events.node_addr),
+        node = COALESCE(anomaly_events.node, excluded.node),
         dedupe_key = COALESCE(excluded.dedupe_key, anomaly_events.dedupe_key),
         commands = COALESCE(anomaly_events.commands, excluded.commands),
         event_sequence = COALESCE(anomaly_events.event_sequence, excluded.event_sequence),
@@ -2941,6 +2946,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       event.relatedMetrics ? JSON.stringify(event.relatedMetrics) : null,
       event.replicaAddr ?? null,
       event.nodeAddr ?? null,
+      event.node ? JSON.stringify(event.node) : null,
       event.dedupeKey ?? null,
       event.commands ? JSON.stringify(event.commands) : null,
       event.eventSequence ?? null,
@@ -2965,16 +2971,17 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       INSERT INTO anomaly_events (
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics, replica_addr, node_addr, dedupe_key, commands, event_sequence,
+        message, correlation_id, related_metrics, replica_addr, node_addr, node, dedupe_key, commands, event_sequence,
         kind, retry_trigger, resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id, scope_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         correlation_id = COALESCE(excluded.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(excluded.related_metrics, anomaly_events.related_metrics),
         scope_id = COALESCE(anomaly_events.scope_id, excluded.scope_id),
         replica_addr = COALESCE(excluded.replica_addr, anomaly_events.replica_addr),
         node_addr = COALESCE(excluded.node_addr, anomaly_events.node_addr),
+        node = COALESCE(anomaly_events.node, excluded.node),
         dedupe_key = COALESCE(excluded.dedupe_key, anomaly_events.dedupe_key),
         commands = COALESCE(anomaly_events.commands, excluded.commands),
         event_sequence = COALESCE(anomaly_events.event_sequence, excluded.event_sequence),
@@ -3003,6 +3010,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
           event.relatedMetrics ? JSON.stringify(event.relatedMetrics) : null,
           event.replicaAddr ?? null,
           event.nodeAddr ?? null,
+          event.node ? JSON.stringify(event.node) : null,
           event.dedupeKey ?? null,
           event.commands ? JSON.stringify(event.commands) : null,
           event.eventSequence ?? null,
@@ -6004,6 +6012,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         connection_type TEXT,
         auto_register_nodes INTEGER,
         membership TEXT,
+        node_availability_zones TEXT,
         node_username TEXT,
         node_password TEXT,
         node_password_encrypted INTEGER,
@@ -6047,6 +6056,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!columns.some((c) => c.name === 'auth_mode')) {
       this.db.exec('ALTER TABLE connections ADD COLUMN auth_mode TEXT');
     }
+    if (!columns.some((c) => c.name === 'node_availability_zones')) {
+      this.db.exec('ALTER TABLE connections ADD COLUMN node_availability_zones TEXT');
+    }
   }
 
   async saveConnection(config: DatabaseConnectionConfig): Promise<void> {
@@ -6055,8 +6067,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     this.ensureConnectionsSchema();
 
     const stmt = this.db.prepare(`
-      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, node_username, node_password, node_password_encrypted, db_index, tls, tls_config, auth_mode, ssh_tunnel, connection_type, auto_register_nodes, membership, is_default, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, node_username, node_password, node_password_encrypted, db_index, tls, tls_config, auth_mode, ssh_tunnel, connection_type, auto_register_nodes, membership, node_availability_zones, is_default, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
         host = excluded.host,
@@ -6075,6 +6087,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         connection_type = excluded.connection_type,
         auto_register_nodes = excluded.auto_register_nodes,
         membership = excluded.membership,
+        node_availability_zones = excluded.node_availability_zones,
         is_default = excluded.is_default,
         updated_at = excluded.updated_at
     `);
@@ -6098,6 +6111,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       config.connectionType ?? null,
       config.autoRegisterNodes === undefined ? null : config.autoRegisterNodes ? 1 : 0,
       config.membership ? JSON.stringify(config.membership) : null,
+      config.nodeAvailabilityZones ? JSON.stringify(config.nodeAvailabilityZones) : null,
       config.isDefault ? 1 : 0,
       config.createdAt,
       config.updatedAt || null,
@@ -6139,6 +6153,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
           ? undefined
           : row.auto_register_nodes === 1,
       membership: parseMembership(row.membership),
+      nodeAvailabilityZones: parseNodeAvailabilityZones(row.node_availability_zones),
       isDefault: row.is_default === 1,
       createdAt: row.created_at,
       updatedAt: row.updated_at || undefined,
@@ -6178,6 +6193,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
           ? undefined
           : row.auto_register_nodes === 1,
       membership: parseMembership(row.membership),
+      nodeAvailabilityZones: parseNodeAvailabilityZones(row.node_availability_zones),
       isDefault: row.is_default === 1,
       createdAt: row.created_at,
       updatedAt: row.updated_at || undefined,
@@ -6239,6 +6255,10 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if ('membership' in updates) {
       setClauses.push('membership = ?');
       params.push(updates.membership ? JSON.stringify(updates.membership) : null);
+    }
+    if ('nodeAvailabilityZones' in updates) {
+      setClauses.push('node_availability_zones = ?');
+      params.push(updates.nodeAvailabilityZones ? JSON.stringify(updates.nodeAvailabilityZones) : null);
     }
 
     if (setClauses.length === 0) return;

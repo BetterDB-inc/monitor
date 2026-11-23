@@ -6,7 +6,15 @@ import { ConnectionRegistry } from '../connections/connection-registry.service';
 
 describe('ClusterMetricsService', () => {
   let service: ClusterMetricsService;
-  let mockDiscoveryService: { discoverNodes: jest.Mock; getNodeConnection: jest.Mock; evictNodeClient: jest.Mock };
+  let mockDiscoveryService: {
+    discoverNodes: jest.Mock;
+    getNodeConnection: jest.Mock;
+    evictNodeClient: jest.Mock;
+    forgetTopology: jest.Mock;
+    onIsolatedClient: jest.Mock;
+    onOwnNodeClient: jest.Mock;
+    releaseOwnNodeClient: jest.Mock;
+  };
   let mockConnectionRegistry: {
     get: jest.Mock;
     getDefaultId: jest.Mock;
@@ -22,14 +30,14 @@ describe('ClusterMetricsService', () => {
       id: 'node1',
       address: '192.168.1.10:6379',
       role: 'master' as const,
-      healthy: true,
+      state: 'healthy',
       slots: [[0, 5460]],
     },
     {
       id: 'node2',
       address: '192.168.1.11:6379',
       role: 'replica' as const,
-      healthy: true,
+      state: 'healthy',
       masterId: 'node1',
       slots: [],
     },
@@ -115,6 +123,10 @@ used_cpu_user:20.3\r
       discoverNodes: jest.fn().mockResolvedValue(mockNodes),
       getNodeConnection: jest.fn().mockResolvedValue(mockClient),
       evictNodeClient: jest.fn(),
+      forgetTopology: jest.fn(),
+      onIsolatedClient: jest.fn(),
+      onOwnNodeClient: jest.fn(),
+      releaseOwnNodeClient: jest.fn(),
     };
 
     mockConnectionRegistry = {
@@ -454,24 +466,69 @@ used_cpu_user:20.3\r
 
   describe('getSlotMigrations', () => {
     const primaries = [
-      { id: 'abc123node1', address: '192.168.1.10:6379', flags: ['master'], role: 'master' as const, healthy: true, slots: [[0, 5460]] },
-      { id: 'def456node2', address: '192.168.1.11:6379', flags: ['master'], role: 'master' as const, healthy: true, slots: [[5461, 10922]] },
-      { id: 'fff789node3', address: '192.168.1.12:6379', flags: ['master'], role: 'master' as const, healthy: true, slots: [] },
+      { id: 'abc123node1', address: '192.168.1.10:6379', flags: ['master'], role: 'master' as const, state: 'healthy', slots: [[0, 5460]] },
+      { id: 'def456node2', address: '192.168.1.11:6379', flags: ['master'], role: 'master' as const, state: 'healthy', slots: [[5461, 10922]] },
+      { id: 'fff789node3', address: '192.168.1.12:6379', flags: ['master'], role: 'master' as const, state: 'healthy', slots: [] },
     ];
 
-    function nodeClients(byNode: Record<string, { nodes?: string; jobs?: unknown; jobsError?: Error }>) {
+    function nodeClients(
+      byNode: Record<
+        string,
+        {
+          nodes?: string;
+          nodesError?: Error;
+          jobs?: unknown;
+          jobsError?: Error;
+          tasks?: unknown;
+          tasksError?: Error;
+        }
+      >,
+    ) {
+      const calls: string[] = [];
       mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => ({
         status: 'ready',
-        call: jest.fn(async (cmd: string, sub: string) => {
+        call: jest.fn(async (cmd: string, sub: string, ...rest: string[]) => {
+          calls.push([nodeId, cmd, sub, ...rest].join(' '));
           const reply = byNode[nodeId] ?? {};
-          if (cmd === 'CLUSTER' && sub === 'NODES') return reply.nodes ?? '';
+          if (cmd === 'CLUSTER' && sub === 'NODES') {
+            if (reply.nodesError) throw reply.nodesError;
+            return reply.nodes ?? '';
+          }
           if (cmd === 'CLUSTER' && sub === 'GETSLOTMIGRATIONS') {
             if (reply.jobsError) throw reply.jobsError;
             return reply.jobs ?? [];
           }
+          if (cmd === 'CLUSTER' && sub === 'MIGRATION') {
+            if (reply.tasksError) throw reply.tasksError;
+            if (reply.tasks === undefined) {
+              throw new Error("ERR unknown subcommand 'MIGRATION'. Try CLUSTER HELP.");
+            }
+            return reply.tasks;
+          }
           return null;
         }),
       }));
+      return calls;
+    }
+
+    const ownNodes = (nodeId: string) => {
+      const node = primaries.find((primary) => primary.id === nodeId)!;
+      return `${node.id} ${node.address}@16379 myself,master - 0 0 1 connected\n`;
+    };
+
+    function ownNodeClient(call: (...args: any[]) => Promise<unknown>) {
+      const client = { status: 'ready', call: jest.fn(call), disconnect: jest.fn() };
+      mockDiscoveryService.onOwnNodeClient.mockImplementation(
+        async (_id: string, _timeoutMs: number, run: (own: typeof client) => Promise<unknown>) => {
+          try {
+            return await run(client);
+          } catch (error) {
+            client.disconnect();
+            throw error;
+          }
+        },
+      );
+      return client;
     }
 
     it('should return empty array when no migrations', async () => {
@@ -551,6 +608,864 @@ used_cpu_user:20.3\r
       await expect(service.getSlotMigrations()).resolves.toEqual([]);
     });
 
+    describe('readSlotMigrations', () => {
+      const job = (fields: Record<string, string | number>) => Object.entries(fields).flat();
+      const running = {
+        name: 'job-1',
+        operation: 'EXPORT',
+        slot_ranges: '0-1365',
+        target_node: 'fff789node3',
+        source_node: 'abc123node1',
+        create_time: 1_700_000_000,
+        last_update_time: 1_700_000_060,
+        last_ack_time: 1_700_000_090,
+        state: 'snapshotting',
+        message: '',
+        cow_size: 0,
+        remaining_repl_size: 4096,
+      };
+
+      it('gives a running job its name, its times in milliseconds and its backlog', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({ abc123node1: { jobs: [job(running)] } });
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect(report.migrations).toEqual([
+          expect.objectContaining({
+            jobName: 'job-1',
+            lastUpdateAt: 1_700_000_060_000,
+            remainingReplBytes: 4096,
+            phase: 'snapshotting',
+          }),
+        ]);
+        expect(report.migrations[0]).not.toHaveProperty('lastAckAt');
+        expect(report.failed).toEqual([]);
+      });
+
+      it('leaves out a time the server did not send', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        const { remaining_repl_size: _backlog, ...withoutBacklog } = running;
+        nodeClients({ abc123node1: { jobs: [job({ ...withoutBacklog, last_update_time: 'soon' })] } });
+
+        const [migration] = (await service.readSlotMigrations('conn-1')).migrations;
+
+        expect(migration.lastUpdateAt).toBeUndefined();
+        expect(migration.remainingReplBytes).toBeUndefined();
+      });
+
+      it('lists a failed job once, with what the server said about it', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        const failed = { ...running, state: 'failed', message: 'Connection lost to target' };
+        nodeClients({
+          abc123node1: { jobs: [job(failed)] },
+          fff789node3: { jobs: [job({ ...failed, operation: 'IMPORT' })] },
+        });
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect(report.migrations).toEqual([]);
+        expect(report.failed).toEqual([
+          {
+            jobName: 'job-1',
+            slotRange: '0-1365',
+            sourceNodeId: 'abc123node1',
+            sourceAddress: '192.168.1.10:6379',
+            targetNodeId: 'fff789node3',
+            targetAddress: '192.168.1.12:6379',
+            message: 'Connection lost to target',
+            listedByNodeIds: expect.arrayContaining(['abc123node1', 'fff789node3']),
+          },
+        ]);
+        expect(report.failed[0].listedByNodeIds).toHaveLength(2);
+      });
+
+      it('names only the node that lists a failed job', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        const failed = { ...running, state: 'failed', operation: 'IMPORT' };
+        nodeClients({ fff789node3: { jobs: [job(failed)] } });
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect(report.failed).toEqual([
+          expect.objectContaining({ jobName: 'job-1', listedByNodeIds: ['fff789node3'] }),
+        ]);
+      });
+
+      it.each(['success', 'cancelled'])('does not list a job that ended as %s', async (state) => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({ abc123node1: { jobs: [job({ ...running, state })] } });
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect(report.migrations).toEqual([]);
+        expect(report.failed).toEqual([]);
+      });
+
+      it.each(['success', 'cancelled', 'failed'])(
+        'names a job that ended as %s among the finished ones',
+        async (state) => {
+          mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+          nodeClients({ abc123node1: { jobs: [job({ ...running, state })] } });
+
+          const report = await service.readSlotMigrations('conn-1');
+
+          expect(report.finishedJobs).toEqual(['job-1']);
+        },
+      );
+
+      it.each([
+        ['success', []],
+        ['cancelled', ['job-1']],
+        ['failed', []],
+      ])('names a job that ended as %s among the cancelled ones only when cancelled', async (state, cancelled) => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({ abc123node1: { jobs: [job({ ...running, state })] } });
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect(report.cancelledJobs).toEqual(cancelled);
+      });
+
+      it('does not name a running job among the finished ones', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({ abc123node1: { jobs: [job(running)] } });
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect(report.finishedJobs).toEqual([]);
+      });
+
+      it('names the primaries that answered', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({ def456node2: { nodesError: new Error('timeout'), jobsError: new Error('timeout') } });
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect(report.complete).toBe(false);
+        expect(report.markersComplete).toBe(false);
+        expect([...report.readNodeIds].sort()).toEqual(['abc123node1', 'fff789node3']);
+      });
+
+      it('counts the markers of primaries that may not list their migration jobs', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        const noperm = {
+          jobsError: new Error("NOPERM User betterdb has no permissions to run the 'cluster|getslotmigrations' command"),
+        };
+        nodeClients({ abc123node1: noperm, def456node2: noperm, fff789node3: noperm });
+        const warn = jest.spyOn((service as unknown as { logger: Logger }).logger, 'warn').mockImplementation(() => undefined);
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect([...report.readNodeIds].sort()).toEqual(['abc123node1', 'def456node2', 'fff789node3']);
+        expect(report.jobsReadNodeIds).toEqual([]);
+        expect(report.markersComplete).toBe(true);
+        expect(report.complete).toBe(false);
+        expect(warn).toHaveBeenCalledTimes(1);
+      });
+
+      it('keeps both ends of an atomic job for the watch', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({
+          abc123node1: { jobs: [job(running)] },
+          fff789node3: { jobs: [job({ ...running, operation: 'IMPORT', state: 'receiving-snapshot' })] },
+        });
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect(report.migrations).toEqual([expect.objectContaining({ state: 'migrating' })]);
+        expect(report.jobViews.map((view) => view.state).sort()).toEqual(['importing', 'migrating']);
+      });
+
+      it.each([
+        ['first', [primaries[1], primaries[2], primaries[0]]],
+        ['last', [primaries[2], primaries[1], primaries[0]]],
+      ])('names both nodes of a job when a node that only follows it is read %s', async (_, order) => {
+        const { source_node: _source, target_node: _target, ...ends } = running;
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(order);
+        nodeClients({
+          def456node2: { jobs: [job({ ...ends, operation: 'IMPORT', state: 'occurring-on-primary' })] },
+          fff789node3: { jobs: [job({ ...running, operation: 'IMPORT', state: 'waiting-for-paused' })] },
+        });
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect(report.migrations).toEqual([
+          expect.objectContaining({ sourceNodeId: 'abc123node1', targetNodeId: 'fff789node3' }),
+        ]);
+      });
+
+      it("leaves the connection's kept own-node socket alone when a read reaches a primary", async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({});
+
+        await service.readSlotMigrations('conn-1');
+
+        expect(mockDiscoveryService.releaseOwnNodeClient).not.toHaveBeenCalled();
+        expect(mockDiscoveryService.onOwnNodeClient).not.toHaveBeenCalled();
+      });
+
+      it('says that it read the primaries when it did', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({});
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect(report.ownNodeOnly).toBe(false);
+      });
+
+      it('says so when no primary could be dialed and it read its own node instead', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
+        mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));
+        ownNodeClient(async (_cmd: string, sub: string) =>
+          sub === 'NODES' ? ownNodes('abc123node1') : [job(running)],
+        );
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect(report.ownNodeOnly).toBe(true);
+        expect(report.complete).toBe(false);
+        expect(report.migrations).toHaveLength(1);
+      });
+
+      it("reads only the connection's own node when asked to", async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
+        mockDiscoveryService.getNodeConnection.mockClear();
+        ownNodeClient(async (_cmd: string, sub: string) =>
+          sub === 'NODES' ? ownNodes('abc123node1') : [job(running)],
+        );
+
+        const report = await service.readSlotMigrations('conn-1', { ownNodeOnly: true });
+
+        expect(mockDiscoveryService.getNodeConnection).not.toHaveBeenCalled();
+        expect(report.ownNodeOnly).toBe(true);
+        expect(report.complete).toBe(false);
+        expect(report.readNodeIds).toHaveLength(1);
+        expect(report.migrations).toHaveLength(1);
+      });
+
+      it('files the own-node read under the node its own socket reached', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValue([
+          { ...primaries[0], flags: ['myself', 'master'] },
+          primaries[1],
+          primaries[2],
+        ]);
+        mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));
+        ownNodeClient(async (_cmd: string, sub: string) =>
+          sub === 'NODES' ? ownNodes('def456node2') : [],
+        );
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect(report.readNodeIds).toEqual(['def456node2']);
+        expect(report.jobsReadNodeIds).toEqual(['def456node2']);
+      });
+
+      it('names no node read when the own node does not answer CLUSTER NODES', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
+        mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));
+        ownNodeClient(async (_cmd: string, sub: string) => {
+          if (sub === 'NODES') throw new Error('Connection is closed.');
+          return [job(running)];
+        });
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect(report.readNodeIds).toEqual([]);
+        expect(report.jobsReadNodeIds).toEqual([]);
+        expect(report.complete).toBe(false);
+      });
+
+      it('counts a primary without the command as one that answered', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({ def456node2: { jobsError: new Error("ERR unknown subcommand 'GETSLOTMIGRATIONS'") } });
+
+        const report = await service.readSlotMigrations('conn-1');
+
+        expect(report.complete).toBe(true);
+        expect(report.readNodeIds).toHaveLength(3);
+        expect(report.jobsReadNodeIds).toHaveLength(3);
+      });
+
+      describe('a primary without the command', () => {
+        const FIVE_MINUTES_MS = 5 * 60_000;
+        const watchRead = (connectionId: string) =>
+          service.readSlotMigrations(connectionId, { rememberNodesWithoutJobs: true });
+        let asked: string[];
+        let now: number;
+
+        beforeEach(() => {
+          asked = [];
+          now = 1_700_000_000_000;
+          jest.spyOn(Date, 'now').mockImplementation(() => now);
+          mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
+          mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => ({
+            status: 'ready',
+            call: jest.fn(async (_cmd: string, sub: string) => {
+              if (sub === 'NODES') return '';
+              if (sub === 'GETSLOTMIGRATIONS') asked.push(nodeId);
+              if (nodeId === 'def456node2') throw new Error(`ERR unknown subcommand '${sub}'`);
+              return [];
+            }),
+          }));
+        });
+
+        afterEach(() => {
+          jest.restoreAllMocks();
+        });
+
+        it('is not asked again on the next read of the watch', async () => {
+          await watchRead('conn-1');
+          asked = [];
+          now += 30_000;
+
+          const report = await watchRead('conn-1');
+
+          expect(asked.sort()).toEqual(['abc123node1', 'fff789node3']);
+          expect(report.complete).toBe(true);
+          expect(report.jobsReadNodeIds).toHaveLength(3);
+        });
+
+        it('is asked again by the watch after five minutes, in case it was upgraded', async () => {
+          await watchRead('conn-1');
+          asked = [];
+          now += FIVE_MINUTES_MS;
+
+          await watchRead('conn-1');
+
+          expect(asked.sort()).toEqual(['abc123node1', 'def456node2', 'fff789node3']);
+        });
+
+        it('is remembered per connection', async () => {
+          await watchRead('conn-1');
+          asked = [];
+
+          await watchRead('conn-2');
+
+          expect(asked).toContain('def456node2');
+        });
+
+        it('is asked again at once by the migration check and the dashboard', async () => {
+          await watchRead('conn-1');
+          asked = [];
+
+          await service.checkSlotMigrations('conn-1');
+
+          expect(asked).toContain('def456node2');
+
+          asked = [];
+          await service.getSlotMigrations('conn-1');
+
+          expect(asked).toContain('def456node2');
+        });
+      });
+
+      describe('a Redis 8.4+ primary', () => {
+        const unknownJobs = new Error(
+          "ERR unknown subcommand 'GETSLOTMIGRATIONS'. Try CLUSTER HELP.",
+        );
+        const TASK_ID = '7f3a9c0e1b2d4f6a8c0e1b2d4f6a8c0e1b2d4f6a';
+        const migrate = {
+          id: TASK_ID,
+          slots: '0-1365',
+          source: 'abc123node1',
+          dest: 'fff789node3',
+          operation: 'migrate',
+          state: 'send-bulk-and-stream',
+          last_error: '',
+          retries: 0,
+          create_time: 1_700_000_000_000,
+          start_time: 1_700_000_000_100,
+          end_time: -1,
+          write_pause_ms: 0,
+        };
+        const importing = { ...migrate, operation: 'import', state: 'accumulate-buffer' };
+
+        it('is asked for its migration tasks when it does not know GETSLOTMIGRATIONS', async () => {
+          mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+          const calls = nodeClients({
+            abc123node1: { jobsError: unknownJobs, tasks: [job(migrate)] },
+            def456node2: { jobsError: unknownJobs, tasks: [] },
+            fff789node3: { jobsError: unknownJobs, tasks: [job(importing)] },
+          });
+
+          const report = await service.readSlotMigrations('conn-1');
+
+          expect(calls).toContain('abc123node1 CLUSTER MIGRATION STATUS ALL');
+          expect(report.migrations).toEqual([
+            {
+              slot: 0,
+              slotRange: '0-1365',
+              sourceNodeId: 'abc123node1',
+              sourceAddress: '192.168.1.10:6379',
+              targetNodeId: 'fff789node3',
+              targetAddress: '192.168.1.12:6379',
+              state: 'migrating',
+              phase: 'send-bulk-and-stream',
+              retries: 0,
+              jobName: TASK_ID,
+            },
+          ]);
+          expect(report.jobViews).toHaveLength(2);
+          expect(report.complete).toBe(true);
+          expect(report.jobsReadNodeIds).toHaveLength(3);
+        });
+
+        it('holds the migration check while a task runs', async () => {
+          mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+          nodeClients({
+            abc123node1: { jobsError: unknownJobs, tasks: [job(migrate)] },
+            def456node2: { jobsError: unknownJobs, tasks: [] },
+            fff789node3: { jobsError: unknownJobs, tasks: [job(importing)] },
+          });
+
+          const check = await service.checkSlotMigrations('conn-1');
+
+          expect(check.complete).toBe(true);
+          expect(check.migrations).toEqual([expect.objectContaining({ jobName: TASK_ID })]);
+        });
+
+        it.each(['completed', 'canceled'])(
+          'names a task that ended as %s among the finished ones',
+          async (state) => {
+            mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+            nodeClients({
+              abc123node1: {
+                jobsError: unknownJobs,
+                tasks: [job({ ...migrate, state, end_time: 1_700_000_090_000 })],
+              },
+            });
+
+            const report = await service.readSlotMigrations('conn-1');
+
+            expect(report.migrations).toEqual([]);
+            expect(report.failed).toEqual([]);
+            expect(report.finishedJobs).toEqual([TASK_ID]);
+            expect(report.cancelledJobs).toEqual(state === 'canceled' ? [TASK_ID] : []);
+          },
+        );
+
+        const failed = {
+          state: 'failed',
+          last_error: 'Main channel - Connection timeout (state: failed, rdb_channel_state: none)',
+          retries: 3,
+        };
+
+        it('keeps a failed import as running, because its target retries it', async () => {
+          mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
+          nodeClients({
+            abc123node1: { jobsError: unknownJobs, tasks: [job({ ...migrate, ...failed })] },
+            fff789node3: { jobsError: unknownJobs, tasks: [job({ ...importing, ...failed })] },
+          });
+
+          const report = await service.readSlotMigrations('conn-1');
+          const check = await service.checkSlotMigrations('conn-1');
+
+          expect(report.migrations).toEqual([
+            expect.objectContaining({
+              jobName: TASK_ID,
+              state: 'importing',
+              phase: 'failed',
+              sourceNodeId: 'abc123node1',
+              targetNodeId: 'fff789node3',
+              retries: 3,
+              lastError: failed.last_error,
+            }),
+          ]);
+          expect(report.jobViews).toHaveLength(1);
+          expect(report.failed).toEqual([]);
+          expect(report.finishedJobs).toEqual([]);
+          expect(check).toEqual({
+            migrations: [expect.objectContaining({ jobName: TASK_ID })],
+            complete: true,
+          });
+        });
+
+        it('leaves out a failed task on its source, which keeps it until a new request', async () => {
+          mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+          nodeClients({
+            abc123node1: { jobsError: unknownJobs, tasks: [job({ ...migrate, ...failed })] },
+          });
+
+          const report = await service.readSlotMigrations('conn-1');
+
+          expect(report.migrations).toEqual([]);
+          expect(report.jobViews).toEqual([]);
+          expect(report.failed).toEqual([]);
+          expect(report.finishedJobs).toEqual([]);
+          expect(report.complete).toBe(true);
+        });
+
+        it.each([
+          ['it times out', { tasksError: new Error('Command timed out') }],
+          ['its reply is not a list of tasks', { tasks: 'OK' }],
+        ])('is incomplete when %s', async (_, reply) => {
+          mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+          nodeClients({ def456node2: { jobsError: unknownJobs, ...reply } });
+
+          const report = await service.readSlotMigrations('conn-1');
+
+          expect(report.complete).toBe(false);
+          expect(report.jobsReadNodeIds).not.toContain('def456node2');
+          expect(report.readNodeIds).toContain('def456node2');
+        });
+
+        describe('whose monitoring user may not run CLUSTER MIGRATION', () => {
+          const noperm = {
+            jobsError: unknownJobs,
+            tasksError: new Error(
+              "NOPERM User betterdb has no permissions to run the 'cluster|migration' command",
+            ),
+          };
+
+          it('counts as answered without tasks and logs the refusal once', async () => {
+            mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
+            nodeClients({ abc123node1: noperm, def456node2: noperm, fff789node3: noperm });
+            const warn = jest
+              .spyOn((service as unknown as { logger: Logger }).logger, 'warn')
+              .mockImplementation(() => undefined);
+
+            await service.readSlotMigrations('conn-1');
+            const report = await service.readSlotMigrations('conn-1');
+
+            expect(report.migrations).toEqual([]);
+            expect(report.complete).toBe(true);
+            expect(report.jobsReadNodeIds).toHaveLength(3);
+            expect(warn).toHaveBeenCalledTimes(1);
+          });
+
+          it('is not asked again by the watch for five minutes', async () => {
+            mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
+            const calls = nodeClients({ def456node2: noperm });
+            jest
+              .spyOn((service as unknown as { logger: Logger }).logger, 'warn')
+              .mockImplementation(() => undefined);
+            const watchRead = () =>
+              service.readSlotMigrations('conn-1', { rememberNodesWithoutJobs: true });
+
+            await watchRead();
+            calls.length = 0;
+            const report = await watchRead();
+
+            expect(
+              calls.filter((call) => call.startsWith('def456node2 CLUSTER MIGRATION')),
+            ).toEqual([]);
+            expect(report.complete).toBe(true);
+          });
+        });
+
+        it('counts a server with neither command as answered, without jobs', async () => {
+          mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+          nodeClients({
+            def456node2: {
+              jobsError: unknownJobs,
+              tasksError: new Error("ERR unknown subcommand 'MIGRATION'. Try CLUSTER HELP."),
+            },
+          });
+
+          const report = await service.readSlotMigrations('conn-1');
+
+          expect(report.migrations).toEqual([]);
+          expect(report.complete).toBe(true);
+          expect(report.jobsReadNodeIds).toHaveLength(3);
+        });
+
+        it('is asked again on every read of the watch', async () => {
+          mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
+          const calls = nodeClients({
+            abc123node1: { jobsError: unknownJobs, tasks: [job(migrate)] },
+          });
+          const watchRead = () =>
+            service.readSlotMigrations('conn-1', { rememberNodesWithoutJobs: true });
+
+          await watchRead();
+          calls.length = 0;
+          const report = await watchRead();
+
+          expect(calls).toContain('abc123node1 CLUSTER MIGRATION STATUS ALL');
+          expect(report.migrations).toEqual([expect.objectContaining({ jobName: TASK_ID })]);
+        });
+
+        it('is never asked of a node that lists jobs with GETSLOTMIGRATIONS', async () => {
+          mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+          const calls = nodeClients({
+            abc123node1: { jobs: [job(running)], tasks: [job(migrate)] },
+          });
+
+          await service.readSlotMigrations('conn-1');
+
+          expect(calls.filter((call) => call.includes('MIGRATION STATUS'))).toEqual([]);
+        });
+      });
+    });
+
+    describe('checkSlotMigrations', () => {
+      it('is complete when every primary answered both questions', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({});
+
+        await expect(service.checkSlotMigrations('conn-1')).resolves.toEqual({
+          migrations: [],
+          complete: true,
+        });
+      });
+
+      it('returns the migrations it found along with the verdict', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({
+          abc123node1: {
+            nodes: 'abc123node1 192.168.1.10:6379 myself,master - 0 0 1 connected 0-5460 [5461->-def456]\n',
+          },
+        });
+
+        const check = await service.checkSlotMigrations('conn-1');
+
+        expect(check.complete).toBe(true);
+        expect(check.migrations).toEqual([expect.objectContaining({ slot: 5461 })]);
+      });
+
+      it.each([
+        [
+          'target',
+          '[5461->-c0ffee99]',
+          { sourceNodeId: 'abc123node1', targetNodeId: 'c0ffee99', targetAddress: '' },
+        ],
+        [
+          'source',
+          '[5461-<-c0ffee99]',
+          { sourceNodeId: 'c0ffee99', sourceAddress: '', targetNodeId: 'abc123node1' },
+        ],
+      ])('keeps a legacy marker whose %s is not in the topology', async (_, marker, expected) => {
+        const self = 'abc123node1 192.168.1.10:6379 myself,master - 0 0 1 connected 0-5460';
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({ abc123node1: { nodes: `${self} ${marker}\n` } });
+
+        const check = await service.checkSlotMigrations('conn-1');
+
+        expect(check.migrations).toEqual([expect.objectContaining({ slot: 5461, ...expected })]);
+      });
+
+      it('counts a server without GETSLOTMIGRATIONS as answered', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({ def456node2: { jobsError: new Error("ERR unknown subcommand 'GETSLOTMIGRATIONS'") } });
+
+        await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: true });
+      });
+
+      it('is incomplete when a primary cannot list its migration jobs', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({ def456node2: { jobsError: new Error('LOADING Valkey is loading the dataset in memory') } });
+
+        await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: false });
+      });
+
+      it('is incomplete when a primary does not answer CLUSTER NODES', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({ fff789node3: { nodesError: new Error('ECONNRESET') } });
+
+        await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: false });
+      });
+
+      it('is incomplete when the topology lists no healthy primary to ask', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce([]);
+
+        await expect(service.checkSlotMigrations()).resolves.toEqual({
+          migrations: [],
+          complete: false,
+        });
+      });
+
+      it('is incomplete when a primary cannot be dialed', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({});
+        const dial = mockDiscoveryService.getNodeConnection.getMockImplementation()!;
+        mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => {
+          if (nodeId === 'def456node2') throw new Error('ECONNREFUSED');
+          return dial(nodeId);
+        });
+
+        await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: false });
+      });
+
+      it('is incomplete when a failed primary that still owns slots is not asked', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+          primaries[0],
+          { ...primaries[1], flags: ['master', 'fail'], state: 'failed' },
+          primaries[2],
+        ]);
+        nodeClients({});
+
+        await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: false });
+        expect(mockDiscoveryService.getNodeConnection).not.toHaveBeenCalledWith(
+          'def456node2',
+          undefined,
+        );
+      });
+
+      it('still asks a primary its peers only suspect, and stays complete when it answers', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+          primaries[0],
+          { ...primaries[1], flags: ['master', 'fail?'], state: 'suspect' },
+          primaries[2],
+        ]);
+        nodeClients({});
+
+        await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: true });
+        expect(mockDiscoveryService.getNodeConnection).toHaveBeenCalledWith('def456node2', undefined);
+      });
+
+      it('stays complete when the failed primary it skips owns no slots', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+          primaries[0],
+          primaries[1],
+          { ...primaries[2], flags: ['master', 'fail'], state: 'failed' },
+        ]);
+        nodeClients({});
+
+        await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: true });
+      });
+
+      it.each(['noaddr', 'fail?', 'handshake'])(
+        'neither asks nor waits for a primary with no slots that is flagged %s',
+        async (flag) => {
+          mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+            primaries[0],
+            primaries[1],
+            { ...primaries[2], flags: ['master', flag], state: 'suspect' },
+          ]);
+          nodeClients({});
+          const dial = mockDiscoveryService.getNodeConnection.getMockImplementation()!;
+          mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => {
+            if (nodeId === 'fff789node3') throw new Error('ECONNREFUSED');
+            return dial(nodeId);
+          });
+
+          await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: true });
+          expect(mockDiscoveryService.getNodeConnection).not.toHaveBeenCalledWith(
+            'fff789node3',
+            undefined,
+          );
+        },
+      );
+
+      it('still asks a healthy primary that owns no slots, and is incomplete when it cannot be dialed', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({});
+        const dial = mockDiscoveryService.getNodeConnection.getMockImplementation()!;
+        mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => {
+          if (nodeId === 'fff789node3') throw new Error('ECONNREFUSED');
+          return dial(nodeId);
+        });
+
+        await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: false });
+        expect(mockDiscoveryService.getNodeConnection).toHaveBeenCalledWith('fff789node3', undefined);
+      });
+
+      it('is incomplete when a suspect primary that owns slots cannot be dialed', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+          primaries[0],
+          { ...primaries[1], flags: ['master', 'noaddr'], state: 'suspect' },
+          primaries[2],
+        ]);
+        nodeClients({});
+        const dial = mockDiscoveryService.getNodeConnection.getMockImplementation()!;
+        mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => {
+          if (nodeId === 'def456node2') throw new Error('ECONNREFUSED');
+          return dial(nodeId);
+        });
+
+        await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: false });
+      });
+
+      it("is incomplete when no primary can be dialed and only the connection's own node answers", async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
+        mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));
+        const own = ownNodeClient(async (cmd: string, sub: string) =>
+          cmd === 'CLUSTER' && sub === 'NODES'
+            ? 'abc123node1 192.168.1.10:6379 myself,master - 0 0 1 connected 0-5460 [5461->-def456]\n'
+            : [],
+        );
+
+        const check = await service.checkSlotMigrations('conn-1');
+
+        expect(check.complete).toBe(false);
+        expect(check.migrations).toEqual([expect.objectContaining({ slot: 5461 })]);
+        expect(own.disconnect).not.toHaveBeenCalled();
+        expect(mockDiscoveryService.releaseOwnNodeClient).not.toHaveBeenCalled();
+      });
+
+      it("is incomplete when no primary can be dialed and the connection's own node does not answer", async () => {
+        jest.useFakeTimers();
+        try {
+          mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
+          mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));
+          const own = ownNodeClient(() => new Promise(() => undefined));
+          jest
+            .spyOn((service as unknown as { logger: Logger }).logger, 'error')
+            .mockImplementation(() => undefined);
+
+          const pending = service.checkSlotMigrations('conn-1');
+          await jest.advanceTimersByTimeAsync(4_999);
+          expect(own.disconnect).not.toHaveBeenCalled();
+          await jest.advanceTimersByTimeAsync(1);
+
+          expect(own.disconnect).toHaveBeenCalledTimes(1);
+          await expect(pending).resolves.toEqual({ migrations: [], complete: false });
+        } finally {
+          jest.useRealTimers();
+        }
+      });
+
+      it("asks the connection's own node on a socket of its own, not on the shared client", async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
+        mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));
+        const own = ownNodeClient(async (_cmd: string, sub: string) =>
+          sub === 'NODES' ? ownNodes('abc123node1') : [],
+        );
+        mockClient.call.mockClear();
+
+        await service.checkSlotMigrations('conn-1');
+
+        expect(mockDiscoveryService.onOwnNodeClient).toHaveBeenCalledWith(
+          'conn-1',
+          5_000,
+          expect.any(Function),
+        );
+        expect(own.call).toHaveBeenCalledWith('CLUSTER', 'NODES');
+        expect(own.call).toHaveBeenCalledWith('CLUSTER', 'GETSLOTMIGRATIONS');
+        expect(mockClient.call).not.toHaveBeenCalled();
+      });
+
+      it('is incomplete when the topology cannot be discovered', async () => {
+        mockDiscoveryService.discoverNodes.mockRejectedValueOnce(new Error('Discovery failed'));
+
+        await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: false });
+      });
+
+      it('is incomplete when the topology read does not answer in time', async () => {
+        jest.useFakeTimers();
+        try {
+          mockDiscoveryService.discoverNodes.mockReturnValueOnce(new Promise(() => undefined));
+          jest
+            .spyOn((service as unknown as { logger: Logger }).logger, 'error')
+            .mockImplementation(() => undefined);
+          const settled = jest.fn();
+
+          const pending = service.checkSlotMigrations('conn-1').then((check) => {
+            settled();
+            return check;
+          });
+          await jest.advanceTimersByTimeAsync(4_999);
+          expect(settled).not.toHaveBeenCalled();
+          await jest.advanceTimersByTimeAsync(1);
+
+          await expect(pending).resolves.toEqual({ migrations: [], complete: false });
+        } finally {
+          jest.useRealTimers();
+        }
+      });
+    });
+
     it('keeps the MIGRATING view of a legacy move whichever node answers first', async () => {
       // Discovered target-first, so its IMPORTING marker is read first.
       mockDiscoveryService.discoverNodes.mockResolvedValueOnce([primaries[1], primaries[0], primaries[2]]);
@@ -577,7 +1492,7 @@ used_cpu_user:20.3\r
     it("reads the connection's own node when no primary can be reached directly, and warns once", async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
       mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));
-      mockClient.call.mockImplementation(async (cmd: string, sub: string) =>
+      ownNodeClient(async (cmd: string, sub: string) =>
         cmd === 'CLUSTER' && sub === 'NODES'
           ? 'abc123node1 192.168.1.10:6379 myself,master - 0 0 1 connected 0-5460 [5461->-def456]\n'
           : null,
@@ -590,14 +1505,18 @@ used_cpu_user:20.3\r
       expect(migrations).toEqual([
         expect.objectContaining({ slot: 5461, sourceNodeId: 'abc123node1', targetNodeId: 'def456node2', state: 'migrating' }),
       ]);
-      expect(mockConnectionRegistry.get).toHaveBeenCalledWith('conn-1');
+      expect(mockDiscoveryService.onOwnNodeClient).toHaveBeenCalledWith(
+        'conn-1',
+        5_000,
+        expect.any(Function),
+      );
       expect(warn).toHaveBeenCalledTimes(1);
     });
 
     it("reads atomic migration jobs through the connection's own node when no primary can be reached directly", async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
       mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));
-      mockClient.call.mockImplementation(async (cmd: string, sub: string) => {
+      ownNodeClient(async (cmd: string, sub: string) => {
         if (cmd !== 'CLUSTER') return null;
         if (sub === 'NODES') return 'abc123node1 192.168.1.10:6379 myself,master - 0 0 1 connected 0-5460\n';
         if (sub === 'GETSLOTMIGRATIONS') {
@@ -621,7 +1540,7 @@ used_cpu_user:20.3\r
       try {
         mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
         mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));
-        mockClient.call.mockImplementation(() => new Promise(() => undefined));
+        ownNodeClient(() => new Promise(() => undefined));
         jest.spyOn((service as unknown as { logger: Logger }).logger, 'error').mockImplementation(() => undefined);
 
         let settled = false;
@@ -697,19 +1616,19 @@ used_cpu_user:20.3\r
       expect(service.coveredBySeed('seed')).toBe(false);
     });
 
-    it('keeps its own node when discovery fails', async () => {
+    it('does not decide when discovery fails', async () => {
       mockDiscoveryService.discoverNodes.mockRejectedValue(new Error('down'));
-      await expect(service.usesClusterWideSlotStats('node-a')).resolves.toBe(false);
+      await expect(service.usesClusterWideSlotStats('node-a')).resolves.toBeNull();
     });
   });
 
   describe('getClusterSlotStats', () => {
     it('merges the slots of every primary and keeps the overall top N', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 8191]] },
-        { id: 'r1', address: '10.0.0.2:6379', role: 'replica', healthy: true, slots: [] },
-        { id: 'p2', address: '10.0.0.3:6379', role: 'master', healthy: true, slots: [[8192, 16383]] },
-        { id: 'ghost', address: '10.0.0.4:6379', role: 'master', healthy: false, slots: [[0, 100]] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 8191]] },
+        { id: 'r1', address: '10.0.0.2:6379', role: 'replica', state: 'healthy', slots: [] },
+        { id: 'p2', address: '10.0.0.3:6379', role: 'master', state: 'healthy', slots: [[8192, 16383]] },
+        { id: 'ghost', address: '10.0.0.4:6379', role: 'master', state: 'failed', slots: [[0, 100]] },
       ]);
       const replies: Record<string, unknown> = {
         // p2 still reports slot 2 it just handed over; p1 owns it.
@@ -740,9 +1659,149 @@ used_cpu_user:20.3\r
       expect(result.failedSlotRanges).toEqual([[0, 100]]);
     });
 
+    it('still asks a primary its peers only suspect, and does not report it as failed', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 8191]] },
+        { id: 'p2', address: '10.0.0.3:6379', role: 'master', state: 'suspect', slots: [[8192, 16383]] },
+      ]);
+      const replies: Record<string, unknown> = {
+        p1: [[1, ['key-count', 50]]],
+        p2: [[9000, ['key-count', 70]]],
+      };
+      mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => ({
+        call: jest.fn(async () => replies[nodeId]),
+      }));
+
+      const result = await service.getClusterSlotStatsResult('key-count', 3, 'conn-1');
+
+      expect(Object.keys(result.stats).sort()).toEqual(['1', '9000']);
+      expect(result.failedNodes).toEqual([]);
+      expect(result.failedSlotRanges).toEqual([]);
+    });
+
+    it('returns every owned slot of each primary that answered in full, whatever the limit', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[1, 2]] },
+        { id: 'p2', address: '10.0.0.3:6379', role: 'master', state: 'healthy', slots: [[9000, 9000]] },
+      ]);
+      const replies: Record<string, unknown> = {
+        p1: [[1, ['key-count', 50]], [2, ['key-count', 5]]],
+        p2: [[9000, ['key-count', 70]], [2, ['key-count', 999]]],
+      };
+      mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => ({
+        call: jest.fn(async () => replies[nodeId]),
+      }));
+
+      const result = await service.getClusterSlotStatsResult('key-count', 1, 'conn-1');
+
+      expect(Object.keys(result.stats)).toEqual(['9000']);
+      expect(result.nodeStats).toEqual([
+        { nodeId: 'p1', address: '10.0.0.1:6379', stats: { '1': { key_count: 50 }, '2': { key_count: 5 } } },
+        { nodeId: 'p2', address: '10.0.0.3:6379', stats: { '9000': { key_count: 70 } } },
+      ]);
+    });
+
+    it('gives the per-node stats the client address, without the cluster bus port', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+        { id: 'p1', address: '10.0.0.1:6379@16379', role: 'master', state: 'healthy', slots: [[7, 7]] },
+      ]);
+      mockDiscoveryService.getNodeConnection.mockResolvedValue({
+        call: jest.fn(async () => [[7, ['key-count', 3]]]),
+      });
+
+      const result = await service.getClusterSlotStatsResult('key-count', 10, 'conn-1');
+
+      expect(result.nodeStats).toEqual([
+        { nodeId: 'p1', address: '10.0.0.1:6379', stats: { '7': { key_count: 3 } } },
+      ]);
+    });
+
+    it('forgets the cached topology and gives no per-node stats when a primary answers for fewer slots than it was asked for', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 1], [5, 5]] },
+        { id: 'p2', address: '10.0.0.3:6379', role: 'master', state: 'healthy', slots: [[9, 9]] },
+      ]);
+      const replies: Record<string, Record<number, unknown>> = {
+        p1: { 0: [[0, ['key-count', 1]], [1, ['key-count', 1]]], 5: [] },
+        p2: { 9: [[9, ['key-count', 1]]] },
+      };
+      mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => ({
+        call: jest.fn(async (_c: string, _s: string, _r: string, start: number) => replies[nodeId][start]),
+      }));
+
+      const result = await service.getClusterSlotStatsResult('key-count', 10, 'conn-1');
+
+      expect(mockDiscoveryService.forgetTopology).toHaveBeenCalledTimes(1);
+      expect(mockDiscoveryService.forgetTopology).toHaveBeenCalledWith('conn-1');
+      expect(result.failedNodes).toEqual([]);
+      expect(Object.keys(result.stats).sort()).toEqual(['0', '1', '9']);
+      expect(result.nodeStats).toBeUndefined();
+    });
+
+    it('gives no per-node stats when the topology lists no primary that owns slots', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [] },
+      ]);
+
+      const result = await service.getClusterSlotStatsResult('key-count', 10, 'conn-1');
+
+      expect(result.failedNodes).toEqual([]);
+      expect(result.nodeStats).toBeUndefined();
+    });
+
+    it('keeps the cached topology while every primary answers for all its slots', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 1], [5, 5]] },
+      ]);
+      const replies: Record<number, unknown> = {
+        0: [[0, ['key-count', 1]], [1, ['key-count', 0]]],
+        5: [[5, ['key-count', 0]], [6, ['key-count', 4]]],
+      };
+      mockDiscoveryService.getNodeConnection.mockResolvedValue({
+        call: jest.fn(async (_c: string, _s: string, _r: string, start: number) => replies[start]),
+      });
+
+      await service.getClusterSlotStatsResult('key-count', 10, 'conn-1');
+
+      expect(mockDiscoveryService.forgetTopology).not.toHaveBeenCalled();
+    });
+
+    it('keeps the cached topology when a range could not be read', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 0], [5, 5]] },
+      ]);
+      mockDiscoveryService.getNodeConnection.mockResolvedValue({
+        call: jest.fn(async (_c: string, _s: string, _r: string, start: number) => {
+          if (start === 5) throw new Error('boom');
+          return [[0, ['key-count', 1]]];
+        }),
+      });
+
+      await service.getClusterSlotStatsResult('key-count', 10, 'conn-1');
+
+      expect(mockDiscoveryService.forgetTopology).not.toHaveBeenCalled();
+    });
+
+    it('leaves a primary with an unread range out of the per-node stats', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 99], [200, 299]] },
+        { id: 'p2', address: '10.0.0.3:6379', role: 'master', state: 'healthy', slots: [[300, 300]] },
+      ]);
+      mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => ({
+        call: jest.fn(async (_c: string, _s: string, _r: string, start: number) => {
+          if (start === 200) throw new Error('boom');
+          return nodeId === 'p1' ? [[1, ['key-count', 50]]] : [[300, ['key-count', 7]]];
+        }),
+      }));
+
+      const result = await service.getClusterSlotStatsResult('key-count', 10);
+
+      expect(result.nodeStats?.map((node) => node.nodeId)).toEqual(['p2']);
+    });
+
     it('does not let a slot a primary is handing off push out the slots it owns', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 99], [200, 299]] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 99], [200, 299]] },
       ]);
       const byRange: Record<string, unknown> = {
         // Slot 150 was handed off but is still reported, at the top of the ranking.
@@ -760,7 +1819,7 @@ used_cpu_user:20.3\r
 
     it('keeps the ranges a primary answered and reports only the range that failed', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 99], [200, 299]] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 99], [200, 299]] },
       ]);
       mockDiscoveryService.getNodeConnection.mockResolvedValue({
         call: jest.fn(async (_c: string, _s: string, _r: string, start: number) => {
@@ -780,7 +1839,7 @@ used_cpu_user:20.3\r
       jest.useFakeTimers();
       try {
         mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
-          { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 0], [2, 2], [4, 4]] },
+          { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 0], [2, 2], [4, 4]] },
         ]);
         mockDiscoveryService.getNodeConnection.mockResolvedValue({
           call: jest.fn((_c: string, _s: string, _r: string, start: number) =>
@@ -804,7 +1863,7 @@ used_cpu_user:20.3\r
       try {
         const slots = Array.from({ length: 17 }, (_, i): [number, number] => [i * 2, i * 2]);
         mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
-          { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots },
+          { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots },
         ]);
         mockDiscoveryService.getNodeConnection.mockResolvedValue({
           call: jest.fn((_c: string, _s: string, _r: string, start: number) =>
@@ -828,8 +1887,8 @@ used_cpu_user:20.3\r
       jest.useFakeTimers();
       try {
         mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
-          { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 8191]] },
-          { id: 'p2', address: '10.0.0.3:6379', role: 'master', healthy: true, slots: [[8192, 16383]] },
+          { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 8191]] },
+          { id: 'p2', address: '10.0.0.3:6379', role: 'master', state: 'healthy', slots: [[8192, 16383]] },
         ]);
         mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => ({
           call: nodeId === 'p1'
@@ -853,8 +1912,8 @@ used_cpu_user:20.3\r
       jest.useFakeTimers();
       try {
         mockDiscoveryService.discoverNodes.mockResolvedValue([
-          { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 8191]] },
-          { id: 'p2', address: '10.0.0.3:6379', role: 'master', healthy: true, slots: [[8192, 16383]] },
+          { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 8191]] },
+          { id: 'p2', address: '10.0.0.3:6379', role: 'master', state: 'healthy', slots: [[8192, 16383]] },
         ]);
         const stuckClient = { call: jest.fn(() => new Promise(() => undefined)) };
         const freshClient = { call: jest.fn().mockResolvedValue([[8192, ['key-count', 7]]]) };
@@ -885,7 +1944,7 @@ used_cpu_user:20.3\r
       jest.useFakeTimers();
       try {
         mockDiscoveryService.discoverNodes.mockResolvedValue([
-          { id: 'p1', address: '10.0.0.1:6379', flags: ['master'], role: 'master', healthy: true, slots: [[0, 16383]] },
+          { id: 'p1', address: '10.0.0.1:6379', flags: ['master'], role: 'master', state: 'healthy', slots: [[0, 16383]] },
         ]);
         mockDiscoveryService.getNodeConnection.mockImplementation(() => new Promise(() => undefined));
 
@@ -905,7 +1964,7 @@ used_cpu_user:20.3\r
       jest.useFakeTimers();
       try {
         mockDiscoveryService.discoverNodes.mockResolvedValue([
-          { id: 'p1', address: '10.0.0.1:6379', flags: ['master'], role: 'master', healthy: true, slots: [[0, 16383]] },
+          { id: 'p1', address: '10.0.0.1:6379', flags: ['master'], role: 'master', state: 'healthy', slots: [[0, 16383]] },
         ]);
         const late = { call: jest.fn() };
         mockDiscoveryService.getNodeConnection.mockImplementation(
@@ -933,8 +1992,8 @@ used_cpu_user:20.3\r
     it('falls back to the connection\'s own node when no primary can be reached directly', async () => {
       // Behind an SSH tunnel the announced addresses are unreachable.
       mockDiscoveryService.discoverNodes.mockResolvedValue([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 8191]], flags: ['myself', 'master'] },
-        { id: 'p2', address: '10.0.0.3:6379', role: 'master', healthy: true, slots: [[8192, 16383]], flags: ['master'] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 8191]], flags: ['myself', 'master'] },
+        { id: 'p2', address: '10.0.0.3:6379', role: 'master', state: 'healthy', slots: [[8192, 16383]], flags: ['master'] },
       ]);
       mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));
       const getClusterSlotStats = jest.fn().mockResolvedValue({ '1': { key_count: 50 } });
@@ -947,11 +2006,12 @@ used_cpu_user:20.3\r
       expect(result.stats).toEqual({ '1': { key_count: 50 } });
       expect(result.failedNodes).toEqual(['10.0.0.3:6379']);
       expect(result.failedSlotRanges).toEqual([[8192, 16383]]);
+      expect(result.nodeStats).toBeUndefined();
     });
 
     it('fails with the connection\'s own error when neither a primary nor the connection answered', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValue([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 16383]] },
       ]);
       mockDiscoveryService.getNodeConnection.mockResolvedValue({ call: jest.fn().mockRejectedValue(new Error('boom')) });
       mockConnectionRegistry.get.mockReturnValue({
@@ -964,7 +2024,7 @@ used_cpu_user:20.3\r
 
     it('does not drop the socket of a primary that missed a deadline the caller cut short', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValue([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 16383]] },
       ]);
       const slow = { call: jest.fn(() => new Promise(() => undefined)) };
       mockDiscoveryService.getNodeConnection.mockResolvedValue(slow);
@@ -982,7 +2042,7 @@ used_cpu_user:20.3\r
       jest.useFakeTimers();
       try {
         mockDiscoveryService.discoverNodes.mockResolvedValue([
-          { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
+          { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 16383]] },
         ]);
         const silent = { call: jest.fn(() => new Promise(() => undefined)) };
         mockDiscoveryService.getNodeConnection.mockResolvedValue(silent);
@@ -1006,8 +2066,8 @@ used_cpu_user:20.3\r
       jest.useFakeTimers();
       try {
         mockDiscoveryService.discoverNodes.mockResolvedValue([
-          { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
-          { id: 'p2', address: '10.0.0.2:6379', role: 'master', healthy: true, slots: [[0, 0]] },
+          { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 16383]] },
+          { id: 'p2', address: '10.0.0.2:6379', role: 'master', state: 'healthy', slots: [[0, 0]] },
         ]);
         const slow = { call: jest.fn(() => new Promise(() => undefined)) };
         mockDiscoveryService.getNodeConnection.mockImplementation((nodeId: string) =>
@@ -1036,7 +2096,7 @@ used_cpu_user:20.3\r
       jest.useFakeTimers();
       try {
         mockDiscoveryService.discoverNodes.mockResolvedValue([
-          { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
+          { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 16383]] },
         ]);
         const silent = { call: jest.fn(() => new Promise(() => undefined)) };
         const fresh = { call: jest.fn().mockResolvedValue([[0, ['key-count', 5]]]) };
@@ -1078,7 +2138,7 @@ used_cpu_user:20.3\r
           () =>
             new Promise((resolve) =>
               setTimeout(
-                () => resolve([{ id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] }]),
+                () => resolve([{ id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 16383]] }]),
                 3_000,
               ),
             ),
@@ -1103,7 +2163,7 @@ used_cpu_user:20.3\r
       jest.useFakeTimers();
       try {
         mockDiscoveryService.discoverNodes.mockResolvedValue([
-          { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
+          { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 16383]] },
         ]);
         mockDiscoveryService.getNodeConnection.mockImplementation(() => new Promise(() => undefined));
         mockConnectionRegistry.get.mockReturnValue({ getClient: jest.fn(), getClusterSlotStats: jest.fn().mockResolvedValue({}) });
@@ -1123,7 +2183,7 @@ used_cpu_user:20.3\r
 
     it('does not back off a primary whose connect was cut off by a shortened budget', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValue([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 16383]] },
       ]);
       mockDiscoveryService.getNodeConnection.mockImplementationOnce(() => new Promise(() => undefined));
       mockConnectionRegistry.get.mockReturnValue({ getClient: jest.fn(), getClusterSlotStats: jest.fn().mockResolvedValue({}) });
@@ -1138,8 +2198,8 @@ used_cpu_user:20.3\r
 
     it('combines the top slots by key count and by CPU from one read per range', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValue([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 8191]] },
-        { id: 'p2', address: '10.0.0.3:6379', role: 'master', healthy: true, slots: [[8192, 16383]] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 8191]] },
+        { id: 'p2', address: '10.0.0.3:6379', role: 'master', state: 'healthy', slots: [[8192, 16383]] },
       ]);
       const replies: Record<string, unknown> = {
         p1: [[1, ['key-count', 50, 'cpu-usec', 10]], [2, ['key-count', 5, 'cpu-usec', 900]]],
@@ -1162,7 +2222,7 @@ used_cpu_user:20.3\r
 
     it('skips the CPU ranking of a combined request while no primary reports CPU', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValue([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 16383]] },
       ]);
       mockDiscoveryService.getNodeConnection.mockResolvedValue({
         call: jest.fn().mockResolvedValue([[1, ['key-count', 5]], [2, ['key-count', 9]]]),
@@ -1175,7 +2235,7 @@ used_cpu_user:20.3\r
 
     it('ranks the fallback node by key count for a combined request', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValue([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]], flags: ['myself', 'master'] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 16383]], flags: ['myself', 'master'] },
       ]);
       mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));
       const getClusterSlotStats = jest.fn().mockResolvedValue({
@@ -1193,7 +2253,7 @@ used_cpu_user:20.3\r
     it('rejects ordering by cpu-usec while no primary reports it', async () => {
       // cluster-slot-stats-enabled no: replies carry key-count only.
       mockDiscoveryService.discoverNodes.mockResolvedValue([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 16383]] },
       ]);
       mockDiscoveryService.getNodeConnection.mockResolvedValue({
         call: jest.fn().mockResolvedValue([[1, ['key-count', 5]], [2, ['key-count', 9]]]),
@@ -1208,8 +2268,8 @@ used_cpu_user:20.3\r
     it('warns once about a primary that keeps failing, and again after it recovered', async () => {
       const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
       mockDiscoveryService.discoverNodes.mockResolvedValue([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 8191]] },
-        { id: 'p2', address: '10.0.0.3:6379', role: 'master', healthy: true, slots: [[8192, 16383]] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', state: 'healthy', slots: [[0, 8191]] },
+        { id: 'p2', address: '10.0.0.3:6379', role: 'master', state: 'healthy', slots: [[8192, 16383]] },
       ]);
       let p2Up = false;
       mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) =>

@@ -1,3 +1,4 @@
+import type { ClusterNodeRef, ServedClusterNodeRef } from '@betterdb/shared';
 import type { StoredAnomalyEvent } from '@app/common/interfaces/storage-port.interface';
 import type { RegressionKind } from '../latency-regression/types';
 import type { RetryAmplificationContributor } from './retry-amplification-attribution';
@@ -24,6 +25,8 @@ export enum MetricType {
   RAFT_HEALTH = 'raft_health',
   /** Gossip-mode failover churn: one shard re-electing repeatedly (valkey#3996) — state-based. */
   FAILOVER_CHURN = 'failover_churn',
+  /** A primary whose shard normally has replicas has no synced replica (#714) — state-based. */
+  PRIMARY_WITHOUT_REPLICAS = 'primary_without_replicas',
   /** Replica output buffer approaching client-output-buffer-limit slave (valkey#3963) — state-based. */
   REPL_BUFFER_PRESSURE = 'repl_buffer_pressure',
   /** Non-dataset memory overhead consuming the maxmemory budget / driving eviction (valkey#1792) — state-based. */
@@ -71,11 +74,16 @@ export enum MetricType {
   /** Connect/disconnect churn: total_connections_received rate spiking while connected_clients does not grow — z-score on the per-poll rate, fed inline. */
   CONNECTION_CHURN = 'connection_churn',
   RESHARD_SHARD_SKEW = 'reshard_shard_skew',
+  HOT_SHARD = 'hot_shard',
+  TOPOLOGY_DIVERGENCE = 'topology_divergence',
+  PARTIAL_MEMBERSHIP = 'partial_membership',
   RETRY_AMPLIFICATION = 'retry_amplification',
   ERROR_REPLIES = 'error_replies',
   REPLICATION_DIVERGENCE = 'replication_divergence',
   BACKLOG_COVERAGE_RISK = 'backlog_coverage_risk',
   RESYNC_ESCALATION = 'resync_escalation',
+  SLOT_MIGRATION = 'slot_migration',
+  SLOT_MIGRATION_STUCK = 'slot_migration_stuck',
 }
 
 /**
@@ -109,6 +117,7 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.EVICTED_CLIENTS,
   MetricType.RAFT_HEALTH,
   MetricType.FAILOVER_CHURN,
+  MetricType.PRIMARY_WITHOUT_REPLICAS,
   MetricType.REPL_BUFFER_PRESSURE,
   MetricType.MEMORY_OVERHEAD,
   MetricType.LOAD_SATURATION,
@@ -118,11 +127,41 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.LARGE_REPLY_PRESSURE,
   MetricType.CONNECTION_CHURN,
   MetricType.RESHARD_SHARD_SKEW,
+  MetricType.HOT_SHARD,
+  MetricType.TOPOLOGY_DIVERGENCE,
+  MetricType.PARTIAL_MEMBERSHIP,
   MetricType.RETRY_AMPLIFICATION,
   MetricType.ERROR_REPLIES,
   MetricType.REPLICATION_DIVERGENCE,
   MetricType.BACKLOG_COVERAGE_RISK,
   MetricType.RESYNC_ESCALATION,
+  MetricType.SLOT_MIGRATION,
+  MetricType.SLOT_MIGRATION_STUCK,
+]);
+
+/**
+ * Extractor metrics that read a lifetime INFO counter. A raw counter only grows,
+ * so its latest value always sits above the trailing mean and the z-score fires
+ * on steady load; AnomalyService feeds these detectors the per-second rate since
+ * the previous poll instead, and their readings print with a /s unit.
+ */
+export const COUNTER_RATE_METRICS: ReadonlySet<MetricType> = new Set([
+  MetricType.ACL_DENIED,
+  MetricType.EVICTED_KEYS,
+  MetricType.KEYSPACE_MISSES,
+]);
+
+/**
+ * Per-second floor below which a COUNTER_RATE_METRICS z-score spike is ignored,
+ * as ERROR_REPLIES_MIN_PER_SEC does for error_replies: on a server that only
+ * occasionally evicts or denies, the baseline sits near zero with a tiny spread
+ * and any non-zero rate would otherwise score as a spike. Absolute thresholds
+ * still fire below the floor.
+ */
+export const COUNTER_RATE_MIN_PER_SEC: ReadonlyMap<MetricType, number> = new Map([
+  [MetricType.ACL_DENIED, 1],
+  [MetricType.EVICTED_KEYS, 10],
+  [MetricType.KEYSPACE_MISSES, 50],
 ]);
 
 export enum AnomalySeverity {
@@ -221,6 +260,8 @@ export interface AnomalyEvent {
   relatedMetrics?: MetricType[];
   replicaAddr?: string;
   nodeAddr?: string;
+  node?: ClusterNodeRef;
+  nodeSubject?: { nodeId: string; address?: string };
   dedupeKey?: string;
   commands?: string[];
   eventSequence?: number;
@@ -393,3 +434,9 @@ export interface AnomalyWebhookSink {
   dispatchAnomalyWebhook(anomaly: StoredAnomalyEvent): Promise<void>;
   dispatchSequenceWebhook(group: CorrelatedAnomalyGroup): Promise<void>;
 }
+
+export type ServedAnomalyEvent = Omit<AnomalyEvent, 'node'> & { node?: ServedClusterNodeRef };
+
+export type ServedCorrelatedAnomalyGroup = Omit<CorrelatedAnomalyGroup, 'anomalies'> & {
+  anomalies: ServedAnomalyEvent[];
+};

@@ -12,7 +12,7 @@ import {
 } from '../membership-diff';
 
 function node(id: string, address: string, flags: string[] = ['master']): DiscoveredNode {
-  return { id, address, flags, role: 'master', slots: [], configEpoch: 0, healthy: true };
+  return { id, address, flags, role: 'master', slots: [], configEpoch: 0, state: 'healthy' };
 }
 
 function member(id: string, address: string, membership: Partial<TopologyMembership> = {}): MemberSnapshot {
@@ -72,7 +72,7 @@ describe('desiredFromDiscovery', () => {
   });
 
   it('stamps cluster source in desiredFromDiscovery', () => {
-    const nodes = [{ id: 'n2', address: '10.0.0.2:7002@17002', flags: ['master'], role: 'master', slots: [], configEpoch: 0, healthy: true }];
+    const nodes = [{ id: 'n2', address: '10.0.0.2:7002@17002', flags: ['master'], role: 'master', slots: [], configEpoch: 0, state: 'healthy' }];
     expect(desiredFromDiscovery({ host: 'seed', port: 7001 }, nodes as never)[0].source).toBe('cluster');
   });
 });
@@ -190,6 +190,36 @@ describe('diffMembership', () => {
     const diff = diffMembership('seed', [{ host: '10.0.0.3', port: 7003, nodeId: 'n3', source: 'cluster' }], [member('c3', '10.0.0.3:7003', { retiredAt: 1 })], () => owner);
     expect(diff.reactivate).toEqual([]);
     expect(diff.skipped).toEqual([{ host: '10.0.0.3', port: 7003, reason: 'occupied' }]);
+  });
+
+  it('adopts a plain connection that took the address of a retired member', () => {
+    const owner: AddressOwner = { id: 'manual', connectionType: 'direct' };
+    const desiredNode = { host: '10.0.0.3', port: 7003, nodeId: 'n3', source: 'cluster' as const };
+    const diff = diffMembership('seed', [desiredNode], [member('c3', '10.0.0.3:7003', { retiredAt: 1 })], () => owner);
+    expect(diff.adopt).toEqual([{ id: 'manual', node: desiredNode }]);
+    expect(diff.reactivate).toEqual([]);
+    expect(diff.skipped).toEqual([]);
+  });
+
+  it.each([
+    ['a seed', { id: 'other', connectionType: 'direct', isSeed: true }],
+    ['a member of another seed', { id: 'theirs', connectionType: 'direct', membership: { seedId: 'other', nodeId: 'x', origin: 'auto', source: 'cluster' } }],
+  ] as Array<[string, AddressOwner]>)('skips the address of a retired member that %s took', (_label, owner) => {
+    const diff = diffMembership('seed', [{ host: '10.0.0.3', port: 7003, nodeId: 'n3', source: 'cluster' }], [member('c3', '10.0.0.3:7003', { retiredAt: 1 })], () => owner);
+    expect(diff.adopt).toEqual([]);
+    expect(diff.skipped).toEqual([{ host: '10.0.0.3', port: 7003, reason: 'occupied' }]);
+  });
+
+  it.each([
+    ['listed after', (retired: MemberSnapshot, adopted: MemberSnapshot) => [retired, adopted]],
+    ['listed before', (retired: MemberSnapshot, adopted: MemberSnapshot) => [adopted, retired]],
+  ])('follows the adopted member %s the retired one at the same address', (_label, order) => {
+    const desiredNode = { host: '10.0.0.3', port: 7003, nodeId: 'n3', source: 'cluster' as const };
+    const retired = member('c3', '10.0.0.3:7003', { retiredAt: 1 });
+    const adopted = member('manual', '10.0.0.3:7003', { origin: 'adopted', nodeId: 'n3' });
+    const owner: AddressOwner = { id: 'manual', connectionType: 'direct', membership: adopted.membership };
+    const diff = diffMembership('seed', [desiredNode], order(retired, adopted), () => owner);
+    expect(diff).toEqual({ add: [], adopt: [], reactivate: [], refresh: [], retire: [], skipped: [] });
   });
 
   it('adopts an unclaimed direct connection at a discovered address', () => {

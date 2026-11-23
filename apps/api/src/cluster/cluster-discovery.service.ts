@@ -1,11 +1,14 @@
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
-import Valkey from 'iovalkey';
+import { Injectable, Logger, NotFoundException, OnModuleDestroy } from '@nestjs/common';
+import Valkey, { type RedisOptions as ValkeyOptions } from 'iovalkey';
+import { clusterNodeState, type ClusterNodeState } from '@betterdb/shared';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { dialsDataNodes } from '../connections/data-node-reach';
 import { ClusterNode } from '../common/types/metrics.types';
 import { MetricsParser } from '../database/parsers/metrics.parser';
 import { tlsIdentityOptions } from '../database/adapters/tls-servername';
 import { parseNodeAddress } from '../topology/membership-diff';
+import { collectionAmong, type NodeCollection } from './node-collection';
+import { readClusterShards, withConfiguredZones, withShardMetadata } from './shard-metadata';
 
 export interface DiscoveredNode {
   id: string;
@@ -14,9 +17,11 @@ export interface DiscoveredNode {
   masterId?: string;
   slots: number[][];
   configEpoch: number;
-  healthy: boolean;
+  state: ClusterNodeState;
   flags: string[];
   hostname?: string;
+  availabilityZone?: string;
+  shardId?: string;
 }
 
 export interface NodeConnection {
@@ -36,10 +41,85 @@ export interface NodeHealth {
   error?: string;
 }
 
+interface OwnNodeClient {
+  shared: Valkey;
+  host: string | undefined;
+  port: number | undefined;
+  username: string | undefined;
+  password: string | undefined;
+  tls: Valkey['options']['tls'];
+  client: Valkey;
+  ready: Promise<void>;
+  connected: boolean;
+  running: number;
+  idleTimer?: ReturnType<typeof setTimeout>;
+}
+
 // Per-connection discovery cache
 interface DiscoveryCache {
   nodes: DiscoveredNode[];
   lastDiscoveryTime: number;
+}
+
+const DEFAULT_NODE_COMMAND_TIMEOUT_MS = 5000;
+const MIN_NODE_COMMAND_TIMEOUT_MS = 100;
+const MAX_NODE_COMMAND_TIMEOUT_MS = 2_147_483_647;
+
+function nodeCommandTimeoutMs(): number {
+  const configured = Number(process.env.CLUSTER_NODE_COMMAND_TIMEOUT_MS);
+  return Number.isInteger(configured) &&
+    configured >= MIN_NODE_COMMAND_TIMEOUT_MS &&
+    configured <= MAX_NODE_COMMAND_TIMEOUT_MS
+    ? configured
+    : DEFAULT_NODE_COMMAND_TIMEOUT_MS;
+}
+
+const UNRESPONSIVE_NODE_COOL_OFF_MS = 30_000;
+const MAX_UNRESPONSIVE_NODES = 512;
+const COMMAND_TIMED_OUT = 'Command timed out';
+const CONNECTION_TIMED_OUT = 'Connection timeout';
+const CLOSING_COMMAND = 'quit';
+const ERROR_REPLY = 'ReplyError';
+
+function isConnectTimeout(error: unknown): boolean {
+  return error instanceof Error && (error.message === CONNECTION_TIMED_OUT || error.message.includes('ETIMEDOUT'));
+}
+
+type NodeCommandOutcome = 'answered' | 'timedOut';
+
+interface OpeningNodeClient {
+  ownerId: string | undefined;
+  released: boolean;
+}
+
+function assertNotReleased(opening: OpeningNodeClient, address: string): void {
+  if (opening.released) {
+    throw new Error(`Connection to ${address} was released while it was opening`);
+  }
+}
+
+class NodeClient extends Valkey {
+  private readonly report: (outcome: NodeCommandOutcome) => void;
+
+  constructor(options: ValkeyOptions, report: (outcome: NodeCommandOutcome) => void) {
+    super(options);
+    this.report = report;
+  }
+
+  sendCommand(...args: Parameters<Valkey['sendCommand']>): ReturnType<Valkey['sendCommand']> {
+    const [command] = args;
+    if (command.name !== CLOSING_COMMAND) {
+      command.promise.then(
+        () => this.report('answered'),
+        (error: unknown) => {
+          if (!(error instanceof Error)) return;
+          if (error.message === COMMAND_TIMED_OUT) this.report('timedOut');
+          else if (error.name === ERROR_REPLY) this.report('answered');
+        },
+      );
+    }
+    return super.sendCommand(...args);
+  }
 }
 
 @Injectable()
@@ -49,6 +129,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   // Per-connection discovery cache to prevent cross-connection cache contamination
   private discoveryCacheByConnection: Map<string, DiscoveryCache> = new Map();
   private discoveryInFlight: Map<string, Promise<DiscoveredNode[]>> = new Map();
+  private ownNodeClients: Map<string, OwnNodeClient> = new Map();
   private loggedConnectionErrors: Set<string> = new Set();
   private loggedGetConnectionErrors: Set<string> = new Set();
   private readonly MAX_LOGGED_ERRORS = 1000; // Prevent unbounded growth
@@ -56,6 +137,13 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   private readonly CONNECTION_TIMEOUT = 5000; // 5 seconds
   private readonly HEALTH_CHECK_INTERVAL = 30000; // 30 seconds
   private readonly MAX_CONNECTIONS = 512; // Maximum number of concurrent connections
+  private readonly OWN_NODE_IDLE_MS = 5 * 60_000;
+  private readonly POOL_LIMIT_WARN_INTERVAL_MS = 60_000;
+  private pendingNodeClients = 0;
+  private openingNodeClients = new Set<OpeningNodeClient>();
+  private poolLimitWarnedAt = 0;
+  private poolLimitClosedSinceWarning = 0;
+  private unresponsiveUntil: Map<string, number> = new Map();
 
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
@@ -66,8 +154,11 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   }
 
   async discoverNodes(connectionId?: string): Promise<DiscoveredNode[]> {
-    // Use connection-specific cache key (default connection uses 'default')
-    const cacheKey = connectionId || this.connectionRegistry.getDefaultId() || 'default';
+    const ownerId = connectionId || this.connectionRegistry.getDefaultId();
+    if (!ownerId) {
+      throw new NotFoundException('No connection available');
+    }
+    const cacheKey = ownerId;
     const cached = this.freshCache(cacheKey);
     if (cached) {
       return cached;
@@ -77,7 +168,12 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
 
     const discovery: Promise<DiscoveredNode[]> = Promise.resolve().then(async () => {
       try {
-        const nodes = await this.connectionRegistry.get(connectionId).getClusterNodes();
+        const client = this.connectionRegistry.get(ownerId);
+        const [clusterNodes, shards] = await Promise.all([client.getClusterNodes(), readClusterShards(client)]);
+        const nodes = withConfiguredZones(
+          withShardMetadata(clusterNodes, shards),
+          this.connectionRegistry.getNodeAvailabilityZones(ownerId),
+        );
         if (this.discoveryInFlight.get(cacheKey) !== discovery) return this.toDiscoveredNodes(nodes);
         return this.remember(cacheKey, nodes);
       } catch (error) {
@@ -93,6 +189,12 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     return discovery;
   }
 
+  async discoverNodesWithCollection(connectionId?: string): Promise<Array<DiscoveredNode & NodeCollection>> {
+    const viewerId = connectionId || this.connectionRegistry.getDefaultId();
+    const nodes = await this.discoverNodes(viewerId ?? undefined);
+    return nodes.map((node) => ({ ...node, ...collectionAmong(node, viewerId, this.connectionRegistry) }));
+  }
+
   /**
    * CLUSTER NODES over a socket of its own, opened for this call. Never served
    * from or written to the discovery cache: the cache holds the main socket's
@@ -100,30 +202,182 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
    * node, and topology sync relies on seeing which node that was.
    */
   async discoverNodesIsolated(connectionId: string, timeoutMs: number): Promise<DiscoveredNode[]> {
-    const { host, port, username, password, tls } = this.connectionRegistry.get(connectionId).getClient().options;
+    return this.onIsolatedClient(connectionId, timeoutMs, async (client) => {
+      const raw = await client.call('CLUSTER', 'NODES');
+      return this.toDiscoveredNodes(MetricsParser.parseClusterNodes(raw as string));
+    });
+  }
+
+  async onIsolatedClient<T>(
+    connectionId: string | undefined,
+    timeoutMs: number,
+    run: (client: Valkey) => Promise<T>,
+  ): Promise<T> {
+    const shared = this.connectionRegistry.get(connectionId).getClient();
     const client = new Valkey({
+      ...this.seedClientOptions(shared, 'BetterDB-Monitor-Discovery'),
+      ...this.oneShotOptions(timeoutMs),
+    });
+    client.on('error', () => undefined);
+    try {
+      await client.connect();
+      return await run(client);
+    } finally {
+      client.disconnect();
+    }
+  }
+
+  async onNodeClientOnce<T>(
+    node: DiscoveredNode,
+    connectionId: string | undefined,
+    timeoutMs: number,
+    run: (client: Valkey) => Promise<T>,
+  ): Promise<T> {
+    const ownerId = connectionId || this.connectionRegistry.getDefaultId() || undefined;
+    this.assertDialsDataNodes(ownerId, node.id);
+    const parsed = parseNodeAddress(node.address);
+    if (!parsed) throw new Error(`Invalid node address: ${node.address}`);
+    const client = new Valkey({
+      ...this.nodeClientOptions(ownerId, node, parsed.host, parsed.port),
+      ...this.oneShotOptions(timeoutMs),
+    });
+    let refused: Error | undefined;
+    client.on('error', (err: Error) => {
+      refused ??= err;
+    });
+    try {
+      await client.connect().catch((err: unknown) => {
+        throw refused ?? err;
+      });
+      return await run(client);
+    } finally {
+      client.disconnect();
+    }
+  }
+
+  private seedClientOptions(shared: Valkey, connectionName: string): ValkeyOptions {
+    const { host, port, username, password, tls } = shared.options;
+    return { host, port, username, password, tls, lazyConnect: true, enableOfflineQueue: false, connectionName };
+  }
+
+  private nodeClientOptions(
+    ownerId: string | undefined,
+    node: DiscoveredNode,
+    host: string,
+    port: number,
+    credentials?: { username: string; password: string },
+  ): ValkeyOptions {
+    const { username, password } =
+      credentials ?? this.connectionRegistry.get(ownerId).getClient().options;
+    return {
       host,
       port,
-      username,
-      password,
-      tls,
+      username: username || '',
+      password: password || '',
+      tls: this.nodeTlsOptions(ownerId, host, node.hostname),
       lazyConnect: true,
       enableOfflineQueue: false,
+      connectionName: `BetterDB-Monitor-Node-${node.id.substring(0, 8)}`,
+    };
+  }
+
+  private oneShotOptions(timeoutMs: number): ValkeyOptions {
+    return {
       maxRetriesPerRequest: 0,
       retryStrategy: () => null,
       enableReadyCheck: false,
       connectTimeout: timeoutMs,
       commandTimeout: timeoutMs,
-      connectionName: 'BetterDB-Monitor-Discovery',
+    };
+  }
+
+  async onOwnNodeClient<T>(
+    connectionId: string | undefined,
+    timeoutMs: number,
+    run: (client: Valkey) => Promise<T>,
+  ): Promise<T> {
+    const key = this.ownNodeKey(connectionId);
+    const shared = this.connectionRegistry.get(connectionId).getClient();
+    const { host, port, username, password, tls } = shared.options;
+    const kept = this.ownNodeClients.get(key);
+    const reusable =
+      kept !== undefined &&
+      kept.shared === shared &&
+      kept.host === host &&
+      kept.port === port &&
+      kept.username === username &&
+      kept.password === password &&
+      kept.tls === tls &&
+      (!kept.connected || kept.client.status === 'ready');
+    if (kept && !reusable) this.dropOwnNodeClient(key, kept);
+    const own = reusable ? kept : this.openOwnNodeClient(key, shared, timeoutMs);
+    clearTimeout(own.idleTimer);
+    own.running += 1;
+    try {
+      await own.ready;
+      return await run(own.client);
+    } catch (error) {
+      this.dropOwnNodeClient(key, own);
+      throw error;
+    } finally {
+      own.running -= 1;
+      if (own.running === 0 && this.ownNodeClients.get(key) === own) this.closeWhenIdle(key, own);
+    }
+  }
+
+  private closeWhenIdle(key: string, own: OwnNodeClient): void {
+    own.idleTimer = setTimeout(() => {
+      if (own.running === 0) this.dropOwnNodeClient(key, own);
+    }, this.OWN_NODE_IDLE_MS);
+    own.idleTimer.unref?.();
+  }
+
+  releaseOwnNodeClient(connectionId: string | undefined): void {
+    const key = this.ownNodeKey(connectionId);
+    const kept = this.ownNodeClients.get(key);
+    if (kept) this.dropOwnNodeClient(key, kept);
+  }
+
+  private ownNodeKey(connectionId: string | undefined): string {
+    return connectionId || this.connectionRegistry.getDefaultId() || 'default';
+  }
+
+  private openOwnNodeClient(key: string, shared: Valkey, timeoutMs: number): OwnNodeClient {
+    const { host, port, username, password, tls } = shared.options;
+    const client = new Valkey({
+      ...this.seedClientOptions(shared, 'BetterDB-Monitor-Own-Node'),
+      ...this.oneShotOptions(timeoutMs),
     });
     client.on('error', () => undefined);
-    try {
-      await client.connect();
-      const raw = await client.call('CLUSTER', 'NODES');
-      return this.toDiscoveredNodes(MetricsParser.parseClusterNodes(raw as string));
-    } finally {
-      client.disconnect();
-    }
+    const own: OwnNodeClient = {
+      shared,
+      host,
+      port,
+      username,
+      password,
+      tls,
+      client,
+      ready: Promise.resolve(),
+      connected: false,
+      running: 0,
+    };
+    own.ready = client.connect().then(() => {
+      own.connected = true;
+    });
+    this.ownNodeClients.set(key, own);
+    return own;
+  }
+
+  private dropOwnNodeClient(key: string, own: OwnNodeClient): void {
+    clearTimeout(own.idleTimer);
+    if (this.ownNodeClients.get(key) === own) this.ownNodeClients.delete(key);
+    own.client.disconnect();
+  }
+
+  forgetTopology(connectionId?: string): void {
+    const cacheKey = connectionId || this.connectionRegistry.getDefaultId() || 'default';
+    this.discoveryCacheByConnection.delete(cacheKey);
+    this.discoveryInFlight.delete(cacheKey);
   }
 
   private freshCache(cacheKey: string): DiscoveredNode[] | null {
@@ -149,9 +403,11 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
 
     // A failed node lingers in CLUSTER NODES until it is forgotten; keep it out
     // of the role counts so a dead primary is not reported as a fourth master.
-    const failed = discovered.filter((n) => !n.healthy).length;
+    const live = discovered.filter((n) => n.state !== 'failed');
+    const failed = discovered.length - live.length;
+    const suspect = live.filter((n) => n.state === 'suspect').length;
     this.logger.log(
-      `Discovered ${discovered.length} nodes for connection ${cacheKey} (${discovered.filter(n => n.healthy && n.role === 'master').length} masters, ${discovered.filter(n => n.healthy && n.role === 'replica').length} replicas${failed > 0 ? `, ${failed} failed` : ''})`,
+      `Discovered ${discovered.length} nodes for connection ${cacheKey} (${live.filter(n => n.role === 'master').length} masters, ${live.filter(n => n.role === 'replica').length} replicas${suspect > 0 ? `, ${suspect} suspect` : ''}${failed > 0 ? `, ${failed} failed` : ''})`,
     );
 
     return discovered;
@@ -161,10 +417,6 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     const discovered: DiscoveredNode[] = [];
 
     for (const node of clusterNodes) {
-      // The link state is the answering node's own cluster-bus link to this
-      // one, not whether Monitor can reach it, so only a failure flag counts.
-      const isHealthy = !node.flags.includes('fail');
-
       const isMaster = node.flags.includes('master');
       const isReplica = node.flags.includes('slave') || node.flags.includes('replica');
 
@@ -179,9 +431,13 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         masterId: isMaster ? undefined : node.master,
         slots: node.slots,
         configEpoch: node.configEpoch,
-        healthy: isHealthy,
+        // The link state is the answering node's own cluster-bus link to this
+        // one, not whether Monitor can reach it, so only the flags count.
+        state: clusterNodeState(node.flags),
         flags: node.flags,
         ...(node.hostname ? { hostname: node.hostname } : {}),
+        ...(node.availabilityZone ? { availabilityZone: node.availabilityZone } : {}),
+        ...(node.shardId ? { shardId: node.shardId } : {}),
       });
     }
     return discovered;
@@ -205,22 +461,24 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       this.discoveredNodes.delete(key);
       existing.client.disconnect();
     }
-    const reused = await this.reuseNodeClient(key);
-    if (reused) return reused;
 
     // Cluster node addresses include bus port: "host:port@busport", and an
     // IPv6 host has colons of its own, so the port is after the last one.
     const parsed = parseNodeAddress(node.address);
-    if (!parsed) {
-      throw new Error(`Invalid node address: ${node.address}`);
-    }
-    const { host, port } = parsed;
-
-    const primaryClient = this.connectionRegistry.get(ownerId).getClient();
-    return this.openNodeClient(key, node, host, port, ownerId, {
-      username: primaryClient.options.username || '',
-      password: primaryClient.options.password || '',
-    });
+    const open = (): Promise<Valkey> => {
+      if (!parsed) {
+        throw new Error(`Invalid node address: ${node.address}`);
+      }
+      const primaryClient = this.connectionRegistry.get(ownerId).getClient();
+      return this.openNodeClient(key, node, parsed.host, parsed.port, ownerId, {
+        username: primaryClient.options.username || '',
+        password: primaryClient.options.password || '',
+      });
+    };
+    if (parsed) this.assertNodeAnswers(parsed.host, parsed.port, key, open);
+    const reused = await this.reuseNodeClient(key);
+    if (reused) return reused;
+    return open();
   }
 
   /**
@@ -241,21 +499,24 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       throw new Error(`Connection ${connectionId} has no data-node credentials for ${host}:${port}`);
     }
     const key = `addr:${connectionId}:${host}:${port}`;
-    const reused = await this.reuseNodeClient(key);
-    if (reused) return reused;
     const node: DiscoveredNode = {
       id: key,
       address: `${host}:${port}`,
       role: 'master',
       slots: [],
       configEpoch: 0,
-      healthy: true,
+      state: 'healthy',
       flags: [],
     };
-    return this.openNodeClient(key, node, host, port, connectionId, {
-      username: credentials.username ?? '',
-      password: credentials.password ?? '',
-    });
+    const open = (): Promise<Valkey> =>
+      this.openNodeClient(key, node, host, port, connectionId, {
+        username: credentials.username ?? '',
+        password: credentials.password ?? '',
+      });
+    this.assertNodeAnswers(host, port, key, open);
+    const reused = await this.reuseNodeClient(key);
+    if (reused) return reused;
+    return open();
   }
 
   async getReplicaConnection(host: string, port: number, connectionId: string, hostname?: string): Promise<Valkey> {
@@ -265,23 +526,72 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       throw new Error(`Connection ${connectionId} cannot dial its replica ${host}:${port} directly`);
     }
     const key = `replica:${connectionId}:${host}:${port}`;
-    const reused = await this.reuseNodeClient(key);
-    if (reused) return reused;
-    const { username, password } = this.connectionRegistry.get(connectionId).getClient().options;
     const node: DiscoveredNode = {
       id: key,
       address: `${host}:${port}`,
       role: 'replica',
       slots: [],
       configEpoch: 0,
-      healthy: true,
+      state: 'healthy',
       flags: [],
       hostname,
     };
-    return this.openNodeClient(key, node, host, port, connectionId, {
-      username: username || '',
-      password: password || '',
-    });
+    const open = (): Promise<Valkey> => {
+      const { username, password } = this.connectionRegistry.get(connectionId).getClient().options;
+      return this.openNodeClient(key, node, host, port, connectionId, {
+        username: username || '',
+        password: password || '',
+      });
+    };
+    this.assertNodeAnswers(host, port, key, open);
+    const reused = await this.reuseNodeClient(key);
+    if (reused) return reused;
+    return open();
+  }
+
+  private assertNodeAnswers(host: string, port: number, key: string, open: () => Promise<Valkey>): void {
+    const address = `${host}:${port}`;
+    let until = this.unresponsiveUntil.get(address);
+    if (until === undefined) return;
+    const now = Date.now();
+    if (now >= until) {
+      const retryAt = now + UNRESPONSIVE_NODE_COOL_OFF_MS;
+      until = retryAt;
+      this.unresponsiveUntil.set(address, retryAt);
+      void this.askNodeAgain(key, open).catch(() => {
+        if (this.unresponsiveUntil.get(address) === retryAt) this.unresponsiveUntil.delete(address);
+      });
+    }
+    throw new Error(`Node ${address} is not answering; next try in ${Math.ceil((until - now) / 1000)}s`);
+  }
+
+  private async askNodeAgain(key: string, open: () => Promise<Valkey>): Promise<void> {
+    const held = this.discoveredNodes.get(key)?.client;
+    if (held?.status === 'ready') {
+      await held.ping();
+    } else {
+      await open();
+    }
+  }
+
+  private markNodeUnresponsive(address: string, client?: Valkey): void {
+    if (!this.unresponsiveUntil.has(address)) {
+      this.logger.warn(
+        `Node ${address} is not answering; skipping it and trying again every ${UNRESPONSIVE_NODE_COOL_OFF_MS / 1000}s`,
+      );
+    }
+    this.unresponsiveUntil.set(address, Date.now() + UNRESPONSIVE_NODE_COOL_OFF_MS);
+    if (this.unresponsiveUntil.size > MAX_UNRESPONSIVE_NODES) {
+      const [oldest] = [...this.unresponsiveUntil].reduce((first, next) => (next[1] < first[1] ? next : first));
+      this.unresponsiveUntil.delete(oldest);
+    }
+    if (client) this.evictNodeClient(client);
+  }
+
+  private markNodeAnswering(address: string): void {
+    if (this.unresponsiveUntil.delete(address)) {
+      this.logger.log(`Node ${address} answers again`);
+    }
   }
 
   private async reuseNodeClient(key: string): Promise<Valkey | null> {
@@ -313,25 +623,43 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       }
     }
 
-    if (this.discoveredNodes.size >= this.MAX_CONNECTIONS) {
-      this.logger.warn(
-        `Connection limit reached (${this.MAX_CONNECTIONS}). Cleaning up idle connections...`,
-      );
-      await this.cleanupIdleConnections(this.HEALTH_CHECK_INTERVAL);
-
-      if (this.discoveredNodes.size >= this.MAX_CONNECTIONS) {
-        const oldestNodeId = this.findOldestConnection();
-        if (oldestNodeId) {
-          this.logger.warn(`Closing oldest connection to ${oldestNodeId} to make room for new connection`);
-          const oldConnection = this.discoveredNodes.get(oldestNodeId);
-          if (oldConnection) {
-            await this.closeNodeClient(oldConnection.client);
-            this.discoveredNodes.delete(oldestNodeId);
-          }
-        }
-      }
-    }
     return null;
+  }
+
+  private async reserveNodeClientSlot(): Promise<void> {
+    let cleanedUp = false;
+    while (this.discoveredNodes.size + this.pendingNodeClients >= this.MAX_CONNECTIONS) {
+      if (!cleanedUp) {
+        cleanedUp = true;
+        this.warnAboutPoolLimit();
+        await this.cleanupIdleConnections(this.HEALTH_CHECK_INTERVAL);
+        continue;
+      }
+      const oldestNodeId = this.findOldestConnection(Date.now() - nodeCommandTimeoutMs());
+      const oldest = oldestNodeId ? this.discoveredNodes.get(oldestNodeId) : undefined;
+      if (!oldestNodeId || !oldest) break;
+      this.logger.debug(`Closing oldest connection to ${oldestNodeId} to make room for new connection`);
+      this.poolLimitClosedSinceWarning += 1;
+      this.discoveredNodes.delete(oldestNodeId);
+      void this.closeNodeClient(oldest.client).catch(() => undefined);
+    }
+    this.pendingNodeClients += 1;
+  }
+
+  private warnAboutPoolLimit(): void {
+    const now = Date.now();
+    if (now - this.poolLimitWarnedAt < this.POOL_LIMIT_WARN_INTERVAL_MS) return;
+    const closed = this.poolLimitClosedSinceWarning;
+    this.poolLimitWarnedAt = now;
+    this.poolLimitClosedSinceWarning = 0;
+    this.logger.warn(
+      `Connection limit reached (${this.MAX_CONNECTIONS}). Closing idle and oldest node connections to make room` +
+        (closed > 0 ? `; ${closed} closed since the last warning` : ''),
+    );
+  }
+
+  private releaseNodeClientSlot(): void {
+    this.pendingNodeClients -= 1;
   }
 
   private async openNodeClient(
@@ -340,21 +668,49 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     host: string,
     port: number,
     ownerId: string | undefined,
+    credentials: { username: string; password: string },
+  ): Promise<Valkey> {
+    const opening: OpeningNodeClient = { ownerId, released: false };
+    this.openingNodeClients.add(opening);
+    try {
+      await this.reserveNodeClientSlot();
+      try {
+        return await this.connectNodeClient(key, node, host, port, opening, credentials);
+      } finally {
+        this.releaseNodeClientSlot();
+      }
+    } finally {
+      this.openingNodeClients.delete(opening);
+    }
+  }
+
+  private async connectNodeClient(
+    key: string,
+    node: DiscoveredNode,
+    host: string,
+    port: number,
+    opening: OpeningNodeClient,
     { username, password }: { username: string; password: string },
   ): Promise<Valkey> {
-    const tls = this.nodeTlsOptions(ownerId, host, node.hostname);
-
-    const client = new Valkey({
-      host,
-      port,
-      username,
-      password,
-      tls,
-      lazyConnect: true,
-      connectTimeout: this.CONNECTION_TIMEOUT,
-      enableOfflineQueue: false,
-      connectionName: `BetterDB-Monitor-Node-${node.id.substring(0, 8)}`,
-    });
+    const { ownerId } = opening;
+    const address = `${host}:${port}`;
+    let replied = false;
+    const client: Valkey = new NodeClient(
+      {
+        ...this.nodeClientOptions(ownerId, node, host, port, { username, password }),
+        connectTimeout: this.CONNECTION_TIMEOUT,
+        commandTimeout: nodeCommandTimeoutMs(),
+        enableReadyCheck: true,
+      },
+      (outcome) => {
+        if (outcome === 'answered') {
+          replied = true;
+          this.markNodeAnswering(address);
+        } else {
+          this.markNodeUnresponsive(address, client);
+        }
+      },
+    );
 
     // Node clients are long-lived, so pick up rotated client cert/key material
     // from the primary adapter before every reconnect.
@@ -392,11 +748,13 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       await Promise.race([
         client.connect(),
         new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('Connection timeout')), this.CONNECTION_TIMEOUT),
+          setTimeout(() => reject(new Error(CONNECTION_TIMED_OUT)), this.CONNECTION_TIMEOUT),
         ),
       ]);
       connecting = false;
       lastError = undefined;
+      this.markNodeAnswering(address);
+      assertNotReleased(opening, address);
 
       const connection: NodeConnection = {
         node,
@@ -418,6 +776,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       }
       if (replaced && replaced.client !== client) {
         await this.closeNodeClient(replaced.client);
+        assertNotReleased(opening, address);
       }
 
       this.discoveredNodes.set(storeKey, connection);
@@ -453,6 +812,8 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       }
 
       await this.closeNodeClient(client);
+      const silent = !replied && [connectError, lastError].some(isConnectTimeout);
+      if (silent && !opening.released) this.markNodeUnresponsive(address);
 
       throw error;
     }
@@ -565,16 +926,20 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   async releaseConnection(connectionId: string): Promise<void> {
     const owned = [...this.discoveredNodes].filter(([, connection]) => connection.connectionId === connectionId);
     for (const [key] of owned) this.discoveredNodes.delete(key);
+    for (const opening of this.openingNodeClients) {
+      if (opening.ownerId === connectionId) opening.released = true;
+    }
     this.discoveryCacheByConnection.delete(connectionId);
     this.discoveryInFlight.delete(connectionId);
+    this.releaseOwnNodeClient(connectionId);
     await Promise.allSettled(owned.map(([, connection]) => this.closeNodeClient(connection.client)));
   }
 
   /**
-   * Drop and disconnect a node client a caller gave up waiting on. Node
-   * clients have no command timeout, so on a socket that went silent the
-   * queued commands would otherwise wait for TCP to give up; disconnecting
-   * rejects them now, and the next getNodeConnection opens a fresh client.
+   * Drop and disconnect a node client a caller gave up waiting on. On a
+   * socket that went silent the queued commands would otherwise each wait for
+   * their own command timeout; disconnecting rejects them now, and the next
+   * getNodeConnection opens a fresh client.
    */
   evictNodeClient(client: Valkey): void {
     for (const [key, connection] of this.discoveredNodes) {
@@ -594,12 +959,14 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
 
   async disconnectAll(): Promise<void> {
     this.logger.log(`Disconnecting from ${this.discoveredNodes.size} nodes`);
+    for (const opening of this.openingNodeClients) opening.released = true;
 
     await Promise.allSettled(
       Array.from(this.discoveredNodes.values(), (connection) => this.closeNodeClient(connection.client)),
     );
     this.discoveredNodes.clear();
     this.discoveryCacheByConnection.clear();
+    for (const [key, own] of [...this.ownNodeClients]) this.dropOwnNodeClient(key, own);
     this.logger.log('All node connections closed');
   }
 
@@ -619,8 +986,8 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       for (const nodeId of toRemove) {
         const connection = this.discoveredNodes.get(nodeId);
         if (connection) {
-          await this.closeNodeClient(connection.client);
           this.discoveredNodes.delete(nodeId);
+          void this.closeNodeClient(connection.client).catch(() => undefined);
         }
       }
     }
@@ -639,9 +1006,9 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     }
   }
 
-  private findOldestConnection(): string | null {
+  private findOldestConnection(handedOutBefore: number): string | null {
     let oldestNodeId: string | null = null;
-    let oldestTime = Number.MAX_SAFE_INTEGER;
+    let oldestTime = handedOutBefore;
 
     for (const [nodeId, connection] of this.discoveredNodes.entries()) {
       if (connection.lastHealthCheck < oldestTime) {

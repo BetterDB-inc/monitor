@@ -1,0 +1,5 @@
+# CI render matrix (chart-tests.yml): the defaults with a connection
+# configured, so the chart-managed Secret renders too. Service = ClusterIP.
+db:
+  host: valkey.default.svc.cluster.local
+  password: ci

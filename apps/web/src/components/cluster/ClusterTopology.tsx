@@ -3,6 +3,7 @@ import { Card, CardHeader, CardTitle, CardContent } from '../ui/card';
 import { EmptyState } from '../ui/empty-state';
 import { Badge } from '../ui/badge';
 import { Server, ChevronDown, ChevronUp, Grid3x3, Network } from 'lucide-react';
+import { clusterNodeState } from '@betterdb/shared';
 import type { ClusterNode } from '../../types/metrics';
 import type { NodeStats } from '../../types/cluster';
 import { formatSlotRanges, countSlots } from '../../types/cluster';
@@ -54,18 +55,20 @@ export function ClusterTopology({ nodes, nodeStats }: ClusterTopologyProps) {
   };
 
   const getNodeBorderColor = (node: ClusterNode): string => {
-    if (node.flags.includes('fail')) return 'border-destructive';
-    if (node.flags.includes('pfail')) return 'border-yellow-500';
+    const state = clusterNodeState(node.flags);
+    if (state === 'failed') return 'border-destructive';
+    if (state === 'suspect') return 'border-yellow-500';
     if (node.flags.includes('myself')) return 'border-primary';
-    if (node.linkState === 'connected' && !node.flags.includes('fail')) {
+    if (node.linkState === 'connected') {
       return 'border-green-500';
     }
     return 'border-muted';
   };
 
   const getNodeBgColor = (node: ClusterNode): string => {
-    if (node.flags.includes('fail')) return 'bg-destructive/5';
-    if (node.flags.includes('pfail')) return 'bg-yellow-500/5';
+    const state = clusterNodeState(node.flags);
+    if (state === 'failed') return 'bg-destructive/5';
+    if (state === 'suspect') return 'bg-yellow-500/5';
     if (node.flags.includes('myself')) return 'bg-primary/5';
     return '';
   };
@@ -95,6 +98,12 @@ export function ClusterTopology({ nodes, nodeStats }: ClusterTopologyProps) {
             <div className="text-xs text-muted-foreground font-mono truncate">
               {node.id.substring(0, 12)}...
             </div>
+            {node.availabilityZone && (
+              <div className="mt-1 text-xs truncate">
+                <span className="text-muted-foreground">Zone: </span>
+                <span className="font-medium">{node.availabilityZone}</span>
+              </div>
+            )}
             {isMaster && node.slots.length > 0 && (
               <div className="mt-2 text-xs">
                 <span className="text-muted-foreground">Slots: </span>
@@ -111,14 +120,14 @@ export function ClusterTopology({ nodes, nodeStats }: ClusterTopologyProps) {
               >
                 {node.linkState}
               </Badge>
-              {node.flags.includes('fail') && (
+              {clusterNodeState(node.flags) === 'failed' && (
                 <Badge className="bg-destructive/10 text-destructive border-0 text-[10px]">
                   FAIL
                 </Badge>
               )}
-              {node.flags.includes('pfail') && (
+              {clusterNodeState(node.flags) === 'suspect' && (
                 <Badge className="bg-yellow-500/10 text-yellow-500 border-0 text-[10px]">
-                  PFAIL
+                  SUSPECT
                 </Badge>
               )}
             </div>
@@ -152,6 +161,12 @@ export function ClusterTopology({ nodes, nodeStats }: ClusterTopologyProps) {
               <span className="text-muted-foreground">Pong Received: </span>
               <span className="font-mono">{node.pongReceived}</span>
             </div>
+            {node.shardId && (
+              <div>
+                <span className="text-muted-foreground">Shard ID: </span>
+                <span className="font-mono break-all">{node.shardId}</span>
+              </div>
+            )}
             {isMaster && node.slots.length > 0 && (
               <div>
                 <span className="text-muted-foreground">Slot Ranges: </span>

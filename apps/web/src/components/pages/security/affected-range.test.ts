@@ -35,6 +35,16 @@ describe('affectedRangeLabel', () => {
     ).toBe('< 8.0.10');
   });
 
+  it('appends a marker to a fallback range', () => {
+    expect(affectedRangeLabel({ branch: '*', vulnerableBelow: '7.2.11', fallback: true })).toBe(
+      '< 7.2.11 (NVD, unpinned branch)',
+    );
+  });
+
+  it('leaves a non-fallback range unchanged', () => {
+    expect(affectedRangeLabel({ branch: '*', vulnerableBelow: '7.2.11' })).toBe('< 7.2.11');
+  });
+
   it('renders nothing when the advisory has no affected range at all', () => {
     expect(affectedRangesLabel([])).toBeNull();
   });

@@ -1,0 +1,4 @@
+# Not part of the packaged chart: helm-unittest suites and the CI render
+# matrix only run from a checkout (chart-tests.yml).
+tests/
+ci/

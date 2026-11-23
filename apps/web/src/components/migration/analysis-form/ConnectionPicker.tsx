@@ -11,7 +11,6 @@ import { Input } from '../../ui/input';
 import { connectionTypeSuffix, isClusterChild } from '../../../utils/connectionType';
 import { EngineBadge } from './EngineBadge';
 import type { EndpointRole } from './EndpointPanel';
-import { usesSshTunnel } from './preflight';
 
 interface Props {
   open: boolean;
@@ -41,9 +40,6 @@ function unavailableReason(
   }
   if (isClusterChild(connection)) {
     return 'Cluster node — pick its seed';
-  }
-  if (usesSshTunnel(connection)) {
-    return 'SSH tunnel — not supported yet';
   }
   if (role === 'target' && connection.isConnected === false) {
     return 'Offline — cannot accept writes';

@@ -104,7 +104,9 @@ and are untouched by re-installing.
 
 **Official Helm chart** (see the [Kubernetes guide](kubernetes)): each chart
 release pins the image to the version it was published for, so updating is
-just pulling the newer chart:
+just pulling the newer chart. A chart is published with every release and its
+version equals the monitor version (chart 0.56.0 deploys monitor 0.56.0), so
+`helm search repo betterdb --versions` shows which release each chart runs:
 
 ```bash
 helm repo update

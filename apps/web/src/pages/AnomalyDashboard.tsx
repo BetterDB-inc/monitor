@@ -1,7 +1,7 @@
 import { useState, useMemo } from 'react';
 import { QueryErrorState, findExternalUnsupportedError } from '../components/QueryErrorState';
 import { useSearchParams } from 'react-router-dom';
-import { Feature } from '@betterdb/shared';
+import { Feature, type ServedClusterNodeRef } from '@betterdb/shared';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
 import { useLicense } from '../hooks/useLicense';
@@ -14,10 +14,14 @@ import { EmptyState } from '../components/ui/empty-state';
 import { CaptureOnNextModal, type CaptureOnNextContext } from './anomalies/capture-on-next-modal';
 import { DataLossAlertBanner } from '../components/anomalies/DataLossAlertBanner';
 import { ThresholdsLink } from '../components/anomalies/ThresholdsLink';
+import { NodeLink } from '../components/cluster/NodeLink';
 import { LatencyRegressionBanner } from '../components/anomalies/LatencyRegressionBanner';
 import { RaftHealthBanner } from '../components/anomalies/RaftHealthBanner';
 import { ReplicaSlotStateBanner } from '../components/anomalies/ReplicaSlotStateBanner';
 import { FanoutCoverageNotice } from '../components/anomalies/FanoutCoverageNotice';
+import { HotShardCaptureNotice } from '../components/anomalies/HotShardCaptureNotice';
+import { RebalanceRuns } from '../components/anomalies/RebalanceRuns';
+import { RebalanceSuggestion } from '../components/anomalies/RebalanceSuggestion';
 import { ReplicationDivergencePanel } from '../components/anomalies/ReplicationDivergencePanel';
 import { formatValue } from '../lib/formatters';
 import {
@@ -67,6 +71,7 @@ interface AnomalyEvent {
   correlationId?: string;
   resolved?: boolean;
   connectionId?: string;
+  node?: ServedClusterNodeRef;
 }
 
 interface CorrelatedGroup {
@@ -326,6 +331,9 @@ export function AnomalyDashboard() {
       <LatencyRegressionBanner events={latencyRegressionEvents ?? undefined} />
       <RaftHealthBanner events={raftHealthEvents ?? undefined} />
       <ReplicaSlotStateBanner events={replicaSlotStateEvents ?? undefined} />
+      <HotShardCaptureNotice connectionId={currentConnection?.id} />
+      <RebalanceRuns connectionId={currentConnection?.id} />
+      <RebalanceSuggestion connectionId={currentConnection?.id} />
       <FanoutCoverageNotice
         coverage={fanoutCoverage?.find((c) => c.connectionId === currentConnection?.id)}
         error={fanoutCoverageError}
@@ -610,6 +618,12 @@ export function AnomalyDashboard() {
                                     <span className="font-medium">
                                       {metricLabel(anomaly.metricType)}
                                     </span>
+                                    {anomaly.node && (
+                                      <NodeLink
+                                        node={anomaly.node}
+                                        connectionId={anomaly.connectionId}
+                                      />
+                                    )}
                                   </div>
                                   <div className="flex items-center gap-4 text-muted-foreground">
                                     <span>
@@ -690,8 +704,11 @@ export function AnomalyDashboard() {
                           <SeverityIcon className={`w-4 h-4 ${config.color}`} />
                           <div>
                             <p className="text-sm font-medium">{event.message}</p>
-                            <p className="text-xs text-muted-foreground">
+                            <p className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                               {formatTime(event.timestamp)}
+                              {event.node && (
+                                <NodeLink node={event.node} connectionId={event.connectionId} />
+                              )}
                             </p>
                           </div>
                         </div>

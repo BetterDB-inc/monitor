@@ -17,6 +17,7 @@ Complete reference for all metrics exposed by BetterDB Monitor at the `/api/prom
   - [Client Analytics Metrics](#client-analytics-metrics)
   - [Slowlog Metrics](#slowlog-metrics)
   - [COMMANDLOG Metrics](#commandlog-metrics-valkey-81)
+  - [Lost Log Entries](#lost-log-entries)
   - [Vector Index Metrics](#vector-index-metrics)
   - [Commandstats Metrics](#commandstats-metrics)
   - [KV Cache Metrics](#kv-cache-metrics)
@@ -163,6 +164,7 @@ A family marked **removed** tracks only its current label values: a value that d
 | -------------------------------------------------------------------------------------------- | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
 | `betterdb_db_keys`, `betterdb_db_keys_expiring`, `betterdb_db_avg_ttl_seconds`               | 3 × D        | D is the number of databases that have held keys. It cannot exceed the server's `databases` setting (default 16). In cluster mode this is normally just `db0`.                | zeroed       |
 | `betterdb_cluster_slot_keys`, `_expires`, `_reads_total`, `_writes_total`                    | 4 × N        | N is `METRICS_SLOT_STATS_TOP_N` (default 100, maximum 16384). Only cluster connections on Valkey 8.0+ emit these.                                                             | removed      |
+| `betterdb_cluster_shard_cpu_usec_per_second`, `_network_bytes_in_per_second`, `_network_bytes_out_per_second`, `_cpu_share`, `_network_share`, `_slots` | 6 × P | P is the number of slot-owning primaries. Only cluster connections with `cluster-slot-stats-enabled yes` on every node emit these. | removed      |
 | `betterdb_commandstats_calls_total`, `betterdb_commandstats_latency_us`                      | 2 × C        | C is the number of commands with at least one call. The command table (with any module commands) caps it; typically a few dozen.                                              | removed      |
 | `betterdb_repl_output_buffer_ratio`                                                          | R            | R is the number of connected replicas.                                                                                                                                        | removed      |
 | `betterdb_vector_index_docs`, `_memory_bytes`, `_indexing_failures`, `_percent_indexed`      | 4 × I        | I is the number of search indexes.                                                                                                                                            | removed      |
@@ -183,6 +185,7 @@ A family marked **removed** tracks only its current label values: a value that d
 | `betterdb_client_connections_by_name`, `betterdb_client_connections_by_user`                 | K + L        | Distinct client names (K) and users (L) that have been inside the client analytics window (`CLIENT_ANALYTICS_WINDOW_MS`, default 24 hours) at any point since BetterDB started.| zeroed       |
 | `betterdb_slowlog_pattern_count`, `_avg_duration_us`, `_percentage`                          | 3 × S        | S is the number of distinct command/key patterns seen since start. Each poll reads the latest 128 slowlog entries, so one poll adds at most 128.                              | zeroed       |
 | `betterdb_commandlog_large_request_by_pattern`, `betterdb_commandlog_large_reply_by_pattern` | Q + Q′       | Q and Q′ are the distinct large-request and large-reply patterns seen since start. Each poll reads the latest 128 entries of each type, so one poll adds at most 128 to each. | zeroed       |
+| `betterdb_log_capture_lost_entries_total` | ≤ 4 | One per log the pollers have read: `slowlog`, plus `commandlog-slow`, `commandlog-large-request` and `commandlog-large-reply` on Valkey 8.1+. | removed |
 | `betterdb_kv_cache_hit_rate` | E × M | E is the number of enabled LMCache engines and M the models each reports a hit rate for in the last 15 minutes. | removed |
 | `betterdb_kv_cache_chunks`, `betterdb_kv_cache_bytes` | 2 × M | M is the number of models found in the sampled LMCache keys. | removed |
 | `betterdb_anomaly_events_total` (counter)                                                    | ≤ 240        | 3 severities × 40 metric types × 2 anomaly types.                                                                                                                             | counter      |
@@ -230,11 +233,12 @@ This example uses `full` with 5 standalone primaries and 2 cluster primaries, as
 | Forecast            | 4                  | 4               |
 | Slowlog patterns    | 60                 | 60              |
 | COMMANDLOG patterns | 20                 | 20              |
+| Lost log entries    | 4                  | 4               |
 | Client name/user    | 7                  | 7               |
 | ACL reason/user     | 5                  | 5               |
-| **Per connection**  | **270**            | **374**         |
+| **Per connection**  | **274**            | **378**         |
 
-The total with `full` is 55 + 5 × 270 + 2 × 374 = **2,153 series**. Add up to 120 more while anomaly detection runs, plus 9 per polled user-added connection (63 for this fleet, if all 7 are user-added) and up to 61 more for each connection with anomalies in the last hour. Anomaly detection also exports up to 5 node signal series per checked primary (connects per second, churn per op, retry state, write rate and backlog coverage; 35 for this fleet), 3 more for each replica those primaries report, 5 `betterdb_anomaly_fanout_primaries` series and up to 1 `betterdb_anomaly_fanout_gap` series per cluster or Sentinel connection, and `betterdb_incident_active` series while incidents are open. `betterdb_retry_amplification_state` is set on every poll, even with no anomaly events.
+The total with `full` is 55 + 5 × 274 + 2 × 378 = **2,181 series**. Add up to 120 more while anomaly detection runs, plus 9 per polled user-added connection (63 for this fleet, if all 7 are user-added) and up to 61 more for each connection with anomalies in the last hour. Anomaly detection also exports up to 5 node signal series per checked primary (connects per second, churn per op, retry state, write rate and backlog coverage; 35 for this fleet), 3 more for each replica those primaries report, 5 `betterdb_anomaly_fanout_primaries` series and up to 1 `betterdb_anomaly_fanout_gap` series per cluster or Sentinel connection, and `betterdb_incident_active` series while incidents are open. `betterdb_retry_amplification_state` is set on every poll, even with no anomaly events.
 
 The same fleet under `vitals` exports 55 + 5 × 33 + 2 × 39 = **298 series**, and that number does not change with key count, database count, pattern churn or cluster size.
 
@@ -302,6 +306,29 @@ Valkey-specific metrics for tracking large request/reply commands.
 | `betterdb_commandlog_large_reply_by_pattern`   | gauge | `pattern` | Large reply count by command pattern   | `3`     |
 
 **Availability**: Only populated when connected to Valkey 8.1+. Returns no data for Redis or older Valkey versions.
+
+### Lost Log Entries
+
+The server keeps only the newest `slowlog-max-len` / `commandlog-*-max-len` entries, and BetterDB reads the newest 128 of each log every 30 seconds. Entry ids are a per-process counter that `SLOWLOG RESET` and `COMMANDLOG RESET` do not restart, so when the oldest id of a poll is more than one above the newest id of the poll before it, the ids in between were logged and never read by BetterDB. That happens in two ways:
+
+- the server dropped them: more entries were logged between two polls than the log's max-len holds, or the log was reset
+- more than 128 entries were logged between two polls: the older ones may still be on the server, but a poll reads only the newest 128
+
+| Metric                                    | Type  | Labels | Description                                                                                                                  | Example |
+| ----------------------------------------- | ----- | ------ | ---------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `betterdb_log_capture_lost_entries_total` | gauge | `log`  | Entries BetterDB never read, dropped by the server or outside the newest 128 a poll reads, since BetterDB started            | `72`    |
+
+**Labels**: `log` is `slowlog`, `commandlog-slow`, `commandlog-large-request` or `commandlog-large-reply`.
+
+The value only grows while BetterDB runs and starts again at `0` when BetterDB restarts or the connection is removed and added back, so read it with `increase()`. It is kept in memory and exported as a gauge, like the INFO-derived `_total` families, so its series are removed with the connection and while the connection is stale. A series appears at `0` after the first completed poll of that log.
+
+Not counted, because the previous id is not one this process read from the same server process:
+
+- every poll after BetterDB starts, up to and including the first one that returns an entry (whatever was logged while it was down)
+- a server restart, seen as a changed `run_id`, or as ids starting over when `INFO` is refused
+- a log that was empty with nothing stored for it at the poll before
+
+Each log is counted on its own. A non-zero increase means the stored history of the log named by the `log` label is incomplete for that window, and so are the pattern metrics and analysis built from that log; the other logs are not affected. Raising that log's max-len (`slowlog-max-len`, or the matching `commandlog-*-max-len`) helps only up to the 128 entries one poll reads. Beyond that, raise its logging threshold (`slowlog-log-slower-than`, or the matching `commandlog-*` threshold) so fewer commands are logged.
 
 ### Vector Index Metrics
 
@@ -506,6 +533,27 @@ Cluster mode health and slot distribution.
 | `betterdb_cluster_slot_network_bytes_out_total` | gauge | `slot` | Bytes sent for the slot, cumulative                          | `12345`   |
 
 **Availability**: Only populated when connected to a Valkey 8.0+ cluster. Read from every primary, since a node only reports the slots it owns; with cluster auto-registration only the seed connection exports them, so each slot appears once. Coverage can be partial: a primary that fails or times out keeps its last series until they are older than the staleness bound, and when no primary can be reached directly only the connection's own node is read. The `_total` series need `cluster-slot-stats-enabled yes` on every node and are left out otherwise. They are cumulative, so use `rate()`; they reset when a slot moves or its node restarts. Limited to the top `METRICS_SLOT_STATS_TOP_N` slots by key count plus the top N by cumulative CPU (default 100; `0` disables), so a slot that only just became hot can be missing. A slot that leaves both lists is removed rather than reported as 0. Not exported under `vitals`.
+
+#### Cluster Shard Load Metrics (Valkey 8.0+)
+
+| Metric                                               | Type  | Labels            | Description                                                                 | Example  |
+| ---------------------------------------------------- | ----- | ----------------- | --------------------------------------------------------------------------- | -------- |
+| `betterdb_cluster_shard_cpu_usec_per_second`         | gauge | `node`, `node_id` | CPU microseconds per second spent on the slots of the shard                 | `412000` |
+| `betterdb_cluster_shard_network_bytes_in_per_second` | gauge | `node`, `node_id` | Bytes per second received for the slots of the shard                        | `98000`  |
+| `betterdb_cluster_shard_network_bytes_out_per_second`| gauge | `node`, `node_id` | Bytes per second sent for the slots of the shard, replication included      | `120000` |
+| `betterdb_cluster_shard_cpu_share`                   | gauge | `node`, `node_id` | The shard's part of the cluster-wide per-slot CPU rate, from 0 to 1         | `0.62`   |
+| `betterdb_cluster_shard_network_share`               | gauge | `node`, `node_id` | The shard's part of the cluster-wide per-slot network rate, in plus out, replication included | `0.55`   |
+| `betterdb_cluster_shard_slots`                       | gauge | `node`, `node_id` | Slots the shard owns, as counted for its load                               | `5461`   |
+
+A shard is one slot-owning primary: `node` is its address and `node_id` its cluster node id. A CPU share far above `1 / number of shards` means the load is skewed onto that shard.
+
+**Network is not client traffic alone**: Valkey adds the bytes of the replication stream to a slot's bytes out once per replica. A shard with more writes, or a primary with more replicas, therefore sends more and takes a larger network share than a shard serving the same client traffic. Use the CPU share to find skewed client load.
+
+**How the rates are made**: every poll already reads the usage counters of every slot from every primary for the slot metrics above. The rate of each slot is the change since the previous poll divided by the time between them, smoothed over about 30 seconds, and a shard's rate is the sum over the slots it owns. This covers all slots, not only the top `METRICS_SLOT_STATS_TOP_N`, and costs no extra command.
+
+**Availability**: needs a Valkey 8.0+ cluster with `cluster-slot-stats-enabled yes` on every node, and the cluster-wide slot read, so nothing is exported under `vitals`, with `METRICS_SLOT_STATS_TOP_N=0`, or for a cluster whose nodes are registered one by one as separate connections. The first series appear after two complete polls. A poll in which any primary did not answer, or answered for fewer slots than it was asked for because a slot just moved, adds no new value: the last one stays until it is older than the staleness bound, then the series are removed. The same holds while the cluster topology cannot be read, and while polls run out of time before the slot read. A slot whose counter went down (its node restarted, or `CONFIG RESETSTAT` ran) or that moved to another shard is left out of the rates for one poll, so a shard that just received slots reads low for a moment and a primary that just restarted reads 0.
+
+**Shares while slots settle**: a share worked out while some slots are left out would be too high for every other shard. So while any slot is left out, and for two polls after a slot changed owner, both shares stay at their last values and only the rates move. A shard that had no share before, such as one that just joined, gets no share series until then. During a long resharding the shares stay where they were before it started.
 
 ### Anomaly Detection Metrics
 
@@ -874,6 +922,9 @@ topk(5, betterdb_slowlog_pattern_avg_duration_us)
 
 # Slowlog growth rate
 rate(betterdb_slowlog_length[5m])
+
+# Entries BetterDB never read, per log, in the last hour
+sum by (connection, log) (increase(betterdb_log_capture_lost_entries_total[1h])) > 0
 ```
 
 ### Cluster Health

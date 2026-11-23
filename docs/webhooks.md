@@ -17,6 +17,7 @@ BetterDB can send HTTP POST requests to your endpoints when monitoring events oc
 - [Per-Webhook Configuration](#per-webhook-configuration)
 - [Rate Limiting & Hysteresis](#rate-limiting--hysteresis)
 - [API Reference](#api-reference)
+- [Receivers on a Private Network](#receivers-on-a-private-network)
 - [Troubleshooting](#troubleshooting)
 
 ## Quick Start
@@ -230,6 +231,49 @@ X-Webhook-Delivery-Id: <delivery-id>
 X-Webhook-Event: <event-type>
 ```
 
+### Failing node on cluster alerts
+
+On a cluster connection, an alert that is about one node names it in `node`:
+
+```json
+"node": {
+  "nodeId": "e7d1eecce10fd6bb5eb35b9f99a514335d9ba9ca",
+  "address": "10.0.1.12:6379",
+  "role": "primary",
+  "shardId": "8f3c1d5e0a9b4c7d2e6f1a0b3c4d5e6f7a8b9c0d",
+  "availabilityZone": "eu-west-1a",
+  "collected": true,
+  "connectionId": "conn-7"
+},
+"nodeUrl": "https://monitor.example.com/cluster?tab=nodes&node=e7d1eecce10fd6bb5eb35b9f99a514335d9ba9ca&connection=conn-1"
+```
+
+| Field | Meaning |
+| --- | --- |
+| `node.nodeId` | The node's cluster id |
+| `node.address` | `host:port` as the cluster reports it |
+| `node.role` | `primary`, `replica`, or `unknown` for a node that is still joining or has left the cluster view |
+| `node.shardId` | From `CLUSTER SHARDS`. Absent on servers without that command |
+| `node.availabilityZone` | From the server, or from the connection's zone map. Absent when neither gives one |
+| `node.collected` | `false` when no connection of the monitor points at this node, so its own metrics are not gathered. This is the usual case for the other nodes of a cluster with auto-registration off |
+| `node.connectionId` | The connection that collects the node. Absent when `collected` is `false` |
+| `nodeUrl` | Opens that node on the Cluster page. Only on `anomaly.detected` and `anomaly.sequence.detected`, and only when `FRONTEND_URL` is set |
+
+Which alerts carry it:
+
+| Event | `node` |
+| --- | --- |
+| `anomaly.detected` | The node of the anomaly event. See [which node each event type names](./anomaly-detection.md#failing-node-on-cluster-events), including the types that name none |
+| `anomaly.sequence.detected` | `nodes`: every node named by the events of the sequence, each once, in the order of the events. Left out when none of them names a node. `nodeUrl` opens the node of the first event |
+| `failover.started`, `failover.completed` | The node that changed role, with the role it changed to |
+| `data.loss.detected` | The node that was read |
+| `retry_amplification.detected` | The primary the finding was read on |
+| `replication.divergence`, `replication.recovered` | The replica in `replica`, not the primary in `instance`. `replication.recovered` names the node stored on the divergence event it closes, so both name the same node and role when the replica's address was reused or its role changed in between. This holds while BetterDB still has that event in memory (the recent events and incidents of the connection) and for an event a restart left open. For an older event it names the node at the replica's address in the current cluster view, with `role` `unknown` when that view is old |
+
+`node` is left out on a standalone or Sentinel connection, and when the node cannot be found in the cluster view. `replication.lag`, `cluster.failover`, `cluster.demoted.writes` and `cluster.bus.corruption` do not carry it yet.
+
+The Slack and Discord formats add a **Node** field: `10.0.1.12:6379 (primary, shard 8f3c1d5e, eu-west-1a)`, with `not collected` at the end when it applies. A sequence alert lists up to 5 nodes under **Nodes**.
+
 ### Event-Specific Payloads
 
 #### instance.down / instance.up
@@ -241,6 +285,28 @@ X-Webhook-Event: <event-type>
   "detectedAt": "2024-01-28T12:00:00.000Z"
 }
 ```
+
+BetterDB checks every connection in rounds, and starts the next round 10
+seconds after the previous one ends. A refused or dropped connection raises
+`instance.down` on the first failed check. A database that keeps the
+connection open but does not answer a ping within 5 seconds counts as one
+missed check. Such a check takes the full 5 seconds, so a database that does
+not answer is checked about every 15 seconds. Two of these checks missed in a
+row raise `instance.down` with the reason `Database ping timed out`. A stall
+shorter than 15 seconds does not page anyone; the event usually comes 20 to 35
+seconds after the database stops answering. Health requests from the dashboard
+or the Prometheus poll do not count as checks.
+
+For a connection BetterDB opens itself, every check after the first missed one
+also pings once over a new connection. If that answers, the database is up and
+only BetterDB's own client is busy, for example behind a long search, so
+nothing is raised. If it stays busy for six checks in a row (about 80
+seconds), BetterDB reconnects its client without raising an event. If the new
+connection gets no answer either, BetterDB raises `instance.down`, closes its
+client to that database and reconnects. Agent and external connections keep
+their client and are reported down after two missed checks.
+
+`instance.up` follows the first ping that answers.
 
 #### memory.critical
 
@@ -378,6 +444,8 @@ An alert only counts once its delivery succeeds, so a failed or dropped delivery
 
 `replicaView` is what the replica itself reported when the monitor could read it: `gapBytes` from its `slave_repl_offset`, `linkStatus` from `master_link_status`, and `applyBacklogBytes`, the data it has received but not applied (`null` when the server does not report `slave_read_repl_offset`). It is `null` when the replica could not be read. A divergence is not sent when the replica reports its link is up and it is less than 1 MiB behind, except a `not_acking` one: that is still sent, and its message says the replica's acknowledgements are not reaching the primary. See [Replica cross-check](./anomaly-detection.md#replication_divergence).
 
+On a cluster the payload also carries `node`, the replica in `replica` (see [Failing node on cluster alerts](#failing-node-on-cluster-alerts)).
+
 Detection works on windows of at least 30 seconds, or three poll intervals if that's longer. If polling stops for longer than a window and more than twice the previous gap between polls, the monitor treats it as an outage: every streak restarts, so an alert can take several windows to fire after polling resumes. A divergence that was already open stays open. Polling that stays steadily slower than a window is not an outage, and detection continues on longer windows.
 
 ```json
@@ -454,7 +522,11 @@ If the replica alerts again, the old event closes with no `replication.recovered
 
 `incidentUrl` opens the incident that holds the event. It is only present when `FRONTEND_URL` is set.
 
-A finding on a primary that a cluster connection reads but that is not registered, such as `reshard_shard_skew`, also carries `nodeAddr`, and its `sourceHost` and `sourcePort` are that primary's address rather than the registered node's.
+On a cluster the payload also carries `node` and `nodeUrl` for an event that is about one node (see [Failing node on cluster alerts](#failing-node-on-cluster-alerts)).
+
+A finding on a primary that a cluster connection reads but that is not registered, such as `reshard_shard_skew` or `hot_shard`, also carries `nodeAddr`, and its `sourceHost` and `sourcePort` are that primary's address rather than the registered node's. A `topology_divergence` event carries them too when exactly one node disagrees with the rest; when several nodes stand on each side it has no `nodeAddr`, and the nodes are named in the `message` (see [topology_divergence](anomaly-detection.md#topology_divergence)). A `partial_membership` event carries the address of the node that has only partly joined; its `message` names the peers that know it, those that do not, and the `CLUSTER MEET` command to run, and its `value` is the number of peers it has a broken link with (see [partial_membership](anomaly-detection.md#partial_membership)). When no view has an address for the node, the event has no `nodeAddr`. The `message` then says so and gives no command, as it does when the address is a host name or no peer that showed the gap gave a view.
+
+**Key names in `hot_shard` messages.** On a cluster with an LFU `maxmemory-policy`, the `message` of a `hot_shard` event names up to 3 of the hottest keys it sampled on the shard, for example `Hot keys: "user:42" (freq 255), "cart:{9}" (freq 201).` (see [hot keys](anomaly-detection.md#hot_shard)). The sample is the first 500 names of each of the shard's top three slots, so a hotter key can be missing. If your key names hold personal or otherwise sensitive data, such as an email address or a session token, check where the webhook delivers before you subscribe a chat channel or a third-party tool to `anomaly.detected`. Each name is cut to 64 characters, and control and invisible characters are written as `\xNN` or `\u{NNNN}`, so a name cannot add a line. The Slack and Discord formats also escape mentions, links and markdown. The generic format carries the text as it is in a JSON string, so escape it yourself if you forward it to a chat tool.
 
 #### anomaly.sequence.detected (Pro)
 
@@ -490,6 +562,9 @@ Notes:
 - `incidentUrl` opens the incident that holds the sequence. It is only present
   when `FRONTEND_URL` is set.
 - `values` is only present when the match carries settings to change.
+- On a cluster, `nodes` lists the nodes the events of the sequence name and
+  `nodeUrl` opens the node of the first event (see
+  [Failing node on cluster alerts](#failing-node-on-cluster-alerts)).
 - Sent once per recorded match, and again when a compound rule replaces it
   with a more severe diagnosis. Nothing is sent on recovery.
 
@@ -512,6 +587,10 @@ Notes:
 - A single finding that is both critical and KEV-exploited emits both
   `cve.critical_detected` (Pro) and `cve.kev_detected` (Enterprise) plus one
   OTel event each, so subscribe accordingly.
+- Findings matched only through NVD data for a branch the vendor advisory
+  doesn't list (typically an end-of-life branch, shown with confidence `broad`)
+  are shown in the UI but don't fire these events unless
+  `CVE_ALERT_ON_BROAD=true`. Other findings fire regardless of confidence.
 
 ```json
 {
@@ -520,7 +599,7 @@ Notes:
   "fingerprint": "a1b2c3d4e5f60718",
   "datasetVersion": "2026-09-15T00:00:00Z",
   "topFindings": [
-    { "cveId": "CVE-2026-12345", "severity": "critical", "knownExploited": true, "fixedIn": "8.0.10" }
+    { "cveId": "CVE-2026-12345", "severity": "critical", "knownExploited": true, "fixedIn": "8.0.10", "confidence": "exact" }
   ],
   "drift": false,
   "partial": false,
@@ -602,7 +681,7 @@ This event replaces the generic `anomaly.detected` for retry amplification, so o
 
 `trigger` is the stress signal that showed up first: `latency`, `errors` or `churn`. `loadRatio` is commands per client against baseline; `value` is the same ratio rounded to two decimals against a `baseline` of 1, which is what Slack and Discord show. `topContributors` lists up to 5 clients grouped by name, then user, then IP; a connection captured before it ran `CLIENT SETNAME` counts under the name it set later, and BetterDB's own connections are left out. `commandRateGrowth` compares each client's command rate during the episode with its rate just before the episode and needs CLIENT LIST `tot-cmds` (Valkey 8+). It is `null` for a client with no reading from before the episode. On older servers it is `null` for every client, and clients are ranked by `newConnections` (reconnects seen in client snapshots). `topContributors` is `null` when neither source could be read.
 
-On a cluster or Sentinel connection the finding can come from another primary the connection reads rather than the registered node. `instance` is then that primary's address, `connectionId` stays the cluster or Sentinel connection, and `topContributors` is `null`.
+On a cluster or Sentinel connection the finding can come from another primary the connection reads rather than the registered node. `instance` is then that primary's address, `connectionId` stays the cluster or Sentinel connection, and `topContributors` is `null`. On a cluster `node` names that primary (see [Failing node on cluster alerts](#failing-node-on-cluster-alerts)).
 
 ```json
 {
@@ -636,7 +715,7 @@ previous stored scan, even when severity is below critical.
   "fingerprint": "a1b2c3d4e5f60718",
   "datasetVersion": "2026-09-15T00:00:00Z",
   "topFindings": [
-    { "cveId": "CVE-2026-54321", "severity": "high", "knownExploited": true, "fixedIn": "8.0.10" }
+    { "cveId": "CVE-2026-54321", "severity": "high", "knownExploited": true, "fixedIn": "8.0.10", "confidence": "exact" }
   ],
   "drift": false,
   "partial": false,
@@ -1316,6 +1395,57 @@ GET /api/webhooks/stats/retry-queue
 }
 ```
 
+## Receivers on a Private Network
+
+By default BetterDB only delivers webhooks to public addresses. In production (`NODE_ENV=production`, which the Docker image and the Helm chart set) a webhook URL is rejected when it points at a private, loopback or link-local address, or at a hostname that resolves to one. This protects against server-side request forgery (SSRF): without it, anyone who can create a webhook could make BetterDB call services on its own network.
+
+A self-hosted BetterDB often needs to reach a receiver on that network: an alert relay in the same Kubernetes cluster, an n8n instance, a self-hosted chat server. Two environment variables allow specific private targets. Both are empty by default.
+
+| Variable | Meaning |
+| --- | --- |
+| `WEBHOOK_ALLOWED_PRIVATE_CIDRS` | Comma-separated IPv4/IPv6 CIDRs, e.g. `10.244.0.0/16,10.96.0.0/12`. A webhook address inside one of them is accepted even though it is private. |
+| `WEBHOOK_ALLOWED_PRIVATE_HOSTS` | Comma-separated hostnames, exact (`relay.internal`) or suffix wildcards (`*.svc.cluster.local`). A URL whose hostname matches may resolve to a private address. |
+
+The same allowlist applies when a webhook is created, updated, tested and on every delivery and retry, so a webhook that saves also delivers.
+
+### Examples
+
+**Kubernetes**, by Service DNS name (the Helm chart values render the same variables):
+
+```yaml
+# values.yaml
+webhooks:
+  allowedPrivateHosts: ["*.svc.cluster.local"]
+```
+
+**Kubernetes**, by pod and Service CIDR:
+
+```yaml
+# values.yaml
+webhooks:
+  allowedPrivateCidrs: ["10.244.0.0/16", "10.96.0.0/12"]
+```
+
+**Docker**, a receiver on the default bridge network:
+
+```bash
+docker run -e WEBHOOK_ALLOWED_PRIVATE_CIDRS=172.17.0.0/16 ... betterdb/monitor
+```
+
+### Rules
+
+- **Metadata and link-local addresses stay blocked.** `169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`, `100.100.100.200` and `192.0.0.192` can never be allowed. A CIDR that overlaps one of them (for example `0.0.0.0/0`, `169.254.0.0/16`, or the whole `100.64.0.0/10` or `fd00::/8` range) is refused at startup; list narrower ranges instead.
+- **Loopback needs its own CIDR.** `127.0.0.0/8`, `::1` and `0.0.0.0/8` are accepted only when listed as a CIDR, and never through a hostname pattern, so a webhook cannot reach BetterDB's own API or a sidecar by accident. Use the IP literal (`http://127.0.0.1:9000/hook`); the name `localhost` stays rejected.
+- **The allowlist applies in every environment.** Without one, `localhost` and `127.x.x.x` are allowed when `NODE_ENV` is not `production`. Once either variable is set, that exception no longer applies and loopback must be listed like any other private range.
+- **A typo fails startup.** An invalid CIDR or hostname pattern stops BetterDB from starting with an error naming the entry. `*` alone is not a valid hostname pattern.
+- **Ignored in cloud mode.** With `CLOUD_MODE` set, both variables are ignored and a warning is logged at startup.
+- **Shrinking the allowlist blocks existing webhooks.** Deliveries to a target that is no longer allowed fail with `Webhook URL resolves to a blocked address` and are recorded as failed deliveries.
+
+### Security Considerations
+
+- Anyone who can create a webhook can make BetterDB send a POST request to anything in the allowlist. List the narrowest CIDR or hostname that works.
+- Allow a hostname only when you control its DNS, such as cluster DNS or a private zone. Whoever controls the DNS for an allowed name decides which private address it reaches. BetterDB checks the address it actually connects to and does not follow redirects, so a name that changes its answer between the check and the request (DNS rebinding) is still held to the allowlist.
+
 ## Troubleshooting
 
 ### Webhook Not Firing
@@ -1427,10 +1557,11 @@ BetterDB blocks private IP addresses to prevent SSRF attacks:
 - IPv6 private ranges
 
 **Allowed in development:**
-- `localhost` and `127.x.x.x` are allowed when `NODE_ENV !== 'production'`
+- `localhost` and `127.x.x.x` are allowed when `NODE_ENV !== 'production'` and no private-network allowlist is set
 
 **Solution:**
-- Use public endpoints or reverse proxy
+- For a receiver on your own network (same Kubernetes cluster, VPC or Docker network), allow it with `WEBHOOK_ALLOWED_PRIVATE_CIDRS` or `WEBHOOK_ALLOWED_PRIVATE_HOSTS`; see [Receivers on a Private Network](#receivers-on-a-private-network)
+- Otherwise use public endpoints or a reverse proxy
 - For testing, set `NODE_ENV=development`
 
 ### Delivery History Missing

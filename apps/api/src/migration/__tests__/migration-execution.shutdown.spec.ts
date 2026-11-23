@@ -5,6 +5,7 @@ import {
   SHUTDOWN_CANCEL_MESSAGE,
   SHUTDOWN_START_MESSAGE,
 } from '../migration-execution.service';
+import { fakeEndpointResolver } from './helpers/fake-tunnels';
 
 jest.mock('../execution/redisshake-runner', () => ({
   findRedisShakeBinary: jest.fn().mockReturnValue('/usr/local/bin/redis-shake'),
@@ -102,6 +103,7 @@ function createService(
   const service = new MigrationExecutionService(
     registry as unknown as Args[0],
     migrationService as unknown as Args[1],
+    fakeEndpointResolver(),
   );
   // Keep the SIGKILL path fast; production waits SHUTDOWN_GRACE_MS (3 s).
   (service as unknown as { SHUTDOWN_GRACE_MS: number }).SHUTDOWN_GRACE_MS = 50;

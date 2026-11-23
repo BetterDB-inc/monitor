@@ -31,4 +31,7 @@ export interface ExecutionJob {
   process: ChildProcess | null;   // redis_shake mode only
   tomlPath: string | null;        // redis_shake mode only
   pidPath: string | null;         // redis_shake mode only — for orphan detection
+  tunnelError?: string;
+  dropConnections?: () => void;
+  closeTunnels?: () => Promise<void>;
 }

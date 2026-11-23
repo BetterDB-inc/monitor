@@ -1,5 +1,6 @@
 import type { RegressionKind } from '../latency-regression/types';
 import { createHash } from 'crypto';
+import type { ClusterNodeRef, ServedClusterNodeRef } from '@betterdb/shared';
 import {
   AnomalyEvent,
   AnomalyPattern,
@@ -17,6 +18,7 @@ export interface IncidentTimelineEntry {
   anomalyId: string;
   connectionId: string;
   nodeAddr?: string;
+  node?: ClusterNodeRef | ServedClusterNodeRef;
   timestamp: number;
   metricType: MetricType;
   severity: AnomalySeverity;
@@ -138,11 +140,17 @@ export const POINT_IN_TIME_QUIET_MS =
 export const RESOLVER_BACKED_METRICS: ReadonlySet<MetricType> = new Set([
   MetricType.RAFT_HEALTH,
   MetricType.RESHARD_SHARD_SKEW,
+  MetricType.HOT_SHARD,
+  MetricType.PRIMARY_WITHOUT_REPLICAS,
+  MetricType.TOPOLOGY_DIVERGENCE,
+  MetricType.PARTIAL_MEMBERSHIP,
   MetricType.REPLICA_SLOT_STATE,
   MetricType.REPLICATION_DIVERGENCE,
   MetricType.BACKLOG_COVERAGE_RISK,
   MetricType.CLIENT_SATURATION,
   MetricType.RESYNC_ESCALATION,
+  MetricType.SLOT_MIGRATION,
+  MetricType.SLOT_MIGRATION_STUCK,
 ]);
 
 const SEVERITY_RANK: Record<AnomalySeverity, number> = {
@@ -332,6 +340,7 @@ export function toTimelineEntry(event: AnomalyEvent): IncidentTimelineEntry {
     anomalyId: event.id,
     connectionId: event.connectionId ?? '',
     ...(event.nodeAddr ? { nodeAddr: event.nodeAddr } : {}),
+    ...(event.node ? { node: event.node } : {}),
     timestamp: event.timestamp,
     metricType: event.metricType,
     severity: event.severity,

@@ -454,6 +454,8 @@ export interface ClusterNode {
    * hostname — see valkey-io/valkey#304.
    */
   hostname?: string;
+  availabilityZone?: string;
+  shardId?: string;
 }
 
 /** A node entry within a `CLUSTER SHARDS` shard. */
@@ -467,6 +469,7 @@ export interface ClusterShardNode {
   hostname?: string;
   port?: number;
   replicationOffset?: number;
+  availabilityZone?: string;
 }
 
 /**
@@ -477,6 +480,7 @@ export interface ClusterShardNode {
 export interface ClusterShard {
   slots: number[][];
   nodes: ClusterShardNode[];
+  shardId?: string;
 }
 
 /**

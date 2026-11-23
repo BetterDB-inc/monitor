@@ -9,6 +9,21 @@ describe('actionFor', () => {
     expect(actionFor('PATCH', '/workspace/members/:userId/role')).toBe('member.role');
   });
 
+  it('names the slot rebalance run and cancel', () => {
+    expect(actionFor('POST', '/api/anomaly/hot-shards/:shardId/rebalance')).toBe(
+      'slot_rebalance.run',
+    );
+    expect(actionFor('POST', '/anomaly/slot-rebalance/cancel')).toBe('slot_rebalance.cancel');
+    expect(targetFor('slot_rebalance.run', { shardId: 'n1' }, {}, undefined)).toEqual({
+      type: 'shard',
+      id: 'n1',
+    });
+    expect(targetFor('slot_rebalance.cancel', {}, { sourceShardId: 'n1' }, undefined)).toEqual({
+      type: 'shard',
+      id: 'n1',
+    });
+  });
+
   it('strips the api prefix and upper-cases the method', () => {
     expect(actionFor('post', '/api/connections')).toBe('connection.create');
   });

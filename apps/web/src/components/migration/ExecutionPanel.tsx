@@ -100,7 +100,8 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
         setPollFailed(false);
         if (generation === pollGenerationRef.current) {
           setExecution(result);
-          if (result.status === 'completed' || result.status === 'failed' || result.status === 'cancelled') {
+          const cancelSettled = result.status === 'cancelled' && result.completedAt !== undefined;
+          if (result.status === 'completed' || result.status === 'failed' || cancelSettled) {
             onStoppedRef.current();
             return;
           }

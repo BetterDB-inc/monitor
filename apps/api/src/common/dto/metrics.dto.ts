@@ -301,6 +301,18 @@ export class ClusterNodeDto implements ClusterNode {
 
   @ApiProperty({ description: 'Slot ranges [[start, end], ...]', type: 'array', example: [[0, 5460]] })
   slots: number[][];
+
+  @ApiPropertyOptional({
+    description: 'Availability zone the node reports in CLUSTER SHARDS (Valkey 9.1+, when the node has one set)',
+    example: 'us-east-1a',
+  })
+  availabilityZone?: string;
+
+  @ApiPropertyOptional({
+    description: 'Id of the shard the node belongs to, from CLUSTER SHARDS (Valkey 9.1+)',
+    example: '7c9e1b0f5a3d4e6f8a2b1c0d9e8f7a6b5c4d3e2f',
+  })
+  shardId?: string;
 }
 
 /**
@@ -378,8 +390,42 @@ export class DiscoveredNodeDto {
   @ApiProperty({ description: 'Slot ranges [[start, end], ...]', type: 'array', example: [[0, 5460]] })
   slots: number[][];
 
-  @ApiProperty({ description: 'Node health status', example: true })
+  @ApiProperty({
+    description:
+      'Node state from its CLUSTER NODES flags: failed when its peers agreed it is down (fail), suspect when they only suspect it (fail?) or it is not a full member yet (handshake, noaddr), healthy otherwise',
+    enum: ['healthy', 'suspect', 'failed'],
+    example: 'healthy',
+  })
+  state: 'healthy' | 'suspect' | 'failed';
+
+  @ApiProperty({
+    description: 'True only when state is healthy. Kept for older clients; read state instead',
+    example: true,
+    deprecated: true,
+  })
   healthy: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Availability zone the node reports in CLUSTER SHARDS (Valkey 9.1+, when the node has one set)',
+    example: 'us-east-1a',
+  })
+  availabilityZone?: string;
+
+  @ApiPropertyOptional({
+    description: 'Id of the shard the node belongs to, from CLUSTER SHARDS (Valkey 9.1+)',
+    example: '7c9e1b0f5a3d4e6f8a2b1c0d9e8f7a6b5c4d3e2f',
+  })
+  shardId?: string;
+
+  @ApiProperty({
+    description:
+      'True when a connection of the monitor points at this node, so its metrics and events are collected',
+    example: true,
+  })
+  collected: boolean;
+
+  @ApiPropertyOptional({ description: 'Id of the connection that collects this node, when one does' })
+  connectionId?: string;
 }
 
 export class NodeStatsDto {

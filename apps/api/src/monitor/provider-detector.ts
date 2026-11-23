@@ -103,6 +103,17 @@ export function detectProvider(
   return { provider: 'self-hosted', restrictions: [] };
 }
 
+export function isManagedProviderBuild(
+  server: Record<string, string | undefined> | undefined,
+): boolean {
+  return (server?.redis_build_id ?? '').toLowerCase().includes('redislabs');
+}
+
+export function isManagedProviderHost(host: string | undefined): boolean {
+  const provider = matchByHost(host);
+  return provider !== null && provider !== 'unknown';
+}
+
 function matchByHost(host: string | undefined): Provider | null {
   if (!host) return null;
   const lower = host.toLowerCase();
@@ -115,11 +126,10 @@ function matchByHost(host: string | undefined): Provider | null {
 }
 
 function matchByServerInfo(server: Record<string, string | undefined>): Provider | null {
-  const buildId = (server.redis_build_id ?? '').toLowerCase();
   const os = (server.os ?? '').toLowerCase();
 
   // Redis Cloud / Redis Enterprise builds carry "redislabs" in the build id.
-  if (buildId.includes('redislabs')) return 'redis-cloud';
+  if (isManagedProviderBuild(server)) return 'redis-cloud';
 
   // ElastiCache marks "Amazon Linux" in the OS field. Self-hosted on EC2 with
   // Amazon Linux would false-positive, but they would still get a non-blocking

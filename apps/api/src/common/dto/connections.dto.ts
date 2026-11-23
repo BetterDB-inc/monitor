@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsString, IsNumber, IsInt, IsBoolean, IsOptional, IsIn, Min, Max, MinLength, MaxLength, ValidateNested, ValidateIf } from 'class-validator';
+import { IsString, IsNumber, IsInt, IsBoolean, IsObject, IsOptional, IsIn, Min, Max, MinLength, MaxLength, ValidateNested, ValidateIf } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ENV_DEFAULT_ID } from '../../connections/connection.constants';
 import type {
@@ -242,6 +242,13 @@ export class ConnectionStatusDto implements ConnectionStatus {
   capabilities?: ConnectionCapabilities;
 
   @ApiPropertyOptional({
+    description:
+      'Whether BetterDB opens its own connections to the data nodes this connection reports; false when it is read through an agent or from pushed metrics. A cluster member answers for its seed',
+    example: true,
+  })
+  dialsDataNodes?: boolean;
+
+  @ApiPropertyOptional({
     description: 'Auto-register discovered nodes (cluster or Sentinel); undefined/null follows CLUSTER_AUTO_REGISTER_NODES or SENTINEL_AUTO_REGISTER_NODES',
     example: true,
   })
@@ -249,6 +256,14 @@ export class ConnectionStatusDto implements ConnectionStatus {
 
   @ApiPropertyOptional({ description: 'Cluster membership details when this connection was registered as a cluster node', type: TopologyMembershipDto })
   membership?: TopologyMembership;
+
+  @ApiPropertyOptional({
+    description: 'Availability zone per node address (host:port), used where the server reports none; a cluster member carries the map of its seed',
+    type: 'object',
+    additionalProperties: { type: 'string' },
+    example: { '10.0.0.1:7001': 'us-east-1a' },
+  })
+  nodeAvailabilityZones?: Record<string, string>;
 }
 
 /**
@@ -412,6 +427,14 @@ export class ConnectionIdResponseDto {
   id: string;
 }
 
+export class ConnectClusterNodeResponseDto {
+  @ApiProperty({ description: 'The connection that reads the node', example: '550e8400-e29b-41d4-a716-446655440000' })
+  id: string;
+
+  @ApiProperty({ description: 'False when a connection already read the node and nothing was added' })
+  created: boolean;
+}
+
 export class SetAutoRegisterDto {
   @ApiProperty({
     description: 'Auto-register discovered nodes (cluster or Sentinel); undefined/null follows CLUSTER_AUTO_REGISTER_NODES or SENTINEL_AUTO_REGISTER_NODES',
@@ -421,6 +444,17 @@ export class SetAutoRegisterDto {
   @ValidateIf((_, value) => value !== null)
   @IsBoolean()
   enabled: boolean | null;
+}
+
+export class SetNodeAvailabilityZonesDto {
+  @ApiProperty({
+    description: 'Availability zone per node address (host:port); an empty object clears the map',
+    type: 'object',
+    additionalProperties: { type: 'string' },
+    example: { '10.0.0.1:7001': 'us-east-1a', '10.0.0.2:7002': 'us-east-1b' },
+  })
+  @IsObject()
+  zones: Record<string, string>;
 }
 
 /**

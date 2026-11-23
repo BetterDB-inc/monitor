@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject, Optional, NotFoundException, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
-import { TopologyMembership, ConnectionStatus, CreateConnectionRequest, CredentialStatus, TestConnectionResponse, DatabaseConnectionConfig, DatabaseConnectionType, tlsConfigStatus } from '@betterdb/shared';
+import { TopologyMembership, ConnectionStatus, CreateConnectionRequest, CredentialStatus, TestConnectionResponse, DatabaseConnectionConfig, DatabaseConnectionType, NodeAvailabilityZones, normalizeNodeAvailabilityZones, tlsConfigStatus } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { DatabasePort } from '../common/interfaces/database-port.interface';
 import { UnifiedDatabaseAdapter } from '../database/adapters/unified.adapter';
@@ -137,6 +137,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   private readonly encryption: EnvelopeEncryptionService | null;
   private startupConnectionErrors: Array<{ name: string; host: string; port: number; error: string }> = [];
   private readonly seedLocks = new Map<string, Promise<unknown>>();
+  private readonly observedNodeIds = new Map<string, string>();
+  private readonly outsideCluster = new Set<string>();
   private readonly removalListeners = new Set<ConnectionRemovalListener>();
   // Connections whose in-memory secrets came from the environment because the
   // stored (encrypted) record could not be decrypted and no cipher is available.
@@ -639,6 +641,19 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     return true;
   }
 
+  async pinLearnedSshHostKey(id: string, fingerprint: string): Promise<void> {
+    const seedId = this.configs.get(id)?.membership?.seedId ?? id;
+    await this.withSeedLock(seedId, async () => {
+      const config = this.configs.get(id);
+      if (!config?.sshTunnel?.enabled || config.sshTunnel.hostKeyFingerprint) {
+        return;
+      }
+      config.sshTunnel = { ...config.sshTunnel, hostKeyFingerprint: fingerprint };
+      this.logger.log(`Pinned SSH host key for ${config.name} on first use (${fingerprint})`);
+      await this.persistLearnedHostKey(config);
+    });
+  }
+
   /**
    * Encrypt the secret fields of an SSH tunnel config for storage. `privateKeyPath`
    * is a filesystem path, not a secret, and is left as-is.
@@ -1003,7 +1018,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
     this.connections.delete(id);
     this.configs.delete(id);
-    this.runtimeCapabilityTracker.removeConnection(id);
+    this.resetSessionState(id);
     this.externalMetricsStore.clear(id);
     await this.storage.deleteConnection(id);
     this.notifyRemoved(id);
@@ -1203,8 +1218,10 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         credentialStatus: config.credentialStatus,
         credentialError: config.credentialError,
         connectionType: config.host === 'agent' ? 'agent' : (config.connectionType ?? 'direct'),
+        dialsDataNodes: dialsDataNodes(this.zoneMapOwner(config)),
         autoRegisterNodes: config.autoRegisterNodes,
         membership: config.membership,
+        nodeAvailabilityZones: this.zoneMapOwner(config).nodeAvailabilityZones,
       });
     }
 
@@ -1216,7 +1233,12 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     if (!live) {
       return config;
     }
-    return { ...config, membership: live.membership, autoRegisterNodes: live.autoRegisterNodes };
+    return {
+      ...config,
+      membership: live.membership,
+      autoRegisterNodes: live.autoRegisterNodes,
+      nodeAvailabilityZones: live.nodeAvailabilityZones,
+    };
   }
 
   async reconnect(id: string): Promise<void> {
@@ -1321,6 +1343,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
     this.connections.set(id, adapter);
     this.configs.set(id, config);
+    this.resetSessionState(id);
     if (options.serverless === true) {
       this.serverlessAgentIds.add(id);
     } else {
@@ -1342,8 +1365,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   removeAgentConnection(id: string): void {
     this.connections.delete(id);
     this.configs.delete(id);
-    this.serverlessAgentIds.delete(id);
-    this.runtimeCapabilityTracker.removeConnection(id);
+    this.resetSessionState(id);
 
     if (this.defaultId === id) {
       const remaining = Array.from(this.configs.keys());
@@ -1351,6 +1373,13 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     }
 
     this.logger.log(`Removed agent connection: ${id}`);
+  }
+
+  private resetSessionState(id: string): void {
+    this.serverlessAgentIds.delete(id);
+    this.observedNodeIds.delete(id);
+    this.outsideCluster.delete(id);
+    this.runtimeCapabilityTracker.removeConnection(id);
   }
 
   getStartupConnectionErrors(): Array<{ name: string; host: string; port: number; error: string }> {
@@ -1377,6 +1406,41 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   isListed(id: string): boolean {
     const config = this.configs.get(id);
     return config !== undefined && !isRetiredAuto(config);
+  }
+
+  isRegisteredClient(id: string, client: DatabasePort): boolean {
+    return this.connections.get(id) === client;
+  }
+
+  noteObservedNodeId(id: string, nodeId: string | undefined): void {
+    if (nodeId) {
+      this.observedNodeIds.set(id, nodeId);
+    } else {
+      this.observedNodeIds.delete(id);
+    }
+  }
+
+  getObservedNodeId(id: string): string | undefined {
+    return this.observedNodeIds.get(id);
+  }
+
+  noteOutsideCluster(id: string, outside: boolean): void {
+    if (outside) {
+      this.outsideCluster.add(id);
+    } else {
+      this.outsideCluster.delete(id);
+    }
+  }
+
+  isOutsideCluster(id: string): boolean {
+    return this.outsideCluster.has(id);
+  }
+
+  findIdObservingNode(nodeId: string): string | null {
+    for (const [id, observed] of this.observedNodeIds) {
+      if (observed === nodeId && this.isListed(id)) return id;
+    }
+    return null;
   }
 
   /** True when `id` was registered automatically from a cluster or Sentinel seed. */
@@ -1499,6 +1563,58 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     return config.id;
   }
 
+  async addNodeConnection(sourceId: string, node: { host: string; port: number }): Promise<string> {
+    const source = this.configs.get(sourceId);
+    if (!source) {
+      throw new NotFoundException(`Connection '${sourceId}' not found.`);
+    }
+    const now = Date.now();
+    const config: DatabaseConnectionConfig = {
+      id: randomUUID(),
+      name: `${source.name} · ${node.host}:${node.port}`,
+      host: node.host,
+      port: node.port,
+      ...dataNodeCredentialsOf(source),
+      dbIndex: 0,
+      tls: source.tls,
+      tlsConfig: source.tlsConfig,
+      authMode: source.authMode,
+      connectionType: 'direct',
+      autoRegisterNodes: false,
+      isDefault: false,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const adapter = this.createAdapter(config);
+    try {
+      await connectWithin(adapter, CHILD_CONNECT_TIMEOUT_MS);
+    } catch (error) {
+      await adapter.disconnect().catch(() => { });
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(`Could not connect to ${node.host}:${node.port}: ${errorMsg}`);
+    }
+    try {
+      if (this.secretsAreMemoryOnly(source)) {
+        this.memoryOnlySecrets.add(config.id);
+        this.logger.warn(`${config.name}: connected in memory only (ENCRYPTION_KEY is not set; inherited secrets are not written)`);
+      } else {
+        await this.storage.saveConnection(this.encryptConfig(config));
+      }
+      this.configs.set(config.id, { ...config, credentialStatus: 'valid' });
+      this.connections.set(config.id, adapter);
+    } catch (error) {
+      this.memoryOnlySecrets.delete(config.id);
+      this.configs.delete(config.id);
+      this.connections.delete(config.id);
+      await adapter.disconnect().catch(() => { });
+      this.logger.error(`Failed to persist node connection ${config.name}: ${error instanceof Error ? error.message : error}`);
+      throw error;
+    }
+    this.discoveredInstances?.forget(config.host, config.port);
+    this.logger.log(`Connected cluster node ${config.name}`);
+    return config.id;
+  }
+
   async adoptChild(id: string, seedId: string, node: DesiredNode): Promise<void> {
     await this.setMembership(id, { seedId, origin: 'adopted', ...membershipFields(node) });
     // The adopted connection keeps its configured dbIndex: whether SELECT on a
@@ -1510,6 +1626,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
   async refreshChild(id: string, node: DesiredNode): Promise<void> {
     const previous = this.requireMembership(id);
+    if (this.observedNodeIds.get(id) !== node.nodeId) this.observedNodeIds.delete(id);
     const { seedId, origin, retiredAt, hostname } = previous;
     const membershipOf = (target: DesiredNode): TopologyMembership => ({
       seedId,
@@ -1536,6 +1653,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
   async retireChild(id: string): Promise<void> {
     const membership = this.requireMembership(id);
+    this.observedNodeIds.delete(id);
     if (membership.origin === 'auto') {
       const adapter = this.connections.get(id);
       try {
@@ -1553,6 +1671,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
   async reactivateChild(id: string, node: DesiredNode): Promise<void> {
     const membership = this.requireMembership(id);
+    this.observedNodeIds.delete(id);
     const config = this.configs.get(id)!;
     if (membership.origin === 'auto') {
       const adapter = this.createAdapter({ ...config, membership: { ...membership, hostname: node.hostname } });
@@ -1589,6 +1708,46 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       this.configs.set(id, { ...config, autoRegisterNodes });
       await this.storage.updateConnection(id, { autoRegisterNodes });
     });
+  }
+
+  getNodeAvailabilityZones(id?: string): NodeAvailabilityZones | undefined {
+    const config = this.getConfig(id);
+    return config ? this.zoneMapOwner(config).nodeAvailabilityZones : undefined;
+  }
+
+  async setNodeAvailabilityZones(id: string, value: unknown): Promise<void> {
+    const requested = this.configs.get(id);
+    if (!requested) {
+      throw new NotFoundException(`Connection '${id}' not found.`);
+    }
+    const result = normalizeNodeAvailabilityZones(value);
+    if (!result.ok) {
+      throw new BadRequestException(result.error);
+    }
+    const nodeAvailabilityZones = result.zones;
+    const requestedOwner = this.zoneMapOwner(requested);
+    if (requestedOwner.connectionType === 'external' || requestedOwner.host === 'agent') {
+      throw new BadRequestException('Availability zones can only be set on a direct connection');
+    }
+    const ownerId = requestedOwner.id;
+    await this.withSeedLock(ownerId, async () => {
+      if (!this.configs.has(id)) {
+        throw new NotFoundException(`Connection '${id}' not found.`);
+      }
+      if (!this.configs.has(ownerId)) {
+        throw new NotFoundException(`Connection '${ownerId}' not found.`);
+      }
+      await this.storage.updateConnection(ownerId, { nodeAvailabilityZones });
+      const owner = this.configs.get(ownerId);
+      if (owner) {
+        this.configs.set(ownerId, { ...owner, nodeAvailabilityZones });
+      }
+    });
+  }
+
+  private zoneMapOwner(config: DatabaseConnectionConfig): DatabaseConnectionConfig {
+    const seedId = config.membership?.seedId;
+    return (seedId && this.configs.get(seedId)) || config;
   }
 
   private pickDefaultCandidate(): string | null {

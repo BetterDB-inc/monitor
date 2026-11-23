@@ -491,6 +491,7 @@ export class MetricsParser {
           const port = nodeMap.get('port') ?? nodeMap.get('tls-port');
           const replOffset = nodeMap.get('replication-offset');
           const health = nodeMap.get('health');
+          const availabilityZone = nodeMap.get('availability-zone');
 
           nodes.push({
             id,
@@ -500,11 +501,13 @@ export class MetricsParser {
             ...(typeof hostname === 'string' && hostname ? { hostname } : {}),
             ...(typeof port === 'number' ? { port } : {}),
             ...(typeof replOffset === 'number' ? { replicationOffset: replOffset } : {}),
+            ...(typeof availabilityZone === 'string' && availabilityZone ? { availabilityZone } : {}),
           });
         }
       }
 
-      shards.push({ slots, nodes });
+      const shardId = shardMap.get('id');
+      shards.push({ slots, nodes, ...(typeof shardId === 'string' && shardId ? { shardId } : {}) });
     }
 
     return shards;

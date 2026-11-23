@@ -14,6 +14,7 @@ Comprehensive guide to BetterDB's real-time anomaly detection system for Valkey 
 - [Detected Patterns](#detected-patterns)
 - [Incident Sequence Rules](#incident-sequence-rules)
 - [Per-node coverage](#per-node-coverage)
+- [Failing node on cluster events](#failing-node-on-cluster-events)
 - [Severity Levels](#severity-levels)
 - [Monitored Metrics](#monitored-metrics)
 - [Configuration](#configuration)
@@ -491,12 +492,69 @@ When a cluster or Sentinel group is registered through one connection (the seed)
 - fork memory risk
 - replica output-buffer pressure, without the per-replica Prometheus gauge
 - reshard pressure, including write P99 read from `INFO latencystats` at most every 30 seconds
+- primary without replicas, without the early CRITICAL for persistence being off
 
 Events from these primaries carry `nodeAddr`. Same-connection sequence rules (`backlog_exhaustion`, `recovery_amplification`) and the correlated signals on a divergence alert group them per node, so a non-seed shard's fork or output-buffer pressure shows on that shard's divergence, not the seed's. `divergence_under_pressure` cannot match on a non-seed shard, because its first step is a z-score write-rate spike, which only runs on registered connections.
 
 A node's divergence, backlog coverage, resync escalation, fork memory and output-buffer events close when it leaves the topology, is claimed by another connection, or is registered as its own connection, and when the seed is removed. Retry amplification alerts are not closed this way; they stay open, as they do on the seed. Open backlog coverage, resync escalation, fork memory and output-buffer events are picked up again per node after a restart, so a node that is still at risk does not raise a duplicate, and the events of a node that did not come back are closed. An output-buffer event is picked up for the replica it was raised on, and a picked-up resync-loop event keeps its 5 minute cooldown. Events of a node whose seed is removed before they are picked up are closed too.
 
 Each command to a primary gets 2 seconds of its own. One that does not answer in time drops that primary's connection once the poll's other commands on it have answered or timed out, so the next poll starts on a fresh one instead of queueing behind it. A primary that cannot be reached is backed off and logged as unreachable; none of the checks above run on it until it answers again. Z-score metrics and the other state-based detectors run only on registered connections. Register a node to get them. A primary whose replication ID matches a registered primary is treated as that connection and skipped, so a node Sentinel reports by IP is not checked twice when it is registered by hostname. The skip lasts while that connection is connected and polling; once it disconnects, or goes three poll intervals (at least 30 seconds) without a poll, the fan-out checks the primary again.
+
+## Failing node on cluster events
+
+On a cluster connection, an event names the node it is about in a `node` object:
+
+```json
+"node": {
+  "nodeId": "e7d1eecce10fd6bb5eb35b9f99a514335d9ba9ca",
+  "address": "10.0.1.12:6379",
+  "role": "primary",
+  "shardId": "8f3c1d5e0a9b4c7d2e6f1a0b3c4d5e6f7a8b9c0d",
+  "availabilityZone": "eu-west-1a",
+  "collected": true,
+  "connectionId": "conn-7"
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `nodeId` | The node's cluster id |
+| `address` | `host:port` as the cluster reports it, without the bus port |
+| `role` | `primary`, `replica`, or `unknown` for a node that is still joining or has left the cluster view, and when the cluster view is too old to say |
+| `shardId` | From `CLUSTER SHARDS`. Absent on servers without that command, on a Raft cluster (the command is not sent there), and on an event raised before any connection of the cluster has read the shards (a connection reads the nodes at the start of its first poll and the shards later in that poll; when another connection of the cluster has read the shards by then, the event takes them from that read). A poll whose `CLUSTER SHARDS` read fails takes the shards from the last read of the cluster with shards: a primary keeps the shard it had there, and a replica takes the shard its current master had there, so a replica that moved to another master since names the new shard. An event raised after it has no `shardId` only when that read did not list the event's node, or for a replica its master, such as a node that joined since, or when no read had the shards yet. It is stored when the event is raised and not filled in later, so an event raised without a `shardId` keeps none |
+| `availabilityZone` | From the server, or from the connection's zone map. Absent when neither gives one |
+| `collected` | `true` when a registered connection reads this node |
+| `connectionId` | That connection. Absent when `collected` is `false` |
+
+`nodeId`, `address`, `role`, `shardId` and `availabilityZone` are taken from the cluster view when the event is raised and stored with it, so an old event keeps the role and shard the node had then. The connections of one cluster share one view, the latest any of them read. When the view was read more than 3 poll intervals (at least 30 seconds) before or after the time of the event, the node is still named but its `role` is `unknown`, since a failover may have changed it. The node a connection reads is the exception, as described next. The node a connection reads takes its `role` from that connection's own `INFO` in the same poll, when that `INFO` was read within the same 3 poll intervals of the event, not from the view, which is read later in the poll. So an event raised in the poll that sees a failover names the new role. An event of a poll keeps the role of that poll's `INFO` also when another connection of the cluster reads the cluster before the event is raised. Only an event that carries another time than that `INFO` takes the role from the view, when the view was read after the `INFO`. A `replication_role` event always carries the role the node changed to, not the one it had before. `collected` and `connectionId` are not stored: they are worked out each time the event is read, from the connections registered at that moment. A node is collected when a registered connection reads it as its own node, or when a connection that belongs to the same cluster points at its address. A connection of another cluster that announces the same address does not count. Neither does a connection at that address that reads another node id there, which is the case for an event about a node that was replaced at the same address. Nor does a connection at that address whose last poll found an instance that is not part of a cluster. With auto-registration off only the seed is collected, plus any node that was registered as a connection by hand.
+
+Events read from `GET /api/anomaly/events`, the events of each group of `GET /api/anomaly/groups`, the entries of `GET /api/anomaly/incidents` and `GET /api/anomaly/incidents/:id`, and the same reads over MCP all carry `node` on an event that has a node stored. An event that names no node, such as a `cluster_state` event, has no `node` field. Each hot shard of `GET /api/anomaly/hot-shards` carries the `node` of its primary. Webhooks carry it too (see [Failing node on cluster alerts](./webhooks.md#failing-node-on-cluster-alerts)). Existing fields (`nodeAddr`, `replicaAddr`, `sourceHost`, `sourcePort`) keep their meaning.
+
+To see which nodes of a cluster are collected without waiting for an event, read `GET /api/metrics/cluster/nodes/discover` or the `get_cluster_nodes` MCP tool: every node carries `collected` and, when it is collected, `connectionId`. There a node is collected when a registered connection reads it as its own node, or when a connection points at its address or announced hostname. A connection at that address that is known to read another node does not count, whether that node belongs to another cluster, is another node of this one, or replaced a node that the cluster still lists as failed at that address. The node a connection reads is the one its own `CLUSTER NODES` reported on the last anomaly detection poll, the same one alerts use. Before the first poll of a connection, and when anomaly detection is not running, it is the node auto-registration saved for the connection, and a connection added by hand counts by its address alone.
+
+In the web UI the node shows up as a link on the event timeline of the Overview page, in the event lists of the Anomalies page, in the incident list and on each incident timeline entry. The link opens the Nodes tab of the Cluster page with that node's row open, and carries a **Not collected** badge when `collected` is `false`. From that row the node can be connected with one click (see [Connecting a single node](cluster-auto-registration.md#connecting-a-single-node)).
+
+Which node each event type names:
+
+| Event types | `node` |
+| --- | --- |
+| `connections`, `ops_per_sec`, `memory_used`, `input_kbps`, `output_kbps`, `slowlog_last_id`, `slowlog_count`, `acl_denied`, `auth_failure_burst`, `rejected_connections`, `client_saturation`, `client_lockout_risk`, `evicted_clients`, `evicted_keys`, `blocked_clients`, `keyspace_misses`, `fragmentation_ratio`, `cpu_utilization`, `memory_overhead`, `load_saturation`, `large_reply_pressure`, `connection_churn`, `error_replies`, `command_p99`, `dataset_keys`, `persistence_child`, `replication_role`, `resync_loop`, `orphaned_slot_keys`, `lagging_promotion` | The node the connection reads |
+| `primary_without_replicas`, `repl_buffer_pressure`, `fork_memory_risk`, `backlog_coverage_risk`, `retry_amplification`, `reshard_shard_skew` | The primary the reading was taken on: the node the connection reads, or the other primary in `nodeAddr` (see [Per-node coverage](#per-node-coverage)) |
+| `hot_shard` | The primary of the hot shard |
+| `replication_divergence`, `resync_escalation`, `replica_slot_state` | The replica in `replicaAddr`, not the primary the event was read on |
+| `cluster_topology` | Duplicate primary: the primary with the stale claim. Replica stuck on a primary that is gone: the replica |
+| `hostname_staleness` | The node whose announced hostname is stale |
+| `ghost_membership` | Ghost entry: the live node at the endpoint the ghost entries point to. A ghost id is not a node, so the ghost ids stay in the message. Forget and rejoin: the node that rejoined after `CLUSTER FORGET` |
+| `failover_churn` | The primary that owns the shard now |
+| `slot_migration`, `slot_migration_stuck` | The source node of the migration |
+| `config_drift`, `acl_drift` | A drift between nodes: the first node the event lists, which is the connection the event is filed under. The event compares the nodes and does not say which one is wrong, so this node may hold the value the others share; the message lists every node with its value. An ACL reload: the node whose ruleset changed |
+| `topology_divergence` | The node whose view differs when one node disagrees with the others. None when several nodes stand on each side: `GET /api/anomaly/topology-divergence` lists every node of both sides |
+| `partial_membership` | The node that has only partly joined, also when the connection's own node does not know it. None when no view has an address for it |
+| `cluster_state` | None. `cluster_state:fail` is a state of the whole cluster, not of one node |
+| `raft_health` | None. Elections and quorum are a state of the cluster's Raft group, not a fault of one node |
+| `sentinel_endpoint_drift`, `sentinel_loop_stall` | None. These are about a Sentinel process, which is not a cluster node |
+
+An event has no `node` in four more cases: the connection is not a cluster (a standalone or Sentinel-managed instance is its own node, named by `connectionId`); the event was raised before the first cluster view was read; the node it is about was in no view and the detector gave no address for it; or the event was stored by a version that did not have this field, since the node is not worked out again for an old event. A connection that stops being a cluster drops its view on the next poll that reads it, and its later events carry no `node`. A node that has left the view is still named when the detector knows its id and address, with `role` set to `unknown`. Correlated groups carry no `node` of their own; each event in the group does.
 
 ## Severity Levels
 
@@ -549,12 +607,14 @@ Some metrics have custom thresholds beyond Z-score:
 
 | Metric | Warning Threshold | Critical Threshold | Consecutive Required | Cooldown |
 |--------|-------------------|-------------------|---------------------|----------|
-| `acl_denied` | 10 events | 50 events | 2 | 30s |
+| `acl_denied` | 10/s | 50/s | 2 | 30s |
 | `slowlog_last_id` | - | - | 1 | 30s |
 | `memory_used` | - | - | 3 | 60s |
 | `evicted_keys` | - | - | 2 | 30s |
 | `fragmentation_ratio` | 1.5 | 2.0 | 5 | 120s |
 | `error_replies` | 200/s | 2000/s | 2 | 60s |
+
+`acl_denied`, `evicted_keys` and `keyspace_misses` read lifetime counters from `INFO stats`, so the detectors see the per-second rate since the previous poll, and absolute thresholds apply to that rate. A z-score spike below a per-second floor (`acl_denied` 1/s, `evicted_keys` 10/s, `keyspace_misses` 50/s) is ignored, so an occasional eviction or denial on an otherwise quiet server does not alert; absolute thresholds still apply below the floor. The first poll of a connection only records the counter. A counter that goes backwards (server restart, `CONFIG RESETSTAT`), or a change in the server's `run_id` (the connection now reaches a different server process, for example after a failover behind a Service), is treated as a reset: that poll adds no sample and the next poll measures from the new value. Absolute threshold overrides saved before this change keep their numbers but now mean events per second; BetterDB logs a warning at startup when any exist for these metrics.
 
 `error_replies` needs at least 20/s to alert. On a quiet instance almost any burst scores a high Z-score, so a Z-score alone only reaches warning here, and critical needs the absolute threshold.
 
@@ -600,17 +660,17 @@ Some metrics have custom thresholds beyond Z-score:
 **Note**: Previous versions used `SLOWLOG LEN` (`slowlog_count`), which saturates at `slowlog-max-len` (default 128). Using `slowlog_last_id` delta avoids this blind spot.
 
 ### acl_denied
-**What it measures**: Sum of rejected connections and ACL auth denials
+**What it measures**: ACL authentication denials per second
 **Why anomalies matter**: Security concern - possible brute force or misconfig
-**Typical baseline**: 0-5 (should be very low normally)
-**Source**: `INFO stats.rejected_connections + stats.acl_access_denied_auth`
-**Config**: Custom thresholds (WARNING: 10, CRITICAL: 50, 2 consecutive, 30s cooldown)
+**Typical baseline**: 0 (should be very low normally)
+**Source**: `INFO stats.acl_access_denied_auth` (per-second rate between polls). Refused connections (`rejected_connections`, maxclients) have their own detector.
+**Config**: Custom thresholds (WARNING: 10/s, CRITICAL: 50/s, 2 consecutive, 30s cooldown)
 
 ### evicted_keys
-**What it measures**: Total number of keys evicted due to maxmemory
+**What it measures**: Keys evicted due to maxmemory, per second
 **Why anomalies matter**: Indicates memory pressure and cache thrashing
 **Typical baseline**: 0 (ideally), or consistent low rate
-**Source**: `INFO stats.evicted_keys`
+**Source**: `INFO stats.evicted_keys` (per-second rate between polls)
 **Config**: Custom thresholds (2 consecutive, 30s cooldown)
 
 ### blocked_clients
@@ -620,10 +680,10 @@ Some metrics have custom thresholds beyond Z-score:
 **Source**: `INFO clients.blocked_clients`
 
 ### keyspace_misses
-**What it measures**: Total number of failed key lookups
+**What it measures**: Failed key lookups per second
 **Why anomalies matter**: Poor cache hit rate impacts application performance
-**Typical baseline**: Varies widely (track hit ratio instead)
-**Source**: `INFO stats.keyspace_misses`
+**Typical baseline**: Varies widely with read load
+**Source**: `INFO stats.keyspace_misses` (per-second rate between polls)
 
 ### fragmentation_ratio
 **What it measures**: Allocator fragmentation ratio, preferring `allocator_frag_ratio` with fallback to `mem_fragmentation_ratio`
@@ -668,6 +728,279 @@ Some metrics have custom thresholds beyond Z-score:
 **Source**: `CLUSTER INFO` (`cluster_raft_*` fields)
 **Detection method**: State-based detector (not z-score based). Three elections inside 60 seconds raise a flapping warning, which resolves after 60 seconds with no new election. A node that can't reach a leader raises a critical event, which resolves when quorum returns. A connection that leaves Raft resolves both.
 
+### primary_without_replicas
+**What it measures**: Whether a primary that normally has replicas still has one in sync
+**Why anomalies matter**: While no replica is in sync, the primary holds the only copy of the shard. With persistence off, losing it loses the shard's data. A Kubernetes operator roll that restarts both replicas of a shard before either is back in sync produces this window on every shard
+**Typical baseline**: At least one replica in `state=online`
+**Source**: `INFO replication` (`role`, `connected_slaves`, `slaveN` or `replicaN` state) of the primary, and the node's own line in `CLUSTER NODES` for its slots
+**Detection method**: State-based detector (not z-score based). A WARNING is raised once the primary has had no replica in `state=online` for 5 seconds, and a CRITICAL once that has lasted 30 seconds. A replica that is attached but still syncing (for example `state=wait_bgsave`) does not count. Both events resolve after one connection sees a synced replica on 2 polls in a row. A replica that is in sync for a single poll does not restart the 30 seconds. An event resolved by hand while the primary still has no synced replica is raised again on the next poll. The message names the primary, its slots, how long the window has lasted and the attached, synced and expected replica counts:
+
+```
+CRITICAL: Primary 10.244.4.28:6379 (90735665) for slots 4096-5460 has had no synced replica for 31 s (0 attached, 0 synced, 2 expected). Persistence is off, so losing this node now loses its data. If a rolling update is in progress, pause it until a replica reports master_link_status:up.
+```
+
+It only fires for a shard that is expected to have replicas. The expected count is the highest `connected_slaves` the monitor has seen on that shard. It rises at once and is lowered only after 24 hours without seeing it, at which point an open event resolves. A standalone instance or a shard that never had a replica is never reported. Neither is a shard whose replicas were already missing when the monitor first saw it, because nothing is expected yet.
+
+In a cluster, only a primary that owns slots is checked. A restarted node that reports `role:master` with no slots is not a primary at risk. One event per level is open per shard, whichever connections observe it: the connection that reads the cluster, a connection registered for the node itself, or both. The shard is identified by its slot ranges, so a failover or a primary that returns under a new address continues the same episode. A reshard changes the slot ranges of a shard, not its primary, so the shard keeps its expected replica count and its open events. A primary that only took slots from another shard is tracked as a new shard.
+
+Outside a cluster, a primary is identified by its replication ID. Its own connection and [per-node coverage](#per-node-coverage) read the same ID, so they share one episode, and a connection that takes the primary over from another one continues it, also after the monitor restarts. A connection keeps the episode when the primary restarts and gets a new replication ID. A replica that is promoted starts with the replica count its former primary was expected to have, so it is reported when a failover leaves it without a replica.
+
+The CRITICAL is raised at 5 seconds instead of 30 when no replica is attached at all and persistence is known to be off: `aof_enabled:0` and an empty `save`. `save` is read with `CONFIG GET` by the config drift check. When it cannot be read, or when the primary is read through another connection's [per-node coverage](#per-node-coverage), persistence counts as unknown and the CRITICAL waits for 30 seconds.
+
+The detector is not held back during a planned rolling update, because that is when the window appears. If no connection observes the shard for 5 minutes, its open events are closed. They are also closed when the last connection that observed the shard is removed. The expected replica count is kept, so a connection added in its place still alerts when the replicas are already gone.
+
+The thresholds are set with `ANOMALY_PRIMARY_NO_REPLICA_WARN_MS` and `ANOMALY_PRIMARY_NO_REPLICA_CRIT_MS`. Set one to `0` to turn that level off, or both to turn the detector off. The early CRITICAL for persistence being off is raised at the WARNING threshold, so with that threshold at `0` it is off too and the CRITICAL waits for its own threshold.
+
+### hot_shard
+**What it measures**: CPU time per second on the slots of each shard, compared with the other shards of the cluster
+**Why anomalies matter**: One shard carrying far more than the others is the first to saturate, while the cluster as a whole still looks healthy
+**Typical baseline**: Shards within a small factor of each other
+**Source**: `CLUSTER SLOT-STATS` on every primary, read by the Prometheus poll (the [shard load metrics](prometheus-metrics.md#cluster-shard-load-metrics-valkey-80))
+**Detection method**: State-based detector (not z-score based). A shard is hot when its CPU rate is at least 2 times the cluster median and at least 100,000 CPU microseconds per second (10% of a core). A WARNING is raised once that has held for 60 seconds. It stays open while the shard is at least 1.5 times the median and at least three quarters of the floor, and resolves below that. One event is open per shard. The message names the shard, its address and its top slots by CPU.
+
+The network rate of a hot shard (bytes in plus bytes out) is reported with it as detail, and its share of the cluster's bytes is in the message, but it never raises an event. Bytes out count the replication stream once per replica, so a shard with more replicas, or more writes to replicate, sends more without serving more clients.
+
+The check needs three or more primaries that own slots, and Valkey 8.0+ with `cluster-slot-stats-enabled yes` on every node. It runs on the connection that reads the whole cluster, so a cluster whose nodes are registered one by one as separate connections is not checked. It is also off under the `vitals` export profile and with `METRICS_SLOT_STATS_TOP_N=0`, because the shard load is not measured then.
+
+Nothing is raised, and open events are kept as they are, while slots are moving: during a reshard, for two samples after a slot changes owner, and after a counter reset. `reshard_shard_skew` covers the reshard itself. A slot migration in flight, atomic or legacy, only delays a new event: the 60 seconds start over, and an open event can still resolve. An event that is resolved by hand is raised again only while its shard is at least 2 times the median, and a migration in flight delays that in the same way. The same holds when the monitor cannot ask every primary whether a slot is migrating. A failed or suspect primary that owns no slots is not asked and does not count. On Valkey 9.0+ that includes a monitoring user that may not run `CLUSTER GETSLOTMIGRATIONS`: no new event is raised until it is allowed (see [Minimum ACL](minimum-acl.md)). On Redis 8.4+ a monitoring user that may not run `CLUSTER MIGRATION` is treated differently: events are raised as usual, but its migrations are not seen, so an event can be raised and a rebalance plan suggested while one runs (see [`slot_migration`](#slot_migration)). A Redis import that has kept failing for 10 minutes no longer delays an event once its [`slot_migration_stuck`](#slot_migration_stuck) warning is open. When no complete shard load sample arrives for 5 minutes, or `INFO` or `CLUSTER NODES` cannot be read for that long, open events are closed. That happens for example when one primary keeps failing. A connection that is disconnected is not polled at all, so its open events stay as they are until it is polled again.
+
+**Hot keys**: when the hot primary runs an LFU `maxmemory-policy` (`allkeys-lfu` or `volatile-lfu`), the event also names the hottest keys of the shard. Right before a new event is raised, and at most every 5 minutes while it stays open, BetterDB asks the hot primary for the first 500 key names of each of the shard's top 3 slots (`CLUSTER GETKEYSINSLOT`) and reads the access frequency of each name (`OBJECT FREQ`). That is at most 3 commands plus 1,500 `OBJECT FREQ` calls in 7 round trips, with a 2 second limit for the whole read. It runs no `KEYS` and no `SCAN`, and reads no value. The 10 keys with the highest frequency are kept, and the first 3 go into the message:
+
+```
+Hot shard 3f2a9c1e at 10.0.0.1:6379: CPU 3.1x the cluster median (61% of the cluster's slot CPU) for 60s. Top slots by CPU: 1234 (62% of the shard), 88 (9%). Hot keys: "user:42" (freq 255), "cart:{9}" (freq 201).
+```
+
+`freq` is the server's LFU counter, not a request count. It runs from 0 to 255, grows logarithmically with access and decays over time, so several keys tied at 255 are normal. It ranks keys against each other; it does not measure their load.
+
+What the read can miss, and when it is skipped:
+
+- `CLUSTER GETKEYSINSLOT` returns the first 500 names of a slot, not the hottest. In a slot with more keys the hottest one can be missed. Compare `keysSampled` with the `keyCount` of the top slots to see how much was covered.
+- Without an LFU policy the node keeps no access frequency. The read stops at the first refusal, normally after one `OBJECT FREQ`.
+- The monitoring user may lack the two commands (see the [minimum ACL](minimum-acl.md#hot-shard-keys)), the read may time out, the node may answer with another error such as `CLUSTERDOWN` or `LOADING`, or the connection may reach the cluster through an agent, which does not dial the nodes.
+
+In the last two cases the event is raised without key names, the detail has `keySource: "unavailable"` and a `keyNote` with the reason, and the reason is logged once per connection. A later read of an open event that fails, or gets no name, does not take away the names of an earlier one: the detail keeps them with `keySource: "lfu"` and the `keysSampledAt` of the read they come from, and `keyNote` says that the last read gave none and why. The next read is 5 minutes later either way. A name that is not valid UTF-8 is still read, and is shown with replacement characters.
+
+**Key names leave the database with the message.** The message is stored with the event, written to the API log and sent to every webhook subscribed to `anomaly.detected`. It carries at most 3 names, each cut to 64 characters, with control and invisible characters written as `\xNN` or `\u{NNNN}` and quotes escaped. It is written once, when the event is raised; later reads only update the detail. The full list of up to 10 names is returned by [`GET /api/anomaly/hot-shards`](#get-hot-shards) only.
+
+**A capture can show the keys when the read cannot.** When the event has no key names and the monitor connects to the cluster nodes directly, the message ends with one more sentence, for example `Key names are not available (no LFU policy); a capture on this primary can show them.`, and the detail has `captureAvailable: true`. Nothing is started for you: a person starts a [MONITOR capture](monitor.md) on the hot primary.
+
+- In the UI, the Anomalies page shows a notice for each open hot shard without key names, with a **Capture on hot primary** action. The notice does not depend on the selected date range. The action opens the usual start dialog at a duration of 10 seconds instead of 30, which can be changed. The capture stays on the hot primary: the dialog offers no other node and no fan-out. The session page then lists the **Top keys in this capture**.
+- By API, take `shardId` from [`GET /api/anomaly/hot-shards`](#get-hot-shards) and send it as `targetNodeId`:
+
+  ```http
+  POST /api/monitor/sessions
+  Content-Type: application/json
+
+  { "connectionId": "<connection-id>", "targetNodeId": "<shardId>", "durationMs": 10000 }
+  ```
+
+  Then read `topKeys` from `GET /api/monitor/sessions/<session-id>/cross-reference?baseline=24h`.
+
+**Rebalance suggestion**: every open hot shard carries a suggestion, shown in a panel at the top of the Anomalies page, in the `rebalance` field of [`GET /api/anomaly/hot-shards`](#get-hot-shards) and in the `get_hot_shards` MCP tool. It is advice only. BetterDB moves no slot and sends nothing to the cluster for it beyond reads.
+
+The suggestion is one of two things:
+
+- A **plan**: slot ranges to move off the hot shard, the shard each range goes to, and the projected CPU of every shard before and after. It picks the ranges with the fewest keys that carry enough CPU, at most 8 ranges, and the coldest healthy shards as targets, an empty primary first and a shard in the hot shard's availability zone first on a tie. It uses as few targets as will do, at most 4. No target ends above 0.8 of a core or above 1.25 times the projected median: slots move whole, so the planner checks the load of the real ranges and takes slots back off a target that would end over the line. `effect` is `resolves` when the hot shard ends at or under 1.25 times the projected median, and `headroom` when the move only frees at least 25% of the shard's CPU.
+- **No plan**, with a `reason`, when moving slots will not help or should wait:
+
+  | `reason` | Meaning |
+  | --- | --- |
+  | `key_level` | One or a few slots carry the load: the slots that each take at least 20% of the shard's CPU add up to 0.8 of a core or more, or the rest of the slots carry under 25% of the shard's CPU. A slot cannot be split, so the fix is at the key: client-side caching, reads from replicas, or splitting the key. `pinnedSlots` lists them. |
+  | `cluster_hot` | All the other shards together cannot take even 25% of the shard's CPU without going over 0.8 of a core or over 1.25 times the projected median. Add a shard. |
+  | `too_many_targets` | The other shards have room, but not within 4 targets: the load would have to be spread over more shards than one suggestion covers. |
+  | `no_target` | No other healthy primary can take slots. |
+  | `unhealthy_node` | A primary that owns slots is failed or suspect. A failed or suspect primary with no slots, such as a node ID the cluster still lists until `CLUSTER FORGET`, does not block a plan and is never a target. |
+  | `migration_running` | A slot migration or reshard is running, or the monitor could not ask every primary before it made a new suggestion. |
+  | `settling` | Slots changed owner and the slot load is still being measured, or a shard in the last measurement is no longer a primary. |
+  | `slots_scattered` | The shard's slots are in too many small ranges to move enough load in 8 ranges. |
+  | `covered_by_other_plan` | The plan for another hot shard, once applied, leaves this shard at or under 1.25 times the median, so it gets no plan of its own. `coveredBy` lists those hot shards, each with `shardId` and `nodeAddr`: apply their plans first. |
+  | `conflicts_with_other_plan` | No plan for this hot shard fits next to the plans made before it: with all of them applied, a target or a hot shard that an earlier plan resolves would end over 1.25 times the median. It is also the answer when the loads those plans leave give this shard no plan, but the measured loads would. `conflictsWith` lists the hot shards whose plans are in the way, each with `shardId` and `nodeAddr`: apply their plans first, and this shard is planned again from the loads they leave. |
+
+  For `key_level` and `cluster_hot` the event message ends with the reason, for example `Rebalancing will not help: slot 9189 alone is 81% of this shard's CPU. Consider client-side caching, reads from replicas, or splitting key "session:global".` For `no_target`, `too_many_targets` and `slots_scattered` it ends with a short `No rebalance is suggested ...` sentence. The message is written once, when the event is raised, so `unhealthy_node`, `migration_running` and `settling`, which can pass while the event stays open, are never written into it. Neither are `covered_by_other_plan` and `conflicts_with_other_plan`, which change whenever the plan of another shard is made again or withdrawn. Read those from the API or the MCP tool.
+
+A slot that is at least 20% of the shard's CPU is never part of a plan: it would only move the problem. Neither is a slot that carries more CPU than any target has room for. `pinnedSlots` lists both kinds. The projection assumes that a slot's load moves with it one for one.
+
+When several shards are hot, their plans are made one after another, in the order the hot shards are listed, and each plan starts from the loads and the slot counts the plans before it leave, so an empty primary that an earlier plan fills counts in the median of the later ones. The `before` numbers of a later plan already count the slots an earlier plan moves, so two plans never fill the same room on a target twice. Such a plan names the earlier hot shards in `plannedAfter`; the list is empty for a plan that starts from the measured loads. The panel says so under the table of such a plan. A hot shard that is over 1.25 times the measured median, but at or under it once the earlier plans are counted, gets `covered_by_other_plan` and not `settling`; the panel names the shard whose suggestion to apply first.
+
+Each new plan is checked together with the plans before it: with all of them applied, no target and no hot shard that a plan resolves may end over 1.25 times the median of that final state. A later plan that fills another empty primary can fail that check, because the new slot owner pulls the median down under the earlier plans. That plan is then made again without the primaries that are still empty, and when that one fails the check too the shard gets `conflicts_with_other_plan`, and the panel names the shard whose suggestion to apply first. Only what the new plan takes over the line counts: a kept plan that the load has since moved over the line on its own is not held against the plans made after it. `conflictsWith` names the earlier plans that move slots to a shard the new plan would take over the line, or that resolve a hot shard it would take over the line. When there is no such plan it names the ones that share a target with the new plan, and when there is none of those either, all of them.
+
+A later hot shard that gets no plan from the loads the earlier plans leave is planned once more from the measured loads alone. When that gives a plan, the answer is `conflicts_with_other_plan`. When it does not, the answer is the one from the measured loads, `key_level` for example, so a reason and its `pinnedSlots` never describe loads that exist only after plans that nobody has applied.
+
+A plan lists `warnings`, none of which block it: `source_fork` (the hot shard forks for the snapshot while it is the busiest node), `fewer_replicas` (the target has fewer replicas than the hot shard), `target_memory` (the keys moved, at the hot shard's average key size, would take the target past 80% of its `maxmemory`; `memoryShare` is the estimate), `memory_unlimited` (the target has no `maxmemory` limit, so there is nothing to check the moved keys against) and `memory_unknown` (`INFO` could not be read on the target or on the hot shard, or the hot shard reports no keys). The estimate of a plan with `plannedAfter` also counts the keys those earlier plans bring to the same target, each at the average key size of its own hot shard, and is `memory_unknown` when one of those hot shards cannot be read. A target with no `maxmemory` limit is `memory_unlimited` whatever could be read on the hot shards.
+
+A plan also says whether the cluster has one command that does the move, in `support`, and gives the command text in `commands`. BetterDB sends it only when an admin runs the plan (see [Running a plan](#running-a-plan)); otherwise it is there to copy.
+
+| `support` | Meaning | `commands` |
+| --- | --- | --- |
+| `valkey_atomic` | The hot shard and every target run Valkey 9.0 or later. | One `CLUSTER MIGRATESLOTS` for the whole plan, to run on the hot shard. The server starts all of its moves or none. |
+| `redis_atomic` | The hot shard and every target run Redis 8.4 or later. | One `CLUSTER MIGRATION IMPORT` per target, to run on that target. |
+| `none` | A shard of the plan runs an older version, or they run different servers. There is no atomic command; BetterDB does not script the `SETSLOT` and `MIGRATE` steps. | Empty. |
+| `provider_managed` | The host name of the connection is that of a managed service (ElastiCache, Memorystore, Redis Cloud, Upstash), or a shard of the plan reports a Redis Software or Redis Cloud build (`redis_build_id` in `INFO` contains `redislabs`), which covers such a cluster on its own host name. Nothing else decides it: not the `os` a shard reports, and not `MONITOR_PROVIDER_OVERRIDE`. Use the provider's own resharding. | Empty. |
+| `unknown` | `INFO` could not be read on a shard of the plan, so the version is not known. | Empty. |
+
+#### Running a plan
+
+On Valkey 9.0 and later an admin can run a plan from the panel. Running is off unless the monitor is started with `BETTERDB_SLOT_MIGRATION=true`, and it is never started on its own. `rebalance.execution` on a plan says whether it can run: `{ "available": true }`, or `available: false` with the first `blockedBy` that applies, in this order:
+
+| `blockedBy` | Meaning |
+| --- | --- |
+| `flag_off` | `BETTERDB_SLOT_MIGRATION` is not `true`. |
+| `provider_managed` | The connection is a managed service; use the provider's resharding. |
+| `unsupported_server` | `support` is not `valkey_atomic`. Redis 8.4+ plans stay copy-only. |
+| `not_dialed` | The monitor does not connect to the cluster nodes itself (an agent or an OTLP-ingested connection). |
+| `migration_running` | A slot migration is running, or a run from this monitor is starting or running on the connection. |
+| `plan_outdated` | A start of this plan found that the slots or the nodes changed. It clears when the plan is made again. |
+| `server_refused` | The server refused `CLUSTER MIGRATESLOTS` for this plan, did not answer it in time, or the connection closed after it was sent. It clears when the plan is made again. |
+
+**Run this plan** asks for a confirmation that repeats the moves and the warnings, then sends `POST /anomaly/hot-shards/:shardId/rebalance` with the moves it showed (`{ "moves": [{ "targetShardId", "ranges" }] }`). Before it sends anything the monitor checks again: the plan it holds must have the same moves, a fresh `CLUSTER NODES` must show the hot shard owning every range and the hot shard and every target as healthy primaries, and no primary may list a slot migration. A poll can make the suggestion again during these reads: when its moves are still the same it runs that one, otherwise it answers as below. When the plan changed it answers `409` with `reason` (`plan_changed`, `no_plan`, `slots_moved`, `source_unhealthy`, `target_unhealthy`) and the suggestion it holds now, with its `execution`; when the slots moved, the plan is made again from the next measurement. Until the plan is made again it is offered with `plan_outdated`. A blocker answers `403` with `blockedBy`. It then sends one `CLUSTER MIGRATESLOTS` to the hot shard, at the address that fresh `CLUSTER NODES` shows, once, on a connection of its own that never resends a command, and does not retry. A server error, for example `NOPERM` or an unknown node, answers `502` with the server's text. No run is recorded, and the plan is offered with `server_refused` until it is made again, so a fixed ACL takes effect with the next plan. When the command does not answer within 2 seconds it also answers `502`, but the migration may still have started, so a run is recorded (see below). The same holds when the connection closes after the command was sent, before any reply from the server. When the connection to the hot shard fails or does not open within 2 seconds, the command was never sent: it answers `502` with why, no run is recorded, and the plan can be started again. When the suggestion changes while the confirmation is open, or the start answers `plan_changed`, the start waits until the new moves are reviewed in the confirmation.
+
+`GET /anomaly/slot-rebalance` lists the latest run started from this monitor for each hot shard on the connection, newest first (a new run from the same shard replaces the one before it), with each move's job found in `CLUSTER GETSLOTMIGRATIONS` by source, target and slots: `starting` (not listed yet, for up to a minute), `running` with its `phase`, `succeeded` (the target owns its slots), `cancelled` (the job finished and the hot shard still owns them a minute later, or the cancel from this monitor was accepted), `failed` with the server's message, or `unknown`. A move that finishes before any read lists it, as a small one can within a second or two, counts as `succeeded` once the target owns its slots, and as `failed` when a job that was not listed before the run failed on the same source, target and slots. A run is `running` while any move is starting or running. The monitor follows a running run on its own poll, so its state and `endedAt` do not wait for anyone to read them. When a primary does not answer the slot migration read, each move is still followed as usual if the hot shard and its target answered; otherwise a move the hot shard lists is `running`, and the move ends `failed` when a failure is listed for it, `succeeded` once `CLUSTER NODES` shows its target owning the slots, `cancelled` after an accepted cancel once the hot shard owns them again, or `unknown` when none of these happened within a minute of reads that missed those nodes. It follows on every slot migration read of the poll, reusing that read and the poll's `CLUSTER NODES` (a run started after that read waits for the next one; after an accepted cancel it reads `CLUSTER NODES` itself, so a move that finished just before the cancel is not taken for a cancelled one), and reads the primaries itself only when 5 seconds passed without a follow; a read of the list in between gets the last state followed. Once every move succeeded and a load measurement taken at least a minute after the end is in, `outcome` gives the projected ratio of the hot shard to the median next to the measured one. When none is in 10 minutes after the end, `outcomeUnavailable` is set and the panel says the load after the move could not be measured. Runs live in memory, are kept while they run, are dropped an hour after they end, and are gone after a restart. When `CLUSTER MIGRATESLOTS` does not answer in time, the start answers `502` but the run is still listed and can be cancelled, because the migration may have started; with no job and no moved slots it ends `unknown` after a minute. The panel shows each run with who started it; members see no email address. The [`slot_migration`](#slot_migration) entries come from their own reads, every 5 or 30 seconds, so a move shorter than one read raises none; the run is the record of it.
+
+**Cancel** (`POST /anomaly/slot-rebalance/cancel` with `{ "sourceShardId" }`) is offered while a run from this monitor is running. It sends `CLUSTER CANCELSLOTMIGRATIONS` to the hot shard, at the address `CLUSTER NODES` shows, which cancels every slot migration on that shard, not only the ones of the run. Slots already moved stay on their target. A move of a cancelled run whose slots the hot shard still owns ends `cancelled`, although the target lists its import as failed, and that failure raises no `slot_migration_stuck` event. A move the server lists as cancelled ends `cancelled`. A move that finished but is listed neither as cancelled nor as failed may have succeeded, so the monitor keeps following it for up to a minute until its target owns the slots: a `CLUSTER NODES` that has not caught up yet does not turn it into a cancelled one. A move that failed before the cancel stays `failed` and keeps its event. The first cancel of a run needs a slot migration read the hot shard answered, so that it knows which moves failed before it; without one it answers `502` and sends nothing. A failure seen while the cancel has not answered raises no event until the cancel is accepted or refused; when it is refused the failure is raised. A failure is matched to a cancelled move that never got a job name only until a minute after the run ends. The run is not advanced until the cancel answers, for at most 10 seconds. When the server refuses it, or the connection to the hot shard fails before the command is sent, it answers `502` and the run keeps running. When it does not answer in time, or the connection closes after it was sent, it also answers `502`, but the cancel may have taken effect, so the run is followed as after an accepted cancel. A run that has already ended answers `409`. Both requests need the admin role and are recorded in the activity log as `slot_rebalance.run` and `slot_rebalance.cancel` with the hot shard as the target. The monitoring user needs `+cluster|migrateslots` and `+cluster|cancelslotmigrations` (see [Minimum ACL](minimum-acl.md#commands-that-change-data-or-server-state)).
+
+The suggestion is computed right before the event is raised and again every 5 minutes, or sooner when slots change owner, an empty primary joins or leaves, a shard that the plan moves slots to turns hot, or a primary that owns slots turns suspect, failed or healthy again. A shard that turns hot or stops being hot changes nothing else until the next 5 minutes are over, so one shard that goes over and under the line does not make every plan change with it. A `migration_running` or `settling` answer is not kept: it is computed again from every new measurement. A `covered_by_other_plan` or `conflicts_with_other_plan` answer is kept like a plan; it is computed again whenever a plan it names is, and it is withdrawn with that plan when a migration is found. A plan with `plannedAfter` is likewise computed again whenever a plan it names is, in the same call and in the order the hot shards are listed, so two kept plans never count each other as applied. A plan is withdrawn at once, without waiting for a new measurement, when a primary that owns slots turns failed or suspect or a measured shard stops being a primary. While a plan is kept, and whenever the suggestion is computed, a new measurement asks every primary whether a slot is migrating, unless a primary is failed or suspect (the answer is then `unhealthy_node` without asking). A kept plan is withdrawn as soon as a migration is found. When a primary does not answer and none of the others reports a migration, kept answers stay as they are, also past the 5 minutes, and are computed again once every primary has answered; a hot shard with no kept answer gets `migration_running` until then. A kept answer with no plan, `key_level` for example, stays as it is until it is computed again, and no primary is asked in between. For new plans it then reads the `memory`, `keyspace` and `server` sections of `INFO`, once on each hot shard and each target, after the hot key read has finished.
+
+Before you start one:
+
+- `MONITOR` makes the node send every command it runs to the capture connection. On a primary that is already hot this adds load, so keep the capture short. The usual limits of a capture apply: its duration, its byte and line caps, and one capture per connection at a time.
+- The pre-flight health check is advice for a capture a person starts; it does not block it. The check and the throughput estimate are read from the node the connection points at, not from the hot primary. A hot primary runs more commands, so expect more lines and bytes than the estimate shows. The check looks at memory, recent OOM events, failover and replication, not at CPU.
+- A capture counts the first argument of a command as its key. `MGET a b c` counts `a` only, an `EVAL` counts its script text, and a command without a key, such as `CLUSTER NODES`, counts its first word.
+- The capture is not offered for a connection that reaches the cluster through an agent, because the monitor cannot open `MONITOR` on a node there.
+
+### slot_migration
+**What it measures**: Slot migrations in flight on a cluster: atomic jobs (`CLUSTER MIGRATESLOTS`, Valkey 9.0+), atomic tasks (`CLUSTER MIGRATION IMPORT`, Redis 8.4+) and the `MIGRATING` / `IMPORTING` markers of the older `SETSLOT` and `MIGRATE` steps
+**Why it matters**: It puts the migration on the timeline, so a latency or load event that happens while slots move can be read next to it
+**Source**: `CLUSTER NODES` and `CLUSTER GETSLOTMIGRATIONS` on every primary; `CLUSTER MIGRATION STATUS ALL` on a primary that does not know `CLUSTER GETSLOTMIGRATIONS`
+**Detection method**: State-based (not z-score based). An INFO event opens when a migration is first seen and resolves when it is no longer running, however it ended. There is one event per atomic job, and one per pair of source and target node for the older markers, whatever the number of slots.
+
+```
+INFO: Slot migration running: slots 0-1365 from 10.0.0.1:6379 to 10.0.0.3:6379. This entry closes when the migration ends.
+```
+
+The cluster is read every 30 seconds, and every 5 seconds while the latest read lists a migration, so a job that starts and ends between two reads gets no entry. An entry kept open while its nodes cannot be read does not keep the faster pace; a move with the older markers keeps it for the 30 seconds it is kept after its last listing (see below). A migration is watched whoever started it. A primary that has neither `CLUSTER GETSLOTMIGRATIONS` nor `CLUSTER MIGRATION` is asked again after 5 minutes, not on every read; the `hot_shard` check and the Cluster dashboard ask every primary every time. When the monitoring user may not run `CLUSTER GETSLOTMIGRATIONS` (`NOPERM`), the markers of the older moves are still watched and their events open and close as usual, but atomic jobs are not seen and an entry for one stays as it is. The refusal is logged once per connection. On a cluster registered through a seed, the seed connection watches and its member connections do not; nodes registered one by one as separate connections each raise their own events.
+
+On Redis 8.4+ a task the source or the target lists in any state other than `completed` or `canceled` is a running migration: it gets its entry, holds back `hot_shard` and the rebalance suggestion, and its entry closes once a node lists it as `completed` or `canceled`. That includes an import in `failed`: its target retries it every second until it completes or is canceled, so the entry stays open across the retries. An import that keeps failing for 10 minutes raises [`slot_migration_stuck`](#slot_migration_stuck), and while that warning is open it no longer holds back `hot_shard` and the rebalance suggestion. A `failed` task on the source is left out, because the source keeps it until the target retries it or a new migration replaces it. Redis tasks are seen only when the monitoring user may run `CLUSTER MIGRATION`. Redis has no narrower grant: `+cluster|migration` also allows `CLUSTER MIGRATION IMPORT` and `CANCEL` (see [Minimum ACL](minimum-acl.md)). Without it the refusal is logged once per connection and the read counts as having found no tasks, so `hot_shard` still raises events and the rebalance suggestion can propose an import while one runs. A primary that refuses is asked again by the watch after 5 minutes.
+
+A connection through the BetterDB agent is not watched: the monitor reaches only that one node through the agent and cannot ask the primaries. When the monitor can open its own sockets but no primary answers on the address the cluster reports for it, as behind NAT or an SSH tunnel, it reads the connection's own node instead, over a socket of its own that it keeps across those reads and closes once it has gone unused for 5 minutes. What it reads there is filed under the node that socket's own `CLUSTER NODES` names as `myself`: behind a VIP a new socket can land on another node than the one discovery reached. A read that reaches no primary, as during a short network blip or a failover, falls back to the own node for that read only; once no read has reached a primary for a minute, the monitor reads only the own node and tries the primaries again after 10 minutes. From one node it sees only the migrations that node is the source or the target of. A node that only follows a job, such as a replica, lists it without its source and target, in the state `occurring-on-primary`; the entry for it closes when that node lists the job as finished.
+
+While the nodes of a migration cannot be read, its events stay as they are: a read that fails does not close them. A move with the older markers is kept for 30 seconds after the last read that listed it, so a read that lands between two slots of a reshard, when neither node carries a marker yet, does not close its events and open new ones. The same holds after the monitor restarts. An entry that was open stays open until the monitor sees the migration again, a node lists the job as finished, both nodes of a move with the older markers answer without them, or a read covers every primary. Where the monitor reads only the connection's own node, an entry for the older markers, or for a job between other nodes, therefore stays open when the migration ended while the monitor was down; resolve it by hand.
+
+### slot_migration_stuck
+**What it measures**: A slot migration that stopped making progress, or an atomic job that ended as `failed`
+**Why it matters**: A migration that hangs keeps slots in a half-moved state and holds memory on both nodes; a failed one means the move you asked for did not happen
+**Source**: The same reads as [`slot_migration`](#slot_migration)
+**Detection method**: State-based (not z-score based). Four cases raise a WARNING:
+
+| Case | Rule | Resolves |
+| --- | --- | --- |
+| Atomic job stuck | The job is still active, its state and `last_update_time` have not changed for 10 minutes, and in that time its `remaining_repl_size` has not dropped below the lowest value seen since the last change. `last_ack_time` is not used: the two nodes exchange a heartbeat every second while their link is up, and Valkey fails a job itself after `repl-timeout` (60 seconds by default) without one. The source and the target each report the job, and each is compared with what that node reported before, so a read that hears from only one of them is not taken as progress. A job is called stuck only on a read that hears from its source, once the source itself has been watched for those 10 minutes; a source read for the first time, as when the monitor reaches the primaries again after reading only its own node, starts that count. The target's state and `last_update_time` stay the same while the source drains its backlog, and only the source reports that backlog. A read that hears only from the target keeps an open warning but raises none. A job for which the server sends no `last_update_time` is never called stuck. Neither is a job whose source is taking the snapshot (`snapshotting`): the server reports no progress inside a snapshot, so a large one would look stuck. A node that only follows a job (`occurring-on-primary`: a replica, a primary that loaded it from its AOF or RDB file, or a target that lost its primary role) reports nothing that moves, so what it says neither raises nor closes a warning. What this catches is a job held back before its snapshot (`waiting-to-snapshot`, usually behind a save or an AOF rewrite) or one whose backlog does not drain before the pause (`waiting-to-pause`) | When the state or `last_update_time` changes on either node, the backlog drops to a new low, or the job ends |
+| Redis import keeps failing | Redis 8.4+ only. A failure is a read of the target that lists the import as `failed`, or with `retries` above the last count the monitor saw, so a read that misses the target loses none. While the import is failing, only a read of the target can end it or age it: the source does not list its own failed task, so a read that reaches only the source neither closes the warning nor counts toward the 10 quiet minutes. Redis starts the next attempt within a second of a failed one, so the import is seldom seen as `failed`; one attempt can last `repl-timeout` (60 seconds by default) or the time a connect takes to give up. A failure counts once, however many reads see it: a read that sees the import `failed` and a later one that sees its `retries` gone up are the same failure, but each read that finds it still `failed` with the same count is one more, since that is a retry held back. The import is failing from its first failure until 10 minutes pass without a new one, and is called stuck once it has at least three failures seen across 10 minutes, from the first to the latest. Redis retries with no limit, and holds the retry back while `min-replicas-to-write` is not met (the import then stays `failed`), so such an import does not end by itself. The message quotes the task's `last_error` and names `CLUSTER MIGRATION CANCEL ID <id>`, run on the target. While the warning is open, the import no longer holds back `hot_shard` and the rebalance suggestion | When a read of the target shows 10 minutes without a new failure or no longer lists the import, or the task ends |
+| Older markers stuck | The same slots carry `MIGRATING` / `IMPORTING` markers between the same two nodes for 30 minutes | When the set of slots changes, or the markers are gone |
+| Atomic job failed | The job is listed with state `failed`. The message carries what the server said, cut to 200 characters | Not by itself: it reports something that happened. Resolve it once you have read it |
+
+Other Redis 8.4+ tasks are never called stuck: `CLUSTER MIGRATION STATUS` sends no last-update time. No Redis task raises the failed case either, since a `failed` task is one Redis retries or replaces, not a migration that ended.
+
+```
+WARNING: Slot migration stuck: slots 0-1365 from 10.0.0.1:6379 to 10.0.0.3:6379 has not changed state or cut its replication backlog for 10 minutes (state: waiting-to-pause). Check for a save or AOF rewrite running on 10.0.0.1:6379, which holds back the snapshot, and for writes to these slots arriving faster than the target takes them, which keep the backlog from draining. To stop it, run CLUSTER CANCELSLOTMIGRATIONS on 10.0.0.1:6379. That cancels every migration that node is the source of, not only this one.
+```
+
+```
+WARNING: Slot migration stuck: slots 0-1365 from 10.0.0.1:6379 to 10.0.0.3:6379 has kept failing for 10 minutes, and its target has retried it 11 times. The server said: "Main channel - Connection timeout (state: failed, rdb_channel_state: none)". Check that 10.0.0.3:6379 can reach 10.0.0.1:6379 and log in to it, and that 10.0.0.3:6379 has the memory and the good replicas the import needs. To stop it, run CLUSTER MIGRATION CANCEL ID 7f3a9c0e1b2d4f6a8c0e1b2d4f6a8c0e1b2d4f6a on 10.0.0.3:6379.
+```
+
+`CLUSTER CANCELSLOTMIGRATIONS` has no job name: it cancels every active migration the node it runs on is the source of. Check what else that node is moving before you run it.
+
+The quiet time is counted on the monitor's clock from the moment it last saw a change, not by comparing the server's timestamps with it, so a clock difference between the two does not matter. It starts again when the monitor restarts. A warning that was open before the restart stays open until the monitor sees the job's state or update time change, its backlog drop, the slots change, or the migration end. That also holds when only the target of the job can be read.
+
+A failed job is reported once. Jobs that were already in a node's list when the monitor first read that node are not reported, so a restart does not repeat old failures; a job that failed while the monitor was down is missed. A job that starts and fails between two reads is still reported while a node the monitor can read still lists it. A node keeps finished jobs in memory only, up to `cluster-slot-migration-log-max-len` of them (1000 by default), and loses the list when it restarts.
+
+BetterDB never cancels or restarts a migration.
+
+### topology_divergence
+**What it measures**: Whether the nodes of a cluster describe the same cluster. Several nodes are asked for their own `CLUSTER NODES` and the answers are compared
+**Why anomalies matter**: Every other cluster check reads one node's view. When a zone or a single node is cut off, the nodes on each side still answer, and each view looks consistent on its own. Only the comparison shows that they disagree
+**Typical baseline**: Every sampled node reports the same failure flags, config epochs, slot owners and members
+**Source**: `CLUSTER NODES` on a sample of nodes, each on that node's own connection
+**Detection method**: State-based detector (not z-score based). It runs on gossip clusters only, not under Raft.
+
+**Which nodes are asked.** One round runs every 5 seconds for each cluster, however many connections watch it. The node the connection points at always takes part. On top of that:
+
+- When the nodes report availability zones (Valkey 9.1+ `availability-zone`, or zones configured on the connection), one node is asked per zone, so a zone that is cut off is always on one side of the comparison.
+- Nodes without a zone share a quota of 3. When the zones give fewer than 3 nodes in total, more are added until there are 3.
+- A node that is registered as its own connection is preferred. When that connection has polled since the round before, its view is taken from that poll at no extra cost; each such view is used in one round only. Primaries are preferred over replicas.
+- The same nodes are asked again in the next round. A node that does not answer is replaced, unless it is part of a disagreement that is still being counted.
+- A node that another node flags `fail?` or `fail` is asked for its own view as well, at most 2 such nodes per round. That is how a node that is cut off in one direction only shows up.
+- No round asks more than 12 nodes. In a cluster with more zones than that, some zones are not sampled.
+
+**What is compared.** For every node that two or more views describe:
+
+- failure flags: one view marks it `fail?` or `fail`, another does not. A node's opinion of itself is not counted.
+- config epoch
+- slot owner: two views name different owners for the same slots. Slots that the same nodes disagree about in the same way are one disagreement. A slot that joins such a disagreement later is added to the event's slot list in the report once it has disagreed for 3 rounds itself; the message of the event keeps the slots it was raised with. When two nodes claim a slot at the same config epoch, every view is read as giving it to the node with the smaller id, so the order of `CLUSTER NODES` alone never makes a disagreement
+- membership: one view knows the node, another does not or still has it in handshake
+
+**When an event is raised.** A disagreement has to be seen in 3 rounds in a row, about 10 seconds. A disagreement about failure flags also has to last one `cluster-node-timeout` (read from the cluster, 15 seconds when it cannot be read), because nodes legitimately disagree for that long while a failure is being detected. A membership disagreement has to last 60 seconds, so a node that is joining or was just forgotten is not reported. A membership disagreement about a node that is alive and has only partly joined is not part of this event: it raises [`partial_membership`](#partial_membership), with the command that repairs it. So does a slot owner disagreement that exists only because that node's own view lacks the owner: no slot owner event is raised for it while `partial_membership` covers the node. A slot owner disagreement is also held back while one of the two owners is still migrating those slots (`MIGRATING`/`IMPORTING` markers, or an unfinished job in `CLUSTER GETSLOTMIGRATIONS` on Valkey 9.0+); when an owner cannot be asked, only the view it gave in that round is checked for those markers, and without such a view the disagreement is reported. A membership disagreement that moves between this event and `partial_membership`, in either direction, is counted afresh from that round, so the move never raises the other event at once.
+
+All disagreements that put the same nodes against the rest are one event. The event names the smaller side first:
+
+```
+Cluster views diverge for 15s: 10.0.1.5:6379 (eu-west-1a) disagrees with 10.0.2.7:6379 (eu-west-1b), 10.0.3.2:6379 (eu-west-1c) about the failure state of 12 nodes and the owner of slots 0-5460.
+```
+
+The time is given in seconds up to two minutes, then in whole minutes, hours or days, rounded down. The same holds for [`partial_membership`](#partial_membership).
+
+It is CRITICAL when slot owners are in dispute, because clients can then be sent to different nodes for the same key, and a WARNING otherwise. When the nodes of an open WARNING start to dispute slot owners as well, the WARNING is closed and a CRITICAL event is raised in its place. An open event is not lowered when the slot dispute ends. When exactly one node stands against the rest, the event carries that node's address as `nodeAddr`. The text is written when the event is raised; [`GET /api/anomaly/topology-divergence`](#get-topology-divergence) returns the current state. [`GET /api/anomaly/topology-disagreements`](#get-topology-disagreements) returns the same state as one line per disagreement with the number of views on each side, and one line per shard, which stays readable on a cluster of hundreds of nodes.
+
+In the web app the same summary is on the **Disagreements** tab of the Cluster page (`/cluster?tab=disagreements`). Each disagreement is one card with the number of views on each side and links to the nodes on it; a line that an open event covers has an **Open event** link to the incident of that event, or to the Anomaly Detection page when the event is older than 30 days. The link opens under the connection that holds the event. A disagreement the last round could not check again shows the time it was last seen, the words "not checked again this round" and no counts. While an event is open for it, it stays in the list and in the count on the tab; without an event it is listed apart under **Not confirmed this round** and is not counted. On a merged line a side names every node that holds it, and `+N more` counts the nodes that are not listed; the table of epochs per node ends with the same count. Below the cards every shard is one row: `Disputed`, `No disagreement` or `Not compared`, with a link to its disagreements and to the unconfirmed ones, and **Only disputed** hides the rest. The tab shows how many nodes were asked and how many answered, and says so when the counts are over a sample of the cluster. The tab needs the anomaly detection licence.
+
+**When it closes.** The event closes after the views agree for 3 rounds in a row. A round in which the disagreement shows again starts that count over. A round in which the nodes of one side do not answer, or fewer than two views could be read, is neither agreement nor disagreement: the count is kept as it is and the event stays open. When that lasts 5 minutes the event is closed. A membership disagreement is held in the same way while a node that lacked the member gives no view, also when another node that lacked it has learned it meanwhile: what the silent node would say is not known, so such a gap can keep the event open for those 5 minutes. That hold is not applied for a silent node that every answering view that lists it flags `fail` or `fail?`. Such a node is taken for dead, and the disagreement is judged by the views that answered. An event that is resolved by hand is raised again while the views still differ. The event of a connection that is removed is closed. After a restart the open event is picked up instead of raised a second time.
+
+**What it costs.** Each round sends one `CLUSTER NODES` to at most 11 other nodes, in parallel, with 2 seconds each. The reply has one line per node of the cluster, so it grows with the cluster. A node that does not answer is asked less often, down to once every 8 rounds. A node that is registered as its own connection is not asked in a round for which that connection has polled since the round before; when it has not, the node is asked like any other. The round runs inside the poll of the connection that samples the cluster, so a node that hangs can hold that poll for about 4 seconds (2 to connect, 2 to answer) until it is backed off. A round that counts a failure flag disagreement also reads `cluster-node-timeout` at most once in 5 minutes, and one that confirms a slot owner dispute asks up to 3 owners for their migrations. A connection that reaches the cluster through an agent never runs the rounds, because the monitor cannot dial the other nodes there. When another connection that can dial them watches the same cluster, that one samples it, and the view of the agent connection is used like that of any registered connection. When only agent connections watch a cluster it is not sampled, and the report says `insufficient_views`.
+
+**What it cannot see.**
+
+- A disagreement among nodes that were not sampled. With the default of one node per zone, a single cut-off node is only caught when it is the sampled one or when a sampled node flags it. Raise `ANOMALY_TOPOLOGY_DIVERGENCE_NODES_PER_ZONE` to widen the sample.
+- A partition that heals in less than 3 rounds, and a node that flaps in and out of `fail?` faster than that. The count starts over each time the views agree.
+- A partition the monitor is on one side of. The nodes it cannot reach give no view, so there is nothing to compare them with, and no event is raised. They are listed as `unanswered` in the report, whose `status` stays `ok` as long as two views could be compared; when no other node answers at all it says `insufficient_views`. The views it does get then agree that the other nodes are failing. `cluster_state` and the fan-out coverage report that case.
+- The two sides are in the `message` as text only. The webhook payload has no separate field for them; the full lists are in the report.
+
+### partial_membership
+**What it measures**: Whether a node has joined the cluster on every node or only on some. It looks for a node that some sampled views list and others do not have, or still hold in `handshake` or without an address (`noaddr`)
+**Why anomalies matter**: A `CLUSTER MEET` that reached only part of the cluster, or a cluster bus port that is blocked between two nodes, leaves a node that some peers talk to and others never learn. Each node's own view looks fine, and the cluster does not repair it while the handshake keeps failing
+**Typical baseline**: Every sampled view lists the same nodes
+**Source**: The views of the [`topology_divergence`](#topology_divergence) round. No extra command is sent
+**Detection method**: State-based detector (not z-score based). It runs on gossip clusters only, and not at all when `ANOMALY_TOPOLOGY_DIVERGENCE_ENABLED` is off.
+
+**What counts.** A broken link is a peer that answered and lacks a node another view lists: the node is missing from its view, or is there in `handshake` or `noaddr`. A peer that gave no view is never counted as lacking a node. A stuck join usually shows in both directions: two peers lack the new node, and the new node's own view lacks those two peers.
+
+**Which node is named.** Each broken link is filed under its newer end. A node that owns slots is never the newer end against one that owns none. Between a replica (flagged `slave` or `replica`) and an empty primary, a node that holds no slots and is no replica, the empty primary is the newer end only when a slot owner lacks it: a slot owner cannot itself be the node that is joining, so its gap shows that the empty primary is. Without that the two count as alike. An empty primary the cluster knows that has not yet learned a new replica is then the peer to run the command on, and the replica is named; a new replica or a second new node that has not learned the empty primary is no sign that it is new. Two empty primaries always count as alike, and so do two replicas. What a node is, is read from its own view when it gave one. When it gave none, it is taken from the views of its peers: it owns slots when any of them shows slots for it, and is a replica when any of them flags it so, so the order in which the views were read does not matter. When both ends are alike, it is the node that is not known. When neither knows the other, it is the one that already has an open event, then the one more peers lack, then the one with the smaller id. A node whose event was resolved by hand still counts as having an open event for this, until the event is raised again or the finding is gone. An empty primary and a new replica that lack only each other are each lacked by one peer, so between them it is the one with an open event, and the smaller id when neither or both have one. The peers that lack a node are counted from the links that are kept, so the name does not change in a round in which some of them gave no view. A slot owner that has not yet learned two new nodes is therefore never the named node: each new node gets its own event, and the slot owner is the peer to run the command on. All links filed under a node are one finding. Each link is counted on its own, from the round its peer first lacked the other node: a peer that stops listing a node starts at zero, however long another peer has lacked that node. The count is kept through rounds in which that peer gave no view, until it has given none for 5 minutes; after that it starts over. A round in which the monitor could read no other node is such a round for every peer. The count also ends as soon as a view of that peer lists the node again, so a later gap starts at zero.
+
+The lists name only peers that gave a view in that round. A disagreement that is held because one side gave no view keeps the finding, but the unread peer is left out of the lists and of the command. The link of a peer that gave no view is kept in the same way while other peers still show the same disagreement, and also when another peer that lacked the node has learned it meanwhile, for as long as its count is kept: a node that lacks a peer and gives no view for a few rounds keeps its finding, and when it answers again its count goes on where it was. The peers that did answer are judged by the view they gave in that round: `Known by` names the peers that list the node in that round, so one that has learned the node since is named there and is left out of `Not known by` and of the command, and one that no longer lists it is left out of `Known by`. A link that is gone in this way no longer sets how long the node has been partly joined, as long as another link is left.
+
+A peer that gave no view is taken for dead, not silent, when every peer that lists it flags it `fail` or `fail?`. Its link is dropped in that round and not kept for the 5 minutes: when it was the node's last link, the finding ends and the event closes after 3 rounds as usual. No `CLUSTER MEET` can be run on a dead peer. When that peer was the only one that lacked the node, the gap it last showed is still listed in the report under `divergences` as being counted, until its count is given up after at most 5 minutes; no `topology_divergence` event is raised for it (see [the report](#get-topology-divergence)). When another peer that lacked the node has learned it meanwhile, the gap of the dead peer is dropped in that round. A peer that only gives no view, and that at least one peer lists without those flags, keeps its link.
+
+A node whose own view could not be read is only counted when a peer lists it without `fail` or `fail?`. When every peer that lists it flags it as failing, it is half removed, not half joined, and `CLUSTER MEET` is the wrong advice: that case stays a membership disagreement of `topology_divergence`. When a node moves from one case to the other, its disagreement is counted afresh from that round: the other event is raised only after the node has stayed in the new case for that event's full time, 60 seconds for `topology_divergence` and 90 seconds here, and the event of the old case closes as usual (see below). A flag that comes and goes before that event has closed leaves it as it is and raises no second one.
+
+**When an event is raised.** The finding has to be seen in 3 rounds in a row and to last 90 seconds. The 3 is the default of `ANOMALY_TOPOLOGY_DIVERGENCE_MIN_POLLS`: wherever this section counts 3 rounds, to raise or to close, it is that setting. `CLUSTER FORGET` bans a node for 60 seconds and a forgotten node that is still alive comes back through gossip right after, so a shorter wait would report it. A node that joins normally is known everywhere well inside that time and raises nothing. There is one WARNING per node, with the node's address as `nodeAddr`. Its `value` is the number of peers the node has a broken link with in the round the event is raised. A peer is counted once, also when the link is broken in both directions, and a peer whose link is kept through a round in which it gave no view is still counted. A peer that has learned the node since is not counted. The event is raised only in a round that shows the finding, so the value is at least 1, and an open event keeps the value it was raised with:
+
+```
+Node 10.0.0.7:6379 has only partly joined the cluster for 95s. Known by 10.0.0.1:6379. Not known by 10.0.0.2:6379 (missing), 10.0.0.3:6379 (stuck in handshake). Its own view is missing 10.0.0.2:6379, 10.0.0.3:6379. Run `CLUSTER MEET 10.0.0.7 6379` on 10.0.0.2:6379 and 10.0.0.3:6379. If it still does not join, check that cluster bus port 16379 is reachable between them. BetterDB does not run this command.
+```
+
+The time is written as in [`topology_divergence`](#topology_divergence): seconds up to two minutes, then whole minutes, hours or days, rounded down. The text is written when the event is raised; [`GET /api/anomaly/topology-divergence`](#get-topology-divergence) returns the lists of the latest round in `partialMembership`, and no command once the node is no longer found (`seen` is `false`).
+
+**The command.** `CLUSTER MEET` run on one node for another repairs that pair in both directions, so the event gives one command, naming the half-joined node, and the peers to run it on: every peer that lacks the node and every peer the node's own view is missing. Running it on a third node that knows both fixes neither. The address is the one most peers that list the node without `fail` or `fail?` reach it at, with the bus port they give; an IPv4 address and its IPv6 mapped form count as the same. A peer that flags the node as failing may still hold the address it had before a restart, so its address is left out, however many such peers there are. The address the node gives for itself breaks a tie and is used when no other peer gives one. Only when there is neither is the address taken from the peers that flag the node as failing. The bus port is added as a third argument when it is not the port plus 10000. When no view has an address for the node, the message says so and gives no command. The same holds when the address has a host name where the IP should be, because `CLUSTER MEET` takes an IP address, and when none of the peers that showed the gap gave a view in that round, because there is then no node to run it on. In all three cases the report has `command: null`. BetterDB never sends the command. If the cause is a blocked bus port the `MEET` does not hold, which is why the message names the port to check.
+
+**When it closes.** The event closes after 3 compared rounds in a row without the finding: every view that answers lists the node and the node lists them, or no view lists it any more. A round in which the peers on one side of its links gave no view, or fewer than two views could be read, is neither: the event stays open, for at most 5 minutes. That also holds when another peer still shows the same disagreement in that round. An event that is resolved by hand is raised again while the node is still half known. The event is closed when the connection that holds it is removed; a connection that still watches the cluster raises it again once the finding is confirmed. After a restart the open event is picked up instead of raised a second time. When the node a finding is filed under changes, the old event is handed over to the finding under the new node once that finding is confirmed: the old event is closed in that round and the new one is raised in it. Until then, while the new finding is still being counted because its own link has not lasted 90 seconds, the old event stays open, so one event is open the whole time. The report lists the old event with `seen` `false` and the new finding as being counted, with the disagreement under the new finding only. When the new finding ends before it is confirmed, the old event closes after the usual 3 rounds. The old event stays open in this way for as long as the new finding is kept: until its link has lasted 90 seconds, and through rounds in which a peer of that link gives no view for at most 5 minutes. One case is left to the 3 rounds, so the old and the new event can be open together for that long: a round in which the old node or a peer that lacked it gave no view, because a missed read is not a change of name. An event picked up after a restart is handed over in the same way, by the finding last seen for it since the restart, also when that finding was not confirmed again. When no round since the restart has shown its finding, there is nothing to hand over: the old event closes after the 3 rounds and the new one is raised once its own finding is confirmed, so no event is open in between.
+
+**How it relates to `topology_divergence`.** A membership disagreement that belongs to a finding here does not count toward a `topology_divergence` event. When the named node's own view lacks a slot owner, that view names no owner for the owner's slots either. The missing link explains this slot owner disagreement, so it is held back from the first round the finding is seen, before the WARNING is raised: no CRITICAL slot owner event is raised for it, and the report lists it under the finding. It is held only when the named node owns no slots, its view names no owner at all for the slots, and every view that names none is that of a named node that lacks the owner. It stays with `topology_divergence`, and is raised as CRITICAL after 3 rounds as before, when the named node's view gives the slots to another owner, when a node that knows the owner names none either, or when the named node owns slots itself. The rounds in which a disagreement is held are not counted. Right after the repair a node knows the owner before it has learned the owner's slots, so its view can name no owner for a few more seconds: the finding no longer covers the disagreement then, and it is counted from that round like a new one. The CRITICAL event is raised when it is still there after 3 rounds, and nothing is raised when the node shows the owner before that. An open `topology_divergence` event is never handed over to a finding. When a finding takes over all its disagreements, the event closes after the usual 3 rounds and the WARNING here is raised once the finding has lasted its 90 seconds. That also holds for an open CRITICAL slot owner event: when the node lacks the owner again, the disagreement is held back from that round, the CRITICAL closes after 3 rounds, and the WARNING replaces it 90 seconds after the link broke. In between no event is open, and the report lists the disagreements under the finding as being counted. Everything else is left as it is.
+
+**What it cannot see.**
+
+- Nodes that were not sampled. Both lists name sampled peers only, and a node all sampled views agree on is not reported. No round asks more than 12 nodes.
+- A cluster watched only through agent connections, which is not sampled (see [`topology_divergence`](#topology_divergence)).
+- Why the join is stuck. The event shows which pairs do not know each other, not whether a firewall, a wrong address or a missed `MEET` caused it.
+
 ## Configuration
 
 ### Environment Variables
@@ -687,6 +1020,19 @@ ANOMALY_CACHE_TTL_MS=3600000
 # Prometheus metrics update interval (default: 30000 = 30 seconds)
 ANOMALY_PROMETHEUS_INTERVAL_MS=30000
 
+# Cluster view divergence (topology_divergence, partial_membership), gossip clusters only
+# Compare the cluster views of several nodes (default: true)
+ANOMALY_TOPOLOGY_DIVERGENCE_ENABLED=true
+# Nodes asked per availability zone (default: 1)
+ANOMALY_TOPOLOGY_DIVERGENCE_NODES_PER_ZONE=1
+# Nodes asked among those without a zone, and the smallest sample (default: 3)
+ANOMALY_TOPOLOGY_DIVERGENCE_RANDOM_NODES=3
+# Rounds in a row a disagreement must hold before it is raised, and
+# rounds of agreement before it is closed (default: 3)
+ANOMALY_TOPOLOGY_DIVERGENCE_MIN_POLLS=3
+# Time between rounds in milliseconds, never shorter than the poll interval (default: 5000)
+ANOMALY_TOPOLOGY_DIVERGENCE_INTERVAL_MS=5000
+
 # Persistence-child stall detection thresholds (seconds)
 # Frozen key progress for this long fires CRITICAL (default: 60)
 MONITOR_PERSISTENCE_STALL_SEC=60
@@ -694,6 +1040,14 @@ MONITOR_PERSISTENCE_STALL_SEC=60
 MONITOR_PERSISTENCE_WARN_SEC=120
 # Elapsed time ceiling before a child fires CRITICAL (default: 600)
 MONITOR_PERSISTENCE_CRIT_SEC=600
+
+# Primary without replicas thresholds (milliseconds); 0 turns a level off
+# No synced replica for this long fires WARNING (default: 5000)
+ANOMALY_PRIMARY_NO_REPLICA_WARN_MS=5000
+# No synced replica for this long fires CRITICAL (default: 30000)
+ANOMALY_PRIMARY_NO_REPLICA_CRIT_MS=30000
+# How long a replica count stays expected after it was last seen (default: 86400000 = 24 hours)
+ANOMALY_PRIMARY_REPLICAS_EXPECTATION_TTL_MS=86400000
 ```
 
 ### Runtime Settings
@@ -832,11 +1186,22 @@ GET /api/anomaly/events?limit=100&severity=critical&metricType=connections
       "message": "WARNING: connections spike detected. Value: 450, Baseline: 250 (80.0% above normal, Z-score: 8.00)",
       "correlationId": "760e9500-f30c-52e5-b827-557766551111",
       "relatedMetrics": ["ops_per_sec"],
-      "resolved": false
+      "resolved": false,
+      "node": {
+        "nodeId": "e7d1eecce10fd6bb5eb35b9f99a514335d9ba9ca",
+        "address": "10.0.1.12:6379",
+        "role": "primary",
+        "shardId": "8f3c1d5e0a9b4c7d2e6f1a0b3c4d5e6f7a8b9c0d",
+        "availabilityZone": "eu-west-1a",
+        "collected": true,
+        "connectionId": "conn-7"
+      }
     }
   ]
 }
 ```
+
+`node` is present on events of a cluster connection that are about one node. It can be absent, for example on an event stored before this field existed, so read it as optional. See [Failing node on cluster events](#failing-node-on-cluster-events).
 
 ### Get Correlated Anomaly Groups
 
@@ -982,6 +1347,300 @@ One entry per polled connection (all connections without the header), with the o
   }
 ]
 ```
+
+### Get Hot Shards
+
+```http
+GET /api/anomaly/hot-shards
+X-Connection-ID: <connection-id>
+```
+
+The open [`hot_shard`](#hot_shard) events of one cluster connection, with the numbers behind them. The connection header is required. The list is empty when no shard is hot. It is kept in memory and rebuilt from the next shard load sample after a restart.
+
+`cpu` gives the shard's CPU rate per second, its share of the cluster, the cluster median and the ratio the rule used. `network` gives the same for bytes in plus bytes out, without a ratio: it is detail only, and it includes replication, counted once per replica. `topSlots` (up to 5) are ranked by CPU. `topKeys` (up to 10, full names) are ranked by `freq`, the LFU counter of the key (0 to 255). `keySource` is `lfu` when the keys were read and `unavailable` when they were not, with the reason in `keyNote`. `keysSampledAt` is the time of the read the names come from and `keysSampled` the number of keys whose frequency it got. When a later read gave no names, the names of the earlier read stay and `keyNote` says so. `eventId` is the id of the open event. `captureAvailable` is `true` when the key names are missing and a [capture on the hot primary](#hot_shard) can show them. `node` names the hot primary, with whether it is collected (see [Failing node on cluster events](#failing-node-on-cluster-events)); it is left out when the primary is not in the cluster view.
+
+`rebalance` is the [rebalance suggestion](#hot_shard): `kind` is `plan` or `no_plan`. A plan has `moves` (each with `targetShardId`, `targetAddr`, inclusive slot `ranges`, and the slots, keys and CPU it moves), `projection` (every shard's CPU, share and ratio to the median `before` and `after`, with its `role`), `medianBefore`, `medianAfter`, `pinnedSlots`, `warnings`, `plannedAfter` (the IDs of the hot shards whose plans its numbers count as applied; empty when it starts from the measured loads), `support` and `commands` (each with the `nodeAddr` to run it on and the command `text`). A `no_plan` has a `reason` and `pinnedSlots`, and `coveredBy` when the reason is `covered_by_other_plan` and `conflictsWith` when it is `conflicts_with_other_plan`. The field is missing for a moment after a restart, until the suggestion is computed again.
+
+**Response**:
+```json
+[
+  {
+    "eventId": "0b9d2c1e-6f3a-4c57-9a41-2d8e7b5f1c30",
+    "captureAvailable": false,
+    "shardId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d",
+    "nodeAddr": "10.0.0.1:6379",
+    "node": {
+      "nodeId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d",
+      "address": "10.0.0.1:6379",
+      "role": "primary",
+      "collected": false
+    },
+    "slotCount": 5461,
+    "since": 1704067140000,
+    "sampledAt": 1704067200000,
+    "cpu": { "perSecond": 930000, "share": 0.61, "median": 300000, "ratio": 3.1 },
+    "network": { "perSecond": 2097152, "share": 0.35, "median": 1887436 },
+    "topSlots": [
+      {
+        "slot": 1234,
+        "cpuUsecPerSecond": 576600,
+        "networkBytesPerSecond": 912000,
+        "keyCount": 1820,
+        "shareOfShard": 0.62
+      }
+    ],
+    "topKeys": [
+      { "key": "user:42", "slot": 1234, "freq": 255 },
+      { "key": "cart:{9}", "slot": 88, "freq": 201 }
+    ],
+    "keySource": "lfu",
+    "keysSampled": 1012,
+    "keysSampledAt": 1704067200000,
+    "rebalance": {
+      "kind": "plan",
+      "action": "spread",
+      "effect": "resolves",
+      "sourceShardId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d",
+      "moves": [
+        {
+          "targetShardId": "9c4e1b7a2d5f8036a1c3e5f7092b4d6f8a0c2e4b",
+          "targetAddr": "10.0.0.3:6379",
+          "ranges": [[2000, 2410]],
+          "slotCount": 411,
+          "keyCount": 48210,
+          "cpuUsecPerSecond": 262000,
+          "shareOfShard": 0.28
+        }
+      ],
+      "pinnedSlots": [{ "slot": 1234, "shareOfShard": 0.62 }],
+      "projection": [
+        {
+          "shardId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d",
+          "nodeAddr": "10.0.0.1:6379",
+          "role": "source",
+          "before": { "cpuUsecPerSecond": 930000, "share": 0.61, "ratio": 3.1 },
+          "after": { "cpuUsecPerSecond": 668000, "share": 0.44, "ratio": 1.19 }
+        }
+      ],
+      "medianBefore": 300000,
+      "medianAfter": 562000,
+      "warnings": [
+        { "code": "source_fork", "shardId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d" }
+      ],
+      "plannedAfter": [],
+      "support": "valkey_atomic",
+      "commands": [
+        {
+          "nodeAddr": "10.0.0.1:6379",
+          "text": "CLUSTER MIGRATESLOTS SLOTSRANGE 2000 2410 NODE 9c4e1b7a2d5f8036a1c3e5f7092b4d6f8a0c2e4b"
+        }
+      ]
+    }
+  }
+]
+```
+
+### Get Topology Divergence
+
+```http
+GET /api/anomaly/topology-divergence
+X-Connection-ID: <connection-id>
+```
+
+What the last [`topology_divergence`](#topology_divergence) round of the connection's cluster saw, with the [`partial_membership`](#partial_membership) findings of the same round. The connection header is required. Any connection that watches the cluster returns the same report. It is kept in memory and rebuilt by the first round after a restart.
+
+`status` is `ok` when at least two views were compared. It means the views that answered were compared, not that the whole cluster agrees: a node listed in `unanswered` gave no view, and a node that was not asked is not in the report at all. `status` is `insufficient_views` when only the connection's own view could be read, and `not_sampled` when no round has run: the connection is not a gossip cluster, the check is off, or the first round is still to come. `observers` are the nodes asked in the round and `unanswered` those that gave no view. Each entry of `divergences` is one group of nodes against the rest: `sides[0]` is the smaller side. `confirmed` is `false` while the disagreement is still being counted and no event is open; `eventId` is then `null`. A group with an open event is listed with the disagreements of the latest round, also those that joined it later and are still being counted, so the event keeps its `eventId` and `confirmed` `true` while it is open. That also holds once a [`partial_membership`](#partial_membership) finding has taken over disagreements of the group: those are listed under the finding only, so the group is listed with the disagreements that are left, or with none, until the event closes. Slots that have joined a confirmed slot owner disagreement are listed once they are confirmed themselves. When none of the slots the event was confirmed with are disputed any more and the same owners dispute other slots, those slots are listed under the open event from the first round, before they are confirmed, so the event is not listed without the dispute it stands for; after 3 rounds they are the confirmed slots of the event. A group whose event was resolved by hand is listed as still being counted, with `eventId` `null`, until the event is raised again, also after the resolved event has been cleared with `DELETE /api/anomaly/resolved`. When the latest round no longer shows the group, it is listed as it was last confirmed until the event closes. A membership disagreement whose only lacking node gave no view is listed too while its count is kept, with `eventId` `null`, `confirmed` `false` and that node on the `missing` side. This is how the last gap of a dead peer is shown once [`partial_membership`](#partial_membership) has let go of it. An open event that was picked up after a restart is listed with its `eventId` and `confirmed` `true` from the first round that shows its disagreement, before the count has reached 3 rounds again. When a later round no longer shows the group, or a finding has taken over its disagreements, it is listed as it was last seen until the event closes. `positions` lists, for each disagreement, what was claimed and which nodes claimed it. For `failure_flags` the value is `ok` or `failing` (the view flags the node `fail?` or `fail`), for `config_epoch` the epoch, for `slot_owner` the node id of the owner or `unassigned`, and for `membership` one of `known`, `handshake`, `noaddr` or `missing`. `rounds` is the number of rounds in a row the disagreement was seen and `since` when it was first seen. Each disagreement also carries the `eventId` and `eventType` (`topology_divergence` or `partial_membership`) of the open event that holds it; both are `null` while it is still being counted.
+
+Each entry of `partialMembership` is one node only part of the cluster knows: `node`, the peers that list it (`knownBy`), the peers that do not (`notKnownBy`, each with `status` `missing`, `handshake` or `noaddr`), the peers its own view lacks (`ownViewMissing`, same `status`), the `command` to run and the peers to run it on (`runOn`). `command` is `null` when no view has an address for the node, when the address is a host name, since `CLUSTER MEET` needs an IP address (`node.address` is still set then), and when none of the peers that showed the gap gave a view in that round. `eventId`, `confirmed` and `since` read as in `divergences`. `seen` is `true` when the round still holds the finding. Its `disagreements` are the membership disagreements behind it and the slot owner disagreements it holds back; a disagreement listed here is not repeated under `divergences`. A disagreement that two findings hold, as when two half-joined nodes lack each other or the same slot owner, is listed under one of them only, with the `eventId` of that finding: first the finding that has an open event, then, when neither or both have one, the finding of the node the disagreement is about, then the finding with the smaller node id. The other finding is listed without it; its other fields are not changed by that. The entries are the findings of the round as the events were judged; a round with `insufficient_views` keeps those of the last compared round. An open event whose node has no finding in the round any more, for example because it has joined, stays open for the closing rounds (3 by default). Until then it is listed with `seen` `false`: `knownBy`, `notKnownBy`, `ownViewMissing`, `runOn` and `disagreements` are empty and `command` is `null`, so the report no longer asks for a `CLUSTER MEET`. An event that was picked up after a restart is listed in the same way when its node joins before the finding was confirmed again. An open `topology_divergence` event stays in `divergences` until it closes, also once a finding holds all its disagreements: it is then listed with its `eventId`, `confirmed` `true` and no `disagreements`, and the disagreements are listed under the finding, counted afresh and with `eventId` `null` until the finding has an event of its own. A finding whose event was resolved by hand is listed as still counted, with `eventId` `null`, until the event is raised again, also after the resolved event has been cleared with `DELETE /api/anomaly/resolved`. A slot owner disagreement that is held back is counted afresh in every round: its `rounds` is 1 and its `since` the time of that round, and it is listed only in a round in which the node's view was read.
+
+**Response**:
+```json
+{
+  "status": "ok",
+  "sampledAt": 1704067200000,
+  "observers": [
+    { "nodeId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d", "address": "10.0.1.5:6379", "role": "primary", "availabilityZone": "eu-west-1a" },
+    { "nodeId": "7c1d0e2f55bb6a1d8c2f5a7b9d3e1f2a4b6c8d0e", "address": "10.0.2.7:6379", "role": "primary", "availabilityZone": "eu-west-1b" },
+    { "nodeId": "9e3f1a2b44cc7b2e9d3a6b8c0e4f2a3b5c7d9e1f", "address": "10.0.3.2:6379", "role": "primary", "availabilityZone": "eu-west-1c" }
+  ],
+  "unanswered": [],
+  "divergences": [
+    {
+      "eventId": "0b9d2c1e-6f3a-4c57-9a41-2d8e7b5f1c30",
+      "confirmed": true,
+      "since": 1704067185000,
+      "sides": [
+        { "nodes": [{ "nodeId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d", "address": "10.0.1.5:6379", "role": "primary", "availabilityZone": "eu-west-1a" }] },
+        { "nodes": [
+          { "nodeId": "7c1d0e2f55bb6a1d8c2f5a7b9d3e1f2a4b6c8d0e", "address": "10.0.2.7:6379", "role": "primary", "availabilityZone": "eu-west-1b" },
+          { "nodeId": "9e3f1a2b44cc7b2e9d3a6b8c0e4f2a3b5c7d9e1f", "address": "10.0.3.2:6379", "role": "primary", "availabilityZone": "eu-west-1c" }
+        ] }
+      ],
+      "disagreements": [
+        {
+          "kind": "failure_flags",
+          "subject": [{ "nodeId": "7c1d0e2f55bb6a1d8c2f5a7b9d3e1f2a4b6c8d0e", "address": "10.0.2.7:6379", "role": "primary", "availabilityZone": "eu-west-1b" }],
+          "positions": [
+            { "value": "failing", "observers": [{ "nodeId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d", "address": "10.0.1.5:6379", "role": "primary", "availabilityZone": "eu-west-1a" }] },
+            { "value": "ok", "observers": [{ "nodeId": "9e3f1a2b44cc7b2e9d3a6b8c0e4f2a3b5c7d9e1f", "address": "10.0.3.2:6379", "role": "primary", "availabilityZone": "eu-west-1c" }] }
+          ],
+          "rounds": 4,
+          "since": 1704067185000,
+          "eventId": "0b9d2c1e-6f3a-4c57-9a41-2d8e7b5f1c30",
+          "eventType": "topology_divergence"
+        }
+      ]
+    }
+  ],
+  "partialMembership": [
+    {
+      "eventId": "5a7c1f0e-2b6d-4e8a-b3c9-7d1e4f6a8b20",
+      "confirmed": true,
+      "seen": true,
+      "since": 1704067095000,
+      "node": { "nodeId": "b1e4f6a8c2d0e1f3a5b7c9d3f2a9c1e77aa5d0c9", "address": "10.0.4.9:6379", "role": "primary" },
+      "knownBy": [{ "nodeId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d", "address": "10.0.1.5:6379", "role": "primary", "availabilityZone": "eu-west-1a" }],
+      "notKnownBy": [{ "nodeId": "7c1d0e2f55bb6a1d8c2f5a7b9d3e1f2a4b6c8d0e", "address": "10.0.2.7:6379", "role": "primary", "availabilityZone": "eu-west-1b", "status": "handshake" }],
+      "ownViewMissing": [],
+      "command": "CLUSTER MEET 10.0.4.9 6379",
+      "runOn": [{ "nodeId": "7c1d0e2f55bb6a1d8c2f5a7b9d3e1f2a4b6c8d0e", "address": "10.0.2.7:6379", "role": "primary", "availabilityZone": "eu-west-1b" }],
+      "disagreements": [
+        {
+          "kind": "membership",
+          "subject": [{ "nodeId": "b1e4f6a8c2d0e1f3a5b7c9d3f2a9c1e77aa5d0c9", "address": "10.0.4.9:6379", "role": "primary" }],
+          "positions": [
+            { "value": "handshake", "observers": [{ "nodeId": "7c1d0e2f55bb6a1d8c2f5a7b9d3e1f2a4b6c8d0e", "address": "10.0.2.7:6379", "role": "primary", "availabilityZone": "eu-west-1b" }] },
+            { "value": "known", "observers": [{ "nodeId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d", "address": "10.0.1.5:6379", "role": "primary", "availabilityZone": "eu-west-1a" }] }
+          ],
+          "rounds": 22,
+          "since": 1704067095000,
+          "eventId": "5a7c1f0e-2b6d-4e8a-b3c9-7d1e4f6a8b20",
+          "eventType": "partial_membership"
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Get Topology Disagreements
+
+```http
+GET /api/anomaly/topology-disagreements
+X-Connection-ID: <connection-id>
+```
+
+The state of the last [`topology_divergence`](#topology_divergence) round, summarised for large clusters: one line per disagreement with the number of views on each side, and one line per shard. The connection header is required. Any connection that watches the cluster returns the same summary. It is built from the round kept in memory, so it is empty until the first round after a restart. The MCP tool `get_topology_disagreements` returns the same data.
+
+**The counts are over the views that answered, not over every node.** A round asks at most 12 nodes by default, so on a 500-node cluster a line reads "9 views against 3", not "497 against 3". `coverage` says how far the round reached: `nodes` is the number of members of the cluster, `asked` the nodes asked in the round, `answered` those that gave a view, and `complete` is `true` only when every member gave one. `unanswered` lists the nodes that were asked and gave no view, and the nodes a line is waiting for that gave none in this round. The second kind is not counted in `asked`, so `unansweredCount` can be above `asked` minus `answered`. A node that one view lists without an address counts as a member when another view lists it as one, so `complete` is not `true` until it has given a view too. An empty `disagreements` list means only that the views that answered agree with each other. A node that was asked and did not answer gave no view, so it is not known to agree, and with `status: insufficient_views` fewer than two views answered and nothing was compared at all. Read `status` and `coverage` before taking an empty list as agreement; it covers the whole cluster only when `complete` is `true`. `status` has the same meaning as in [Get Topology Divergence](#get-topology-divergence).
+
+Each entry of `disagreements` is one thing the views disagree about:
+
+| Field | Meaning |
+|-------|---------|
+| `kind` | `slot_owner`, `config_epoch`, `failure_flags` or `membership` |
+| `severity` | `critical` for `slot_owner`, `warning` for the others |
+| `open` | `true` for a line of the last round, and for a stale line whose event is still open. The lines that are not open are the stale ones without an open event. A shard is `disputed` only through open lines |
+| `confirmed`, `eventId`, `eventType`, `eventAt`, `eventConnectionId` | `confirmed` is `true` when an open event covers the line; `eventId` and `eventType` then point at that event, `eventAt` is the time it was raised, and `eventConnectionId` is the connection to open it under: the one that asked when it can open the event, otherwise the one that holds it. All four are `null` while the disagreement is still being counted, and after the event was resolved by hand. An event covers a line only while the line still shows what the event was raised for: the same node and kind (for `slot_owner` the same owners and at least one slot in common), with the nodes the event names as disagreeing still apart from the others. A new dispute between the same owners on other slots does not take the event of an ended one. When more than one event covers a line, an open one comes before one that was resolved by hand, then the one that shares the most slots, then the one whose disagreement was confirmed last |
+| `resolvedByHand` | `true` when the event of the line was resolved by hand and the disagreement has not been raised again. The line then has no `eventId` and `confirmed` is `false`, although it was confirmed before. A disagreement that is still confirmed is raised again in the next round, so this is mostly seen for one round, or on a stale line |
+| `since`, `rounds` | When it was first seen, and for how many rounds in a row |
+| `stale`, `lastSeenAt` | `stale` is `true` when the line was not seen in the last round; `lastSeenAt` is the round it was last seen in. See below |
+| `subjects`, `subjectCount` | The nodes the line is about. For `slot_owner` these are the nodes claimed as owner |
+| `slots`, `slotCount` | The disputed slot ranges, for `slot_owner` only |
+| `shardIds` | The shards the line touches: those of the subjects, and for `slot_owner` those that own the disputed slots |
+| `positions` | One entry per side, largest first: `value`, `count` (the number of views on that side), `observers` (the nodes that hold it) and `observerCount` (how many nodes hold it, which is the same as `count` unless the line is merged). For `slot_owner` the value is the node id of the owner, repeated as `owner` with its address, or `unassigned`. Empty on a stale line |
+| `epochs` | On a merged `config_epoch` line only: the epoch each side has for each node, in the order of `positions`. The `value` of the positions is then `null` |
+| `text` | The line in words |
+
+For `failure_flags` the value is `ok`, `fail?` (the view suspects the node) or `fail` (the view has it as failed), so a node that part of the cluster only suspects is told apart from one that part of it has failed. What a node says of itself is not counted, so the views on such a line can add up to one less than `answered`. For `membership` the value is `known`, `handshake`, `noaddr` or `missing`.
+
+Lines of the same kind that have the same nodes on the same sides, with the same counts, and differ only in the node they are about are merged into one: `4 nodes: ok in 9 views, fail? in 3 views.` `subjectCount` is then above 1 and the `id` ends in `+N`. The `id` of a merged line changes when the set of merged lines changes, so it is stable only within one response: do not keep it across polls. Slot owner lines are never merged. On a merged line `count` is the number of views on that side for each node of the line, `observers` lists every node that holds the side for at least one node of the line, and `observerCount` is how many those are. When a zone is cut off, each of its nodes is vouched for by the others, so a side reads `ok in 3 views` with 4 observers. A line is not merged into another when a node would then stand on both sides of the merged line. When two halves of a cluster each flag the other as failing, there is one line for each half, so the sides still say who flags whom. Open lines come first, with the lines of the last round before the stale ones; within those the order is critical first, then confirmed before counting, then oldest first.
+
+**A line that could not be checked again is kept, without counts.** When the nodes that hold one side of a disagreement do not answer, or the round could not compare views at all, the disagreement could not be checked in that round. It is kept for up to 5 minutes with `stale: true`: `positions` is empty, `text` says what the views differed on without numbers (`Slots 0-99: views differed on the owner (10.0.0.1:6379, 10.0.0.3:6379).`), and `lastSeenAt` says when it was last seen. A stale line keeps its event. While that event is open the line has `confirmed: true`, the `eventId` and `open: true`, and its shards stay `disputed`: the event was raised and nothing has cleared it. A stale line without an open event has `open: false`: it was neither confirmed nor cleared, comes after the open lines and does not make a shard `disputed`. Stale lines are only merged with lines last seen in the same round.
+
+Each entry of `shards` is one shard: its `primary`, the number of `replicas`, its `zones`, its `slots`, and `ownViews`, the number of its own nodes that gave a view. `state` is `disputed` when an open line touches the shard (the lines are in `disagreementIds`), also in a round that could not compare views; `undisputed` when no line does; and `not_compared` when the round could not compare views or only lines that are not open touch the shard. The lines that are not open and touch a shard are in `staleDisagreementIds`, whatever its state. Undisputed means no view that answered disagrees about the shard. Disputed shards come first, the rest follow in slot order. `shardTotals` counts the shards by state (`total`, `disputed`, `undisputed`, `notCompared`).
+
+The MCP route and tool return only the disputed shards by default, with `shardsListed: "disputed"` and the same `shardTotals`; `shards=all` (tool argument `shards: "all"`) returns one line per shard.
+
+Node lists (`subjects`, `observers`, `unanswered`, `epochs`) hold at most 25 entries; the counts next to them are exact. The number of lines is not capped: every distinct disagreement adds one. A summary of a 500-node cluster with a few disagreements is under 150 KB, and one with many distinct disagreements is larger.
+
+**Response**:
+```json
+{
+  "status": "ok",
+  "sampledAt": 1704067200000,
+  "coverage": {
+    "nodes": 500,
+    "asked": 12,
+    "answered": 12,
+    "complete": false,
+    "unanswered": [],
+    "unansweredCount": 0
+  },
+  "disagreements": [
+    {
+      "id": "slot_owner:3f2a9c1e|9c4e1b7a",
+      "kind": "slot_owner",
+      "severity": "critical",
+      "open": true,
+      "confirmed": true,
+      "resolvedByHand": false,
+      "eventId": "0c1f6f0e-6d0f-4d3e-9a55-0f2f8f3f6a11",
+      "eventType": "topology_divergence",
+      "eventAt": 1704067180000,
+      "eventConnectionId": "5b0c7d2e-1f7a-4a53-8f0d-2f6f1c9e4b10",
+      "since": 1704067170000,
+      "rounds": 6,
+      "stale": false,
+      "lastSeenAt": 1704067200000,
+      "subjects": [
+        { "nodeId": "3f2a9c1e", "address": "10.0.0.1:6379", "role": "primary", "availabilityZone": "eu-west-1a" },
+        { "nodeId": "9c4e1b7a", "address": "10.0.0.3:6379", "role": "primary", "availabilityZone": "eu-west-1b" }
+      ],
+      "subjectCount": 2,
+      "slots": [[0, 5460]],
+      "slotCount": 5461,
+      "shardIds": ["3f2a9c1e", "9c4e1b7a"],
+      "positions": [
+        {
+          "value": "3f2a9c1e",
+          "owner": { "nodeId": "3f2a9c1e", "address": "10.0.0.1:6379", "role": "primary", "availabilityZone": "eu-west-1a" },
+          "count": 9,
+          "observerCount": 9,
+          "observers": [{ "nodeId": "3f2a9c1e", "address": "10.0.0.1:6379", "role": "primary" }]
+        },
+        {
+          "value": "9c4e1b7a",
+          "owner": { "nodeId": "9c4e1b7a", "address": "10.0.0.3:6379", "role": "primary", "availabilityZone": "eu-west-1b" },
+          "count": 3,
+          "observerCount": 3,
+          "observers": [{ "nodeId": "9c4e1b7a", "address": "10.0.0.3:6379", "role": "primary" }]
+        }
+      ],
+      "text": "Slots 0-5460: owned by 10.0.0.1:6379 in 9 views, by 10.0.0.3:6379 in 3 views."
+    }
+  ],
+  "shards": [
+    {
+      "shardId": "3f2a9c1e",
+      "primary": { "nodeId": "3f2a9c1e", "address": "10.0.0.1:6379", "role": "primary", "availabilityZone": "eu-west-1a" },
+      "replicas": 1,
+      "zones": ["eu-west-1a", "eu-west-1b"],
+      "slots": [[0, 5460]],
+      "slotCount": 5461,
+      "nodes": 2,
+      "ownViews": 1,
+      "state": "disputed",
+      "disagreementIds": ["slot_owner:3f2a9c1e|9c4e1b7a"],
+      "staleDisagreementIds": []
+    }
+  ],
+  "shardTotals": { "total": 250, "disputed": 2, "undisputed": 248, "notCompared": 0 },
+  "shardsListed": "all"
+}
+```
+
+In the example only the first shard is shown, node ids are shortened and the `observers` lists are cut to one entry each.
 
 ### Resolve Anomaly or Group
 

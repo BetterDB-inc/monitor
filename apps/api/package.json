@@ -1,6 +1,6 @@
 {
   "name": "api",
-  "version": "0.55.0",
+  "version": "0.56.0",
   "homepage": "https://betterdb.com",
   "private": true,
   "scripts": {
@@ -29,6 +29,7 @@
     "test:cluster": "jest test/api-cluster.e2e-spec.ts",
     "test:integration:cve": "RUN_CVE_E2E=true jest test/cve-scan.e2e-spec.ts",
     "test:migration-topology": "RUN_TOPOLOGY_TESTS=true jest test/migration-topology.e2e-spec.ts",
+    "test:migration-ssh-tunnel": "RUN_SSH_TUNNEL_TESTS=true jest test/migration-ssh-tunnel.e2e-spec.ts",
     "test:sentinel-topology": "RUN_SENTINEL_TESTS=true jest test/sentinel-topology.e2e-spec.ts",
     "test:sentinel-loop-stall": "RUN_SENTINEL_TESTS=true jest test/sentinel-loop-stall.e2e-spec.ts",
     "test:mtls": "RUN_MTLS_TESTS=true SKIP_DOCKER_SETUP=true jest test/mtls.e2e-spec.ts",
@@ -43,6 +44,7 @@
     "docs:clean": "rm -rf data/docs data/chunks data/vector-store",
     "seed:demo": "ts-node -r tsconfig-paths/register scripts/seed-demo-data.ts",
     "cache-sim:seed": "ts-node -r tsconfig-paths/register scripts/cache-simulator/seed.ts",
+    "load:cluster": "ts-node --transpile-only -r tsconfig-paths/register scripts/cluster-load/run.ts",
     "cache-sim:validate": "ts-node -r tsconfig-paths/register scripts/cache-simulator/validate.ts"
   },
   "dependencies": {

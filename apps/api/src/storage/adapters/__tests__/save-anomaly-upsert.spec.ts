@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import type { ClusterNodeRef } from '@betterdb/shared';
 import { adapters, type AdapterFactory } from './anomaly-storage-adapters';
 import type {
   StoragePort,
@@ -29,6 +30,15 @@ describe.each<[string, AdapterFactory]>(adapters)(
       resolved: false,
       ...overrides,
     });
+
+    const NODE: ClusterNodeRef = {
+      nodeId: 'node-a',
+      address: '10.0.1.5:6379',
+      role: 'primary',
+      shardId: 'shard-1',
+      availabilityZone: 'eu-west-1a',
+    };
+    const OTHER_NODE: ClusterNodeRef = { nodeId: 'node-b', address: '10.0.1.7:6379', role: 'replica' };
 
     const correlated = event({
       correlationId: CORRELATION_ID,
@@ -73,6 +83,44 @@ describe.each<[string, AdapterFactory]>(adapters)(
       const rows = await storage.getAnomalyEvents({ connectionId: CONN });
 
       expect(rows.map((r) => r.nodeAddr)).toEqual(['10.0.1.5:6379']);
+    });
+
+    it('stores the failing node and keeps it when a later save omits it', async () => {
+      await storage.saveAnomalyEvent(event({ node: NODE }), CONN);
+      await storage.saveAnomalyEvents([event({ id: randomUUID(), node: OTHER_NODE })], CONN);
+      await storage.saveAnomalyEvent(correlated, CONN);
+      await storage.saveAnomalyEvents([event()], CONN);
+
+      const rows = await storage.getAnomalyEvents({ connectionId: CONN });
+
+      expect(rows.map((r) => r.node).sort((a, b) => a!.nodeId.localeCompare(b!.nodeId))).toEqual([NODE, OTHER_NODE]);
+    });
+
+    it('keeps the node an event was raised with when it is saved again with another', async () => {
+      await storage.saveAnomalyEvent(event({ node: NODE }), CONN);
+      await storage.saveAnomalyEvent(event({ node: OTHER_NODE }), CONN);
+      await storage.saveAnomalyEvents([event({ node: OTHER_NODE })], CONN);
+
+      const [row] = await storage.getAnomalyEvents({ connectionId: CONN });
+
+      expect(row.node).toEqual(NODE);
+    });
+
+    it('fills a missing node from a later save', async () => {
+      await storage.saveAnomalyEvent(event(), CONN);
+      await storage.saveAnomalyEvents([event({ node: NODE })], CONN);
+
+      const [row] = await storage.getAnomalyEvents({ connectionId: CONN });
+
+      expect(row.node).toEqual(NODE);
+    });
+
+    it('leaves the node out of an event saved without one', async () => {
+      await storage.saveAnomalyEvent(event(), CONN);
+
+      const [row] = await storage.getAnomalyEvents({ connectionId: CONN });
+
+      expect(row.node).toBeUndefined();
     });
 
     it('stores the retry trigger and keeps it when a later save omits it', async () => {

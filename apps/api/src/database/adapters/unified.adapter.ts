@@ -1,4 +1,4 @@
-import Valkey from 'iovalkey';
+import Valkey, { type RedisOptions } from 'iovalkey';
 import { randomUUID } from 'crypto';
 import { Logger } from '@nestjs/common';
 import {
@@ -9,6 +9,7 @@ import { InfoParser } from '../parsers/info.parser';
 import { MetricsParser } from '../parsers/metrics.parser';
 import { parseKeyspaceDatabases, type KeyspaceDatabase } from '../parsers/keyspace-databases';
 import { CLUSTER_TOTAL_SLOTS } from '../../common/constants/cluster.constants';
+import { isBetterDbClientName } from '../../common/utils/own-clients';
 import {
   InfoResponse,
   SlowLogEntry,
@@ -202,7 +203,11 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   // Bumped on every `ready` of the main client, see getConnectionGeneration().
   private connectionGeneration = 0;
 
-  private createValkeyClient(connectionName: string, db?: number): Valkey {
+  private createValkeyClient(
+    connectionName: string,
+    db?: number,
+    overrides: RedisOptions = {},
+  ): Valkey {
     // In certificate mode both are undefined, so iovalkey sends no AUTH and the
     // server keeps the ACL user derived from the client certificate.
     const { username, password } = clientCredentials(this.config);
@@ -228,6 +233,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       // issued for the hostname its cluster announces for it.
       // Custom CA and client certificate (mutual TLS) ride on the same object.
       tls: this.tlsOptions(),
+      ...overrides,
     });
   }
 
@@ -492,6 +498,10 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
         this._client.disconnect();
         this._client = null;
       }
+      if (this.cliClient) {
+        this.cliClient.disconnect();
+        this.cliClient = null;
+      }
       this.connectHost = this.config.host;
       this.connectPort = this.config.port;
     }
@@ -642,6 +652,39 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       return response === 'PONG';
     } catch {
       return false;
+    }
+  }
+
+  async reconnectClient(): Promise<void> {
+    const silent = this._client;
+    const running = this.connectPromise;
+    this._client = null;
+    this.connected = false;
+    silent?.disconnect();
+    await running?.catch(() => undefined);
+    if (!this.isConnected()) await this.connect();
+  }
+
+  async pingOnNewConnection(timeoutMs: number): Promise<boolean> {
+    if (this.usesTunnel && !this.tunnelActive) {
+      return false;
+    }
+    const probe = this.createValkeyClient('BetterDB-Health-Probe', 0, {
+      connectTimeout: timeoutMs,
+      commandTimeout: timeoutMs,
+      maxRetriesPerRequest: 0,
+      retryStrategy: () => null,
+      enableReadyCheck: false,
+    });
+    probe.on('error', () => undefined);
+    try {
+      await probe.connect();
+      await probe.ping();
+      return true;
+    } catch (error) {
+      return error instanceof Error && error.name === 'ReplyError';
+    } finally {
+      probe.disconnect();
     }
   }
 
@@ -832,9 +875,10 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     const rawLog = await this.client.slowlog('GET', fetchCount);
     let entries = MetricsParser.parseSlowLog(rawLog as unknown[]);
 
-    // Filter out entries from specified client (e.g., monitor's own commands)
+    // excludeMonitor passes the seed name as a flag. Hide every BetterDB client,
+    // including BetterDB-Monitor-Node-*, not only that exact name.
     if (excludeClientName) {
-      entries = entries.filter((entry) => entry.clientName !== excludeClientName);
+      entries = entries.filter((entry) => !isBetterDbClientName(entry.clientName));
     }
 
     if (startTime) {

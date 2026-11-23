@@ -1,6 +1,14 @@
 import { BadRequestException, Logger } from '@nestjs/common';
 import { promises as dns } from 'dns';
-import { assertSafeOutboundUrl, BlockedAddressError, guardedLookup, isBlockedIp } from '../outbound-url-guard';
+import {
+  assertConnectableIpLiteral,
+  assertSafeOutboundUrl,
+  BlockedAddressError,
+  guardedLookup,
+  isBlockedIp,
+  parseAllowedCidrs,
+  parseAllowedHosts,
+} from '../outbound-url-guard';
 
 describe('outbound url guard', () => {
   const env = process.env.NODE_ENV;
@@ -289,6 +297,170 @@ describe('outbound url guard', () => {
       const failure = Object.assign(new Error('getaddrinfo ENOTFOUND h'), { code: 'ENOTFOUND' });
       jest.spyOn(dns, 'lookup').mockRejectedValue(failure);
       expect((await run(guardedLookup({ label: 'metrics URL' }), 'h', false)).error).toBe(failure);
+    });
+  });
+
+  describe('private network policy', () => {
+    const webhook = (cidrs = '', hosts = '') => ({
+      label: 'webhook URL',
+      privateNetworkPolicy: { allowedCidrs: parseAllowedCidrs(cidrs), allowedHosts: parseAllowedHosts(hosts) },
+    });
+    const resolveTo = (...addresses: string[]) =>
+      jest.spyOn(dns, 'lookup').mockResolvedValue(addresses.map((address) => ({ address, family: address.includes(':') ? 6 : 4 })) as never);
+    const run = (lookup: ReturnType<typeof guardedLookup>, host: string) =>
+      new Promise<{ error: NodeJS.ErrnoException | null; address: unknown }>((resolve) =>
+        lookup(host, { all: false } as never, (error: NodeJS.ErrnoException | null, address: unknown) => resolve({ error, address })),
+      );
+
+    beforeEach(() => {
+      process.env.NODE_ENV = 'production';
+    });
+
+    it('allows an IP literal inside a listed CIDR and rejects one outside it', async () => {
+      const options = webhook('10.244.0.0/16, fd12:3456::/32');
+      await expect(assertSafeOutboundUrl('http://10.244.1.7/hook', options)).resolves.toBeInstanceOf(URL);
+      await expect(assertSafeOutboundUrl('http://[fd12:3456::8]/hook', options)).resolves.toBeInstanceOf(URL);
+      await expect(assertSafeOutboundUrl('http://10.245.0.1/hook', options)).rejects.toThrow('Cannot use private IP addresses as webhook URL');
+      await expect(assertSafeOutboundUrl('http://8.8.8.8/hook', options)).resolves.toBeInstanceOf(URL);
+    });
+
+    it('allows a listed hostname to resolve to a private address', async () => {
+      const options = webhook('', '*.svc.cluster.local, Relay.Internal.');
+      resolveTo('10.96.3.4');
+      await expect(assertSafeOutboundUrl('http://r.ns.svc.cluster.local/', options)).resolves.toBeInstanceOf(URL);
+      await expect(assertSafeOutboundUrl('http://R.NS.SVC.cluster.local./', options)).resolves.toBeInstanceOf(URL);
+      await expect(assertSafeOutboundUrl('http://relay.internal/', options)).resolves.toBeInstanceOf(URL);
+      for (const url of ['http://evil.example.com/', 'http://svc.cluster.local/', 'http://a.relay.internal/', 'http://xsvc.cluster.local/']) {
+        await expect(assertSafeOutboundUrl(url, options)).rejects.toThrow('Webhook URL resolves to a blocked address');
+      }
+    });
+
+    it('never allows metadata or link-local addresses', async () => {
+      const options = webhook('10.0.0.0/8', '*.svc.cluster.local');
+      resolveTo('169.254.169.254');
+      await expect(assertSafeOutboundUrl('http://r.ns.svc.cluster.local/', options)).rejects.toThrow('Webhook URL resolves to a blocked address');
+      for (const url of ['http://169.254.169.254/latest/meta-data/', 'http://[::ffff:169.254.169.254]/', 'http://[fd00:ec2::254]/', 'http://100.100.100.200/']) {
+        await expect(assertSafeOutboundUrl(url, options)).rejects.toBeInstanceOf(BadRequestException);
+      }
+    });
+
+    it('keeps loopback blocked unless its CIDR is listed', async () => {
+      await expect(assertSafeOutboundUrl('http://127.0.0.1:3001/', webhook('10.0.0.0/8'))).rejects.toBeInstanceOf(BadRequestException);
+      await expect(assertSafeOutboundUrl('http://[::1]:3001/', webhook('10.0.0.0/8'))).rejects.toBeInstanceOf(BadRequestException);
+      await expect(assertSafeOutboundUrl('http://127.0.0.1:3001/', webhook('127.0.0.0/8'))).resolves.toBeInstanceOf(URL);
+      await expect(assertSafeOutboundUrl('http://[::1]:3001/', webhook('::1/128'))).resolves.toBeInstanceOf(URL);
+      resolveTo('127.0.0.1');
+      await expect(assertSafeOutboundUrl('http://r.ns.svc.cluster.local/', webhook('', '*.svc.cluster.local'))).rejects.toThrow(
+        'Webhook URL resolves to a blocked address',
+      );
+      await expect(assertSafeOutboundUrl('http://r.ns.svc.cluster.local/', webhook('127.0.0.0/8'))).resolves.toBeInstanceOf(URL);
+    });
+
+    it('rejects a hostname when any answer is outside the allowlist', async () => {
+      resolveTo('10.244.1.7', '10.245.0.1');
+      await expect(assertSafeOutboundUrl('http://hooks.example.com/', webhook('10.244.0.0/16'))).rejects.toThrow('Webhook URL resolves to a blocked address');
+    });
+
+    it('appends the hint only when the address is merely private', async () => {
+      const options = { label: 'webhook URL', privateHint: 'allow it with X' };
+      await expect(assertSafeOutboundUrl('http://10.0.0.1/', options)).rejects.toThrow('Cannot use private IP addresses as webhook URL; allow it with X');
+      const metadata = await assertSafeOutboundUrl('http://169.254.169.254/', options).catch((e: Error) => e);
+      expect((metadata as Error).message).toBe('Cannot use private IP addresses as webhook URL');
+      resolveTo('10.9.9.9');
+      await expect(assertSafeOutboundUrl('http://db.internal/', options)).rejects.toThrow('Webhook URL resolves to a blocked address; allow it with X');
+      resolveTo('169.254.169.254');
+      const resolved = await assertSafeOutboundUrl('http://db.internal/', options).catch((e: Error) => e);
+      expect((resolved as Error).message).toBe('Webhook URL resolves to a blocked address');
+    });
+
+    it('applies the same policy at connect time', async () => {
+      const options = webhook('10.244.0.0/16', '*.svc.cluster.local');
+      resolveTo('10.96.3.4');
+      expect((await run(guardedLookup(options), 'r.ns.svc.cluster.local')).address).toBe('10.96.3.4');
+      expect((await run(guardedLookup(options), 'evil.example.com')).error).toBeInstanceOf(BlockedAddressError);
+      resolveTo('10.244.1.7');
+      expect((await run(guardedLookup(options), 'evil.example.com')).address).toBe('10.244.1.7');
+      resolveTo('10.244.1.7', '10.245.0.1');
+      expect((await run(guardedLookup(options), 'hooks.example.com')).error).toBeInstanceOf(BlockedAddressError);
+      resolveTo('169.254.169.254');
+      expect((await run(guardedLookup(options), 'r.ns.svc.cluster.local')).error).toBeInstanceOf(BlockedAddressError);
+      resolveTo('127.0.0.1');
+      expect((await run(guardedLookup(options), 'r.ns.svc.cluster.local')).error).toBeInstanceOf(BlockedAddressError);
+    });
+
+    it('checks IP-literal URLs at connect time, which the lookup never sees', () => {
+      const options = webhook('10.244.0.0/16');
+      expect(() => assertConnectableIpLiteral('http://10.244.1.7/hook', options)).not.toThrow();
+      expect(() => assertConnectableIpLiteral('http://8.8.8.8/hook', options)).not.toThrow();
+      expect(() => assertConnectableIpLiteral('http://hooks.example.com/hook', options)).not.toThrow();
+      expect(() => assertConnectableIpLiteral('http://10.245.0.1/hook', options)).toThrow(BlockedAddressError);
+      expect(() => assertConnectableIpLiteral('http://[::ffff:169.254.169.254]/', options)).toThrow(BlockedAddressError);
+      expect(() => assertConnectableIpLiteral('http://127.0.0.1:3001/', options)).toThrow(BlockedAddressError);
+    });
+
+    it('holds loopback to the policy outside production too', async () => {
+      process.env.NODE_ENV = 'development';
+      const hostsOnly = webhook('', '*.svc.cluster.local');
+      for (const url of ['http://127.0.0.1:3001/', 'http://[::1]:3001/', 'http://0.0.0.0:3001/', 'http://localhost:3001/']) {
+        await expect(assertSafeOutboundUrl(url, hostsOnly)).rejects.toBeInstanceOf(BadRequestException);
+      }
+      await expect(assertSafeOutboundUrl('http://localhost:3001/', hostsOnly)).rejects.toThrow('Cannot use localhost or 0.0.0.0 as webhook URL');
+      await expect(assertSafeOutboundUrl('http://localhost:3001/', hostsOnly)).rejects.not.toThrow('in production');
+      expect(() => assertConnectableIpLiteral('http://127.0.0.1:3001/', hostsOnly)).toThrow(BlockedAddressError);
+      resolveTo('127.0.0.1');
+      expect((await run(guardedLookup(hostsOnly), 'r.ns.svc.cluster.local')).error).toBeInstanceOf(BlockedAddressError);
+      expect((await run(guardedLookup(hostsOnly), 'localhost')).error).toBeInstanceOf(BlockedAddressError);
+
+      const withLoopback = webhook('127.0.0.0/8');
+      await expect(assertSafeOutboundUrl('http://127.0.0.1:3001/', withLoopback)).resolves.toBeInstanceOf(URL);
+      expect(() => assertConnectableIpLiteral('http://127.0.0.1:3001/', withLoopback)).not.toThrow();
+      expect((await run(guardedLookup(withLoopback), 'relay.internal')).address).toBe('127.0.0.1');
+    });
+
+    it.each(['development', 'production'])('accepts 0.0.0.0 at create and connect when a CIDR lists it in %s', async (env) => {
+      process.env.NODE_ENV = env;
+      const listed = webhook('0.0.0.0/32');
+      await expect(assertSafeOutboundUrl('http://0.0.0.0:3001/', listed)).resolves.toBeInstanceOf(URL);
+      expect(() => assertConnectableIpLiteral('http://0.0.0.0:3001/', listed)).not.toThrow();
+      await expect(assertSafeOutboundUrl('http://0.0.0.0:3001/', webhook('10.0.0.0/8'))).rejects.toThrow(
+        'Cannot use localhost or 0.0.0.0 as webhook URL',
+      );
+      await expect(assertSafeOutboundUrl('http://localhost:3001/', listed)).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('keeps the development loopback exception when no policy is configured', async () => {
+      process.env.NODE_ENV = 'development';
+      const none = { label: 'webhook URL' };
+      await expect(assertSafeOutboundUrl('http://127.0.0.1:3001/', none)).resolves.toBeInstanceOf(URL);
+      await expect(assertSafeOutboundUrl('http://localhost:3001/', none)).resolves.toBeInstanceOf(URL);
+      expect(() => assertConnectableIpLiteral('http://127.0.0.1:3001/', none)).not.toThrow();
+      resolveTo('127.0.0.1');
+      expect((await run(guardedLookup(none), 'localhost')).address).toBe('127.0.0.1');
+    });
+
+    it.each(['0.0.0.0/0', '169.254.0.0/16', '169.254.169.254/32', '100.64.0.0/10', '192.0.0.0/24', '::/0', 'fe80::/64', 'fd00::/8', '::ffff:169.254.0.0/112'])(
+      'refuses the allowlist entry %s because it overlaps an always-blocked range',
+      (cidr) => {
+        expect(() => parseAllowedCidrs(`10.0.0.0/8,${cidr}`)).toThrow('overlaps a cloud metadata or link-local range');
+      },
+    );
+
+    it.each(['10.0.0.0', '10.0.0.0/33', '10.0.0/8', 'fd12::/129', '10.0.0.0/8/8', 'relay.internal', '10.0.0.0/x'])('rejects the malformed CIDR %s', (cidr) => {
+      expect(() => parseAllowedCidrs(cidr)).toThrow('is not a valid CIDR');
+    });
+
+    it.each(['*', '*.', 'a.*.local', '*relay.internal', '10.0.0.1', '[::1]', 'relay internal', 'http://relay.internal', '-relay.internal'])(
+      'rejects the malformed host pattern %s',
+      (host) => {
+        expect(() => parseAllowedHosts(host)).toThrow('is not a valid hostname pattern');
+      },
+    );
+
+    it('treats empty lists as no allowlist', () => {
+      expect(parseAllowedCidrs('')).toBeUndefined();
+      expect(parseAllowedCidrs(' , ')).toBeUndefined();
+      expect(parseAllowedHosts(' , ')).toEqual([]);
+      expect(parseAllowedHosts('*.SVC.cluster.local, relay.internal.')).toEqual(['*.svc.cluster.local', 'relay.internal']);
     });
   });
 

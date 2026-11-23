@@ -7,7 +7,6 @@ import type {
   AnomalyDetectorSettingsResponse,
 } from '@betterdb/shared';
 import { settingsApi } from '../../../../api/settings';
-import { Alert, AlertDescription } from '../../../ui/alert';
 import { Badge } from '../../../ui/badge';
 import { Button } from '../../../ui/button';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../../../ui/collapsible';
@@ -16,7 +15,6 @@ import { Switch } from '../../../ui/switch';
 import { cn } from '../../../../lib/utils';
 import {
   ANOMALY_DETECTORS_QUERY_KEY,
-  LIFETIME_COUNTER_METRICS,
   METRIC_UNITS,
   WARNING_ZSCORE_ONLY_METRICS,
   buildSave,
@@ -235,14 +233,6 @@ export function DetectorPanel({
       </CollapsibleTrigger>
       <CollapsibleContent className="space-y-4 px-3 pb-4 pt-2">
         <p className="text-sm text-muted-foreground">Unit: {METRIC_UNITS[metric]}</p>
-        {LIFETIME_COUNTER_METRICS.has(metric) && (
-          <Alert>
-            <AlertDescription>
-              This metric is a lifetime total since the server's last restart. Once it passes an
-              absolute threshold it alerts every cooldown until the server restarts.
-            </AlertDescription>
-          </Alert>
-        )}
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           {textField('warningZScore', 'Warning z-score', '0.5–10', '0.1')}
           {!WARNING_ZSCORE_ONLY_METRICS.has(metric) &&

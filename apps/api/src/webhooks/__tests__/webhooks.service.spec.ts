@@ -1,5 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException, ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Logger } from '@nestjs/common';
+import { promises as dns } from 'dns';
 import { WebhooksService } from '../webhooks.service';
 import { StoragePort } from '../../common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
@@ -138,6 +139,87 @@ describe('WebhooksService', () => {
           events: ['instance.down'] as any,
         })
       ).rejects.toThrow(BadRequestException);
+    });
+
+    it('should point at the allowlist variables when a URL is only private', async () => {
+      const create = (url: string) => service.createWebhook({ name: 'Test', url, events: [WebhookEventType.INSTANCE_DOWN] });
+      await expect(create('http://10.244.1.7/hook')).rejects.toThrow('WEBHOOK_ALLOWED_PRIVATE_CIDRS or WEBHOOK_ALLOWED_PRIVATE_HOSTS');
+      await expect(create('http://169.254.169.254/hook')).rejects.not.toThrow('WEBHOOK_ALLOWED_PRIVATE_CIDRS');
+    });
+  });
+
+  describe('Private network allowlist', () => {
+    const env = { ...process.env };
+    const stored = { id: '123', name: 'Test', url: 'http://stored', events: [] } as never;
+    const create = (url: string) => service.createWebhook({ name: 'Test', url, events: [WebhookEventType.INSTANCE_DOWN] });
+    const update = (url: string) => service.updateWebhook('123', { url });
+    const resolveTo = (address: string) => jest.spyOn(dns, 'lookup').mockResolvedValue([{ address, family: 4 }] as never);
+
+    beforeEach(() => {
+      process.env.NODE_ENV = 'production';
+      delete process.env.CLOUD_MODE;
+      storageClient.createWebhook.mockResolvedValue(stored);
+      storageClient.updateWebhook.mockResolvedValue(stored);
+    });
+
+    afterEach(() => {
+      process.env = { ...env };
+      jest.restoreAllMocks();
+    });
+
+    it('should accept IP literals inside WEBHOOK_ALLOWED_PRIVATE_CIDRS on create and update', async () => {
+      process.env.WEBHOOK_ALLOWED_PRIVATE_CIDRS = '10.244.0.0/16';
+      await expect(create('http://10.244.1.7/hook')).resolves.toBe(stored);
+      await expect(update('http://10.244.1.7/hook')).resolves.toBe(stored);
+      await expect(create('http://10.245.0.1/hook')).rejects.toThrow(BadRequestException);
+      await expect(update('http://10.245.0.1/hook')).rejects.toThrow(BadRequestException);
+      await expect(create('http://127.0.0.1:3001/')).rejects.toThrow(BadRequestException);
+      await expect(create('http://169.254.169.254/latest')).rejects.toThrow(BadRequestException);
+    });
+
+    it('should accept loopback only when its CIDR is listed', async () => {
+      process.env.WEBHOOK_ALLOWED_PRIVATE_CIDRS = '127.0.0.0/8';
+      await expect(create('http://127.0.0.1:3001/')).resolves.toBe(stored);
+    });
+
+    it('should accept hostnames matching WEBHOOK_ALLOWED_PRIVATE_HOSTS on create and update', async () => {
+      process.env.WEBHOOK_ALLOWED_PRIVATE_HOSTS = '*.svc.cluster.local';
+      resolveTo('10.96.0.10');
+      await expect(create('http://hook.operator-sim.svc.cluster.local/')).resolves.toBe(stored);
+      await expect(update('http://hook.operator-sim.svc.cluster.local/')).resolves.toBe(stored);
+      await expect(create('http://evil.example.com/')).rejects.toThrow('Webhook URL resolves to a blocked address');
+      await expect(update('http://evil.example.com/')).rejects.toThrow('Webhook URL resolves to a blocked address');
+      resolveTo('169.254.169.254');
+      await expect(create('http://hook.operator-sim.svc.cluster.local/')).rejects.toThrow(BadRequestException);
+    });
+
+    it('should check DNS outside production too once an allowlist is set', async () => {
+      process.env.NODE_ENV = 'development';
+      const lookup = resolveTo('10.96.0.10');
+      await expect(create('http://evil.example.com/')).resolves.toBe(stored);
+      expect(lookup).not.toHaveBeenCalled();
+      process.env.WEBHOOK_ALLOWED_PRIVATE_HOSTS = '*.svc.cluster.local';
+      await expect(create('http://evil.example.com/')).rejects.toThrow('Webhook URL resolves to a blocked address');
+      await expect(create('http://hook.operator-sim.svc.cluster.local/')).resolves.toBe(stored);
+    });
+
+    it('should hold loopback to the allowlist outside production too', async () => {
+      process.env.NODE_ENV = 'development';
+      await expect(create('http://127.0.0.1:3001/')).resolves.toBe(stored);
+      process.env.WEBHOOK_ALLOWED_PRIVATE_HOSTS = '*.svc.cluster.local';
+      await expect(create('http://127.0.0.1:3001/')).rejects.toThrow(BadRequestException);
+      await expect(update('http://localhost:3001/')).rejects.toThrow(BadRequestException);
+      process.env.WEBHOOK_ALLOWED_PRIVATE_CIDRS = '127.0.0.0/8';
+      await expect(create('http://127.0.0.1:3001/')).resolves.toBe(stored);
+    });
+
+    it('should ignore the allowlist in cloud mode', async () => {
+      jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      process.env.CLOUD_MODE = 'true';
+      process.env.WEBHOOK_ALLOWED_PRIVATE_CIDRS = '10.244.0.0/16';
+      const error = await create('http://10.244.1.7/hook').catch((e: Error) => e);
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect((error as Error).message).toBe('Cannot use private IP addresses as webhook URL');
     });
   });
 

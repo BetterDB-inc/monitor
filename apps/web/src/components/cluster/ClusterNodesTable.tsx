@@ -1,4 +1,4 @@
-import { useState, useMemo, Fragment } from 'react';
+import { useState, useMemo, useEffect, useRef, Fragment } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/card';
 import { EmptyState } from '../ui/empty-state';
 import { Badge } from '../ui/badge';
@@ -11,18 +11,39 @@ import {
   TableCell,
 } from '../ui/table';
 import { ChevronDown, ChevronRight, Server, Copy } from 'lucide-react';
+import { clusterNodeState, type ClusterNodeState } from '@betterdb/shared';
 import type { ClusterNode } from '../../types/metrics';
 import { formatSlotRanges, countSlots } from '../../types/cluster';
+import { NodeCollectionNotice } from './NodeCollectionNotice';
+import type { ClusterConnectionRef, NodeCollection } from './nodeCollection';
 
 interface ClusterNodesTableProps {
   nodes: ClusterNode[];
+  focusNodeId?: string | null;
+  collection?: ReadonlyMap<string, NodeCollection>;
+  clusterConnection?: ClusterConnectionRef | null;
+  onNodeConnected?: () => void;
 }
 
 type SortColumn = 'address' | 'role' | 'slots' | 'state';
 type SortDirection = 'asc' | 'desc';
 type FilterTab = 'all' | 'masters' | 'replicas';
 
-export function ClusterNodesTable({ nodes }: ClusterNodesTableProps) {
+const STATE_RANK: Record<ClusterNodeState, number> = { healthy: 0, suspect: 1, failed: 2 };
+const FOCUS_FOLLOW_MS = 10_000;
+const READER_INPUTS = ['wheel', 'touchmove', 'keydown', 'pointerdown'] as const;
+
+function stateSortKey(node: ClusterNode): string {
+  return `${STATE_RANK[clusterNodeState(node.flags)]}:${node.linkState}`;
+}
+
+export function ClusterNodesTable({
+  nodes,
+  focusNodeId,
+  collection,
+  clusterConnection,
+  onNodeConnected,
+}: ClusterNodesTableProps) {
   const [sortColumn, setSortColumn] = useState<SortColumn>('address');
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
   const [filterTab, setFilterTab] = useState<FilterTab>('all');
@@ -34,6 +55,39 @@ export function ClusterNodesTable({ nodes }: ClusterNodesTableProps) {
     nodes.forEach((node) => map.set(node.id, node));
     return map;
   }, [nodes]);
+
+  const rows = useRef(new Map<string, HTMLTableRowElement>());
+  const [shownFocus, setShownFocus] = useState<string | null>(null);
+  const focusKnown = focusNodeId ? nodeMap.has(focusNodeId) : false;
+
+  if (!focusNodeId && shownFocus !== null) {
+    setShownFocus(null);
+  }
+  if (focusNodeId && focusKnown && shownFocus !== focusNodeId) {
+    setShownFocus(focusNodeId);
+    setFilterTab('all');
+    setExpandedNode(focusNodeId);
+  }
+
+  useEffect(() => {
+    const row = shownFocus ? rows.current.get(shownFocus) : undefined;
+    if (!row) return;
+    const show = () => row.scrollIntoView?.({ block: 'center' });
+    show();
+    if (typeof ResizeObserver === 'undefined') return;
+    const pageGrowth = new ResizeObserver(show);
+    const stop = () => {
+      pageGrowth.disconnect();
+      window.clearTimeout(timer);
+      READER_INPUTS.forEach((input) => window.removeEventListener(input, stop));
+    };
+    const timer = window.setTimeout(stop, FOCUS_FOLLOW_MS);
+    READER_INPUTS.forEach((input) => window.addEventListener(input, stop, { passive: true }));
+    pageGrowth.observe(document.body);
+    return stop;
+  }, [shownFocus]);
+
+  const showZone = useMemo(() => nodes.some((node) => node.availabilityZone), [nodes]);
 
   const filteredNodes = useMemo(() => {
     let filtered = nodes;
@@ -68,8 +122,8 @@ export function ClusterNodesTable({ nodes }: ClusterNodesTableProps) {
           bVal = countSlots(b.slots);
           break;
         case 'state':
-          aVal = a.linkState;
-          bVal = b.linkState;
+          aVal = stateSortKey(a);
+          bVal = stateSortKey(b);
           break;
       }
 
@@ -116,6 +170,17 @@ export function ClusterNodesTable({ nodes }: ClusterNodesTableProps) {
     );
   };
 
+  const getNodeStateBadge = (node: ClusterNode) => {
+    const state = clusterNodeState(node.flags);
+    if (state === 'failed') {
+      return <Badge className="bg-destructive/10 text-destructive border-0">Failed</Badge>;
+    }
+    if (state === 'suspect') {
+      return <Badge className="bg-yellow-500/10 text-yellow-500 border-0">Suspect</Badge>;
+    }
+    return null;
+  };
+
   const getMasterAddress = (node: ClusterNode) => {
     if (node.master === '-') return 'N/A';
     const masterNode = nodeMap.get(node.master);
@@ -152,6 +217,12 @@ export function ClusterNodesTable({ nodes }: ClusterNodesTableProps) {
         </div>
       </CardHeader>
       <CardContent>
+        {focusNodeId && nodes.length > 0 && !focusKnown && (
+          <p role="status" className="mb-3 text-sm text-muted-foreground">
+            Node {focusNodeId.substring(0, 8)} is not in the current view of this cluster. It may
+            have left the cluster.
+          </p>
+        )}
         <Table>
           <TableHeader>
             <TableRow>
@@ -181,6 +252,7 @@ export function ClusterNodesTable({ nodes }: ClusterNodesTableProps) {
                 Slots {sortColumn === 'slots' && (sortDirection === 'asc' ? '↑' : '↓')}
               </TableHead>
               <TableHead>Master</TableHead>
+              {showZone && <TableHead>Zone</TableHead>}
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -192,6 +264,10 @@ export function ClusterNodesTable({ nodes }: ClusterNodesTableProps) {
               return (
                 <Fragment key={node.id}>
                   <TableRow
+                    ref={(element) => {
+                      if (element) rows.current.set(node.id, element);
+                      else rows.current.delete(node.id);
+                    }}
                     className="cursor-pointer"
                     onClick={() => toggleExpanded(node.id)}
                   >
@@ -211,10 +287,24 @@ export function ClusterNodesTable({ nodes }: ClusterNodesTableProps) {
                             MYSELF
                           </Badge>
                         )}
+                        {collection?.get(node.id)?.collected === false && (
+                          <Badge
+                            variant="outline"
+                            className="text-[10px]"
+                            title="BetterDB has no connection of its own to this node"
+                          >
+                            Not collected
+                          </Badge>
+                        )}
                       </div>
                     </TableCell>
                     <TableCell>{getRoleBadge(node)}</TableCell>
-                    <TableCell>{getStateBadge(node.linkState)}</TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-1">
+                        {getStateBadge(node.linkState)}
+                        {getNodeStateBadge(node)}
+                      </div>
+                    </TableCell>
                     <TableCell>
                       {isMaster ? (
                         <span className="font-medium">{slotCount.toLocaleString()}</span>
@@ -231,13 +321,29 @@ export function ClusterNodesTable({ nodes }: ClusterNodesTableProps) {
                         <span className="text-muted-foreground">-</span>
                       )}
                     </TableCell>
+                    {showZone && (
+                      <TableCell>
+                        {node.availabilityZone ? (
+                          <span className="text-sm">{node.availabilityZone}</span>
+                        ) : (
+                          <span className="text-muted-foreground">-</span>
+                        )}
+                      </TableCell>
+                    )}
                   </TableRow>
 
                   {/* Expanded Details */}
                   {isExpanded && (
                     <TableRow>
-                      <TableCell colSpan={6} className="bg-muted/30">
+                      <TableCell colSpan={showZone ? 7 : 6} className="bg-muted/30">
                         <div className="p-4 space-y-3 text-sm">
+                          <NodeCollectionNotice
+                            nodeId={node.id}
+                            address={node.address.split('@')[0]}
+                            collection={collection?.get(node.id)}
+                            clusterConnection={clusterConnection}
+                            onConnected={onNodeConnected}
+                          />
                           <div className="grid grid-cols-2 gap-4">
                             <div>
                               <span className="text-muted-foreground">Node ID:</span>
@@ -287,6 +393,12 @@ export function ClusterNodesTable({ nodes }: ClusterNodesTableProps) {
                               <span className="text-muted-foreground">Link State:</span>
                               <div className="mt-1">{getStateBadge(node.linkState)}</div>
                             </div>
+                            {node.shardId && (
+                              <div>
+                                <span className="text-muted-foreground">Shard ID:</span>
+                                <div className="font-mono text-xs mt-1">{node.shardId}</div>
+                              </div>
+                            )}
                           </div>
                           {isMaster && node.slots.length > 0 && (
                             <div>

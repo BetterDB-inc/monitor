@@ -464,6 +464,190 @@ ghi789jkl012 192.168.1.12:6379@16379 master - 0 1234567890000 2 connected 5461-1
       expect(MetricsParser.parseClusterShards([])).toEqual([]);
       expect(MetricsParser.parseClusterShards('nope' as unknown as unknown[])).toEqual([]);
     });
+
+    describe('availability zone and shard id (Valkey 9.1+)', () => {
+      const shardId = '7c9e1b0f5a3d4e6f8a2b1c0d9e8f7a6b5c4d3e2f';
+      const primaryId = 'e2e5e98c4e177833752687117b54cbeefe174953';
+      const replicaId = '331427a0134bc2e6047d0ad132933abbb8a7b6a4';
+
+      // Hand-built: key order follows clusterCommandShards and
+      // addNodeDetailsToShardReply in valkey 9.1 src/cluster_legacy.c. The
+      // server omits availability-zone for a node whose config value is empty.
+      const valkey91Reply = [
+        [
+          'slots',
+          [0, 5460],
+          'nodes',
+          [
+            [
+              'id',
+              primaryId,
+              'port',
+              6379,
+              'ip',
+              '172.23.0.5',
+              'endpoint',
+              '172.23.0.5',
+              'role',
+              'master',
+              'replication-offset',
+              4102,
+              'health',
+              'online',
+              'availability-zone',
+              'us-east-1a',
+            ],
+            [
+              'id',
+              replicaId,
+              'port',
+              6379,
+              'ip',
+              '172.23.0.3',
+              'endpoint',
+              '172.23.0.3',
+              'role',
+              'replica',
+              'replication-offset',
+              4102,
+              'health',
+              'online',
+            ],
+          ],
+          'id',
+          shardId,
+        ],
+      ];
+
+      // Captured from a Valkey 8.1.6 cluster (first shard of three).
+      const valkey81Reply = [
+        [
+          'slots',
+          [0, 5460],
+          'nodes',
+          [
+            [
+              'id',
+              primaryId,
+              'port',
+              6379,
+              'ip',
+              '172.23.0.5',
+              'endpoint',
+              '172.23.0.5',
+              'role',
+              'master',
+              'replication-offset',
+              4102,
+              'health',
+              'online',
+            ],
+            [
+              'id',
+              replicaId,
+              'port',
+              6379,
+              'ip',
+              '172.23.0.3',
+              'endpoint',
+              '172.23.0.3',
+              'role',
+              'replica',
+              'replication-offset',
+              4102,
+              'health',
+              'online',
+            ],
+          ],
+        ],
+      ];
+
+      it('reads the node availability zone and the shard id from a 9.1 reply', () => {
+        const shards = MetricsParser.parseClusterShards(valkey91Reply);
+        expect(shards).toHaveLength(1);
+        expect(shards[0].shardId).toBe(shardId);
+        expect(shards[0].slots).toEqual([[0, 5460]]);
+        expect(shards[0].nodes[0]).toEqual({
+          id: primaryId,
+          role: 'master',
+          health: 'online',
+          endpoint: '172.23.0.5',
+          port: 6379,
+          replicationOffset: 4102,
+          availabilityZone: 'us-east-1a',
+        });
+      });
+
+      it('leaves the zone unset for a 9.1 node that reports none', () => {
+        const shards = MetricsParser.parseClusterShards(valkey91Reply);
+        expect(shards[0].nodes[1].id).toBe(replicaId);
+        expect(shards[0].nodes[1]).not.toHaveProperty('availabilityZone');
+      });
+
+      it('leaves both unset for an 8.x reply', () => {
+        const shards = MetricsParser.parseClusterShards(valkey81Reply);
+        expect(shards).toHaveLength(1);
+        expect(shards[0]).not.toHaveProperty('shardId');
+        expect(shards[0].shardId).toBeUndefined();
+        expect(shards[0].nodes).toHaveLength(2);
+        for (const node of shards[0].nodes) {
+          expect(node).not.toHaveProperty('availabilityZone');
+          expect(node.availabilityZone).toBeUndefined();
+        }
+      });
+
+      it('reads both from the RESP3 object reply shape', () => {
+        const shards = MetricsParser.parseClusterShards([
+          {
+            slots: [0, 16383],
+            nodes: [{ id: primaryId, role: 'master', 'availability-zone': 'zone-a' }],
+            id: shardId,
+          },
+        ]);
+        expect(shards[0].shardId).toBe(shardId);
+        expect(shards[0].nodes[0].availabilityZone).toBe('zone-a');
+      });
+
+      it('reads both from the RESP3 Map reply shape', () => {
+        const shards = MetricsParser.parseClusterShards([
+          new Map<string, unknown>([
+            ['slots', [0, 16383]],
+            [
+              'nodes',
+              [
+                new Map<string, unknown>([
+                  ['id', primaryId],
+                  ['role', 'master'],
+                  ['availability-zone', 'zone-a'],
+                ]),
+              ],
+            ],
+            ['id', shardId],
+          ]),
+        ]);
+        expect(shards[0].shardId).toBe(shardId);
+        expect(shards[0].nodes[0].availabilityZone).toBe('zone-a');
+      });
+
+      it('ignores an empty or non-string zone and shard id', () => {
+        const shards = MetricsParser.parseClusterShards([
+          [
+            'slots',
+            [0, 1],
+            'nodes',
+            [
+              ['id', 'a', 'role', 'master', 'availability-zone', ''],
+              ['id', 'b', 'role', 'replica', 'availability-zone', 7],
+            ],
+            'id',
+            '',
+          ],
+        ]);
+        expect(shards[0]).not.toHaveProperty('shardId');
+        expect(shards[0].nodes[0]).not.toHaveProperty('availabilityZone');
+        expect(shards[0].nodes[1]).not.toHaveProperty('availabilityZone');
+      });
+    });
   });
 
   describe('parseSlowLog', () => {

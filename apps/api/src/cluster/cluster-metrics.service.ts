@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import Valkey from 'iovalkey';
 import { ClusterDiscoveryService, DiscoveredNode } from './cluster-discovery.service';
+import { NodeSlotStats } from './shard-load';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { MetricsParser } from '../database/parsers/metrics.parser';
 import { InfoParser } from '../database/parsers/info.parser';
@@ -50,16 +51,21 @@ const SLOT_RANGE_BATCH_SIZE = 16;
 export interface ClusterSlotStatsResult {
   stats: SlotStats;
   /**
-   * Slot-owning primaries that were unhealthy or did not answer for all their
+   * Slot-owning primaries that were failed or did not answer for all their
    * ranges; the slots in `failedSlotRanges` are missing from `stats`.
    */
   failedNodes: string[];
   /** The slot ranges that could not be read, as discovery sees them. */
   failedSlotRanges: number[][];
+  nodeStats?: NodeSlotStats[];
 }
 
 export function inSlotRanges(slot: number, ranges: number[][]): boolean {
   return ranges.some(([start, end]) => slot >= start && slot <= (end ?? start));
+}
+
+function slotsInRanges(ranges: number[][]): number {
+  return ranges.reduce((count, [start, end]) => count + (end ?? start) - start + 1, 0);
 }
 
 /** Keep only the slots inside the node's owned ranges, as discovery sees them. */
@@ -169,6 +175,8 @@ export interface NodeStatsOptions {
   nodeIds?: ReadonlyArray<string>;
 }
 
+type NodeAddress = Pick<DiscoveredNode, 'id' | 'address'>;
+
 export interface SlotMigration {
   slot: number;
   sourceNodeId: string;
@@ -181,9 +189,77 @@ export interface SlotMigration {
   slotRange?: string;
   /** Atomic slot migration job state as Valkey reports it, e.g. "snapshotting". */
   phase?: string;
+  jobName?: string;
+  lastUpdateAt?: number;
+  remainingReplBytes?: number;
+  retries?: number;
+  lastError?: string;
+}
+
+export interface SlotMigrationCheck {
+  migrations: SlotMigration[];
+  complete: boolean;
+}
+
+export interface FailedSlotMigration {
+  jobName: string;
+  slotRange: string;
+  sourceNodeId: string;
+  sourceAddress: string;
+  targetNodeId: string;
+  targetAddress: string;
+  message: string;
+  listedByNodeIds: string[];
+}
+
+export interface SlotMigrationReport extends SlotMigrationCheck {
+  failed: FailedSlotMigration[];
+  finishedJobs: string[];
+  cancelledJobs?: string[];
+  jobViews: SlotMigration[];
+  readNodeIds: string[];
+  jobsReadNodeIds: string[];
+  markersComplete: boolean;
+  ownNodeOnly: boolean;
 }
 
 const FINISHED_MIGRATION_STATES = new Set(['success', 'failed', 'cancelled']);
+const FINISHED_REDIS_MIGRATION_STATES = new Set(['completed', 'canceled']);
+const FAILED_REDIS_MIGRATION_STATE = 'failed';
+const MIGRATION_JOBS_ASK_AGAIN_MS = 5 * 60_000;
+const MAX_REMEMBERED_NODES_WITHOUT_MIGRATION_JOBS = 1000;
+const FULL_NODE_ID_LENGTH = 40;
+
+function namesBothEnds(migration: SlotMigration): boolean {
+  return migration.sourceNodeId !== '' && migration.targetNodeId !== '';
+}
+
+function isUnknownCommand(message: string): boolean {
+  return /unknown (sub)?command/i.test(message);
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export function parseRedisMigrationTasks(raw: unknown): Record<string, string>[] {
+  if (!Array.isArray(raw)) {
+    throw new Error('CLUSTER MIGRATION STATUS did not reply with a list of tasks');
+  }
+  return parseSlotMigrationJobs(raw);
+}
+
+function byteCount(value: string | undefined): number | undefined {
+  const bytes = Number(value);
+  return value !== undefined && value !== '' && Number.isSafeInteger(bytes) && bytes >= 0
+    ? bytes
+    : undefined;
+}
+
+function epochSecondsToMs(value: string | undefined): number | undefined {
+  const seconds = Number(value);
+  return value !== undefined && Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined;
+}
 
 /** One CLUSTER GETSLOTMIGRATIONS job; RESP2 delivers each map as a flat name/value array. */
 export function parseSlotMigrationJobs(raw: unknown): Record<string, string>[] {
@@ -204,6 +280,7 @@ export class ClusterMetricsService {
   private readonly logger = new Logger(ClusterMetricsService.name);
   private loggedErrors: Set<string> = new Set();
   private readonly commandVerdicts: Map<string, boolean> = new Map();
+  private readonly migrationJobsAskAgainAt: Map<string, number> = new Map();
   private readonly MAX_LOGGED_ERRORS = 500;
   // Commands a fan-out gave up waiting for, by node socket. While they stay
   // queued on that socket the node is reported as not answering instead of
@@ -547,8 +624,10 @@ export class ClusterMetricsService {
    *   other registered connection is one of the nodes its discovery lists.
    *   Nodes registered one by one each keep their own node's slots. A replica
    *   reports its primary's slots, so registering both counts that shard twice.
+   * Null when that discovery fails, so the caller does not take it for a
+   * change of mode.
    */
-  async usesClusterWideSlotStats(connectionId?: string): Promise<boolean> {
+  async usesClusterWideSlotStats(connectionId?: string): Promise<boolean | null> {
     const id = connectionId ?? this.connectionRegistry.getDefaultId() ?? undefined;
     if (!id) return true;
     if (this.connectionRegistry.getConfig(id)?.membership) return false;
@@ -559,7 +638,7 @@ export class ClusterMetricsService {
     try {
       nodes = await this.discoveryService.discoverNodes(id);
     } catch {
-      return false;
+      return null;
     }
     const registeredElsewhere = (host: string, port: number) => {
       const owner = this.connectionRegistry.findConfigByHostPort(host, port);
@@ -611,7 +690,7 @@ export class ClusterMetricsService {
       `Cluster discovery did not answer within ${timeoutMs}ms`,
     );
     const owners = discovered.filter((node) => node.role === 'master' && node.slots.length > 0);
-    const primaries = owners.filter((node) => node.healthy);
+    const primaries = owners.filter((node) => node.state !== 'failed');
     const remainingMs = Math.max(0, budgetEnd - Date.now());
     const nodeTimeoutMs = slotStatsNodeBudget(remainingMs);
     // A node's timeout says something about it only when this call had at
@@ -686,9 +765,11 @@ export class ClusterMetricsService {
     );
 
     const perNode: SlotStats[] = [];
-    const unhealthy = owners.filter((node) => !node.healthy);
-    const failedNodes = unhealthy.map((node) => node.address);
-    const failedSlotRanges = unhealthy.flatMap((node) => node.slots);
+    const nodeStats: NodeSlotStats[] = [];
+    let ownershipDrifted = false;
+    const failedOwners = owners.filter((node) => node.state === 'failed');
+    const failedNodes = failedOwners.map((node) => node.address);
+    const failedSlotRanges = failedOwners.flatMap((node) => node.slots);
     for (const [i, result] of results.entries()) {
       const node = primaries[i];
       // Each scrape and dashboard poll lands here, so log a failing node once
@@ -714,8 +795,19 @@ export class ClusterMetricsService {
             `slot ranges from ${node.address}: ${result.value.reason}`,
         );
       } else {
+        nodeStats.push({
+          nodeId: node.id,
+          address: node.address.split('@')[0],
+          stats: result.value.stats,
+        });
+        if (Object.keys(result.value.stats).length < slotsInRanges(node.slots)) {
+          ownershipDrifted = true;
+        }
         this.loggedErrors.delete(errorKey);
       }
+    }
+    if (ownershipDrifted) {
+      this.discoveryService.forgetTopology(connectionId);
     }
     if (primaries.length > 0 && perNode.length === 0) {
       // No primary answered on the address it announces, as behind an SSH
@@ -755,6 +847,7 @@ export class ClusterMetricsService {
       stats: mergeSlotStats(perNode, orderBy, validLimit),
       failedNodes,
       failedSlotRanges,
+      nodeStats: ownershipDrifted || nodeStats.length === 0 ? undefined : nodeStats,
     };
   }
 
@@ -817,22 +910,55 @@ export class ClusterMetricsService {
   /**
    * Slot migrations in progress, asked of every primary: legacy MIGRATING /
    * IMPORTING markers only appear on a node's own CLUSTER NODES line, and atomic
-   * slot migration jobs (Valkey 9+, CLUSTER MIGRATESLOTS) only show up in
-   * CLUSTER GETSLOTMIGRATIONS on the source and target nodes.
+   * slot migration jobs only show up on the source and target nodes, in
+   * CLUSTER GETSLOTMIGRATIONS (Valkey 9+) or CLUSTER MIGRATION STATUS (Redis 8.4+).
    */
   async getSlotMigrations(connectionId?: string): Promise<SlotMigration[]> {
+    return (await this.checkSlotMigrations(connectionId)).migrations;
+  }
+
+  async checkSlotMigrations(connectionId?: string): Promise<SlotMigrationCheck> {
+    const { migrations, complete } = await this.readSlotMigrations(connectionId);
+    return { migrations, complete };
+  }
+
+  async readSlotMigrations(
+    connectionId?: string,
+    options: { ownNodeOnly?: boolean; rememberNodesWithoutJobs?: boolean } = {},
+  ): Promise<SlotMigrationReport> {
     let nodes: DiscoveredNode[];
     try {
-      nodes = await this.discoveryService.discoverNodes(connectionId);
+      nodes = await withTimeout(
+        this.discoveryService.discoverNodes(connectionId),
+        NODE_COMMAND_TIMEOUT_MS,
+        `Cluster discovery did not answer within ${NODE_COMMAND_TIMEOUT_MS}ms`,
+      );
     } catch (error) {
       this.logger.error(
         `Failed to check slot migrations: ${error instanceof Error ? error.message : error}`,
       );
-      return [];
+      return {
+        migrations: [],
+        failed: [],
+        finishedJobs: [],
+        cancelledJobs: [],
+        jobViews: [],
+        readNodeIds: [],
+        jobsReadNodeIds: [],
+        complete: false,
+        markersComplete: false,
+        ownNodeOnly: false,
+      };
     }
 
+    const nodesById = new Map(nodes.map((node) => [node.id, node]));
     const findNode = (idOrPrefix: string) =>
-      idOrPrefix ? nodes.find((n) => n.id.startsWith(idOrPrefix)) : undefined;
+      idOrPrefix
+        ? (nodesById.get(idOrPrefix) ??
+          (idOrPrefix.length < FULL_NODE_ID_LENGTH
+            ? nodes.find((n) => n.id.startsWith(idOrPrefix))
+            : undefined))
+        : undefined;
     // The source's MIGRATING marker and the target's IMPORTING marker describe
     // the same move; keep one entry and let MIGRATING win so the label is stable.
     const legacy = new Map<string, SlotMigration>();
@@ -843,6 +969,12 @@ export class ClusterMetricsService {
     // Both ends of an atomic migration report the job; keep one per job name,
     // preferring the source's EXPORT view so the entry does not flip between polls.
     const atomicJobs = new Map<string, SlotMigration>();
+    const failedJobs = new Map<string, FailedSlotMigration>();
+    const finishedJobs = new Set<string>();
+    const cancelledJobs = new Set<string>();
+    const jobViews: SlotMigration[] = [];
+    const readNodeIds = new Set<string>();
+    const jobsReadNodeIds = new Set<string>();
 
     const addLegacyMarkers = (nodesString: string) => {
       for (const line of nodesString.trim().split('\n')) {
@@ -851,26 +983,26 @@ export class ClusterMetricsService {
         const [nodeId, address] = parts;
         for (const slotRange of parts.slice(8)) {
           const migrating = slotRange.match(/\[(\d+)->-([a-f0-9]+)\]/i);
-          const target = migrating && findNode(migrating[2]);
-          if (migrating && target) {
+          if (migrating) {
+            const target = findNode(migrating[2]);
             addLegacy({
               slot: parseInt(migrating[1], 10),
               sourceNodeId: nodeId,
               sourceAddress: address,
-              targetNodeId: target.id,
-              targetAddress: target.address,
+              targetNodeId: target?.id ?? migrating[2],
+              targetAddress: target?.address ?? '',
               state: 'migrating',
               keysRemaining: undefined, // Can't get this without node connection
             });
           }
 
           const importing = slotRange.match(/\[(\d+)-<-([a-f0-9]+)\]/i);
-          const source = importing && findNode(importing[2]);
-          if (importing && source) {
+          if (importing) {
+            const source = findNode(importing[2]);
             addLegacy({
               slot: parseInt(importing[1], 10),
-              sourceNodeId: source.id,
-              sourceAddress: source.address,
+              sourceNodeId: source?.id ?? importing[2],
+              sourceAddress: source?.address ?? '',
               targetNodeId: nodeId,
               targetAddress: address,
               state: 'importing',
@@ -880,63 +1012,208 @@ export class ClusterMetricsService {
       }
     };
     let nodesRead = 0;
+    let complete = true;
+    let markersComplete = true;
 
-    const readNode = async (primary: DiscoveredNode, client: Valkey): Promise<void> => {
+    const nodeNamedMyself = (nodesString: string): NodeAddress | undefined => {
+      const line = nodesString
+        .trim()
+        .split('\n')
+        .map((entry) => entry.split(' '))
+        .find((parts) => parts.length >= 3 && parts[2].split(',').includes('myself'));
+      if (!line) return undefined;
+      return nodesById.get(line[0]) ?? { id: line[0], address: line[1].split('@')[0] };
+    };
+
+    const readNode = async (client: Valkey, known?: NodeAddress): Promise<void> => {
+      let nodesString: string | undefined;
       try {
-        addLegacyMarkers((await client.call('CLUSTER', 'NODES')) as string);
-        nodesRead++;
+        nodesString = (await client.call('CLUSTER', 'NODES')) as string;
+        addLegacyMarkers(nodesString);
       } catch (error) {
-        this.logger.debug(`CLUSTER NODES failed on ${primary.address}: ${error}`);
+        nodesString = undefined;
+        complete = false;
+        markersComplete = false;
+        this.logger.debug(
+          `CLUSTER NODES failed on ${known?.address ?? "the connection's own node"}: ${error}`,
+        );
+      }
+      const primary =
+        known ?? (nodesString === undefined ? undefined : nodeNamedMyself(nodesString));
+      if (!primary) return;
+      if (nodesString !== undefined) {
+        nodesRead++;
+        readNodeIds.add(primary.id);
       }
 
+      const withoutJobsKey = `${connectionId ?? ''}:${primary.id}`;
+      if (
+        options.rememberNodesWithoutJobs &&
+        (this.migrationJobsAskAgainAt.get(withoutJobsKey) ?? 0) > Date.now()
+      ) {
+        jobsReadNodeIds.add(primary.id);
+        return;
+      }
+      const warnOnce = (command: string, message: string) => {
+        const errorKey = /^NOPERM/i.test(message)
+          ? `${command}-noperm-${connectionId ?? ''}`
+          : `${command}-${primary.id}-${message}`;
+        if (!this.loggedErrors.has(errorKey)) {
+          this.addLoggedError(errorKey);
+          this.logger.warn(`${command} failed on ${primary.address}: ${message}`);
+        }
+      };
+      const failJobsRead = (command: string, message: string) => {
+        complete = false;
+        warnOnce(command, message);
+      };
+      const addJobView = (
+        name: string,
+        slotRanges: string | undefined,
+        sourceNode: string | undefined,
+        targetNode: string | undefined,
+        isImport: boolean,
+        details: Pick<
+          SlotMigration,
+          'phase' | 'lastUpdateAt' | 'remainingReplBytes' | 'retries' | 'lastError'
+        >,
+      ) => {
+        const source = findNode(sourceNode ?? '');
+        const target = findNode(targetNode ?? '');
+        const firstSlot = parseInt((slotRanges ?? '').split(/[-\s]/)[0], 10);
+        const view: SlotMigration = {
+          slot: Number.isNaN(firstSlot) ? -1 : firstSlot,
+          slotRange: slotRanges,
+          sourceNodeId: source?.id ?? sourceNode ?? '',
+          sourceAddress: source?.address ?? '',
+          targetNodeId: target?.id ?? targetNode ?? '',
+          targetAddress: target?.address ?? '',
+          state: isImport ? 'importing' : 'migrating',
+          ...details,
+          jobName: name,
+        };
+        jobViews.push(view);
+        const known = atomicJobs.get(name);
+        if (!known || (namesBothEnds(view) && (!isImport || !namesBothEnds(known)))) {
+          atomicJobs.set(name, view);
+        }
+      };
       let jobs: Record<string, string>[];
       try {
         jobs = parseSlotMigrationJobs(await client.call('CLUSTER', 'GETSLOTMIGRATIONS'));
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        // Before Valkey 9 the subcommand does not exist; anything else is worth a line.
-        const errorKey = `getslotmigrations-${primary.id}-${message}`;
-        if (!/unknown (sub)?command/i.test(message) && !this.loggedErrors.has(errorKey)) {
-          this.addLoggedError(errorKey);
-          this.logger.warn(`CLUSTER GETSLOTMIGRATIONS failed on ${primary.address}: ${message}`);
+        const message = errorText(error);
+        if (!isUnknownCommand(message)) {
+          failJobsRead('CLUSTER GETSLOTMIGRATIONS', message);
+          return;
+        }
+        let tasks: Record<string, string>[];
+        try {
+          tasks = parseRedisMigrationTasks(
+            await client.call('CLUSTER', 'MIGRATION', 'STATUS', 'ALL'),
+          );
+        } catch (redisError) {
+          const redisMessage = errorText(redisError);
+          const refused = /^NOPERM/i.test(redisMessage);
+          if (!refused && !isUnknownCommand(redisMessage)) {
+            failJobsRead('CLUSTER MIGRATION STATUS', redisMessage);
+            return;
+          }
+          if (refused) warnOnce('CLUSTER MIGRATION STATUS', redisMessage);
+          if (options.rememberNodesWithoutJobs) {
+            this.rememberNodeWithoutMigrationJobs(withoutJobsKey);
+          }
+          jobsReadNodeIds.add(primary.id);
+          return;
+        }
+        this.migrationJobsAskAgainAt.delete(withoutJobsKey);
+        jobsReadNodeIds.add(primary.id);
+        for (const task of tasks) {
+          const isImport = task.operation?.toLowerCase() === 'import';
+          if (!task.id || (task.state === FAILED_REDIS_MIGRATION_STATE && !isImport)) continue;
+          if (FINISHED_REDIS_MIGRATION_STATES.has(task.state)) {
+            finishedJobs.add(task.id);
+            if (task.state === 'canceled') cancelledJobs.add(task.id);
+            continue;
+          }
+          const retries = parseInt(task.retries ?? '', 10);
+          addJobView(task.id, task.slots, task.source, task.dest, isImport, {
+            phase: task.state,
+            ...(Number.isNaN(retries) ? {} : { retries }),
+            ...(task.last_error ? { lastError: task.last_error } : {}),
+          });
         }
         return;
       }
+      this.migrationJobsAskAgainAt.delete(withoutJobsKey);
+      jobsReadNodeIds.add(primary.id);
       for (const job of jobs) {
-        if (!job.name || FINISHED_MIGRATION_STATES.has(job.state)) continue;
+        if (!job.name) continue;
         const isImport = job.operation?.toUpperCase() === 'IMPORT';
-        if (isImport && atomicJobs.has(job.name)) continue;
-        const source = findNode(job.source_node ?? '');
-        const target = findNode(job.target_node ?? '');
-        const firstSlot = parseInt((job.slot_ranges ?? '').split(/[-\s]/)[0], 10);
-        atomicJobs.set(job.name, {
-          slot: Number.isNaN(firstSlot) ? -1 : firstSlot,
-          slotRange: job.slot_ranges,
-          sourceNodeId: source?.id ?? job.source_node ?? '',
-          sourceAddress: source?.address ?? '',
-          targetNodeId: target?.id ?? job.target_node ?? '',
-          targetAddress: target?.address ?? '',
-          state: isImport ? 'importing' : 'migrating',
+        if (FINISHED_MIGRATION_STATES.has(job.state)) {
+          finishedJobs.add(job.name);
+          if (job.state === 'cancelled') cancelledJobs.add(job.name);
+          if (job.state !== 'failed') continue;
+        }
+        if (job.state === 'failed') {
+          const known = failedJobs.get(job.name);
+          const listedByNodeIds = [...(known?.listedByNodeIds ?? []), primary.id];
+          if (known && isImport) {
+            failedJobs.set(job.name, { ...known, listedByNodeIds });
+            continue;
+          }
+          const source = findNode(job.source_node ?? '');
+          const target = findNode(job.target_node ?? '');
+          failedJobs.set(job.name, {
+            jobName: job.name,
+            slotRange: job.slot_ranges ?? '',
+            sourceNodeId: source?.id ?? job.source_node ?? '',
+            sourceAddress: source?.address ?? '',
+            targetNodeId: target?.id ?? job.target_node ?? '',
+            targetAddress: target?.address ?? '',
+            message: job.message ?? '',
+            listedByNodeIds,
+          });
+          continue;
+        }
+        addJobView(job.name, job.slot_ranges, job.source_node, job.target_node, isImport, {
           phase: job.state,
+          lastUpdateAt: epochSecondsToMs(job.last_update_time),
+          remainingReplBytes: byteCount(job.remaining_repl_size),
         });
       }
     };
 
-    // A new primary has no slots until its first import lands, so include every primary.
-    const primaries = nodes.filter((node) => node.role === 'master' && node.healthy);
-    await Promise.all(
-      primaries.map((primary) =>
-        this.onNode(primary, connectionId, NODE_COMMAND_TIMEOUT_MS, (client) => readNode(primary, client)).catch((error) => {
-          this.logger.debug(`Slot migration check skipped ${primary.address}: ${error}`);
-        }),
-      ),
+    // A new primary has no slots until its first import lands, so include every healthy primary.
+    const masters = nodes.filter(
+      (node) => node.role === 'master' && (node.state === 'healthy' || node.slots.length > 0),
     );
+    const primaries = masters.filter((node) => node.state !== 'failed');
+    if (primaries.length === 0 || masters.some((node) => node.state === 'failed')) {
+      complete = false;
+      markersComplete = false;
+    }
+    if (!options.ownNodeOnly) {
+      await Promise.all(
+        primaries.map((primary) =>
+          this.onNode(primary, connectionId, NODE_COMMAND_TIMEOUT_MS, (client) => readNode(client, primary)).catch((error) => {
+            complete = false;
+            markersComplete = false;
+            this.logger.debug(`Slot migration check skipped ${primary.address}: ${error}`);
+          }),
+        ),
+      );
+    }
 
     // No primary could be read directly, as behind an SSH tunnel or NAT: the
     // connection's own node still shows its own markers and migration jobs.
+    let ownNodeOnly = false;
     if (primaries.length > 0 && nodesRead === 0) {
+      complete = false;
+      markersComplete = false;
+      ownNodeOnly = true;
       const errorKey = `slotmigrations-${connectionId ?? ''}`;
-      if (!this.loggedErrors.has(errorKey)) {
+      if (!options.ownNodeOnly && !this.loggedErrors.has(errorKey)) {
         this.logger.warn(
           'Slot migration check could not read any primary directly; reading the connection\'s own node instead',
         );
@@ -944,14 +1221,16 @@ export class ClusterMetricsService {
       }
       // Ask it the same way as a primary, so atomic migrations it is part of
       // (GETSLOTMIGRATIONS) show up as well as legacy markers.
-      const self = nodes.find((node) => node.flags.includes('myself')) ?? primaries[0];
       try {
-        // The connection's own client is shared, so a reply that never comes
-        // is left queued on it rather than disconnecting it; only the wait ends.
-        await withTimeout(
-          readNode(self, this.connectionRegistry.get(connectionId).getClient()),
+        await this.discoveryService.onOwnNodeClient(
+          connectionId,
           NODE_COMMAND_TIMEOUT_MS,
-          `The connection did not answer the slot migration check within ${NODE_COMMAND_TIMEOUT_MS}ms`,
+          (client) =>
+            withTimeout(
+              readNode(client),
+              NODE_COMMAND_TIMEOUT_MS,
+              `The connection did not answer the slot migration check within ${NODE_COMMAND_TIMEOUT_MS}ms`,
+            ),
         );
       } catch (error) {
         this.logger.error(
@@ -962,7 +1241,31 @@ export class ClusterMetricsService {
       this.loggedErrors.delete(`slotmigrations-${connectionId ?? ''}`);
     }
 
-    return [...legacy.values(), ...atomicJobs.values()];
+    return {
+      migrations: [...legacy.values(), ...atomicJobs.values()],
+      failed: [...failedJobs.values()],
+      finishedJobs: [...finishedJobs],
+      cancelledJobs: [...cancelledJobs],
+      jobViews,
+      readNodeIds: [...readNodeIds],
+      jobsReadNodeIds: [...jobsReadNodeIds],
+      complete,
+      markersComplete,
+      ownNodeOnly,
+    };
+  }
+
+  private rememberNodeWithoutMigrationJobs(key: string): void {
+    const now = Date.now();
+    if (this.migrationJobsAskAgainAt.size >= MAX_REMEMBERED_NODES_WITHOUT_MIGRATION_JOBS) {
+      for (const [known, askAgainAt] of this.migrationJobsAskAgainAt) {
+        if (askAgainAt <= now) this.migrationJobsAskAgainAt.delete(known);
+      }
+      if (this.migrationJobsAskAgainAt.size >= MAX_REMEMBERED_NODES_WITHOUT_MIGRATION_JOBS) {
+        this.migrationJobsAskAgainAt.clear();
+      }
+    }
+    this.migrationJobsAskAgainAt.set(key, now + MIGRATION_JOBS_ASK_AGAIN_MS);
   }
 
   private async getKeysInSlot(client: Valkey, slot: number): Promise<number | undefined> {

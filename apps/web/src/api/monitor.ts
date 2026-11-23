@@ -1,5 +1,6 @@
 import type {
   CaptureTriggerStatus,
+  ClusterNodeState,
   ScheduledCaptureStatus,
   StoredCaptureSession,
   StoredCaptureTrigger,
@@ -102,6 +103,7 @@ export interface MonitorNodeDescriptor {
   id: string;
   address: string;
   role: 'master' | 'replica';
+  state: ClusterNodeState;
   healthy: boolean;
 }
 
@@ -129,6 +131,12 @@ export interface CrossReferenceHotKey {
   rankInBaseline: number | null;
 }
 
+export interface CrossReferenceTopKey {
+  key: string;
+  count: number;
+  share: number;
+}
+
 export interface CrossReferenceSlowlogRegression {
   cmd: string;
   shape: string;
@@ -149,6 +157,7 @@ export interface CrossReferenceResult {
   };
   session: { startTs: number; endTs: number; capturedLineCount: number };
   newShapes: CrossReferenceNewShape[];
+  topKeys?: CrossReferenceTopKey[];
   hotKeyDelta: {
     newInTopK: CrossReferenceHotKey[];
     rankChanges: CrossReferenceHotKey[];

@@ -72,3 +72,8 @@ export const MODULE_VERSION_ENCODINGS: Partial<
     timeseries: 'decimal',
   },
 };
+
+/** Opt-in: include findings matched only via NVD fallback ranges in alert events. Default off. */
+export function isBroadAlertEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.CVE_ALERT_ON_BROAD === 'true';
+}

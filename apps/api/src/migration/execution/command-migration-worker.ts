@@ -1,5 +1,5 @@
 import Valkey from 'iovalkey';
-import type { DatabaseConnectionConfig } from '@betterdb/shared';
+import type { MigrationConnectionConfig } from '../migration-endpoints';
 import type { ExecutionJob } from './execution-job';
 import { migrateKey } from './type-handlers';
 import { attachTlsRefresh, createClient, createTargetClient, nodeClientAuthOptions } from './client-factory';
@@ -11,8 +11,8 @@ const TYPE_BATCH = 500;
 const MIGRATE_BATCH = 50;
 
 export interface CommandMigrationOptions {
-  sourceConfig: DatabaseConnectionConfig;
-  targetConfig: DatabaseConnectionConfig;
+  sourceConfig: MigrationConnectionConfig;
+  targetConfig: MigrationConnectionConfig;
   sourceIsCluster: boolean;
   targetIsCluster: boolean;
   job: ExecutionJob;
@@ -28,8 +28,13 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
   const sourceClients: Valkey[] = [];
   const onTlsRefreshError = (message: string) => log(job, maxLogLines, message);
   const targetClient = createTargetClient(targetConfig, 'BetterDB-Migration-Target', targetIsCluster, onTlsRefreshError);
+  const dropConnections = () => {
+    for (const client of [...sourceClients, targetClient]) client.disconnect();
+  };
+  job.dropConnections = dropConnections;
 
   try {
+    if (job.tunnelError !== undefined) return;
     await targetClient.connect();
     log(job, maxLogLines, `Connected to target${targetIsCluster ? ' (cluster mode)' : ''}`);
 
@@ -76,6 +81,7 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
       // Register before connecting so the outer cleanup quits it, and stop the
       // reconnect loop iovalkey starts when the first dial fails.
       sourceClients.push(client);
+      if (job.tunnelError !== undefined) return;
       try {
         await client.connect();
       } catch (err) {
@@ -94,6 +100,8 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
     }
     job.totalKeys = totalKeys;
     log(job, maxLogLines, `Total keys to migrate: ${totalKeys.toLocaleString()}`);
+
+    if (isCancelled(job)) return;
 
     if (totalKeys === 0) {
       log(job, maxLogLines, 'No keys to migrate');
@@ -172,12 +180,22 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
       } while (cursor !== '0');
     }
 
+    if (isCancelled(job)) return;
+
     job.progress = 100;
     log(job, maxLogLines,
       `Migration complete: ${job.keysTransferred.toLocaleString()} transferred, ${keysSkipped} skipped out of ${totalKeys.toLocaleString()} total`);
 
   } finally {
-    await Promise.allSettled([...sourceClients, targetClient].map(c => c.quit()));
+    try {
+      if (job.tunnelError !== undefined) {
+        dropConnections();
+      } else {
+        await Promise.allSettled([...sourceClients, targetClient].map(c => c.quit()));
+      }
+    } finally {
+      job.dropConnections = undefined;
+    }
   }
 }
 
@@ -208,7 +226,7 @@ async function batchType(client: Valkey, keys: string[]): Promise<string[]> {
 }
 
 function isCancelled(job: ExecutionJob): boolean {
-  return (job.status as string) === 'cancelled';
+  return (job.status as string) === 'cancelled' || job.tunnelError !== undefined;
 }
 
 function log(job: ExecutionJob, maxLines: number, message: string): void {

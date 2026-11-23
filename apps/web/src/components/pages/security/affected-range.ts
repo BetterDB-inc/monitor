@@ -1,6 +1,6 @@
 import type { BranchRange } from '@betterdb/shared';
 
-export function affectedRangeLabel(range: BranchRange): string | null {
+function baseRangeLabel(range: BranchRange): string | null {
   if (range.vulnerableBelow !== undefined) {
     if (range.vulnerableFrom === undefined) {
       return `< ${range.vulnerableBelow}`;
@@ -18,6 +18,12 @@ export function affectedRangeLabel(range: BranchRange): string | null {
   }
 
   return `${range.vulnerableFrom} – ${range.vulnerableAtOrBelow}`;
+}
+
+export function affectedRangeLabel(range: BranchRange): string | null {
+  const base = baseRangeLabel(range);
+
+  return range.fallback === true && base !== null ? `${base} (NVD, unpinned branch)` : base;
 }
 
 export function affectedRangesLabel(ranges: BranchRange[]): string | null {

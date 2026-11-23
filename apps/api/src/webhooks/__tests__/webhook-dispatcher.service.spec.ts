@@ -10,6 +10,7 @@ import {
   type WebhookPayload,
 } from '@betterdb/shared';
 import { ConfigService } from '@nestjs/config';
+import { Logger } from '@nestjs/common';
 import { createServer, type Server } from 'http';
 import type { AddressInfo } from 'net';
 import { promises as dns } from 'dns';
@@ -1040,6 +1041,90 @@ describe('WebhookDispatcherService', () => {
       jest.spyOn(dns, 'lookup').mockResolvedValue([{ address: '8.8.8.8', family: 4 }, { address: '10.1.2.3', family: 4 }] as any);
       await expect(service.sendWebhook(hook(`http://hooks.example.com:${port}/ok`), 'd1', payload)).resolves.toBe(DeliveryStatus.FAILED);
       expect(hits['/ok']).toBeUndefined();
+    });
+
+    describe('with a private network allowlist', () => {
+      const blocked = 'Webhook URL resolves to a blocked address';
+      const resolveTo = (address: string) => jest.spyOn(dns, 'lookup').mockResolvedValue([{ address, family: 4 }] as never);
+
+      beforeEach(() => {
+        process.env.NODE_ENV = 'production';
+      });
+
+      afterEach(() => {
+        delete process.env.WEBHOOK_ALLOWED_PRIVATE_CIDRS;
+        delete process.env.WEBHOOK_ALLOWED_PRIVATE_HOSTS;
+      });
+
+      it('delivers and test-delivers to a hostname resolving inside an allowed CIDR', async () => {
+        process.env.WEBHOOK_ALLOWED_PRIVATE_CIDRS = '127.0.0.0/8';
+        resolveTo('127.0.0.1');
+        const url = `http://hook.operator-sim.svc.cluster.local:${port}/ok`;
+        await expect(service.sendWebhook(hook(url), 'd1', payload)).resolves.toBe(DeliveryStatus.SUCCESS);
+        await expect(service.testWebhook(hook(url))).resolves.toMatchObject({ success: true, statusCode: 200 });
+        expect(hits['/ok']).toHaveLength(2);
+      });
+
+      it('delivers to an allowed IP literal and blocks one outside the allowlist', async () => {
+        process.env.WEBHOOK_ALLOWED_PRIVATE_CIDRS = '127.0.0.0/8';
+        await expect(service.sendWebhook(hook(`http://127.0.0.1:${port}/ok`), 'd1', payload)).resolves.toBe(DeliveryStatus.SUCCESS);
+        await expect(service.sendWebhook(hook('http://10.245.0.1/ok'), 'd1', payload)).resolves.toBe(DeliveryStatus.FAILED);
+        expect(storageClient.updateDelivery).toHaveBeenLastCalledWith('d1', expect.objectContaining({ status: DeliveryStatus.FAILED, responseBody: blocked }));
+        await expect(service.testWebhook(hook('http://10.245.0.1/ok'))).resolves.toMatchObject({ success: false, error: blocked });
+      });
+
+      it('fails a delivery when the hostname now resolves outside the allowlist', async () => {
+        process.env.WEBHOOK_ALLOWED_PRIVATE_CIDRS = '127.0.0.0/8';
+        const url = `http://hooks.example.com:${port}/ok`;
+        resolveTo('127.0.0.1');
+        await expect(service.sendWebhook(hook(url), 'd1', payload)).resolves.toBe(DeliveryStatus.SUCCESS);
+        resolveTo('10.245.0.1');
+        await expect(service.sendWebhook(hook(url), 'd1', payload)).resolves.toBe(DeliveryStatus.FAILED);
+        await expect(service.testWebhook(hook(url))).resolves.toMatchObject({ success: false, error: blocked });
+        expect(hits['/ok']).toHaveLength(1);
+      });
+
+      it('applies host patterns to private addresses but never to loopback', async () => {
+        process.env.WEBHOOK_ALLOWED_PRIVATE_HOSTS = '*.svc.cluster.local';
+        resolveTo('127.0.0.1');
+        const result = await service.testWebhook(hook(`http://hook.operator-sim.svc.cluster.local:${port}/ok`));
+        expect(result).toMatchObject({ success: false, error: blocked });
+        expect(hits['/ok']).toBeUndefined();
+      });
+
+      it('guards deliveries outside production too', async () => {
+        process.env.NODE_ENV = 'test';
+        process.env.WEBHOOK_ALLOWED_PRIVATE_CIDRS = '10.244.0.0/16';
+        resolveTo('10.245.0.1');
+        await expect(service.testWebhook(hook(`http://hooks.example.com:${port}/ok`))).resolves.toMatchObject({ success: false, error: blocked });
+        await expect(service.testWebhook(hook('http://10.245.0.1/ok'))).resolves.toMatchObject({ success: false, error: blocked });
+      });
+
+      it('holds loopback to the allowlist outside production too', async () => {
+        process.env.NODE_ENV = 'test';
+        process.env.WEBHOOK_ALLOWED_PRIVATE_HOSTS = '*.svc.cluster.local';
+        await expect(service.testWebhook(hook(`http://127.0.0.1:${port}/ok`))).resolves.toMatchObject({ success: false, error: blocked });
+        resolveTo('127.0.0.1');
+        await expect(service.testWebhook(hook(`http://localhost:${port}/ok`))).resolves.toMatchObject({ success: false, error: blocked });
+        expect(hits['/ok']).toBeUndefined();
+        process.env.WEBHOOK_ALLOWED_PRIVATE_CIDRS = '127.0.0.0/8';
+        await expect(service.testWebhook(hook(`http://127.0.0.1:${port}/ok`))).resolves.toMatchObject({ success: true, statusCode: 200 });
+      });
+
+      it('blocks a stored private IP literal once the allowlist is removed', async () => {
+        await expect(service.sendWebhook(hook('http://10.244.1.7/ok'), 'd1', payload)).resolves.toBe(DeliveryStatus.FAILED);
+        expect(storageClient.updateDelivery).toHaveBeenLastCalledWith('d1', expect.objectContaining({ status: DeliveryStatus.FAILED, responseBody: blocked }));
+      });
+
+      it('warns once per webhook while its deliveries stay blocked', async () => {
+        const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+        const deliveryWarnings = () => warn.mock.calls.filter(([message]) => String(message).startsWith('Webhook delivery blocked'));
+        await service.sendWebhook(hook('http://10.244.1.7/ok'), 'd1', payload);
+        await service.sendWebhook(hook('http://10.244.1.7/ok'), 'd1', payload);
+        expect(deliveryWarnings()).toHaveLength(1);
+        await service.sendWebhook({ ...hook('http://10.244.1.7/ok'), id: '2' }, 'd1', payload);
+        expect(deliveryWarnings()).toHaveLength(2);
+      });
     });
   });
 });

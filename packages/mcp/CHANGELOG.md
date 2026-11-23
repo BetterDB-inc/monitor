@@ -18,6 +18,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BETTERDB_TELEMETRY` is off.
 - `BETTERDB_MONITOR_<NAME>` variables are passed to the started monitor as
   `<NAME>`.
+- `get_cluster_nodes` returns `availabilityZone` and `shardId` for each node
+  on Valkey 9.1 and later. On older versions `availabilityZone` is returned
+  for nodes listed in the connection's zone map.
+- `get_hot_shards`: the hot shards open on a cluster, each with its top
+  slots, hot keys and a suggested slot rebalance (which slot ranges to move
+  to which shards, and the projected load), or the reason no move is
+  suggested. Read-only; nothing is moved.
+- `get_anomalies`, `get_incident_timeline` and `get_hot_shards` name the
+  cluster node an event or hot shard is about in `node`: its id, address,
+  role, shard and zone when known, and `collected`, which is false when no
+  connection of the monitor points at that node.
+- `get_cluster_nodes` returns `collected` for each node, with the
+  `connectionId` of the connection that collects it.
+- `get_topology_disagreements`: where the nodes of a cluster disagree about
+  slot owners, config epochs, failure flags or membership, with the number
+  of views on each side, and one line per shard. Built for large clusters:
+  lines that differ only in the node they are about are merged, node lists
+  are capped at 25 and `coverage` says how many nodes answered. Returns the
+  disputed shards and the totals of all of them; `shards: "all"` returns
+  one line per shard.
+
+### Changed
+
+- `get_cluster_nodes` returns a `state` for each node: `failed` for a node
+  flagged `fail`, `suspect` for one flagged `fail?` (PFAIL), `handshake` or
+  `noaddr`, and `healthy` otherwise. A node its peers only suspect was
+  reported as healthy before.
+
+### Deprecated
+
+- The `healthy` boolean on `get_cluster_nodes` nodes: use `state`. It is
+  still returned and is now `true` only when `state` is `healthy`.
 
 ### Fixed
 

@@ -5,11 +5,12 @@ import { MigrationController } from './migration.controller';
 import { MigrationService } from './migration.service';
 import { MigrationExecutionService } from './migration-execution.service';
 import { MigrationValidationService } from './migration-validation.service';
+import { MigrationEndpointResolver } from './migration-endpoints';
 
 @Module({
   imports: [ConnectionsModule, StorageModule],
   controllers: [MigrationController],
-  providers: [MigrationService, MigrationExecutionService, MigrationValidationService],
+  providers: [MigrationService, MigrationExecutionService, MigrationValidationService, MigrationEndpointResolver],
   exports: [MigrationService, MigrationExecutionService, MigrationValidationService],
 })
 export class MigrationModule {}

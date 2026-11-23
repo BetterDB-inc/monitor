@@ -9,19 +9,13 @@ export const METRIC_UNITS: Record<AnomalyDetectorMetric, string> = {
   input_kbps: 'KB/s',
   output_kbps: 'KB/s',
   slowlog_last_id: 'new slowlog entries per poll',
-  acl_denied: 'denials',
-  evicted_keys: 'keys',
+  acl_denied: 'denials/s',
+  evicted_keys: 'evicted keys/s',
   blocked_clients: 'clients',
-  keyspace_misses: 'misses',
+  keyspace_misses: 'misses/s',
   fragmentation_ratio: 'ratio',
   error_replies: 'error replies/s',
 };
-
-export const LIFETIME_COUNTER_METRICS: ReadonlySet<AnomalyDetectorMetric> = new Set<AnomalyDetectorMetric>([
-  'acl_denied',
-  'evicted_keys',
-  'keyspace_misses',
-]);
 
 export type AbsoluteField = { enabled: boolean; value: string };
 

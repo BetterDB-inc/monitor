@@ -1,6 +1,7 @@
 import { BadRequestException } from '@nestjs/common';
 import { AnomalyController } from '../anomaly.controller';
 import { AnomalyService } from '../anomaly.service';
+import { LicenseGuard } from '@proprietary/licenses';
 
 jest.mock('@proprietary/licenses', () => ({
   LicenseGuard: class {},
@@ -161,5 +162,116 @@ describe('AnomalyController incident by event', () => {
       BadRequestException,
     );
     expect(service.findIncidentIdByEvent).not.toHaveBeenCalled();
+  });
+});
+
+describe('AnomalyController hot shards', () => {
+  const detail = {
+    shardId: 'a0000000',
+    nodeAddr: '10.0.0.1:6379',
+    topSlots: [{ slot: 12 }],
+    topKeys: [{ key: 'user:42', slot: 12, freq: 255 }],
+    keySource: 'lfu',
+  };
+  const service = { getHotShards: jest.fn().mockReturnValue([detail]) };
+  const controller = new AnomalyController(service as unknown as AnomalyService);
+
+  beforeEach(() => jest.clearAllMocks());
+
+  it('returns the open hot shards of the connection in the header', () => {
+    expect(controller.getHotShards('c1')).toEqual([detail]);
+    expect(service.getHotShards).toHaveBeenCalledWith('c1');
+  });
+
+  it('is served at hot-shards and requires the connection header', () => {
+    const args = Reflect.getMetadata('__routeArguments__', AnomalyController, 'getHotShards');
+
+    expect(Reflect.getMetadata('path', AnomalyController.prototype.getHotShards)).toBe(
+      'hot-shards',
+    );
+    expect(Object.values(args)).toEqual([expect.objectContaining({ data: { required: true } })]);
+  });
+});
+
+describe('AnomalyController.getTopologyDivergence', () => {
+  const report = {
+    status: 'ok',
+    sampledAt: 1000,
+    observers: [],
+    unanswered: [],
+    divergences: [],
+    partialMembership: [],
+  };
+  const service = { getTopologyDivergence: jest.fn().mockReturnValue(report) };
+  const controller = new AnomalyController(service as unknown as AnomalyService);
+
+  beforeEach(() => jest.clearAllMocks());
+
+  it('returns the divergence report of the connection in the header', () => {
+    expect(controller.getTopologyDivergence('c1')).toEqual(report);
+    expect(service.getTopologyDivergence).toHaveBeenCalledWith('c1');
+  });
+
+  it('is served at topology-divergence and requires the connection header', () => {
+    const args = Reflect.getMetadata('__routeArguments__', AnomalyController, 'getTopologyDivergence');
+
+    expect(Reflect.getMetadata('path', AnomalyController.prototype.getTopologyDivergence)).toBe(
+      'topology-divergence',
+    );
+    expect(Object.values(args)).toEqual([expect.objectContaining({ data: { required: true } })]);
+  });
+});
+
+describe('AnomalyController.getTopologyDisagreements', () => {
+  const summary = {
+    status: 'ok',
+    sampledAt: 1000,
+    coverage: { nodes: 3, asked: 3, answered: 3, complete: true, unanswered: [], unansweredCount: 0 },
+    disagreements: [],
+    shards: [],
+  };
+  const service = { getTopologyDisagreements: jest.fn().mockReturnValue(summary) };
+  const controller = new AnomalyController(service as unknown as AnomalyService);
+
+  beforeEach(() => jest.clearAllMocks());
+
+  it('returns the disagreement summary of the connection in the header', () => {
+    expect(controller.getTopologyDisagreements('c1')).toEqual(summary);
+    expect(service.getTopologyDisagreements).toHaveBeenCalledWith('c1');
+  });
+
+  it('is served at topology-disagreements and requires the connection header', () => {
+    const args = Reflect.getMetadata('__routeArguments__', AnomalyController, 'getTopologyDisagreements');
+
+    expect(Reflect.getMetadata('path', AnomalyController.prototype.getTopologyDisagreements)).toBe(
+      'topology-disagreements',
+    );
+    expect(Object.values(args)).toEqual([expect.objectContaining({ data: { required: true } })]);
+  });
+
+  it('sits behind the licence guard, which answers 402 without the feature', () => {
+    expect(Reflect.getMetadata('__guards__', AnomalyController.prototype.getTopologyDisagreements)).toContain(
+      LicenseGuard,
+    );
+  });
+});
+
+describe('AnomalyController slot rebalance runs', () => {
+  const run = { sourceShardId: 'src', startedBy: { userId: 'u1', email: 'admin@example.com' } };
+  const service = { followRebalanceRuns: jest.fn().mockResolvedValue([run]) };
+  const controller = new AnomalyController(service as unknown as AnomalyService);
+  const asRole = (role: 'admin' | 'member' | null) =>
+    ({ actor: role ? { userId: 'u2', role } : null }) as never;
+
+  it('shows an admin who started each run', async () => {
+    const [listed] = await controller.getRebalanceRuns('c1', asRole('admin'));
+    expect(listed.startedBy).toEqual({ userId: 'u1', email: 'admin@example.com' });
+  });
+
+  it('hides the email of the admin from members', async () => {
+    for (const role of ['member', null] as const) {
+      const [listed] = await controller.getRebalanceRuns('c1', asRole(role));
+      expect(listed.startedBy).toEqual({ userId: 'u1', email: null });
+    }
   });
 });

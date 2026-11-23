@@ -18,6 +18,7 @@ import {
 } from '../common/services/multi-connection-poller';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
+import { LogGapTracker, commandLogCapture } from '../common/services/log-gap-tracker';
 
 @Injectable()
 export class CommandLogAnalyticsService extends MultiConnectionPoller implements OnModuleInit {
@@ -30,6 +31,7 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
   private lastSeenIds = new Map<string, Map<CommandLogType, number | null>>();
   // Server process each connection's lastSeenIds belong to (command log IDs are per process).
   private readonly logSources: LogSourceTracker;
+  private readonly gaps = new LogGapTracker();
 
   // Nested Maps: connectionId -> (type -> entries)
   private cachedEntries = new Map<string, Map<CommandLogType, CommandLogEntry[]>>();
@@ -104,6 +106,7 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
         );
       }
       this.lastSeenIds.delete(ctx.connectionId);
+      this.gaps.sourceChanged(ctx.connectionId);
     }
 
     // Initialize per-connection state if needed
@@ -151,15 +154,13 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
         connectionCachedAnalysis.set(type, analyzeSlowLogPatterns(entries));
         this.lastCacheUpdate.set(ctx.connectionId, now);
 
-        // Detect ID wraparound (e.g., after COMMANDLOG RESET)
-        if (entries.length > 0 && lastSeenId !== null) {
+        const capture = commandLogCapture(type);
+        if (this.gaps.idsRestarted(ctx.connectionId, capture, entries, lastSeenId)) {
           const maxIdInBatch = Math.max(...entries.map(e => e.id));
-          if (maxIdInBatch < lastSeenId) {
-            this.logger.warn(
-              `Commandlog ${type} ID wraparound detected for ${ctx.connectionName} (lastSeenId: ${lastSeenId}, maxIdInBatch: ${maxIdInBatch}). Resetting tracker.`
-            );
-            connectionLastSeenIds.set(type, null);
-          }
+          this.logger.warn(
+            `Commandlog ${type} ID wraparound detected for ${ctx.connectionName} (lastSeenId: ${lastSeenId}, maxIdInBatch: ${maxIdInBatch}). Resetting tracker.`
+          );
+          connectionLastSeenIds.set(type, null);
         }
 
         // Re-fetch lastSeenId after potential reset
@@ -171,6 +172,7 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
           : entries;
 
         if (newEntries.length === 0) {
+          this.gaps.completePoll(ctx.connectionId, capture, entries, currentLastSeenId);
           continue;
         }
 
@@ -191,6 +193,12 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
         }));
 
         const saved = await this.storage.saveCommandLogEntries(storedEntries, ctx.connectionId);
+        const missed = this.gaps.completePoll(ctx.connectionId, capture, entries, currentLastSeenId);
+        if (missed > 0) {
+          this.logger.warn(
+            `Command log ${type} of ${ctx.connectionName}: ${missed} entries after id ${currentLastSeenId} were never read (dropped by the server, or more than 128 logged between two polls)`
+          );
+        }
 
         // Update lastSeenId to the highest ID we've seen
         const maxId = Math.max(...newEntries.map(e => e.id));
@@ -208,6 +216,7 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
   protected onConnectionRemoved(connectionId: string): void {
     this.lastSeenIds.delete(connectionId);
     this.logSources.forget(connectionId);
+    this.gaps.forget(connectionId);
     this.cachedEntries.delete(connectionId);
     this.cachedAnalysis.delete(connectionId);
     this.lastCacheUpdate.delete(connectionId);
@@ -268,6 +277,10 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
     const targetId = connectionId || this.connectionRegistry.getDefaultId();
     if (!targetId) return 0;
     return this.lastCacheUpdate.get(targetId) || 0;
+  }
+
+  getLostEntries(connectionId: string): ReadonlyMap<string, number> {
+    return this.gaps.lostEntries(connectionId);
   }
 
   hasCommandLogSupport(connectionId?: string): boolean {

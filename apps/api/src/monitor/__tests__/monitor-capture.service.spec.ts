@@ -266,8 +266,8 @@ describe('MonitorCaptureService', () => {
     it('records target_node when a cluster node id is supplied', async () => {
       const { service, storage, cluster } = makeService();
       cluster.discoverNodes.mockResolvedValueOnce([
-        { id: 'node-a', address: 'cluster-1:6379', role: 'master', slots: [], healthy: true },
-        { id: 'node-b', address: 'cluster-2:6379', role: 'master', slots: [], healthy: true },
+        { id: 'node-a', address: 'cluster-1:6379', role: 'master', slots: [], state: 'healthy' },
+        { id: 'node-b', address: 'cluster-2:6379', role: 'master', slots: [], state: 'healthy' },
       ]);
       const session = await service.startSession({
         connectionId: CONNECTION_ID,
@@ -389,17 +389,36 @@ describe('MonitorCaptureService', () => {
   });
 
   describe('fan-out', () => {
-    function configureCluster(cluster: { discoverNodes: jest.Mock }, nodes: Array<{ id: string; address: string; role?: 'master' | 'replica'; healthy?: boolean }>) {
+    function configureCluster(cluster: { discoverNodes: jest.Mock }, nodes: Array<{ id: string; address: string; role?: 'master' | 'replica'; state?: 'healthy' | 'suspect' | 'failed' }>) {
       cluster.discoverNodes.mockResolvedValue(
         nodes.map((n) => ({
           id: n.id,
           address: n.address,
           role: n.role ?? 'master',
           slots: [],
-          healthy: n.healthy ?? true,
+          state: n.state ?? 'healthy',
         })),
       );
     }
+
+    it('captures on a primary its peers only suspect, and skips one they agreed has failed', async () => {
+      const { service, cluster } = makeService();
+      configureCluster(cluster, [
+        { id: 'A', address: 'h1:6379' },
+        { id: 'B', address: 'h2:6379', state: 'suspect' },
+        { id: 'C', address: 'h3:6379', state: 'failed' },
+      ]);
+      const opened: string[] = [];
+      service.setMonitorSourceFactory(async (_connId, nodeId) => {
+        if (nodeId) opened.push(nodeId);
+        return new FakeSource();
+      });
+
+      const session = await service.startSession({ connectionId: CONNECTION_ID, fanOut: true });
+
+      expect(opened).toEqual(['A', 'B']);
+      await service.stopSession(session.id);
+    });
 
     it('opens one writer per primary, attributes each chunk to a node, and aggregates segments on terminate', async () => {
       const { service, storage, cluster } = makeService();

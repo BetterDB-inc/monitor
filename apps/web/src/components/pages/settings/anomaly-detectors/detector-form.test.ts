@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AnomalyDetectorConfigEntry } from '@betterdb/shared';
 import {
-  LIFETIME_COUNTER_METRICS,
   METRIC_UNITS,
   buildSave,
   isCustomized,
@@ -124,14 +123,13 @@ describe('buildSave', () => {
 });
 
 describe('metric metadata', () => {
-  it('treats slowlog_last_id as a per-poll delta, not a lifetime counter', () => {
-    expect(LIFETIME_COUNTER_METRICS.has('slowlog_last_id')).toBe(false);
+  it('treats slowlog_last_id as a per-poll delta', () => {
     expect(METRIC_UNITS.slowlog_last_id).toBe('new slowlog entries per poll');
   });
 
-  it('keeps the raw INFO counters marked as lifetime totals', () => {
+  it('labels the INFO counter metrics as per-second rates', () => {
     for (const metric of ['acl_denied', 'evicted_keys', 'keyspace_misses'] as const) {
-      expect(LIFETIME_COUNTER_METRICS.has(metric)).toBe(true);
+      expect(METRIC_UNITS[metric]).toMatch(/\/s$/);
     }
   });
 });

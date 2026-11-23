@@ -15,6 +15,7 @@ import {
   type MetricKind,
   type RetryAmplificationDetectedData,
   type ScalingReadinessLowData,
+  type ServedClusterNodeRef,
   type WebhookInstanceInfo,
 } from '@betterdb/shared';
 import { LicenseService } from '@proprietary/licenses';
@@ -390,6 +391,7 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
     timestamp: number;
     instance: { host: string; port: number };
     connectionId?: string;
+    node?: ServedClusterNodeRef;
   }): Promise<void> {
     if (!this.isEnabled()) {
       this.logger.debug('Failover started event skipped - requires PRO license');
@@ -404,6 +406,7 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
         message: `Failover started: node role changed from ${data.previousRole} to ${data.newRole}`,
         timestamp: data.timestamp,
         instance: data.instance,
+        ...(data.node ? { node: data.node } : {}),
       },
       data.connectionId,
     );
@@ -419,6 +422,7 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
     timestamp: number;
     instance: { host: string; port: number };
     connectionId?: string;
+    node?: ServedClusterNodeRef;
   }): Promise<void> {
     if (!this.isEnabled()) {
       this.logger.debug('Failover completed event skipped - requires PRO license');
@@ -433,6 +437,7 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
         message: `Failover completed: node promoted from ${data.previousRole} to ${data.newRole}`,
         timestamp: data.timestamp,
         instance: data.instance,
+        ...(data.node ? { node: data.node } : {}),
       },
       data.connectionId,
     );
@@ -456,6 +461,7 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
     timestamp: number;
     instance: { host: string; port: number };
     connectionId?: string;
+    node?: ServedClusterNodeRef;
   }): Promise<void> {
     if (!this.isEnabled()) {
       this.logger.debug('Data loss detected event skipped - requires PRO license');
@@ -475,6 +481,7 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
         message: data.message,
         timestamp: data.timestamp,
         instance: data.instance,
+        ...(data.node ? { node: data.node } : {}),
       },
       data.connectionId,
     );
@@ -532,6 +539,7 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
         message: data.message,
         timestamp: data.timestamp,
         instance: data.instance,
+        ...(data.node ? { node: data.node } : {}),
       },
       data.connectionId,
     );

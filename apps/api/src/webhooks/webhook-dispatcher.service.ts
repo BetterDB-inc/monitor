@@ -21,8 +21,9 @@ import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { WebhooksService } from './webhooks.service';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { formatWebhookBody } from './webhook-payload-formatter';
-import { BlockedAddressError, guardedLookup } from '../common/utils/outbound-url-guard';
+import { assertConnectableIpLiteral, BlockedAddressError, guardedLookup } from '../common/utils/outbound-url-guard';
 import { pinnedRequest } from '../common/utils/pinned-request';
+import { webhookNetworkPolicy } from './webhook-network-policy';
 
 interface AlertState {
   fired: boolean;
@@ -58,6 +59,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
   private storageRetryBuffer: PendingEvent[] = [];
   private inFlightEvent: PendingEvent | null = null;
   private readonly inFlightDirectDispatches = new Set<Promise<boolean>>();
+  private readonly blockedWebhookIds = new Set<string>();
   private nextEventSequence = 0;
   private flushing = false;
   private flushTimer: NodeJS.Timeout | null = null;
@@ -129,6 +131,8 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     this.sourceHost = this.configService.get<string>('database.host', 'localhost');
     this.sourcePort = this.configService.get<number>('database.port', 6379);
     this.appBaseUrl = this.configService.get<string>('FRONTEND_URL');
+    // Build the allowlist at startup so the cloud-mode warning is logged then.
+    webhookNetworkPolicy();
   }
 
   // ConfigService hands back the raw env string (no validation in ConfigModule),
@@ -751,9 +755,16 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     return delivery.id;
   }
 
-  private post(url: string, headers: Record<string, string>, body: string, signal: AbortSignal): Promise<Response> {
-    const lookup = process.env.NODE_ENV === 'production' ? guardedLookup({ label: 'webhook URL' }) : undefined;
-    return pinnedRequest(url, { method: 'POST', headers, body, signal, lookup });
+  // Guarded in production, and in every environment once a private-network
+  // allowlist is set, so delivery enforces what create and update accepted.
+  private async post(url: string, headers: Record<string, string>, body: string, signal: AbortSignal): Promise<Response> {
+    const privateNetworkPolicy = webhookNetworkPolicy();
+    if (!privateNetworkPolicy && process.env.NODE_ENV !== 'production') {
+      return pinnedRequest(url, { method: 'POST', headers, body, signal });
+    }
+    const guard = { label: 'webhook URL', privateNetworkPolicy };
+    assertConnectableIpLiteral(url, guard);
+    return pinnedRequest(url, { method: 'POST', headers, body, signal, lookup: guardedLookup(guard) });
   }
 
   /**
@@ -814,6 +825,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
         // Consider 2xx as success
         if (response.ok) {
           status = DeliveryStatus.SUCCESS;
+          this.blockedWebhookIds.delete(webhook.id);
           this.logger.log(`Webhook delivered successfully: ${webhook.id} -> ${webhook.url}`);
         } else if (statusCode >= 300 && statusCode < 400) {
           status = DeliveryStatus.FAILED;
@@ -840,7 +852,11 @@ export class WebhookDispatcherService implements OnModuleDestroy {
         if (fetchError instanceof BlockedAddressError) {
           status = DeliveryStatus.FAILED;
           responseBody = fetchError.message;
-          this.logger.warn(`Webhook delivery blocked: ${webhook.id} -> ${webhook.url}`);
+          // Every delivery is recorded as failed; warn once per webhook, not once per delivery.
+          if (!this.blockedWebhookIds.has(webhook.id)) {
+            this.blockedWebhookIds.add(webhook.id);
+            this.logger.warn(`Webhook delivery blocked: ${webhook.id} -> ${webhook.url}`);
+          }
         } else if (fetchError instanceof Error && fetchError.name === 'AbortError') {
           status = DeliveryStatus.RETRYING;
           responseBody = 'Request timeout';

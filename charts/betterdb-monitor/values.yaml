@@ -66,6 +66,14 @@ license:
 # Set false to disable anonymous telemetry (BETTERDB_TELEMETRY).
 telemetry: true
 
+webhooks:
+  # Private ranges/hostnames webhooks may deliver to. Empty = public receivers
+  # only. Keep these as narrow as possible: anyone who can create a webhook can
+  # make the monitor POST to anything listed. Cloud metadata and link-local
+  # addresses can never be allowed. See docs/webhooks.md.
+  allowedPrivateCidrs: []      # e.g. ["10.244.0.0/16", "10.96.0.0/12"]
+  allowedPrivateHosts: []      # e.g. ["*.svc.cluster.local"]
+
 # PVC mounted at /app/data (BETTERDB_DATA_DIR): persisted license state and
 # the online outage-grace token. NOT the metrics history - that lives in
 # storage.type above. Off by default; the app runs fine without it.
@@ -79,8 +87,28 @@ persistence:
   annotations: {}
 
 service:
+  # ClusterIP | NodePort | LoadBalancer
   type: ClusterIP
   port: 3001
+  # Fixed node port (30000-32767) for type NodePort or LoadBalancer. Empty =
+  # Kubernetes allocates one. Ignored for ClusterIP.
+  nodePort: null
+  # Added to the Service, e.g. cloud load-balancer settings or ExternalDNS:
+  #   service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+  #   external-dns.alpha.kubernetes.io/hostname: monitor.example.com
+  annotations: {}
+  # Added to the Service's labels (the chart's own labels are always kept).
+  labels: {}
+  # type LoadBalancer only: the load-balancer implementation to use, e.g.
+  # service.k8s.aws/nlb. Empty = the cluster default.
+  loadBalancerClass: ""
+  # type LoadBalancer only: client CIDRs allowed through the load balancer,
+  # e.g. ["203.0.113.0/24"]. Empty = no restriction.
+  loadBalancerSourceRanges: []
+  # type NodePort or LoadBalancer only: Cluster (the Kubernetes default) or
+  # Local (keeps the client source IP; traffic only reaches nodes running
+  # the pod). Empty = not set.
+  externalTrafficPolicy: ""
 
 # HTTP port the app listens on (PORT env). The Service targets this.
 containerPort: 3001
