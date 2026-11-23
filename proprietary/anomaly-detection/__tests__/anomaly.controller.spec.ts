@@ -195,7 +195,14 @@ describe('AnomalyController hot shards', () => {
 });
 
 describe('AnomalyController.getTopologyDivergence', () => {
-  const report = { status: 'ok', sampledAt: 1000, observers: [], unanswered: [], divergences: [] };
+  const report = {
+    status: 'ok',
+    sampledAt: 1000,
+    observers: [],
+    unanswered: [],
+    divergences: [],
+    partialMembership: [],
+  };
   const service = { getTopologyDivergence: jest.fn().mockReturnValue(report) };
   const controller = new AnomalyController(service as unknown as AnomalyService);
 

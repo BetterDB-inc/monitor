@@ -16,16 +16,9 @@ import {
 } from '../common/services/multi-connection-poller';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { isBetterDbClientName } from '../common/utils/own-clients';
+import { csvList } from '../common/utils/csv-list';
 import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
 import { LogGapTracker, SLOWLOG_CAPTURE } from '../common/services/log-gap-tracker';
-
-function csvList(value: string | undefined): string[] {
-  if (!value) return [];
-  return value
-    .split(',')
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0);
-}
 
 @Injectable()
 export class SlowLogAnalyticsService extends MultiConnectionPoller implements OnModuleInit {

@@ -17,7 +17,10 @@ const REPLICA_SUBJECT_METRICS: ReadonlySet<MetricType> = new Set([
   MetricType.RESYNC_ESCALATION,
 ]);
 
-const METRICS_WITHOUT_OWN_NODE: ReadonlySet<MetricType> = new Set([MetricType.TOPOLOGY_DIVERGENCE]);
+const METRICS_WITHOUT_OWN_NODE: ReadonlySet<MetricType> = new Set([
+  MetricType.TOPOLOGY_DIVERGENCE,
+  MetricType.PARTIAL_MEMBERSHIP,
+]);
 
 interface ShardRead {
   read: () => readonly ClusterNode[];
