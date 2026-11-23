@@ -214,6 +214,84 @@ describe('AgentGateway reconnects', () => {
     expect(jest.getTimerCount()).toBe(1);
   });
 
+  describe('when registering takes a while', () => {
+    function slowRegistration(registry: ConnectionRegistry): void {
+      const register = registry.registerAgentConnection.bind(registry);
+      jest.spyOn(registry, 'registerAgentConnection').mockImplementation(async (...args) => {
+        await new Promise((resolve) => setTimeout(resolve, 2_000));
+        return register(...args);
+      });
+    }
+
+    it('registers one of two newcomers that replace a silent agent and turns the other away', async () => {
+      const { registry, gateway, connect } = build();
+      await connect();
+      slowRegistration(registry);
+      const second = await connect(true);
+      await jest.advanceTimersByTimeAsync(1_000);
+      const third = await connect(true);
+
+      await jest.advanceTimersByTimeAsync(20_000);
+
+      expect(second.closes).toHaveLength(0);
+      expect(third.closes).toEqual([{ code: 4003, reason: expect.any(String) }]);
+      expect(gateway.getConnectedAgents()).toHaveLength(1);
+      expect(jest.getTimerCount()).toBe(1);
+    });
+
+    it('registers one of two agents that connect together and turns the other away', async () => {
+      const { registry, gateway, connect } = build();
+      slowRegistration(registry);
+      const first = await connect(true);
+      await jest.advanceTimersByTimeAsync(100);
+      const second = await connect(true);
+
+      await jest.advanceTimersByTimeAsync(20_000);
+
+      expect(first.closes).toHaveLength(0);
+      expect(second.closes).toEqual([{ code: 4003, reason: expect.any(String) }]);
+      expect(gateway.getConnectedAgents()).toHaveLength(1);
+      expect(jest.getTimerCount()).toBe(1);
+    });
+
+    it('does not hold up the next newcomer when one closes during its check', async () => {
+      const { registry, gateway, connect } = build();
+      const oldSocket = await connect();
+      slowRegistration(registry);
+      const second = await connect(true);
+      await jest.advanceTimersByTimeAsync(100);
+      const third = await connect(true);
+      await jest.advanceTimersByTimeAsync(900);
+      second.drop();
+
+      await jest.advanceTimersByTimeAsync(CHECK_MS + 2_000);
+
+      expect(oldSocket.terminated).toBe(true);
+      expect(third.closes).toHaveLength(0);
+      expect(gateway.getConnectedAgents()).toHaveLength(1);
+      expect(jest.getTimerCount()).toBe(1);
+    });
+
+    it('skips a newcomer that closed while it waited its turn', async () => {
+      const { registry, gateway, connect } = build();
+      await connect();
+      slowRegistration(registry);
+      const second = await connect();
+      await jest.advanceTimersByTimeAsync(100);
+      const third = await connect();
+      await jest.advanceTimersByTimeAsync(100);
+      const fourth = await connect();
+      await jest.advanceTimersByTimeAsync(100);
+      third.drop();
+
+      await jest.advanceTimersByTimeAsync(13_800);
+
+      expect(second.terminated).toBe(true);
+      expect(fourth.closes).toHaveLength(0);
+      expect(gateway.getConnectedAgents()).toHaveLength(1);
+    });
+  });
+
   it('ignores a pong timeout from the old socket after a reconnect', async () => {
     const { registry, connect } = build();
     const oldSocket = await connect();

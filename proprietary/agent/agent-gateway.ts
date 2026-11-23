@@ -36,6 +36,7 @@ export class AgentGateway {
   private readonly logger = new Logger(AgentGateway.name);
   private wss: WebSocketServer;
   private agents = new Map<string, AgentConnection>();
+  private claims = new Map<string, Promise<void>>();
 
   constructor(
     private readonly tokenService: AgentTokensService,
@@ -99,7 +100,7 @@ export class AgentGateway {
         if (msg.type === 'agent_hello' && !agent.agentHello) {
           clearTimeout(helloTimeout);
           agent.agentHello = msg as AgentHelloMessage;
-          this.registerAgent(agent);
+          this.queueRegistration(agent);
           return;
         }
 
@@ -132,7 +133,19 @@ export class AgentGateway {
     });
   }
 
+  private queueRegistration(agent: AgentConnection): void {
+    const register = () => this.registerAgent(agent);
+    const prior = this.claims.get(agent.id) ?? Promise.resolve();
+    const claim = prior.then(register, register);
+    this.claims.set(agent.id, claim);
+    void claim.finally(() => {
+      if (this.claims.get(agent.id) === claim) this.claims.delete(agent.id);
+    });
+  }
+
   private async registerAgent(agent: AgentConnection): Promise<void> {
+    if (agent.ws.readyState !== WebSocket.OPEN) return;
+
     const hello = agent.agentHello!;
     this.logger.log(
       `Agent ${agent.id} hello: ${hello.valkey.type} ${hello.valkey.version} ` +
@@ -188,7 +201,7 @@ export class AgentGateway {
       const previous = this.agents.get(agent.id);
       if (!previous) return 'free';
 
-      const answered = await this.answersPing(previous.ws);
+      const answered = await this.answersPing(previous.ws, agent.ws);
       if (agent.ws.readyState !== WebSocket.OPEN) return 'closed';
       if (this.agents.get(agent.id) !== previous) continue;
       if (answered) return 'taken';
@@ -201,7 +214,7 @@ export class AgentGateway {
     }
   }
 
-  private answersPing(ws: WebSocket): Promise<boolean> {
+  private answersPing(ws: WebSocket, asker: WebSocket): Promise<boolean> {
     if (ws.readyState !== WebSocket.OPEN) return Promise.resolve(false);
 
     return new Promise((resolve) => {
@@ -209,6 +222,7 @@ export class AgentGateway {
         clearTimeout(timer);
         ws.off('message', onMessage);
         ws.off('close', onClose);
+        asker.off('close', onClose);
         resolve(answered);
       };
       const onMessage = (data: RawData) => {
@@ -219,6 +233,7 @@ export class AgentGateway {
 
       ws.on('message', onMessage);
       ws.on('close', onClose);
+      asker.on('close', onClose);
       ws.send(JSON.stringify({ type: 'ping', ts: Date.now() }));
     });
   }
