@@ -468,7 +468,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         password: primaryClient.options.password || '',
       });
     };
-    if (parsed) this.assertNodeAnswers(parsed.host, parsed.port, open);
+    if (parsed) this.assertNodeAnswers(parsed.host, parsed.port, key, open);
     const reused = await this.reuseNodeClient(key);
     if (reused) return reused;
     return open();
@@ -506,7 +506,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         username: credentials.username ?? '',
         password: credentials.password ?? '',
       });
-    this.assertNodeAnswers(host, port, open);
+    this.assertNodeAnswers(host, port, key, open);
     const reused = await this.reuseNodeClient(key);
     if (reused) return reused;
     return open();
@@ -536,13 +536,13 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         password: password || '',
       });
     };
-    this.assertNodeAnswers(host, port, open);
+    this.assertNodeAnswers(host, port, key, open);
     const reused = await this.reuseNodeClient(key);
     if (reused) return reused;
     return open();
   }
 
-  private assertNodeAnswers(host: string, port: number, open: () => Promise<Valkey>): void {
+  private assertNodeAnswers(host: string, port: number, key: string, open: () => Promise<Valkey>): void {
     const address = `${host}:${port}`;
     let until = this.unresponsiveUntil.get(address);
     if (until === undefined) return;
@@ -551,13 +551,20 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       const retryAt = now + UNRESPONSIVE_NODE_COOL_OFF_MS;
       until = retryAt;
       this.unresponsiveUntil.set(address, retryAt);
-      void Promise.resolve()
-        .then(open)
-        .catch(() => {
-          if (this.unresponsiveUntil.get(address) === retryAt) this.unresponsiveUntil.delete(address);
-        });
+      void this.askNodeAgain(key, open).catch(() => {
+        if (this.unresponsiveUntil.get(address) === retryAt) this.unresponsiveUntil.delete(address);
+      });
     }
     throw new Error(`Node ${address} is not answering; next try in ${Math.ceil((until - now) / 1000)}s`);
+  }
+
+  private async askNodeAgain(key: string, open: () => Promise<Valkey>): Promise<void> {
+    const held = this.discoveredNodes.get(key)?.client;
+    if (held?.status === 'ready') {
+      await held.ping();
+    } else {
+      await open();
+    }
   }
 
   private markNodeUnresponsive(address: string, client?: Valkey): void {

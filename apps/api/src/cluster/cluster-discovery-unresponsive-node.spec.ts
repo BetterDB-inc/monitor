@@ -3,6 +3,7 @@ import { ClusterDiscoveryService } from './cluster-discovery.service';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 
 interface FakeCommand {
+  name?: string;
   promise: Promise<unknown>;
 }
 
@@ -17,6 +18,7 @@ interface FakeClient {
 
 const created: FakeClient[] = [];
 let nextConnect: (() => Promise<void>) | undefined;
+let nextPing: (() => FakeCommand) | undefined;
 
 jest.mock('iovalkey', () => {
   return class FakeValkey {
@@ -42,11 +44,18 @@ jest.mock('iovalkey', () => {
     sendCommand(command: FakeCommand): unknown {
       return command.promise;
     }
+
+    ping(): unknown {
+      const command = nextPing ? nextPing() : { name: 'ping', promise: Promise.resolve('PONG') };
+      nextPing = undefined;
+      return this.sendCommand(command);
+    }
   };
 });
 
 const COOL_OFF_MS = 30_000;
 const CONNECT_TIMEOUT_MS = 5_000;
+const COMMAND_TIMEOUT_MS = 5_000;
 const MARK_LIMIT = 512;
 
 const answered = (): FakeCommand => ({ promise: Promise.resolve('OK') });
@@ -86,6 +95,7 @@ describe('ClusterDiscoveryService unresponsive node', () => {
     jest.useFakeTimers();
     created.length = 0;
     nextConnect = undefined;
+    nextPing = undefined;
     const adapter = {
       getClusterNodes: jest.fn().mockResolvedValue(nodes),
       getClusterShards: jest.fn().mockResolvedValue([]),
@@ -276,6 +286,44 @@ describe('ClusterDiscoveryService unresponsive node', () => {
     await expect(service.getAddressConnection(hostOf(0), 6379, 'seed')).rejects.toThrow('is not answering');
     await expect(service.getAddressConnection(hostOf(1), 6379, 'seed')).resolves.toBeDefined();
     await expect(service.getAddressConnection(hostOf(2), 6379, 'seed')).rejects.toThrow('is not answering');
+  });
+
+  describe('when another connection still holds a client for the node', () => {
+    const holdAndSilence = async (): Promise<FakeClient> => {
+      const first = await service.getNodeConnection(silent.id, 'seed');
+      const held = (await service.getNodeConnection(silent.id, 'other')) as unknown as FakeClient;
+      await send(first, timedOut());
+      await jest.advanceTimersByTimeAsync(COOL_OFF_MS);
+      return held;
+    };
+
+    it('asks the held client after the cool-off instead of opening one that replaces it', async () => {
+      const held = await holdAndSilence();
+
+      await expect(service.getNodeConnection(silent.id, 'other')).rejects.toThrow('is not answering');
+      await jest.advanceTimersByTimeAsync(0);
+
+      expect(held.status).toBe('ready');
+      expect(created).toHaveLength(2);
+      await expect(service.getNodeConnection(silent.id, 'other')).resolves.toBe(held);
+    });
+
+    it('closes the held client and keeps refusing the node when it does not answer either', async () => {
+      const held = await holdAndSilence();
+      nextPing = () => ({
+        name: 'ping',
+        promise: new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Command timed out')), COMMAND_TIMEOUT_MS),
+        ),
+      });
+
+      await expect(service.getNodeConnection(silent.id, 'other')).rejects.toThrow('is not answering');
+      await jest.advanceTimersByTimeAsync(COMMAND_TIMEOUT_MS);
+
+      expect(held.disconnect).toHaveBeenCalled();
+      await expect(service.getNodeConnection(silent.id, 'other')).rejects.toThrow('is not answering');
+      expect(created).toHaveLength(2);
+    });
   });
 
   describe('when a client connects after its connection is gone', () => {
