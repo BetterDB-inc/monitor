@@ -37,6 +37,7 @@ import {
   ReplicationRecoveredData,
   WebhookEventType,
   clusterNodeState,
+  INCIDENT_LOOKBACK_MS,
   type ClusterNodeRef,
   type ServedClusterNodeRef,
 } from '@betterdb/shared';
@@ -755,7 +756,7 @@ const NEXT_FIRING_BUDGET_MS = 10_000;
 const NEXT_FIRING_BUDGET_EXHAUSTED = 'lookup budget exhausted';
 const NEXT_FIRING_MIN_REMAINING_MS = 250;
 const NEXT_FIRING_MAX_OUTSTANDING = 5;
-const MAX_INCIDENT_LOOKBACK_MS = 30 * 24 * 60 * 60_000;
+const MAX_INCIDENT_LOOKBACK_MS = INCIDENT_LOOKBACK_MS;
 const MAX_INCIDENT_EVENTS_PER_CONNECTION = 200;
 const RETRY_AMP_ATTRIBUTION_TIMEOUT_MS = 5_000;
 const CORRELATION_ID_CHUNK_SIZE = 500;
@@ -902,6 +903,7 @@ export class AnomalyService
   };
   private topologyDivergenceEventOwners = new Map<string, string>();
   private topologyDivergenceEventSeverity = new Map<string, AnomalySeverity>();
+  private topologyDivergenceEventAt = new Map<string, number>();
   private topologyDivergenceOpen = new Map<string, Map<string, OpenDivergence>>();
   private partialMembershipOpen = new Map<string, Map<string, OpenDivergence<PartialMembership>>>();
   private partialMembershipRounds = new Map<string, PartialMembershipRound>();
@@ -7655,6 +7657,7 @@ export class AnomalyService
       if (tracked.has(eventId)) continue;
       this.topologyDivergenceEventOwners.delete(eventId);
       this.topologyDivergenceEventSeverity.delete(eventId);
+      this.topologyDivergenceEventAt.delete(eventId);
     }
   }
 
@@ -7957,6 +7960,7 @@ export class AnomalyService
     const severity = divergenceSeverity(group);
     this.topologyDivergenceEventOwners.set(id, ctx.connectionId);
     this.topologyDivergenceEventSeverity.set(id, severity);
+    this.topologyDivergenceEventAt.set(id, timestamp);
     return {
       id,
       timestamp,
@@ -8031,6 +8035,7 @@ export class AnomalyService
       eventIds.set(signature, event.id);
       this.topologyDivergenceEventOwners.set(event.id, connectionId);
       this.topologyDivergenceEventSeverity.set(event.id, event.severity as AnomalySeverity);
+      this.topologyDivergenceEventAt.set(event.id, event.timestamp);
     }
     if (eventIds.size > 0) store.eventIds.set(connectionId, eventIds);
   }
@@ -8048,6 +8053,7 @@ export class AnomalyService
       if (owner !== connectionId || tracked.has(eventId)) continue;
       this.topologyDivergenceEventOwners.delete(eventId);
       this.topologyDivergenceEventSeverity.delete(eventId);
+      this.topologyDivergenceEventAt.delete(eventId);
     }
     const watched = new Set(this.connectionClusterKeys.values());
     for (const [clusterKey, anchor] of [...this.topologyDivergenceAnchors]) {
@@ -11462,6 +11468,7 @@ export class AnomalyService
     const eventIds = store.eventIds.get(round.anchorConnectionId);
     const closedByHand = store.closedByHand.get(round.anchorConnectionId);
     const raised: RaisedDivergence[] = [];
+    const reachable = new Set(this.scopeConnectionIds(connectionId));
     for (const [signature, { group, confirmedAt }] of this.topologyDivergenceOpen.get(clusterKey) ?? []) {
       if (!group) continue;
       const eventId = eventIds?.get(signature);
@@ -11469,16 +11476,30 @@ export class AnomalyService
         if (!closedByHand?.has(signature)) continue;
         raised.push({
           group,
-          event: { eventId: '', eventType: MetricType.TOPOLOGY_DIVERGENCE, resolvedByHand: true },
+          event: {
+            eventId: '',
+            eventType: MetricType.TOPOLOGY_DIVERGENCE,
+            eventAt: null,
+            connectionId,
+            resolvedByHand: true,
+          },
           confirmedAt: confirmedAt ?? 0,
         });
         continue;
       }
       const event = this.eventInMemory(eventId) ?? this.findIncidentEvent(eventId);
       const eventType = event?.metricType ?? MetricType.TOPOLOGY_DIVERGENCE;
+      const eventAt = this.topologyDivergenceEventAt.get(eventId) ?? event?.timestamp ?? null;
+      const holder = this.topologyDivergenceEventOwners.get(eventId) ?? round.anchorConnectionId;
       raised.push({
         group,
-        event: { eventId, eventType, resolvedByHand: event?.resolved === true },
+        event: {
+          eventId,
+          eventType,
+          eventAt,
+          connectionId: reachable.has(holder) ? connectionId : holder,
+          resolvedByHand: event?.resolved === true,
+        },
         confirmedAt: confirmedAt ?? 0,
       });
     }
