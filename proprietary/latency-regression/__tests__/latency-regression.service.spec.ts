@@ -1,6 +1,10 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { Test, TestingModule } from '@nestjs/testing';
-import { LatencyRegressionService } from '../latency-regression.service';
+import {
+  LatencyRegressionService,
+  latencyRegressionIgnoreCommands,
+} from '../latency-regression.service';
+import { ADMIN_COMMANDS } from '../regression-detector';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { ConnectionContext } from '@app/common/services/multi-connection-poller';
 import { WEBHOOK_EVENTS_PRO_SERVICE } from '@betterdb/shared';
@@ -281,5 +285,46 @@ describe('LatencyRegressionService', () => {
     await poll(service, 6000, '9.0.0');
     expect(storage.saveAnomalyEvent).toHaveBeenCalledTimes(2);
     expect(webhook.dispatchLatencyRegressionDetected).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes the ignore list from the environment to its detectors', async () => {
+    process.env.LATENCY_REGRESSION_EXTRA_IGNORE_COMMANDS = 'hmget';
+    try {
+      const service = await makeService();
+      await driveUpgradeRegression(service);
+    } finally {
+      delete process.env.LATENCY_REGRESSION_EXTRA_IGNORE_COMMANDS;
+    }
+
+    expect(storage.saveAnomalyEvent).not.toHaveBeenCalled();
+    expect(webhook.dispatchLatencyRegressionDetected).not.toHaveBeenCalled();
+  });
+});
+
+describe('latencyRegressionIgnoreCommands', () => {
+  it('defaults to the built-in admin commands', () => {
+    expect(latencyRegressionIgnoreCommands({})).toEqual(new Set(ADMIN_COMMANDS));
+  });
+
+  it('replaces the built-in list with LATENCY_REGRESSION_IGNORE_COMMANDS', () => {
+    expect(
+      latencyRegressionIgnoreCommands({ LATENCY_REGRESSION_IGNORE_COMMANDS: ' INFO , cluster|* ,' }),
+    ).toEqual(new Set(['info', 'cluster|*']));
+  });
+
+  it('turns the filter off when LATENCY_REGRESSION_IGNORE_COMMANDS is set but empty', () => {
+    expect(latencyRegressionIgnoreCommands({ LATENCY_REGRESSION_IGNORE_COMMANDS: '' })).toEqual(
+      new Set(),
+    );
+  });
+
+  it('adds LATENCY_REGRESSION_EXTRA_IGNORE_COMMANDS to whichever list applies', () => {
+    const extra = { LATENCY_REGRESSION_EXTRA_IGNORE_COMMANDS: 'my|admincmd' };
+    expect(latencyRegressionIgnoreCommands(extra)).toEqual(
+      new Set([...ADMIN_COMMANDS, 'my|admincmd']),
+    );
+    expect(
+      latencyRegressionIgnoreCommands({ ...extra, LATENCY_REGRESSION_IGNORE_COMMANDS: '' }),
+    ).toEqual(new Set(['my|admincmd']));
   });
 });

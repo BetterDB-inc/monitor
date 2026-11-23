@@ -1,0 +1,27 @@
+suite: deployment
+templates:
+  - templates/deployment.yaml
+tests:
+  # The default image follows appVersion, so this catches a version bump that
+  # leaves the chart pointing at an image tag that does not match the release.
+  - it: defaults the image to <appVersion>-no-ai
+    chart:
+      appVersion: 9.8.7
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: betterdb/monitor:9.8.7-no-ai
+
+  - it: uses the chart's own appVersion for the default image
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: ^betterdb/monitor:[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?-no-ai$
+
+  - it: uses an explicit image tag as given
+    set:
+      image.tag: 1.2.3
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: betterdb/monitor:1.2.3
