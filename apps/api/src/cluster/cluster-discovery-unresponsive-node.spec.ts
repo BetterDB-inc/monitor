@@ -202,6 +202,21 @@ describe('ClusterDiscoveryService unresponsive node', () => {
     expect(created).toHaveLength(1);
   });
 
+  it('does not skip a node that replied while its connect timed out', async () => {
+    nextConnect = () => new Promise<void>(() => undefined);
+    const connecting = service.getNodeConnection(silent.id, 'seed');
+    const failed = expect(connecting).rejects.toThrow('Connection timeout');
+    await jest.advanceTimersByTimeAsync(0);
+    await send(created[0], answered());
+    await jest.advanceTimersByTimeAsync(CONNECT_TIMEOUT_MS);
+    await failed;
+
+    const next = await service.getNodeConnection(silent.id, 'seed');
+
+    expect(next).toBe(created[1]);
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('is not answering'));
+  });
+
   it('does not hold a refused connect against the node', async () => {
     nextConnect = () => Promise.reject(new Error('connect ECONNREFUSED 10.0.0.1:6379'));
     await expect(service.getNodeConnection(silent.id, 'seed')).rejects.toThrow('ECONNREFUSED');

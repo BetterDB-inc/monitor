@@ -694,6 +694,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   ): Promise<Valkey> {
     const { ownerId } = opening;
     const address = `${host}:${port}`;
+    let replied = false;
     const client: Valkey = new NodeClient(
       {
         ...this.nodeClientOptions(ownerId, node, host, port, { username, password }),
@@ -702,8 +703,12 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         enableReadyCheck: true,
       },
       (outcome) => {
-        if (outcome === 'answered') this.markNodeAnswering(address);
-        else this.markNodeUnresponsive(address, client);
+        if (outcome === 'answered') {
+          replied = true;
+          this.markNodeAnswering(address);
+        } else {
+          this.markNodeUnresponsive(address, client);
+        }
       },
     );
 
@@ -807,7 +812,8 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       }
 
       await this.closeNodeClient(client);
-      if (!opening.released && [connectError, lastError].some(isConnectTimeout)) this.markNodeUnresponsive(address);
+      const silent = !replied && [connectError, lastError].some(isConnectTimeout);
+      if (silent && !opening.released) this.markNodeUnresponsive(address);
 
       throw error;
     }
