@@ -80,7 +80,7 @@ function describeWarning(warning: RebalanceWarning): string {
     case 'memory_unknown':
       return `The memory room of ${shard} is not known.`;
     case 'memory_unlimited':
-      return `Shard ${short(warning.shardId)} has no maxmemory limit, so BetterDB cannot check that the moved keys fit.`;
+      return `Shard ${shortShardId(warning.shardId)} has no maxmemory limit, so BetterDB cannot check that the moved keys fit.`;
   }
 }
 
