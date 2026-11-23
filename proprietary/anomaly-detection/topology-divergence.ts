@@ -82,6 +82,8 @@ const DURATION_UNITS: Array<[string, number]> = [
 ];
 const FINISHED_MIGRATION_STATES = ['success', 'failed', 'cancelled'];
 
+export type FailureVote = 'fail' | 'fail?' | 'ok';
+
 type MemberStatus = typeof KNOWN_MEMBER | 'handshake' | 'noaddr';
 
 interface ViewIndex {
@@ -114,6 +116,12 @@ export function isKnownMember(node: ClusterNode): boolean {
 
 export function isFlaggedFailing(node: ClusterNode): boolean {
   return node.flags.some((flag) => FAILING_FLAGS.includes(flag));
+}
+
+export function failureVoteOf(observerId: string, node: ClusterNode): FailureVote | null {
+  if (node.id === observerId || !isKnownMember(node)) return null;
+  if (!isFlaggedFailing(node)) return 'ok';
+  return node.flags.includes('fail') ? 'fail' : 'fail?';
 }
 
 function indexViews(views: TopologyView[]): ViewIndex[] {
@@ -285,7 +293,7 @@ export function intersectSlotRanges(a: number[][], b: number[][]): number[][] {
   return shared.sort((x, y) => x[0] - y[0]);
 }
 
-function countSlots(ranges: number[][]): number {
+export function countSlots(ranges: number[][]): number {
   return ranges.reduce((total, [start, end = start]) => total + end - start + 1, 0);
 }
 
@@ -553,6 +561,61 @@ export function confirmedDisagreements(
   });
 }
 
+function sharedWith(entry: TopologyDisagreement, disagreement: TopologyDisagreement): number {
+  if (entry.kind !== disagreement.kind) return 0;
+  if (!entry.slots || !disagreement.slots) return entry.key === disagreement.key ? 1 : 0;
+  if (slotDisputeOwners(entry) !== slotDisputeOwners(disagreement)) return 0;
+  return countSlots(intersectSlotRanges(entry.slots, disagreement.slots));
+}
+
+function keepsSidesOf(
+  entry: TopologyDisagreement,
+  dissent: ReadonlySet<string>,
+  disagreement: TopologyDisagreement,
+): boolean {
+  const others = new Set(entry.positions.flatMap((position) => position.observers).filter((id) => !dissent.has(id)));
+  const dissenting = disagreement.positions.filter((position) => position.observers.some((id) => dissent.has(id)));
+  return dissenting.length > 0 && dissenting.every((position) => !position.observers.some((id) => others.has(id)));
+}
+
+function sharedWithGroup(group: DivergenceGroup, disagreement: TopologyDisagreement): number {
+  const dissent = new Set(group.dissent);
+  let most = 0;
+  for (const entry of group.disagreements) {
+    const shared = sharedWith(entry, disagreement);
+    if (shared > most && keepsSidesOf(entry, dissent, disagreement)) most = shared;
+  }
+  return most;
+}
+
+export interface DivergenceCandidate {
+  group: DivergenceGroup;
+  resolvedByHand?: boolean;
+  confirmedAt?: number;
+}
+
+function comesBefore(ranks: number[], best: number[]): boolean {
+  const at = ranks.findIndex((rank, index) => rank !== best[index]);
+  return at < 0 || ranks[at] > best[at];
+}
+
+export function matchDivergence<T extends DivergenceCandidate>(
+  raised: readonly T[],
+  disagreement: TopologyDisagreement,
+): T | undefined {
+  let match: T | undefined;
+  let best: number[] = [];
+  for (const candidate of raised) {
+    const shared = sharedWithGroup(candidate.group, disagreement);
+    if (shared === 0) continue;
+    const ranks = [candidate.resolvedByHand ? 0 : 1, shared, candidate.confirmedAt ?? 0];
+    if (match && !comesBefore(ranks, best)) continue;
+    match = candidate;
+    best = ranks;
+  }
+  return match;
+}
+
 export function divergenceSignature(dissent: string[]): string {
   return `${TOPOLOGY_DIVERGENCE_SIGNATURE_PREFIX}${dissent.join(',')}`;
 }
@@ -594,6 +657,7 @@ export function groupDivergences(tracked: TrackedDisagreement[]): DivergenceGrou
 
 export interface OpenDivergence {
   group?: DivergenceGroup;
+  confirmedAt?: number;
   lastCountedAt: number;
   clean: number;
 }
@@ -621,7 +685,7 @@ export function settleOpenDivergences(input: {
   for (const [signature, entry] of open) {
     const group = confirmed.get(signature);
     if (group) {
-      open.set(signature, { group, lastCountedAt: at, clean: 0 });
+      open.set(signature, { group, confirmedAt: at, lastCountedAt: at, clean: 0 });
       continue;
     }
     const pending = input.pendingSignatures.has(signature);
