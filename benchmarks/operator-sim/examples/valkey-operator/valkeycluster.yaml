@@ -1,0 +1,24 @@
+# ValkeyCluster for valkey-operator v0.8.0 (valkey.io/v1alpha1) with a read-only
+# ACL user for BetterDB. Apply with: kubectl -n valkey apply -f valkeycluster.yaml
+# spec.replicas is replicas per shard. We tested 12 shards x 2 replicas; 3 x 1 keeps this small.
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: demo        # headless Service: valkey-demo (the BetterDB seed in betterdb-values.yaml)
+spec:
+  shards: 3
+  replicas: 1
+  image: valkey/valkey:9.1.3
+  users:
+    - name: betterdb
+      passwordSecret: { name: valkey-users, keys: [betterdb] }
+      # Read-only monitoring commands (docs/minimum-acl.md in the BetterDB repo).
+      # COMMANDLOG and CLUSTER GETSLOTMIGRATIONS need Valkey 9.x; drop them on 8.x.
+      permissions: "-@all +ping +info +select +client|setname +client|getname +client|list +client|no-touch +config|get +slowlog|get +slowlog|len +commandlog|get +commandlog|len +latency|latest +latency|histogram +latency|history +latency|doctor +memory|stats +memory|doctor +acl|whoami +acl|log +role +cluster|info +cluster|nodes +cluster|shards +cluster|slot-stats +cluster|getslotmigrations +cluster|myid +command|info +dbsize +lastsave +time +module|list"
+  config:
+    slowlog-log-slower-than: "10000"
+    commandlog-execution-slower-than: "10000"
+    latency-monitor-threshold: "10"
+    # Optional: per-slot cpu-usec and network bytes in CLUSTER SLOT-STATS (hot-shard detection).
+    # Not live-settable: adding or changing it later rolls the cluster.
+    cluster-slot-stats-enabled: "yes"

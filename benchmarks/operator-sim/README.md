@@ -41,6 +41,12 @@ primary→replica link) · primaryKill (graceful pod delete) · rollingUpdate (o
 SLOWLOG, CLUSTER SHARDS, slot stats) · `betterdb.jsonl` (every BetterDB event/group, attributed to pod
 and shard) · `findings.jsonl` · `SUMMARY.md`.
 
+## Example config
+
+`examples/valkey-operator/`: plain manifests and Helm values for running BetterDB against a
+valkey-operator cluster outside the harness (seed on the headless Service, node auto-registration,
+Postgres storage, read-only ACL user).
+
 ## Standalone repro
 
 `scripts/repro-ghost-master.sh` — kubectl + valkey-cli only (no BetterDB, no load): rolls the

@@ -1,0 +1,31 @@
+# Values for the betterdb-monitor Helm chart (https://docs.betterdb.com/charts, chart 0.51.1).
+# helm install betterdb betterdb-monitor --repo https://docs.betterdb.com/charts \
+#   --version 0.51.1 -n betterdb -f betterdb-values.yaml
+image:
+  repository: betterdb/monitor
+  # Chart 0.51.1 defaults to the 0.51.1 image. Before 0.55.0 a seed that resolves to several
+  # nodes (the headless Service) churned auto-registered nodes and lost slow log entries.
+  # Pin 0.55.0 or later.
+  tag: 0.56.0-no-ai
+db:
+  # Seed: the operator's headless Service (valkey-<ValkeyCluster name>). It resolves to
+  # every pod, so BetterDB still finds the cluster while pods are being replaced.
+  host: valkey-demo.valkey.svc.cluster.local
+  port: 6379
+  username: betterdb
+  existingSecret: betterdb
+  existingSecretKey: valkey-password
+storage:
+  type: postgres
+  existingSecret: betterdb
+  existingSecretKey: storage-url
+license:
+  existingSecret: betterdb
+  existingSecretKey: license-key
+extraEnv:
+  # Register every cluster node as its own connection, and keep the list in sync as the
+  # operator replaces pods (new pods get new IPs and node ids).
+  - { name: CLUSTER_AUTO_REGISTER_NODES, value: "true" }
+  # Encrypts the node credentials BetterDB stores for the auto-registered connections.
+  - name: ENCRYPTION_KEY
+    valueFrom: { secretKeyRef: { name: betterdb, key: encryption-key } }
