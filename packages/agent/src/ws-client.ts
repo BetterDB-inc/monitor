@@ -58,9 +58,9 @@ export class WsClient {
       this.stopHeartbeat();
       this.options.onClose(code, reason.toString());
       if (code === REPLACED_CLOSE_CODE) {
-        console.error(
-          '[Agent] Another agent is using the same token, so the server turned this one away. ' +
-          'Give each agent its own token. Retrying in 30 s.',
+        console.warn(
+          '[Agent] Another agent is connected with this token ' +
+          '(a duplicate, or a previous instance still shutting down). Retrying in 30 s.',
         );
       }
       this.scheduleReconnect(code === REPLACED_CLOSE_CODE);

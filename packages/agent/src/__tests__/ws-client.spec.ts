@@ -32,12 +32,14 @@ function build(): WsClient {
 }
 
 describe('WsClient reconnects', () => {
+  let warn: jest.SpyInstance;
   let error: jest.SpyInstance;
 
   beforeEach(() => {
     jest.useFakeTimers();
     mockSockets.length = 0;
     jest.spyOn(console, 'log').mockImplementation(() => {});
+    warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
     error = jest.spyOn(console, 'error').mockImplementation(() => {});
   });
 
@@ -69,7 +71,11 @@ describe('WsClient reconnects', () => {
 
     jest.advanceTimersByTime(1);
     expect(mockSockets).toHaveLength(2);
-    expect(error).toHaveBeenCalledWith(expect.stringContaining('Another agent is using the same token'));
+    expect(warn).toHaveBeenCalledWith(
+      '[Agent] Another agent is connected with this token ' +
+        '(a duplicate, or a previous instance still shutting down). Retrying in 30 s.',
+    );
+    expect(error).not.toHaveBeenCalled();
     client.close();
   });
 
