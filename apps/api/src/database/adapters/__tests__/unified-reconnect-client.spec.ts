@@ -8,6 +8,7 @@ describe('UnifiedDatabaseAdapter reconnecting its main client', () => {
   let sockets: Socket[];
   let adapter: UnifiedDatabaseAdapter | undefined;
   let serverInfo: string;
+  let stalled: (() => void) | undefined;
 
   const bulk = (text: string): string => `$${Buffer.byteLength(text)}\r\n${text}\r\n`;
 
@@ -20,6 +21,10 @@ describe('UnifiedDatabaseAdapter reconnecting its main client', () => {
   const replyTo = (command: string): string => {
     const name = command.split('\r\n')[2]?.toUpperCase();
     if (name === 'PING') return '+PONG\r\n';
+    if (name === 'INFO' && command.includes('server') && stalled) {
+      stalled();
+      return '';
+    }
     if (name === 'INFO') return bulk(serverInfo);
     if (name === 'CONFIG') return `*2\r\n${bulk('maxmemory')}${bulk('0')}`;
     return '+OK\r\n';
@@ -35,6 +40,7 @@ describe('UnifiedDatabaseAdapter reconnecting its main client', () => {
     sockets = [];
     adapter = undefined;
     serverInfo = SERVER_INFO;
+    stalled = undefined;
     server = createServer((socket) => {
       sockets.push(socket);
       socket.on('error', () => undefined);
@@ -72,6 +78,23 @@ describe('UnifiedDatabaseAdapter reconnecting its main client', () => {
     expect(connected.isConnected()).toBe(true);
     await expect(connected.ping()).resolves.toBe(true);
     expect(sockets).toHaveLength(3);
+  });
+
+  it('connects again when a connect was still running on the client it closes', async () => {
+    const serverWentSilent = new Promise<void>((resolve) => {
+      stalled = resolve;
+    });
+    adapter = new UnifiedDatabaseAdapter({ host: '127.0.0.1', port: serverPort() });
+    const running = adapter.connect().catch(() => undefined);
+    await serverWentSilent;
+    stalled = undefined;
+
+    await adapter.reconnectClient();
+    await running;
+
+    expect(adapter.isConnected()).toBe(true);
+    await expect(adapter.ping()).resolves.toBe(true);
+    expect(sockets).toHaveLength(2);
   });
 
   it('leaves the CLI connection open', async () => {

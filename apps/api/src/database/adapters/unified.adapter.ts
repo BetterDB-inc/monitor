@@ -657,10 +657,12 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
 
   async reconnectClient(): Promise<void> {
     const silent = this._client;
+    const running = this.connectPromise;
     this._client = null;
     this.connected = false;
     silent?.disconnect();
-    await this.connect();
+    await running?.catch(() => undefined);
+    if (!this.isConnected()) await this.connect();
   }
 
   async pingOnNewConnection(timeoutMs: number): Promise<boolean> {
