@@ -20,7 +20,7 @@ interface HeldClaim {
   readonly claimedAt: number;
   readonly heldUntil: number;
   readonly epoch?: number;
-  readonly releasedAt?: number;
+  readonly releaseTimes: readonly number[];
   readonly sightingOnly?: boolean;
 }
 
@@ -55,14 +55,13 @@ export function promotionSignature(primaryId: string, configEpoch: number): Fail
 function claimOfBoth(kept: HeldClaim, joined: HeldClaim): HeldClaim {
   const claimedAt = Math.max(kept.claimedAt, joined.claimedAt);
   const epochs = [kept.epoch, joined.epoch].filter((epoch): epoch is number => epoch !== undefined);
-  const releases = [kept.releasedAt, joined.releasedAt].filter(
-    (releasedAt): releasedAt is number => releasedAt !== undefined && releasedAt >= claimedAt,
-  );
   return {
     claimedAt,
     heldUntil: Math.max(kept.heldUntil, joined.heldUntil),
     epoch: epochs.length > 0 ? Math.max(...epochs) : undefined,
-    releasedAt: releases.length > 0 ? Math.min(...releases) : undefined,
+    releaseTimes: [...kept.releaseTimes, ...joined.releaseTimes].filter(
+      (releasedAt) => releasedAt >= claimedAt,
+    ),
     sightingOnly: kept.sightingOnly && joined.sightingOnly,
   };
 }
@@ -149,18 +148,19 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
     const renewed =
       signature.renewsOnLaterEpoch === true && (signature.epoch ?? 0) > (held?.epoch ?? 0);
     const released =
-      held?.releasedAt !== undefined &&
+      held !== undefined &&
       stateChangedAt !== undefined &&
-      stateChangedAt >= held.releasedAt;
+      held.releaseTimes.some((releasedAt) => stateChangedAt >= releasedAt);
     const reportsSighting =
       held?.sightingOnly === true &&
       signature.sightingOnly !== true &&
-      held.releasedAt === undefined;
+      held.releaseTimes.length === 0;
     if (held && !renewed && !released && !reportsSighting) return false;
     this.claims.set(claim, {
       claimedAt: reportsSighting ? held.claimedAt : now,
       heldUntil: now + signature.holdMs,
       epoch: signature.epoch,
+      releaseTimes: [],
       sightingOnly: signature.sightingOnly,
     });
     if (signature.releases && !reportsSighting) {
@@ -233,7 +233,7 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
 
   private release(claim: string, now: number): void {
     const held = this.claims.get(claim);
-    if (held) this.claims.set(claim, { ...held, releasedAt: now });
+    if (held) this.claims.set(claim, { ...held, releaseTimes: [...held.releaseTimes, now] });
   }
 
   private releaseNodes(nodeIds: ReadonlySet<string>): void {

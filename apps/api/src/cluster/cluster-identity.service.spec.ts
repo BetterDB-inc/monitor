@@ -468,6 +468,38 @@ describe('ClusterIdentityService', () => {
       ).toBe(false);
     });
 
+    it.each([
+      ['the first two', ['a', 'b', 'c', 'd']],
+      ['the last two', ['c', 'd', 'e', 'f']],
+    ])(
+      'is given after the recovery that followed three claims when %s are joined first',
+      (_order, firstJoin) => {
+        service.observe('member-1', view('a', 'b'));
+        service.observe('member-2', view('c', 'd'));
+        service.observe('manual', view('e', 'f'));
+        const [first, second, third] = ['member-1', 'member-2', 'manual'].map((id) =>
+          service.clusterKeyOf(id),
+        );
+        service.claimFailover(first, outageSignature(), NOW);
+        service.claimFailover(second, outageSignature(), NOW + 5_000);
+        service.claimFailover(first, recoverySightingSignature(), NOW + 10_000, NOW);
+        service.claimFailover(third, outageSignature(), NOW + 15_000);
+        service.claimFailover(second, recoverySightingSignature(), NOW + 20_000, NOW + 5_000);
+
+        service.observe(SEED, view(...firstJoin));
+        service.observe(SEED, view('a', 'b', 'c', 'd', 'e', 'f'));
+
+        expect(
+          service.claimFailover(
+            service.clusterKeyOf(SEED),
+            outageSignature(),
+            NOW + 30_000,
+            NOW + 20_000,
+          ),
+        ).toBe(true);
+      },
+    );
+
     it('counts a reported sighting from when it was sighted when clusters are joined', () => {
       service.observe('member-1', view('a', 'b'));
       service.observe('manual', view('c', 'd'));
