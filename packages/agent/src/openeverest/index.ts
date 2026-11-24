@@ -8,6 +8,8 @@ import { createPluginServer } from './plugin-server';
 // BETTERDB_AGENT_MODE=openeverest): the plugin backend plus one Agent per
 // Valkey node of every enabled instance, all in this process.
 
+const SHUTDOWN_DEADLINE_MS = 20_000;
+
 export async function runOpenEverest(): Promise<void> {
   const log = (message: string) => console.log(`[OpenEverest] ${message}`);
   const config = loadOpenEverestConfig();
@@ -31,6 +33,13 @@ export async function runOpenEverest(): Promise<void> {
     if (stopping) return;
     stopping = true;
     log('shutting down');
+    // Kubernetes gives terminationGracePeriodSeconds (30s by default) before
+    // SIGKILL; leave before that even if a connection refuses to close.
+    const deadline = setTimeout(() => {
+      log('shutdown deadline reached, exiting');
+      process.exit(0);
+    }, SHUTDOWN_DEADLINE_MS);
+    deadline.unref();
     server.close();
     await manager.stop();
     process.exit(0);

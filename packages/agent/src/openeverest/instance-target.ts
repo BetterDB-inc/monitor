@@ -45,6 +45,8 @@ export interface InstanceTargetOptions {
   cloudCa?: string;
   rediscoverIntervalMs: number;
   log: (message: string) => void;
+  /** How many node agents start at once; unreachable nodes take a connect timeout each. */
+  startConcurrency?: number;
 }
 
 type Secret = KubeObject & SecretLike;
@@ -58,6 +60,7 @@ interface NodeRun {
 
 const RETRY_MS = 15_000;
 const CONNECT_TIMEOUT_MS = 5_000;
+const DEFAULT_START_CONCURRENCY = 4;
 
 export class InstanceTarget {
   private secretName: string | null = null;
@@ -73,6 +76,8 @@ export class InstanceTarget {
   private generation = 0;
   private loop: Promise<void> | null = null;
   private wake: (() => void) | null = null;
+  // A kick that arrived while reconcile() was running; served right after it.
+  private pending = false;
 
   constructor(private readonly options: InstanceTargetOptions) {}
 
@@ -135,9 +140,11 @@ export class InstanceTarget {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    // Wake the loop; it exits after the reconcile in flight, if any, and the
+    // teardown below waits for that rather than racing it.
+    this.kick();
     await this.informer?.stop();
     this.informer = null;
-    this.kick();
     await this.loop;
     await this.stopNodes(Array.from(this.nodes.keys()));
     this.setState('off');
@@ -176,8 +183,10 @@ export class InstanceTarget {
   }
 
   // The reconcile loop runs once per wake-up and then every rediscovery
-  // interval. Credential changes, settings changes and stop() wake it.
+  // interval. Credential changes, settings changes and stop() wake it; a wake
+  // during a reconcile is remembered and served as soon as it finishes.
   private kick(): void {
+    this.pending = true;
     if (this.wake) {
       this.wake();
     } else if (!this.loop && !this.stopped) {
@@ -187,12 +196,15 @@ export class InstanceTarget {
 
   private async run(): Promise<void> {
     while (!this.stopped) {
+      this.pending = false;
       const generation = this.generation;
       try {
         await this.reconcile(generation);
       } catch (err) {
         this.setState('error', (err as Error).message);
       }
+      if (this.stopped) break;
+      if (this.pending) continue;
       const delay = this.state === 'monitoring' ? this.options.rediscoverIntervalMs : RETRY_MS;
       await new Promise<void>((resolve) => {
         this.wake = resolve;
@@ -227,13 +239,25 @@ export class InstanceTarget {
     const wanted = new Map(discovered.map((n) => [n.id, n]));
     const gone = Array.from(this.nodes.keys()).filter((id) => !wanted.has(id));
     await this.stopNodes(gone);
+    const toStart: DiscoveredNode[] = [];
     for (const node of discovered) {
       const existing = this.nodes.get(node.id);
-      if (existing && existing.agent && sameAddress(existing.node, node)) continue;
+      if (existing && existing.agent && sameAddress(existing.node, node)) {
+        // Same connection, possibly a new role after a failover: keep the
+        // agent, refresh what the status reports.
+        existing.node = node;
+        existing.name = displayName(node);
+        continue;
+      }
       if (existing) await this.stopNodes([node.id]);
-      await this.startNode(node, credentials, settings);
-      if (generation !== this.generation || this.stopped) return;
+      toStart.push(node);
     }
+    // Each unreachable node costs a connect timeout, so start a few at once.
+    await mapLimit(toStart, this.options.startConcurrency ?? DEFAULT_START_CONCURRENCY, async (node) => {
+      if (generation !== this.generation || this.stopped) return;
+      await this.startNode(node, credentials, settings);
+    });
+    if (generation !== this.generation || this.stopped) return;
 
     const failed = Array.from(this.nodes.values()).filter((run) => run.error);
     if (failed.length === this.nodes.size) {
@@ -269,7 +293,7 @@ export class InstanceTarget {
   }
 
   private async startNode(node: DiscoveredNode, credentials: ConnectionCredentials, settings: CloudSettings): Promise<void> {
-    const name = node.hostname ? node.hostname.split('.')[0] : `${node.host}:${node.port}`;
+    const name = displayName(node);
     const identity: AgentIdentity = {
       platform: 'openeverest',
       clusterId: this.options.clusterId,
@@ -317,6 +341,10 @@ export class InstanceTarget {
   }
 }
 
+function displayName(node: DiscoveredNode): string {
+  return node.hostname ? node.hostname.split('.')[0] : `${node.host}:${node.port}`;
+}
+
 function sameAddress(a: DiscoveredNode, b: DiscoveredNode): boolean {
   return a.host === b.host && a.port === b.port;
 }
@@ -326,6 +354,18 @@ function tlsOptions(credentials: ConnectionCredentials): Record<string, unknown>
   const { ca, cert, key } = credentials.tls;
   // Chain-only verification, see AgentConfig.valkeyTlsOptions.
   return { ca, cert, key, checkServerIdentity: () => undefined };
+}
+
+/** Runs `fn` over `items` with at most `limit` in flight. */
+async function mapLimit<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    while (next < items.length) {
+      const item = items[next++];
+      await fn(item);
+    }
+  });
+  await Promise.all(workers);
 }
 
 /**
