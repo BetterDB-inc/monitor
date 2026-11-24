@@ -253,6 +253,29 @@ describe('CaptureSessionReconciler', () => {
     expect(update).not.toHaveBeenCalled();
   });
 
+  it('writes nothing when the startup timeout fires during the chunk-stats read', async () => {
+    jest.useFakeTimers();
+    const s = session();
+    await storage.saveCaptureSession(s, CONN);
+    let release!: () => void;
+    jest
+      .spyOn(storage, 'getCaptureChunkStats')
+      .mockReturnValue(new Promise((r) => (release = () => r(null))));
+    const update = jest.spyOn(storage, 'updateCaptureSession');
+    jest
+      .spyOn((reconciler as unknown as { logger: { warn: () => void } }).logger, 'warn')
+      .mockImplementation(() => undefined);
+
+    const done = reconciler.reconcileOnStartup(NONE);
+    await jest.advanceTimersByTimeAsync(10_000);
+    await expect(done).resolves.toBeUndefined();
+
+    release(); // the stats query answers after readiness was released
+    await jest.advanceTimersByTimeAsync(0);
+    expect(update).not.toHaveBeenCalled();
+    expect((await storage.getCaptureSession(s.id))?.status).toBe('running');
+  });
+
   it('is idempotent', async () => {
     const a = session();
     const b = session();

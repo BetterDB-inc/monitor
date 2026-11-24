@@ -151,18 +151,27 @@ export class CaptureSessionReconciler {
     // owned → not owned (it finished); the CAS in failSession handles that case.
     if (abort.aborted || isOwned(s.id)) return false;
     try {
-      return await this.failSession(s, reason);
+      return await this.failSession(s, reason, abort);
     } catch (err) {
       this.logger.warn(`Failed to reconcile capture session ${s.id}: ${(err as Error).message}`);
       return false;
     }
   }
 
-  /** False when the row was no longer `running` (CAS miss): someone else finished it. */
-  private async failSession(s: StoredCaptureSession, reason: OrphanReason): Promise<boolean> {
+  /**
+   * False when the pass was aborted while reading chunk stats, or when the row
+   * was no longer `running` (CAS miss): someone else finished it.
+   */
+  private async failSession(
+    s: StoredCaptureSession,
+    reason: OrphanReason,
+    abort: AbortFlag,
+  ): Promise<boolean> {
     // CaptureWriter writes byte/line counts only in terminate(), so an orphan
     // still holds the 0 it was inserted with. Recover them from the chunks.
     const stats = await this.storage.getCaptureChunkStats(s.id);
+    // The stats read can outlive the startup timeout; write nothing after it.
+    if (abort.aborted) return false;
     const endedAt = stats?.lastTs ?? Date.now();
     const segments: CaptureNodeSegment[] | undefined = s.nodeSegments?.map((seg) => {
       if (seg.status !== 'running') return seg; // keep e.g. monitor_open_failed causes
