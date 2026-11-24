@@ -33,6 +33,14 @@ describe('ClusterIdentityService', () => {
     removalListeners = [];
     const registry = {
       getConfig: jest.fn((id: string) => configs[id] ?? null),
+      list: jest.fn(() =>
+        Object.entries(configs).map(([id, config]) => ({
+          id,
+          host: `${id}.internal`,
+          port: 6379,
+          membership: config.membership,
+        })),
+      ),
       get: jest.fn((id: string) => {
         if (!(id in configs)) throw new Error(`Connection '${id}' not found`);
         return { isConnected: () => connected.has(id) };
@@ -303,6 +311,65 @@ describe('ClusterIdentityService', () => {
       service.claimFailover('cluster-1', promotionSignature('node-b', 7), NOW + MINUTE_MS);
 
       expect(service['claims'].size).toBe(1);
+    });
+  });
+
+  describe('other connections of the cluster', () => {
+    const others = (connectionId: string): string[] =>
+      service.otherClusterConnections(connectionId).map((other) => other.connectionId);
+
+    it('lists a second user-added connection whose view shares a node', () => {
+      configs['manual-2'] = {};
+      service.observe('manual', view('a', 'b'));
+      service.observe('manual-2', view('b', 'c'));
+
+      expect(others('manual')).toEqual(['manual-2']);
+    });
+
+    it('lists the members of the seed, also one that has not read a view yet', () => {
+      service.observe(SEED, view('a', 'b'));
+      service.observe('member-1', view('a', 'b'));
+
+      expect(others(SEED)).toEqual(['member-1', 'member-2']);
+    });
+
+    it('lists the member that saw the change when the event is filed under a seed that is down', () => {
+      connected.delete(SEED);
+      service.observe('member-1', view('a', 'b'));
+
+      expect(others('member-1')).toEqual(['member-1', 'member-2']);
+    });
+
+    it('lists a user-added connection next to the members of the seed', () => {
+      service.observe(SEED, view('a', 'b'));
+      service.observe('member-1', view('a', 'b'));
+      service.observe('manual', view('b', 'c'));
+
+      expect(others('member-1')).toEqual(['member-1', 'member-2', 'manual']);
+    });
+
+    it('lists the other members when the seed connection was removed', () => {
+      delete configs[SEED];
+      service.observe('member-1', view('a', 'b'));
+
+      expect(others('member-1')).toEqual(['member-2']);
+    });
+
+    it('leaves out the connections of another cluster', () => {
+      service.observe(SEED, view('a', 'b'));
+      service.observe('manual', view('x', 'y'));
+
+      expect(others(SEED)).toEqual(['member-1', 'member-2']);
+      expect(others('manual')).toEqual([]);
+    });
+
+    it('gives each connection its own host and port', () => {
+      service.observe(SEED, view('a', 'b'));
+
+      expect(service.otherClusterConnections(SEED)[0]).toEqual({
+        connectionId: 'member-1',
+        instance: { host: 'member-1.internal', port: 6379 },
+      });
     });
   });
 

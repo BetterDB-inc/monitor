@@ -10,6 +10,11 @@ export interface FailoverSignature {
   readonly renewsOnLaterEpoch?: boolean;
 }
 
+export interface ScopedConnection {
+  readonly connectionId: string;
+  readonly instance: { host: string; port: number };
+}
+
 interface HeldClaim {
   readonly heldUntil: number;
   readonly epoch?: number;
@@ -126,6 +131,24 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
     const membership = this.connectionRegistry.getConfig(connectionId)?.membership;
     if (membership?.origin !== 'auto') return connectionId;
     return this.connectionRegistry.getConfig(membership.seedId) ? membership.seedId : connectionId;
+  }
+
+  otherClusterConnections(connectionId: string): ScopedConnection[] {
+    const clusterKey = this.clusterKeyOf(connectionId);
+    const filedUnder = this.eventConnectionOf(connectionId);
+    const registered = this.connectionRegistry.list();
+    const anchors = new Set(
+      registered
+        .filter((connection) => this.clusterKeyOf(connection.id) === clusterKey)
+        .flatMap(({ id, membership }) => (membership ? [id, membership.seedId] : [id])),
+    );
+    return registered
+      .filter(
+        ({ id, membership }) =>
+          id !== filedUnder &&
+          (anchors.has(id) || (membership !== undefined && anchors.has(membership.seedId))),
+      )
+      .map(({ id, host, port }) => ({ connectionId: id, instance: { host, port } }));
   }
 
   private release(claim: string, now: number): void {
