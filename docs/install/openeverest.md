@@ -137,8 +137,10 @@ so a password rotation reconnects on its own.
 provider-valkey always runs Valkey in cluster mode. The agent asks the instance's Service for
 `CLUSTER SHARDS` (or `CLUSTER NODES`), opens one connection per node and follows no redirects, so
 each node is monitored as itself. Discovery runs again every minute to follow scaling and
-failover. In BetterDB every node keeps a stable identity (cluster, namespace, instance, node id),
-so history survives agent restarts, fail-overs and token rotation.
+failover. In BetterDB every node keeps a stable identity (cluster, namespace, instance, node id,
+scoped by the agent token's name), so history survives agent restarts and fail-overs. To rotate
+the token without losing history, create the new token under the same name; a token with a
+different name gets its own set of connections and cannot take over another's.
 
 ## Troubleshooting
 

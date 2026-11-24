@@ -2,7 +2,7 @@ jest.mock('../../apps/api/src/database/adapters/unified.adapter');
 
 import { EventEmitter } from 'events';
 import type { WebSocket } from 'ws';
-import { AgentGateway, agentConnectionId, agentConnectionName } from './agent-gateway';
+import { AgentGateway, agentConnectionId, agentConnectionName, validateIdentity, MAX_CONNECTIONS_PER_TOKEN } from './agent-gateway';
 import { ConnectionRegistry } from '../../apps/api/src/connections/connection-registry.service';
 import { ExternalMetricsStore } from '../../apps/api/src/external-metrics/external-metrics-store';
 import { DiscoveredInstancesStore } from '../../apps/api/src/external-metrics/discovered-instances.store';
@@ -371,36 +371,66 @@ describe('agentConnectionId', () => {
   };
 
   it('keeps the token-based id for single-target agents', () => {
-    expect(agentConnectionId('tok-1')).toBe('agent-tok-1');
+    expect(agentConnectionId('tok-1', 'Agent')).toBe('agent-tok-1');
     expect(agentConnectionName('Agent')).toBe('Agent');
   });
 
-  it('derives the same id for the same node whatever the token', () => {
-    const a = agentConnectionId('tok-1', identity);
-    const b = agentConnectionId('tok-2', { ...identity });
+  it('derives the same id for the same node across tokens of the same name (rotation)', () => {
+    const a = agentConnectionId('tok-1', 'openeverest', identity);
+    const b = agentConnectionId('tok-2', 'openeverest', { ...identity });
     expect(a).toBe(b);
     expect(a).toMatch(/^agent-openeverest-[0-9a-f]{16}$/);
   });
 
+  it('scopes the id by token name, so a token under another name cannot take a node over', () => {
+    expect(agentConnectionId('tok-1', 'openeverest', identity)).not.toBe(agentConnectionId('tok-1', 'other', identity));
+  });
+
   it('gives every node, instance, namespace and cluster its own id', () => {
-    const base = agentConnectionId('tok-1', identity);
-    expect(agentConnectionId('tok-1', { ...identity, node: 'other-node' })).not.toBe(base);
-    expect(agentConnectionId('tok-1', { ...identity, instance: 'sessions' })).not.toBe(base);
-    expect(agentConnectionId('tok-1', { ...identity, namespace: 'staging' })).not.toBe(base);
-    expect(agentConnectionId('tok-1', { ...identity, clusterId: 'another-cluster' })).not.toBe(base);
+    const base = agentConnectionId('tok-1', 'openeverest', identity);
+    expect(agentConnectionId('tok-1', 'openeverest', { ...identity, node: 'other-node' })).not.toBe(base);
+    expect(agentConnectionId('tok-1', 'openeverest', { ...identity, instance: 'sessions' })).not.toBe(base);
+    expect(agentConnectionId('tok-1', 'openeverest', { ...identity, namespace: 'staging' })).not.toBe(base);
+    expect(agentConnectionId('tok-1', 'openeverest', { ...identity, clusterId: 'another-cluster' })).not.toBe(base);
   });
 
   it('ignores the readable node name and falls back to the cluster name without a cluster id', () => {
-    expect(agentConnectionId('tok-1', { ...identity, nodeName: 'renamed' })).toBe(agentConnectionId('tok-1', identity));
+    expect(agentConnectionId('tok-1', 'openeverest', { ...identity, nodeName: 'renamed' })).toBe(agentConnectionId('tok-1', 'openeverest', identity));
     const { clusterId: _omit, ...unlabelled } = identity;
-    expect(agentConnectionId('tok-1', unlabelled)).not.toBe(agentConnectionId('tok-1', identity));
-    expect(agentConnectionId('tok-1', unlabelled)).toBe(agentConnectionId('tok-9', { ...unlabelled, cluster: 'main' }));
+    expect(agentConnectionId('tok-1', 'openeverest', unlabelled)).not.toBe(agentConnectionId('tok-1', 'openeverest', identity));
+    expect(agentConnectionId('tok-1', 'openeverest', unlabelled)).toBe(agentConnectionId('tok-9', 'openeverest', { ...unlabelled, cluster: 'main' }));
   });
 
   it('names the connection after the namespace, instance and node', () => {
     expect(agentConnectionName('Agent', identity)).toBe('databases/orders-cache/valkey-orders-cache-0');
     const { nodeName: _omit, ...unnamed } = identity;
     expect(agentConnectionName('Agent', unnamed)).toBe(`databases/orders-cache/${identity.node}`);
+  });
+});
+
+describe('validateIdentity', () => {
+  const valid = { platform: 'openeverest', cluster: 'main', namespace: 'db', instance: 'orders', node: 'abc123', nodeName: 'valkey-orders-0', clusterId: '9336879f-70a0-49ff-8b7d-c52428770aa1' };
+
+  it('accepts a well-formed identity and keeps only the known fields', () => {
+    expect(validateIdentity({ ...valid, extra: 'x' })).toEqual(valid);
+    expect(validateIdentity({ platform: 'openeverest', cluster: 'main', namespace: 'db', instance: 'orders', node: '10.0.0.1:6379' }))
+      .toEqual({ platform: 'openeverest', cluster: 'main', namespace: 'db', instance: 'orders', node: '10.0.0.1:6379' });
+  });
+
+  it.each([
+    ['not an object', 'openeverest'],
+    ['unknown platform', { ...valid, platform: 'other' }],
+    ['missing node', { ...valid, node: undefined }],
+    ['missing instance', { ...valid, instance: '' }],
+    ['non-string namespace', { ...valid, namespace: 42 }],
+    ['uppercase namespace', { ...valid, namespace: 'DB' }],
+    ['namespace with a slash', { ...valid, namespace: 'db/x' }],
+    ['node with whitespace', { ...valid, node: 'a b' }],
+    ['over-long instance', { ...valid, instance: 'a'.repeat(254) }],
+    ['bad cluster id', { ...valid, clusterId: 'id with spaces' }],
+    ['bad node name', { ...valid, nodeName: '<script>' }],
+  ])('rejects %s', (_label, raw) => {
+    expect(validateIdentity(raw)).toBeNull();
   });
 });
 
@@ -442,8 +472,8 @@ describe('AgentGateway identified agents', () => {
 
     const ids = gateway.getConnectedAgents().map((a) => a.id).sort();
     expect(ids).toEqual([
-      agentConnectionId(TOKEN_ID, { ...identity, node: 'n1' } as never),
-      agentConnectionId(TOKEN_ID, { ...identity, node: 'n2' } as never),
+      agentConnectionId(TOKEN_ID, 'OpenEverest', { ...identity, node: 'n1' } as never),
+      agentConnectionId(TOKEN_ID, 'OpenEverest', { ...identity, node: 'n2' } as never),
     ].sort());
     expect(registry.isListed(`agent-${TOKEN_ID}`)).toBe(false);
     const listed = registry.list().filter((c) => ids.includes(c.id));
@@ -451,7 +481,42 @@ describe('AgentGateway identified agents', () => {
     expect(listed.map((c) => c.name)).toEqual(['db/vk/vk-0', 'db/vk/vk-0']);
   });
 
-  it('lets a restarted agent on a new token take over the same node id', async () => {
+  it('closes an agent whose identity is malformed before registering anything', async () => {
+    const registry = buildRegistry();
+    const gateway = new AgentGateway({} as never, registry);
+    const socket = new FakeSocket(true);
+    (gateway as unknown as { onConnection: (ws: WebSocket, id: string, name: string) => void }).onConnection(
+      socket as unknown as WebSocket, TOKEN_ID, 'OpenEverest',
+    );
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'agent_hello', version: '1.0.0', capabilities: [],
+      valkey: { type: 'valkey', version: '8.0.0', tls: true, cluster: true },
+      identity: { platform: 'evil', cluster: 'main', namespace: 'db', instance: 'vk', node: 'n1' },
+    })));
+    await jest.advanceTimersByTimeAsync(0);
+
+    expect(socket.closes).toEqual([{ code: 4004, reason: 'Invalid identity' }]);
+    expect(gateway.getConnectedAgents()).toHaveLength(0);
+    expect(registry.list()).toHaveLength(0);
+  });
+
+  it('caps identified connections per token', async () => {
+    const registry = buildRegistry();
+    const gateway = new AgentGateway({} as never, registry);
+    for (let i = 0; i < MAX_CONNECTIONS_PER_TOKEN; i++) connectIdentified(gateway, TOKEN_ID, `n${i}`);
+    await jest.advanceTimersByTimeAsync(0);
+    expect(gateway.getConnectedAgents()).toHaveLength(MAX_CONNECTIONS_PER_TOKEN);
+
+    const extra = connectIdentified(gateway, TOKEN_ID, 'one-too-many');
+    const otherToken = connectIdentified(gateway, 'tok-other', 'other-n0');
+    await jest.advanceTimersByTimeAsync(0);
+
+    expect(extra.closes).toEqual([{ code: 4005, reason: expect.stringContaining('Too many') }]);
+    expect(otherToken.closes).toHaveLength(0);
+    expect(gateway.getConnectedAgents()).toHaveLength(MAX_CONNECTIONS_PER_TOKEN + 1);
+  });
+
+  it('lets a restarted agent on a new token of the same name take over the same node id', async () => {
     const registry = buildRegistry();
     const gateway = new AgentGateway({} as never, registry);
     const first = connectIdentified(gateway, 'tok-a', 'n1');

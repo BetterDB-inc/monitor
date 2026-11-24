@@ -11,18 +11,68 @@ import type { AgentHelloMessage, AgentConnectionInfo, AgentIdentity } from '@bet
 const LIVENESS_CHECK_MS = 5000;
 
 /**
+ * Identified agents (one process relaying many nodes) may hold at most this
+ * many connections per token; beyond it the gateway turns new ones away rather
+ * than let one token fill the registry.
+ */
+export const MAX_CONNECTIONS_PER_TOKEN = 512;
+
+const IDENTITY_PLATFORMS: ReadonlySet<string> = new Set(['openeverest']);
+const IDENTITY_MAX_LENGTH = 253;
+// DNS-style names for the Kubernetes-side labels; the node key may be a
+// cluster node id, host:port or a pod name, the cluster id a UID.
+const DNS_NAME = /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/;
+const NODE_KEY = /^[A-Za-z0-9][A-Za-z0-9.:_[\]-]*$/;
+const OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+
+function validField(value: unknown, pattern: RegExp): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= IDENTITY_MAX_LENGTH && pattern.test(value);
+}
+
+/**
+ * Checks an identity from the wire: the platform comes from an allowlist,
+ * cluster, namespace, instance and node are required, every field is a
+ * bounded string of an expected shape, and nothing else is kept. Returns null
+ * for anything malformed, which the gateway rejects.
+ */
+export function validateIdentity(raw: unknown): AgentIdentity | null {
+  if (raw === null || typeof raw !== 'object') return null;
+  const value = raw as Record<string, unknown>;
+  if (typeof value.platform !== 'string' || !IDENTITY_PLATFORMS.has(value.platform)) return null;
+  if (!validField(value.cluster, DNS_NAME) || !validField(value.namespace, DNS_NAME) || !validField(value.instance, DNS_NAME)) return null;
+  if (!validField(value.node, NODE_KEY)) return null;
+  if (value.clusterId !== undefined && !validField(value.clusterId, OPAQUE_ID)) return null;
+  if (value.nodeName !== undefined && !validField(value.nodeName, OPAQUE_ID)) return null;
+  const identity: AgentIdentity = {
+    platform: value.platform as AgentIdentity['platform'],
+    cluster: value.cluster,
+    namespace: value.namespace,
+    instance: value.instance,
+    node: value.node,
+  };
+  if (value.clusterId !== undefined) identity.clusterId = value.clusterId;
+  if (value.nodeName !== undefined) identity.nodeName = value.nodeName;
+  return identity;
+}
+
+/**
  * Connection id for an agent. A single-target agent is its token: one token,
  * one database. A multi-target agent (OpenEverest) sends an identity with each
  * node it relays, and the id is derived from that instead, so a node keeps its
- * id (and its history) when the agent pod restarts, fails over to another
- * replica or the token is rotated. The Kubernetes cluster id is preferred over
- * the OpenEverest cluster name, which is only a label the user picked.
+ * id (and its history) when the agent pod restarts or fails over.
+ *
+ * The hash is scoped by the token's name, not its id: ids survive rotating
+ * the token (create the new one under the same name), while a token created
+ * under another name cannot take over an existing node's id. Tokens carry no
+ * owner today, so the name is the stable handle an admin controls. The
+ * Kubernetes cluster id is preferred over the OpenEverest cluster name, which
+ * is only a label the user picked.
  */
-export function agentConnectionId(tokenId: string, identity?: AgentIdentity): string {
+export function agentConnectionId(tokenId: string, tokenName: string, identity?: AgentIdentity): string {
   if (!identity) return `agent-${tokenId}`;
   const cluster = identity.clusterId || identity.cluster;
   const digest = createHash('sha256')
-    .update([identity.platform, cluster, identity.namespace, identity.instance, identity.node].join('\0'))
+    .update([tokenName, identity.platform, cluster, identity.namespace, identity.instance, identity.node].join('\0'))
     .digest('hex');
   return `agent-${identity.platform}-${digest.slice(0, 16)}`;
 }
@@ -125,9 +175,24 @@ export class AgentGateway {
 
         if (msg.type === 'agent_hello' && !agent.agentHello) {
           clearTimeout(helloTimeout);
-          agent.agentHello = msg as AgentHelloMessage;
-          agent.id = agentConnectionId(tokenId, agent.agentHello.identity);
-          agent.name = agentConnectionName(tokenName, agent.agentHello.identity);
+          const hello = msg as AgentHelloMessage;
+          if (hello.identity !== undefined) {
+            const identity = validateIdentity(hello.identity);
+            if (!identity) {
+              this.logger.warn(`Agent ${connectionId} sent a malformed identity, closing`);
+              ws.close(4004, 'Invalid identity');
+              return;
+            }
+            hello.identity = identity;
+            if (this.connectionsForToken(tokenId) >= MAX_CONNECTIONS_PER_TOKEN) {
+              this.logger.warn(`Agent ${connectionId}: token ${tokenName} already has ${MAX_CONNECTIONS_PER_TOKEN} connections, turning this one away`);
+              ws.close(4005, 'Too many connections for this token');
+              return;
+            }
+          }
+          agent.agentHello = hello;
+          agent.id = agentConnectionId(tokenId, tokenName, hello.identity);
+          agent.name = agentConnectionName(tokenName, hello.identity);
           connectionId = agent.id;
           this.queueRegistration(agent);
           return;
@@ -160,6 +225,12 @@ export class AgentGateway {
     ws.on('error', (err) => {
       this.logger.error(`Agent ${connectionId} WebSocket error: ${err.message}`);
     });
+  }
+
+  private connectionsForToken(tokenId: string): number {
+    let count = 0;
+    for (const agent of this.agents.values()) if (agent.tokenId === tokenId) count++;
+    return count;
   }
 
   private queueRegistration(agent: AgentConnection): void {
