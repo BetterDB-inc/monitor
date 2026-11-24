@@ -144,6 +144,44 @@ describe('ClusterIdentityService', () => {
       expect(service.clusterKeyOf(SEED)).not.toBe(apart);
     });
 
+    it('is its own for a node that lists only itself after it left the cluster', () => {
+      service.observe(SEED, view('a', 'b', 'c'));
+      service.observe('member-1', view('a', 'b', 'c'));
+
+      service.observe('member-1', view('c'));
+
+      expect(service.clusterKeyOf('member-1')).not.toBe(service.clusterKeyOf(SEED));
+    });
+
+    it('is shared by two connections to a node that lists only itself', () => {
+      service.observe('manual', view('c'));
+      service.observe('member-1', view('c'));
+
+      expect(service.clusterKeyOf('member-1')).toBe(service.clusterKeyOf('manual'));
+    });
+
+    it('stays the key of the cluster for a node that lists the others as failing', () => {
+      service.observe(SEED, view('a', 'b', 'c'));
+      service.observe('member-1', view('a', 'b', 'c'));
+
+      service.observe('member-1', [
+        { id: 'c' },
+        { id: 'a', flags: ['master', 'fail?'] },
+        { id: 'b', flags: ['slave', 'fail?'] },
+      ]);
+
+      expect(service.clusterKeyOf('member-1')).toBe(service.clusterKeyOf(SEED));
+    });
+
+    it('is the key of the cluster again once a node that listed only itself joined it', () => {
+      service.observe(SEED, view('a', 'b'));
+      service.observe('member-1', view('z'));
+
+      service.observe('member-1', view('z', 'a', 'b'));
+
+      expect(service.clusterKeyOf('member-1')).toBe(service.clusterKeyOf(SEED));
+    });
+
     it('is the seed id for a member and its seed before either has read a view', () => {
       expect(service.clusterKeyOf('member-1')).toBe(SEED);
       expect(service.clusterKeyOf(SEED)).toBe(SEED);
@@ -410,6 +448,27 @@ describe('ClusterIdentityService', () => {
       ).toBe(false);
     });
 
+    it('is not held in the cluster for the outage a node shows after it left', () => {
+      service.observe(SEED, view('a', 'b', 'c'));
+      service.observe('member-1', view('a', 'b', 'c'));
+      service.observe('member-1', view('c'));
+      service.claimFailover(service.clusterKeyOf('member-1'), outageSignature(), NOW);
+
+      expect(service.claimFailover(service.clusterKeyOf(SEED), outageSignature(), NOW)).toBe(true);
+    });
+
+    it('stays held in the cluster when a node comes back to it under a new node id', () => {
+      service.observe(SEED, view('a', 'b'));
+      service.claimFailover(service.clusterKeyOf(SEED), promotionSignature('a', 7), NOW);
+      service.observe('member-1', view('z'));
+
+      service.observe('member-1', view('z', 'a', 'b'));
+
+      expect(
+        service.claimFailover(service.clusterKeyOf('member-1'), followerSignature('a', 7), NOW),
+      ).toBe(false);
+    });
+
     it('keeps the outage of another cluster claimed when this one recovers', () => {
       service.claimFailover('cluster-1', outageSignature(), NOW);
       service.claimFailover('cluster-2', outageSignature(), NOW);
@@ -489,6 +548,15 @@ describe('ClusterIdentityService', () => {
       service.observe('member-1', view('x', 'y'));
 
       expect(others('member-1')).toEqual([]);
+    });
+
+    it('lists nothing for a node that lists only itself after it left the cluster', () => {
+      service.observe(SEED, view('a', 'b', 'c'));
+      service.observe('member-1', view('a', 'b', 'c'));
+      service.observe('member-1', view('c'));
+
+      expect(others('member-1')).toEqual([]);
+      expect(service.eventConnectionOf('member-1')).toBe('member-1');
     });
 
     it('gives each connection its own host and port', () => {

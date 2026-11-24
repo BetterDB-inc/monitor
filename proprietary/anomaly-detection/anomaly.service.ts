@@ -1862,6 +1862,7 @@ export class AnomalyService
       }
       if (live && info['cluster_enabled'] !== '1') {
         this.forgetClusterKey(ctx.connectionId);
+        this.clusterIdentity?.forget(ctx.connectionId);
         this.clusterNodeViews.forget(ctx.connectionId);
         this.connectionRegistry.noteObservedNodeId(ctx.connectionId, undefined);
         this.connectionRegistry.noteOutsideCluster(ctx.connectionId, true);

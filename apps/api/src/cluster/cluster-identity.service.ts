@@ -83,6 +83,10 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
         .filter((id): id is string => !!id),
     );
     if (nodeIds.size === 0) return;
+    if (nodes.length === 1) {
+      this.standAlone(connectionId, [...nodeIds][0]);
+      return;
+    }
     const [known, ...joined] = [
       ...new Set(
         [...nodeIds].map((id) => this.keyByNode.get(id)).filter((key): key is string => !!key),
@@ -94,6 +98,13 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
     this.views.set(connectionId, nodeIds);
     this.keyByConnection.set(connectionId, clusterKey);
     nodeIds.forEach((id) => this.keyByNode.set(id, clusterKey));
+    if (previous) this.releaseNodes(previous);
+  }
+
+  private standAlone(connectionId: string, nodeId: string): void {
+    const previous = this.views.get(connectionId);
+    this.views.delete(connectionId);
+    this.keyByConnection.set(connectionId, `node:${nodeId}`);
     if (previous) this.releaseNodes(previous);
   }
 

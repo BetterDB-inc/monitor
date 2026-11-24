@@ -2669,6 +2669,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.clusterEnabled.labels(connLabel).set(clusterEnabled ? 1 : 0);
 
     if (!clusterEnabled) {
+      this.clusterIdentity?.forget(connectionId);
       this.clearSlotSeries(connectionId, connLabel, state);
       return;
     }

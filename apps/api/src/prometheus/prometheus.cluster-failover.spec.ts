@@ -397,6 +397,50 @@ describe('PrometheusService cluster.failover per cluster', () => {
     expect(otlpFailovers()).toHaveLength(2);
   });
 
+  it('files the outage a removed node shows under that node only', async () => {
+    await pollAll([SEED, ...MEMBERS], HEALTHY);
+    clusterInfos['member-2'] = clusterInfo({ cluster_state: 'fail', cluster_known_nodes: '1' });
+
+    await pollAll(['member-2'], [primary('c')]);
+
+    expect(failoverEvents()).toHaveLength(1);
+    expect(failoverEvents()[0]).toMatchObject({
+      connectionId: 'member-2',
+      instance: { host: '10.0.0.3', port: 6379 },
+      alsoScopedTo: [],
+    });
+  });
+
+  it('still reports an outage of the cluster after a removed node showed one', async () => {
+    await pollAll([SEED, ...MEMBERS], HEALTHY);
+    clusterInfos['member-2'] = clusterInfo({ cluster_state: 'fail', cluster_known_nodes: '1' });
+    await pollAll(['member-2'], [primary('c')]);
+    clusterInfos[SEED] = clusterInfo({ cluster_state: 'fail' });
+
+    await pollAll(
+      [SEED],
+      HEALTHY.filter((node) => node.id !== 'c'),
+    );
+
+    expect(failoverEvents()).toHaveLength(2);
+    expect(failoverEvents()[1]).toMatchObject({ connectionId: SEED });
+  });
+
+  it('forgets the cluster of a connection that no longer runs in cluster mode', async () => {
+    await pollAll([SEED, 'manual-1'], HEALTHY);
+
+    await service['updateClusterMetricsFromInfo'](
+      {} as never,
+      { cluster: { cluster_enabled: '0' } } as never,
+      'manual-1',
+      'manual-1',
+      service['getConnectionState']('manual-1'),
+      configs['manual-1'],
+    );
+
+    expect(identity.clusterKeyOf('manual-1')).toBe('manual-1');
+  });
+
   it('sends nothing for the late failure of a node after the recovery was reported', async () => {
     await pollAll([SEED, ...MEMBERS], HEALTHY);
     const clusterKey = identity.clusterKeyOf(SEED);
