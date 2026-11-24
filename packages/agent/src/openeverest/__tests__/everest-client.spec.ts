@@ -54,6 +54,19 @@ describe('EverestClient.checkConnectionAccess', () => {
   });
 });
 
+describe('EverestClient.checkSession', () => {
+  it('accepts a session plugin-context answers 2xx to, and only then', async () => {
+    const ok = clientAnswering(200, '{"user":"admin","namespaces":["db"]}');
+    expect(await ok.client.checkSession('main', 'Bearer user-jwt')).toBe(true);
+    expect(ok.seen[0].url).toBe('http://everest.example:8080/v1/clusters/main/plugin-context');
+    expect(ok.seen[0].init.headers).toEqual({ Authorization: 'Bearer user-jwt', Accept: 'application/json' });
+
+    expect(await clientAnswering(401).client.checkSession('main', 'Bearer forged')).toBe(false);
+    expect(await clientAnswering(403).client.checkSession('main', 'Bearer forged')).toBe(false);
+    await expect(clientAnswering(500).client.checkSession('main', 'Bearer x')).rejects.toMatchObject({ status: 502 });
+  });
+});
+
 describe('everestApiUrl', () => {
   it('follows the plugin template lookup order', () => {
     expect(everestApiUrl({ EVEREST_API_URL: 'http://e:1/' })).toBe('http://e:1');

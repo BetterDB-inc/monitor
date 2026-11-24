@@ -56,16 +56,25 @@ export class EverestClient {
   }
 
   /**
-   * Authorization check for enabling monitoring. `authorization` is the
-   * user's `Authorization` header as the plugin proxy forwarded it; it is
-   * used for this one request and never stored.
+   * Is this a live OpenEverest session? Used before accepting a settings
+   * change: the backend is a plain ClusterIP Service, so a request can come
+   * from any pod with a made-up header, and the proxy's own JWT check never
+   * ran for it. plugin-context sits behind OpenEverest's JWT middleware and
+   * answers 2xx only to a valid session.
    */
-  async checkConnectionAccess(ref: InstanceRef, authorization: string): Promise<ConnectionCheck> {
+  async checkSession(cluster: string, authorization: string): Promise<boolean> {
+    const res = await this.get(`${this.baseUrl}/v1/clusters/${encodeURIComponent(cluster)}/plugin-context`, authorization);
+    if (res.status >= 200 && res.status < 300) return true;
+    if (res.status === 401 || res.status === 403) return false;
+    throw new EverestApiError(502, `OpenEverest API answered ${res.status} on the session check`);
+  }
+
+  private async get(url: string, authorization: string): Promise<Response> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     let res: Response;
     try {
-      res = await this.fetchImpl(this.connectionUrl(ref), {
+      res = await this.fetchImpl(url, {
         method: 'GET',
         headers: { Authorization: authorization, Accept: 'application/json' },
         signal: controller.signal,
@@ -75,8 +84,18 @@ export class EverestClient {
     } finally {
       clearTimeout(timer);
     }
-    // Drain without keeping the credentials around.
+    // Drain without keeping the body (credentials, identities) around.
     await res.arrayBuffer().catch(() => undefined);
+    return res;
+  }
+
+  /**
+   * Authorization check for enabling monitoring. `authorization` is the
+   * user's `Authorization` header as the plugin proxy forwarded it; it is
+   * used for this one request and never stored.
+   */
+  async checkConnectionAccess(ref: InstanceRef, authorization: string): Promise<ConnectionCheck> {
+    const res = await this.get(this.connectionUrl(ref), authorization);
 
     switch (res.status) {
       case 200:

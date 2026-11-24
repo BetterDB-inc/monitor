@@ -121,11 +121,18 @@ export class TargetManager implements PluginBackend {
       tokenSet: Boolean(current?.token),
       dashboardUrl: current ? dashboardUrlFor(current.url) : null,
       source,
+      editable: this.options.config.allowSettingsEdit,
     };
   }
 
-  async updateSettings(input: { url?: string; token?: string }): Promise<SettingsView> {
-    const { kube, config } = this.options;
+  async updateSettings(input: { url?: string; token?: string }, authorization: string): Promise<SettingsView> {
+    const { kube, config, everest } = this.options;
+    if (!config.allowSettingsEdit) {
+      throw new HttpError(403, 'settings are managed by the Helm release (plugin.allowSettingsEdit is off)');
+    }
+    if (!(await everest.checkSession(config.localCluster, authorization))) {
+      throw new HttpError(401, 'OpenEverest did not accept the session token');
+    }
     const stringData: Record<string, string> = {};
     if (input.url !== undefined) stringData.url = input.url;
     if (input.token !== undefined && input.token !== '') stringData.token = input.token;

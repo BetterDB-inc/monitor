@@ -59,6 +59,8 @@ spec:
             {{- end }}
             - name: OPENEVEREST_CLUSTER_NAME
               value: {{ .Values.openeverest.clusterName | quote }}
+            - name: PLUGIN_ALLOW_SETTINGS_EDIT
+              value: {{ .Values.plugin.allowSettingsEdit | quote }}
             - name: BETTERDB_SETTINGS_SECRET
               value: {{ include "betterdb-openeverest.settingsSecretName" . | quote }}
             - name: BETTERDB_TARGETS_CONFIGMAP

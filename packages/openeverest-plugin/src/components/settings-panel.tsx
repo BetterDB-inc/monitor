@@ -46,6 +46,26 @@ const SettingsPanelBody = () => {
     }
   };
 
+  // Editing is off unless the chart enables it (plugin.allowSettingsEdit): the
+  // URL and token then come from Helm values or the settings Secret only.
+  if (current && !current.editable) {
+    return (
+      <Stack spacing={2} sx={{ p: 2, maxWidth: 640 }}>
+        <Typography variant="h6">BetterDB</Typography>
+        <Typography variant="body2">
+          Agent URL: <code>{current.url || 'not set'}</code>
+        </Typography>
+        <Typography variant="body2">Agent token: {current.tokenSet ? 'stored' : 'not set'}</Typography>
+        <Alert severity="info">
+          These settings are managed by the Helm release (values <code>betterdb.url</code>, <code>betterdb.token</code> or{' '}
+          <code>betterdb.existingSecret</code>). To change them here, install the chart with{' '}
+          <code>plugin.allowSettingsEdit=true</code>.
+        </Alert>
+        {message && <Alert severity={message.severity}>{message.text}</Alert>}
+      </Stack>
+    );
+  }
+
   return (
     <Stack spacing={2} sx={{ p: 2, maxWidth: 640 }}>
       <Typography variant="h6">BetterDB</Typography>

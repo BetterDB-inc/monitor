@@ -24,8 +24,13 @@ helm install betterdb-openeverest oci://ghcr.io/betterdb/charts/betterdb-openeve
   --set betterdb.token=<agent token>
 ```
 
-Or leave `betterdb.*` empty and fill in the URL and token from OpenEverest's Settings → BetterDB
-afterwards. Then open a Valkey instance, pick the BetterDB tab and press **Enable**.
+Then open a Valkey instance, pick the BetterDB tab and press **Enable**.
+
+The URL and token come from Helm values or `betterdb.existingSecret`. The settings panel in
+OpenEverest shows them read-only unless `plugin.allowSettingsEdit=true`; with that on, a change
+still needs a session OpenEverest accepts (the backend re-checks the token against
+`/v1/clusters/{cluster}/plugin-context`), and `networkPolicy.enabled` keeps anything but
+everest-server from reaching the backend at all.
 
 ## How credentials work
 
@@ -51,6 +56,8 @@ and every write on these connections. No pod is restarted and no database CR is 
 | `openeverest.clusterName` | `main` | OpenEverest's name for this Kubernetes cluster. |
 | `plugin.name` | `betterdb` | Plugin CR name; cluster-scoped, one install per OpenEverest. |
 | `plugin.compatibleHostVersions` | `""` | Semver range of host versions to accept; empty skips the check. |
+| `plugin.allowSettingsEdit` | `false` | Let the settings panel change URL and token. Off: `PUT /api/settings` answers 403. |
+| `networkPolicy.enabled` | `true` | Admit only everest-server pods (`networkPolicy.serverPodSelector`, in `networkPolicy.openeverestNamespace` or the release namespace) to the backend. Needs an enforcing CNI. |
 | `image.tag` | `""` | Empty resolves to the chart's `appVersion`. |
 | `replicaCount` | `1` | Keep at 1: a second pod would open duplicate connections. |
 

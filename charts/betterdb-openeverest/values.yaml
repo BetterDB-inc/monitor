@@ -34,6 +34,12 @@ plugin:
   compatibleHostVersions: ""
   # The React major the bundle is built against (the host checks this).
   compatibleUiContractVersions: "^18.0.0"
+  # Let the settings panel change the BetterDB URL and token (PUT /api/settings).
+  # Off by default: the backend is a ClusterIP Service any pod can reach, and
+  # a repointed URL would send every enabled instance's telemetry elsewhere.
+  # With it on, a change still needs a session OpenEverest accepts; pair it with
+  # networkPolicy.enabled on a CNI that enforces policies.
+  allowSettingsEdit: false
   # Extension points the bundle registers; the host rejects any other type.
   # `providers` scopes the tab to Valkey instances (spec.providerRef.name).
   extensionPoints:
@@ -91,6 +97,18 @@ rbac:
 
 service:
   port: 8080
+
+# Only everest-server should reach the backend: the plugin proxy's session
+# check runs there, not in the backend. The policy admits pods matching
+# serverPodSelector in the OpenEverest namespace (the release namespace unless
+# set). Needs a CNI that enforces NetworkPolicy; kind's default CNI does not.
+networkPolicy:
+  enabled: true
+  openeverestNamespace: ""
+  serverPodSelector:
+    app.kubernetes.io/name: everest-server
+  # Extra ingress peers (NetworkPolicyPeer list), e.g. a port-forward test pod.
+  extraFrom: []
 
 resources:
   requests:

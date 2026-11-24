@@ -32,6 +32,7 @@ export interface SettingsView {
   tokenSet: boolean;
   dashboardUrl: string | null;
   source: 'secret' | 'env' | 'none';
+  editable: boolean;
 }
 
 export class ApiError extends Error {

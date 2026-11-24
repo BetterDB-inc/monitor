@@ -49,6 +49,24 @@ tests:
       - notExists:
           path: spec.template.spec.volumes
 
+  - it: keeps settings editing off unless asked
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PLUGIN_ALLOW_SETTINGS_EDIT
+            value: "false"
+
+  - it: turns settings editing on through plugin.allowSettingsEdit
+    set:
+      plugin.allowSettingsEdit: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PLUGIN_ALLOW_SETTINGS_EDIT
+            value: "true"
+
   - it: uses an existing settings Secret when given
     set:
       betterdb.existingSecret: my-betterdb
