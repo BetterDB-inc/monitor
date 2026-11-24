@@ -1,4 +1,5 @@
 import WebSocket from 'ws';
+import { rootCertificates } from 'tls';
 
 const MAX_RECONNECT_DELAY_MS = 30000;
 const REPLACED_CLOSE_CODE = 4003;
@@ -6,7 +7,7 @@ const REPLACED_CLOSE_CODE = 4003;
 export interface WsClientOptions {
   url: string;
   token: string;
-  /** Extra CA (PEM) to trust for the server certificate; the system store still applies. */
+  /** Extra CA (PEM) trusted for the server certificate, in addition to Node's bundled root CAs. */
   ca?: string;
   /** Prefix for log lines; defaults to [Agent]. */
   logPrefix?: string;
@@ -35,7 +36,8 @@ export class WsClient {
 
     this.ws = new WebSocket(this.options.url, {
       headers: { Authorization: `Bearer ${this.options.token}` },
-      ...(this.options.ca ? { ca: this.options.ca } : {}),
+      // `ca` replaces the trust store, so the public roots come along with it.
+      ...(this.options.ca ? { ca: [...rootCertificates, this.options.ca] } : {}),
     });
 
     this.ws.on('open', () => {

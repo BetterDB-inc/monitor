@@ -6,7 +6,10 @@ class MockSocket extends EventEmitter {
   static OPEN = 1;
   readyState = 1;
 
-  constructor() {
+  constructor(
+    readonly url?: string,
+    readonly options?: { ca?: string[] },
+  ) {
     super();
     mockSockets.push(this);
   }
@@ -18,7 +21,39 @@ class MockSocket extends EventEmitter {
 
 jest.mock('ws', () => ({ __esModule: true, default: MockSocket }));
 
+import { rootCertificates } from 'tls';
 import { WsClient } from '../ws-client';
+
+describe('WsClient TLS trust', () => {
+  beforeEach(() => {
+    mockSockets.length = 0;
+  });
+
+  it('adds an extra CA to the bundled roots instead of replacing them', () => {
+    new WsClient({ ...buildOptions(), ca: 'PRIVATE-CA-PEM' }).connect();
+
+    const ca = mockSockets[0].options?.ca ?? [];
+    expect(ca).toHaveLength(rootCertificates.length + 1);
+    expect(ca[ca.length - 1]).toBe('PRIVATE-CA-PEM');
+    expect(ca.slice(0, -1)).toEqual([...rootCertificates]);
+  });
+
+  it('leaves the trust store alone when no CA is given', () => {
+    build().connect();
+    expect(mockSockets[0].options?.ca).toBeUndefined();
+  });
+});
+
+function buildOptions() {
+  return {
+    url: 'ws://monitor',
+    token: 'token',
+    onMessage: jest.fn(),
+    onOpen: jest.fn(),
+    onClose: jest.fn(),
+    onError: jest.fn(),
+  };
+}
 
 function build(): WsClient {
   return new WsClient({
