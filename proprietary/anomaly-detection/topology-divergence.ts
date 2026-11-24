@@ -647,6 +647,23 @@ function sharedWith(entry: TopologyDisagreement, disagreement: TopologyDisagreem
   return countSharedSlots(entry.slots, disagreement.slots);
 }
 
+export function trackedKeyOf(
+  tracked: readonly TopologyDisagreement[],
+  disagreement: TopologyDisagreement,
+): string | undefined {
+  if (!disagreement.slots) return disagreement.key;
+  let key: string | undefined;
+  let most = 0;
+  for (const entry of tracked) {
+    const shared = sharedWith(entry, disagreement);
+    if (shared === 0 || shared < most) continue;
+    if (shared === most && key !== undefined && compareText(key, entry.key) <= 0) continue;
+    key = entry.key;
+    most = shared;
+  }
+  return key;
+}
+
 function keepsSidesOf(
   entry: TopologyDisagreement,
   dissent: ReadonlySet<string>,

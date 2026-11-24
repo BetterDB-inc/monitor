@@ -30274,6 +30274,60 @@ describe('AnomalyService', () => {
           ]);
         });
 
+        describe('next to an older dispute over other slots of the same owner', () => {
+          const everyone = [...EVERYONE, 'm'];
+          const OLDER = '[[9000,9100]]';
+          const OF_THE_NODE = '[[5461,8999],[9101,10922]]';
+          type SlotLine = { id: string; slots?: number[][]; eventId: string | null; eventType: unknown };
+          const bySlots = (lines: SlotLine[]) =>
+            Object.fromEntries(
+              lines.filter((line) => line.slots).map((line) => [JSON.stringify(line.slots), line] as const),
+            );
+          const eventsOf = (lines: ReturnType<typeof bySlots>) =>
+            Object.fromEntries(Object.entries(lines).map(([slots, line]) => [slots, [line.eventId, line.eventType]]));
+
+          beforeEach(async () => {
+            (service as any).topologyDivergenceSettings.randomNodes = 5;
+            MEMBERS.m = { host: '10.0.0.8', epoch: 0, slots: '' };
+            knows = { a: everyone, b: everyone, c: everyone, n: everyone, m: everyone };
+            slotsBy = { m: { b: '5461-8999 9101-10922' } };
+            await rounds(2);
+            knows.n = ['a', 'c', 'n', 'm'];
+            await rounds(19);
+          });
+
+          afterEach(() => {
+            delete MEMBERS.m;
+          });
+
+          it('gives each slot line of a full check the event of the sampled line over the same slots', async () => {
+            (discovery as any).onNodeClientOnce = jest.fn(
+              async (node: { id: string }, _connectionId: string, _timeoutMs: number, run: (client: unknown) => unknown) =>
+                run({ call: jest.fn(async () => memberView(node.id)) }),
+            );
+            (service as any).connectionRegistry.get.mockReturnValue(dbClient);
+            (service as any).connectionRegistry.getConfig.mockImplementation((id: string) => ({ id, host: 'seed' }));
+            const [partial] = openPartialEvents();
+            const sampled = bySlots(service.getTopologyDisagreements('conn-1').disagreements);
+            expect(sampled[OLDER].id).toBe('slot_owner:b|unassigned');
+            expect(sampled[OF_THE_NODE]).toMatchObject({
+              id: 'slot_owner:b|unassigned#2',
+              eventId: partial.id,
+              eventType: MetricType.PARTIAL_MEMBERSHIP,
+            });
+            expect(sampled[OLDER].eventId).not.toBe(partial.id);
+
+            expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'started' });
+            for (let i = 0; i < 50 && service.getTopologyFullCheck('conn-1').state !== 'done'; i++) {
+              await new Promise((resolve) => setImmediate(resolve));
+            }
+
+            const checked = bySlots(service.getTopologyFullCheck('conn-1').summary?.disagreements ?? []);
+            expect(checked[OF_THE_NODE].id).toBe('slot_owner:b|unassigned');
+            expect(eventsOf(checked)).toEqual(eventsOf(sampled));
+          });
+        });
+
         describe('once it has learned the owner but still shows no owner for the slots', () => {
           beforeEach(async () => {
             await rounds(6);

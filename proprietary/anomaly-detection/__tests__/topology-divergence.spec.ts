@@ -20,6 +20,7 @@ import {
   type OpenDivergence,
   settleOpenDivergences,
   slotRangesOverlap,
+  trackedKeyOf,
 } from '../topology-divergence';
 
 type NodePatch = Partial<ClusterNode> | null;
@@ -104,6 +105,51 @@ describe('countSharedSlots', () => {
     expect(countSharedSlots(everyOther, everyOther)).toBe(8192);
     expect(countSharedSlots(everyOther, [[0, 16383]])).toBe(8192);
     expect(countSharedSlots(everyOther, everyOther.map(([slot]) => [slot + 1, slot + 1]))).toBe(0);
+  });
+});
+
+describe('trackedKeyOf', () => {
+  const dispute = (key: string, slots: number[][], owner = 'p2'): TopologyDisagreement => ({
+    key,
+    kind: 'slot_owner',
+    subjectIds: [owner],
+    slots,
+    positions: [
+      { value: owner, observers: ['p1', 'p2'] },
+      { value: 'unassigned', observers: ['p3'] },
+    ],
+  });
+  const FIRST = 'slot_owner:p2|unassigned';
+  const SECOND = 'slot_owner:p2|unassigned#2';
+  const tracked = [dispute(FIRST, [[9000, 9100]]), dispute(SECOND, [[5461, 8999]])];
+
+  it('gives the key of the tracked dispute over the same slots, whatever number the compared one has', () => {
+    expect(trackedKeyOf(tracked, dispute(FIRST, [[5461, 8999]]))).toBe(SECOND);
+    expect(trackedKeyOf(tracked, dispute(SECOND, [[9000, 9100]]))).toBe(FIRST);
+  });
+
+  it('takes the tracked dispute that shares the most slots', () => {
+    expect(trackedKeyOf(tracked, dispute(SECOND, [[8990, 9100]]))).toBe(FIRST);
+  });
+
+  it('gives no key when no tracked dispute between the same owners shares a slot', () => {
+    expect(trackedKeyOf(tracked, dispute(FIRST, [[10000, 10010]]))).toBeUndefined();
+    expect(trackedKeyOf(tracked, dispute('slot_owner:p3|unassigned', [[9000, 9100]], 'p3'))).toBeUndefined();
+    expect(trackedKeyOf([], dispute(FIRST, [[9000, 9100]]))).toBeUndefined();
+  });
+
+  it('keeps the key of a disagreement that is not about slots', () => {
+    const membership: TopologyDisagreement = {
+      key: 'membership:n',
+      kind: 'membership',
+      subjectIds: ['n'],
+      positions: [
+        { value: 'known', observers: ['p1'] },
+        { value: 'missing', observers: ['p2'] },
+      ],
+    };
+
+    expect(trackedKeyOf([], membership)).toBe('membership:n');
   });
 });
 

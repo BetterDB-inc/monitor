@@ -285,12 +285,14 @@ import {
 import {
   type DivergenceGroup,
   type OpenDivergence,
+  type TopologyDisagreement,
   type TrackedDisagreement,
   confirmedDisagreements,
   groupDivergences,
   isKnownMember,
   migrationTouchesSlots,
   settleOpenDivergences,
+  trackedKeyOf,
 } from './topology-divergence';
 import {
   type DivergenceRoundResult,
@@ -11530,7 +11532,16 @@ export class AnomalyService
         now: () => Date.now(),
         onProgress,
       });
-      return fullCheckResult(outcome, this.topologyDisagreementEventOf(clusterKey, connectionId, (holder) => holder));
+      const tracked = this.topologyDivergence.lastRound(clusterKey)?.disagreements ?? [];
+      return fullCheckResult(
+        outcome,
+        this.topologyDisagreementEventOf(
+          clusterKey,
+          connectionId,
+          (holder) => holder,
+          (disagreement) => trackedKeyOf(tracked, disagreement),
+        ),
+      );
     });
     if (started.result === 'started') this.topologyFullCheckOwners.set(clusterKey, connectionId);
     return started;
@@ -11545,6 +11556,7 @@ export class AnomalyService
     clusterKey: string,
     connectionId: string,
     placed: (holder: string) => string = this.topologyEventPlaceFor(connectionId),
+    trackedKey: (disagreement: TopologyDisagreement) => string | undefined = (disagreement) => disagreement.key,
   ): DisagreementEventOf {
     const anchor = this.topologyDivergence.lastRound(clusterKey)?.anchorConnectionId;
     const lineEvent = this.topologyLineEventOf(connectionId, anchor, placed);
@@ -11557,7 +11569,9 @@ export class AnomalyService
       eventId: eventIds?.get(finding.signature) ?? null,
     }));
     return (disagreement) => {
-      const holder = findingThatHolds(findings, disagreement);
+      const key = trackedKey(disagreement);
+      const holder =
+        key === undefined ? undefined : findingThatHolds(findings, { key, subjectIds: disagreement.subjectIds });
       if (!holder) return ofGroup(disagreement);
       if (holder.eventId !== null) return lineEvent(holder.eventId, MetricType.PARTIAL_MEMBERSHIP);
       return closedByHand?.has(holder.finding.signature) ? lineEvent(null, MetricType.PARTIAL_MEMBERSHIP) : undefined;
