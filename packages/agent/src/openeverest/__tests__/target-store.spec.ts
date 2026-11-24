@@ -1,0 +1,77 @@
+import { KubeApiError } from '../kube-client';
+import { TargetStore, parseTargetKey, targetKey } from '../target-store';
+
+// A ConfigMap API with optimistic locking, enough for the store's read-modify-write.
+class FakeKube {
+  namespace = 'plugins';
+  configMap: { metadata: { name: string; resourceVersion: string }; data: Record<string, string> } | null = null;
+  conflictsLeft = 0;
+  puts = 0;
+
+  async get(path: string) {
+    if (!this.configMap) throw new KubeApiError(404, path, 'not found');
+    return JSON.parse(JSON.stringify(this.configMap));
+  }
+
+  async post(_path: string, body: { metadata: { name: string }; data: Record<string, string> }) {
+    this.configMap = { metadata: { name: body.metadata.name, resourceVersion: '1' }, data: body.data };
+    return this.configMap;
+  }
+
+  async put(path: string, body: { metadata: { resourceVersion: string }; data: Record<string, string> }) {
+    this.puts += 1;
+    if (this.conflictsLeft > 0) {
+      this.conflictsLeft -= 1;
+      this.configMap!.metadata.resourceVersion = String(Number(this.configMap!.metadata.resourceVersion) + 1);
+      throw new KubeApiError(409, path, 'conflict');
+    }
+    if (body.metadata.resourceVersion !== this.configMap!.metadata.resourceVersion) {
+      throw new KubeApiError(409, path, 'stale resourceVersion');
+    }
+    this.configMap = { metadata: { ...this.configMap!.metadata, resourceVersion: String(Number(body.metadata.resourceVersion) + 1) }, data: body.data };
+    return this.configMap;
+  }
+}
+
+const ORDERS = { cluster: 'main', namespace: 'db', instance: 'orders.cache' };
+const SESSIONS = { cluster: 'main', namespace: 'db', instance: 'sessions' };
+
+describe('TargetStore', () => {
+  it('creates the ConfigMap on the first opt-in and lists it back', async () => {
+    const kube = new FakeKube();
+    const store = new TargetStore(kube as never, 'betterdb-targets');
+
+    await store.add(ORDERS, { enabledAt: '2026-11-24T00:00:00Z' });
+
+    expect(kube.configMap?.metadata.name).toBe('betterdb-targets');
+    expect(Object.keys(kube.configMap!.data)).toEqual(['main__db__orders.cache']);
+    expect(await store.list()).toEqual([{ ref: ORDERS, record: { enabledAt: '2026-11-24T00:00:00Z' } }]);
+  });
+
+  it('adds and removes without touching other entries, retrying a write conflict', async () => {
+    const kube = new FakeKube();
+    const store = new TargetStore(kube as never, 'betterdb-targets');
+    await store.add(ORDERS, { enabledAt: 'a' });
+    kube.conflictsLeft = 1;
+
+    await store.add(SESSIONS, { enabledAt: 'b' });
+    await store.remove(ORDERS);
+
+    expect((await store.list()).map((t) => t.ref.instance)).toEqual(['sessions']);
+    expect(kube.puts).toBe(3);
+  });
+
+  it('lists nothing when the ConfigMap does not exist yet', async () => {
+    const store = new TargetStore(new FakeKube() as never, 'betterdb-targets');
+    expect(await store.list()).toEqual([]);
+  });
+});
+
+describe('target keys', () => {
+  it('round-trips cluster/namespace/instance', () => {
+    expect(targetKey(ORDERS)).toBe('main/db/orders.cache');
+    expect(parseTargetKey('main/db/orders.cache')).toEqual(ORDERS);
+    expect(parseTargetKey('main/db')).toBeNull();
+    expect(parseTargetKey('main//x')).toBeNull();
+  });
+});

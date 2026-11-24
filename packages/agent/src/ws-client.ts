@@ -6,6 +6,10 @@ const REPLACED_CLOSE_CODE = 4003;
 export interface WsClientOptions {
   url: string;
   token: string;
+  /** Extra CA (PEM) to trust for the server certificate; the system store still applies. */
+  ca?: string;
+  /** Prefix for log lines; defaults to [Agent]. */
+  logPrefix?: string;
   onMessage: (data: string) => void;
   onOpen: () => void;
   onClose: (code: number, reason: string) => void;
@@ -20,13 +24,18 @@ export class WsClient {
   private pongTimer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
 
-  constructor(private readonly options: WsClientOptions) { }
+  private readonly tag: string;
+
+  constructor(private readonly options: WsClientOptions) {
+    this.tag = options.logPrefix ?? '[Agent]';
+  }
 
   connect(): void {
     if (this.closed) return;
 
     this.ws = new WebSocket(this.options.url, {
       headers: { Authorization: `Bearer ${this.options.token}` },
+      ...(this.options.ca ? { ca: this.options.ca } : {}),
     });
 
     this.ws.on('open', () => {
@@ -59,7 +68,7 @@ export class WsClient {
       this.options.onClose(code, reason.toString());
       if (code === REPLACED_CLOSE_CODE) {
         console.warn(
-          '[Agent] Another agent is connected with this token ' +
+          `${this.tag} Another agent is connected with this token ` +
           '(a duplicate, or a previous instance still shutting down). Retrying in 30 s.',
         );
       }
@@ -75,6 +84,10 @@ export class WsClient {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(data);
     }
+  }
+
+  isOpen(): boolean {
+    return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
   }
 
   close(): void {
@@ -95,7 +108,7 @@ export class WsClient {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.ws.send(JSON.stringify({ type: 'ping', ts: Date.now() }));
         this.pongTimer = setTimeout(() => {
-          console.error('[Agent] Pong timeout, closing connection');
+          console.error(`${this.tag} Pong timeout, closing connection`);
           this.ws?.close(4000, 'Pong timeout');
         }, 10000);
       }
@@ -124,7 +137,7 @@ export class WsClient {
       ? MAX_RECONNECT_DELAY_MS
       : Math.min(1000 * Math.pow(2, this.reconnectAttempt), MAX_RECONNECT_DELAY_MS);
     this.reconnectAttempt++;
-    console.log(`[Agent] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempt})`);
+    console.log(`${this.tag} Reconnecting in ${delay}ms (attempt ${this.reconnectAttempt})`);
 
     this.reconnectTimer = setTimeout(() => {
       this.connect();

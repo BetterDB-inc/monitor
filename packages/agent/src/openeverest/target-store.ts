@@ -1,0 +1,115 @@
+import { KubeApiError, KubeClient, KubeObject } from './kube-client';
+import type { InstanceRef } from './everest-client';
+
+// Which instances a user opted into, kept in a ConfigMap in the plugin's
+// namespace so the choice survives pod restarts. One key per instance,
+// `<cluster>/<namespace>/<instance>` (slashes are not allowed in ConfigMap
+// keys, so they are stored with `.`), holding a small JSON record.
+
+export interface TargetRecord {
+  enabledAt: string;
+}
+
+interface ConfigMap extends KubeObject {
+  data?: Record<string, string>;
+}
+
+export function targetKey(ref: InstanceRef): string {
+  return `${ref.cluster}/${ref.namespace}/${ref.instance}`;
+}
+
+export function parseTargetKey(key: string): InstanceRef | null {
+  const parts = key.split('/');
+  if (parts.length !== 3 || parts.some((p) => p.length === 0)) return null;
+  const [cluster, namespace, instance] = parts;
+  return { cluster, namespace, instance };
+}
+
+// ConfigMap keys allow [-._a-zA-Z0-9]; the refs are DNS names, so only the
+// separator needs mapping. Instance names can contain `.`, so use a run that
+// no DNS name can.
+const SEPARATOR = '__';
+
+function toDataKey(ref: InstanceRef): string {
+  return [ref.cluster, ref.namespace, ref.instance].join(SEPARATOR);
+}
+
+function fromDataKey(key: string): InstanceRef | null {
+  const parts = key.split(SEPARATOR);
+  if (parts.length !== 3 || parts.some((p) => p.length === 0)) return null;
+  const [cluster, namespace, instance] = parts;
+  return { cluster, namespace, instance };
+}
+
+export class TargetStore {
+  private readonly path: string;
+
+  constructor(
+    private readonly client: KubeClient,
+    private readonly name: string,
+    namespace = client.namespace,
+  ) {
+    this.path = `/api/v1/namespaces/${encodeURIComponent(namespace)}/configmaps`;
+  }
+
+  async list(): Promise<Array<{ ref: InstanceRef; record: TargetRecord }>> {
+    const cm = await this.read();
+    const result: Array<{ ref: InstanceRef; record: TargetRecord }> = [];
+    for (const [key, value] of Object.entries(cm?.data ?? {})) {
+      const ref = fromDataKey(key);
+      if (!ref) continue;
+      try {
+        result.push({ ref, record: JSON.parse(value) as TargetRecord });
+      } catch {
+        result.push({ ref, record: { enabledAt: '' } });
+      }
+    }
+    return result;
+  }
+
+  async add(ref: InstanceRef, record: TargetRecord): Promise<void> {
+    await this.update((data) => ({ ...data, [toDataKey(ref)]: JSON.stringify(record) }));
+  }
+
+  async remove(ref: InstanceRef): Promise<void> {
+    await this.update((data) => {
+      const next = { ...data };
+      delete next[toDataKey(ref)];
+      return next;
+    });
+  }
+
+  private async read(): Promise<ConfigMap | null> {
+    try {
+      return await this.client.get<ConfigMap>(`${this.path}/${encodeURIComponent(this.name)}`);
+    } catch (err) {
+      if (err instanceof KubeApiError && err.status === 404) return null;
+      throw err;
+    }
+  }
+
+  // Read-modify-write with the resourceVersion as the optimistic lock; a 409
+  // from a concurrent writer (two enables at once) is retried from a fresh read.
+  private async update(mutate: (data: Record<string, string>) => Record<string, string>): Promise<void> {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const current = await this.read();
+      const data = mutate(current?.data ?? {});
+      try {
+        if (!current) {
+          await this.client.post(this.path, {
+            apiVersion: 'v1',
+            kind: 'ConfigMap',
+            metadata: { name: this.name, labels: { 'app.kubernetes.io/managed-by': 'betterdb-openeverest' } },
+            data,
+          });
+        } else {
+          await this.client.put(`${this.path}/${encodeURIComponent(this.name)}`, { ...current, data });
+        }
+        return;
+      } catch (err) {
+        if (err instanceof KubeApiError && err.status === 409 && attempt < 4) continue;
+        throw err;
+      }
+    }
+  }
+}

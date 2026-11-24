@@ -1,5 +1,7 @@
 import Valkey from 'iovalkey';
+import type { ConnectionOptions as TlsConnectionOptions } from 'tls';
 import { isElastiCacheServerlessHost } from '@betterdb/shared';
+import type { AgentIdentity } from '@betterdb/shared';
 import { WsClient } from './ws-client';
 import { CommandExecutor } from './command-executor';
 import type { AgentCommandMessage, AgentHelloMessage } from './protocol';
@@ -23,6 +25,21 @@ export interface AgentConfig {
   awsResourceName?: string;
   awsUserId?: string;
   awsServerless?: boolean;
+  /**
+   * TLS material for the Valkey connection, used when valkeyTls is on. With
+   * verifyHostname off the certificate chain is still checked against `ca`
+   * but the server name is not: cluster nodes are dialled by pod IP, which is
+   * never in their certificate's SANs.
+   */
+  valkeyTlsOptions?: { ca?: string; cert?: string; key?: string; verifyHostname?: boolean };
+  /** Sent in the hello; identifies this target when one process relays many. */
+  identity?: AgentIdentity;
+  /** Sent in the hello; asks the cloud to refuse state-changing commands. */
+  readOnly?: boolean;
+  /** Extra CA (PEM) to trust for the cloud WebSocket, e.g. a self-hosted Monitor behind a private CA. */
+  cloudCa?: string;
+  /** Prefix for log lines, so the targets of a multi-target process can be told apart. */
+  logPrefix?: string;
 }
 
 export class Agent {
@@ -46,6 +63,20 @@ export class Agent {
   private valkeyVersion = 'unknown';
   private isCluster = false;
   private capabilities: string[] = [];
+  private readonly tag: string;
+
+  private tlsOptions(): TlsConnectionOptions {
+    const options = this.config.valkeyTlsOptions;
+    if (!options) return {};
+    const tls: TlsConnectionOptions = {};
+    if (options.ca) tls.ca = options.ca;
+    if (options.cert) tls.cert = options.cert;
+    if (options.key) tls.key = options.key;
+    // Verify the chain only: a successful chain check returns undefined here,
+    // which tls.connect takes as "identity ok".
+    if (options.verifyHostname === false) tls.checkServerIdentity = () => undefined;
+    return tls;
+  }
 
   private async createValkeyClient(connectionName: string): Promise<Valkey> {
     const result = await Promise.race([
@@ -67,7 +98,7 @@ export class Agent {
       port: this.config.valkeyPort,
       username: this.config.valkeyUsername,
       password,
-      tls: this.config.valkeyTls ? {} : undefined,
+      tls: this.config.valkeyTls ? this.tlsOptions() : undefined,
       db: this.config.valkeyDb,
       lazyConnect: true,
       connectionName,
@@ -90,11 +121,11 @@ export class Agent {
   private attachClientHandlers(client: Valkey): void {
     client.on('connect', () => {
       this.valkeyConnected = true;
-      console.log('[Agent] Connected to Valkey/Redis');
+      console.log(`${this.tag} Connected to Valkey/Redis`);
     });
 
     client.on('error', (err) => {
-      console.error(`[Agent] Valkey error: ${err.message}`);
+      console.error(`${this.tag} Valkey error: ${err.message}`);
       this.valkeyConnected = false;
       // In IAM mode, trigger a fresh-token reconnect on auth rejections (WRONGPASS /
       // NOAUTH) that don't emit a subsequent close. Transient network errors
@@ -103,7 +134,7 @@ export class Agent {
       const isAuthError = /WRONGPASS|NOAUTH/i.test(err.message);
       if (this.started && !this.shuttingDown && this.authProvider.requiresFreshTokenPerConnection && isAuthError && !this.isReconnecting) {
         this.reconnectLoopPromise = this.reconnectWithFreshToken().catch((reconnectErr) => {
-          console.error(`[Agent] IAM reconnect failed: ${reconnectErr.message}`);
+          console.error(`${this.tag} IAM reconnect failed: ${reconnectErr.message}`);
         });
       }
     });
@@ -113,7 +144,7 @@ export class Agent {
       if (this.shuttingDown) return;
       if (this.started && this.authProvider.requiresFreshTokenPerConnection && !this.isReconnecting) {
         this.reconnectLoopPromise = this.reconnectWithFreshToken().catch((err) => {
-          console.error(`[Agent] IAM reconnect failed: ${err.message}`);
+          console.error(`${this.tag} IAM reconnect failed: ${err.message}`);
         });
       }
     });
@@ -126,7 +157,7 @@ export class Agent {
 
     this.reconnectAttempt += 1;
     const delayMs = Math.min(this.reconnectAttempt * 1000, 30000);
-    console.log(`[Agent] Rebuilding Valkey client with fresh IAM token (attempt ${this.reconnectAttempt}, delay ${delayMs}ms)`);
+    console.log(`${this.tag} Rebuilding Valkey client with fresh IAM token (attempt ${this.reconnectAttempt}, delay ${delayMs}ms)`);
     await new Promise<void>((resolve) => {
       this.resolveReconnectDelay = resolve;
       setTimeout(() => { this.resolveReconnectDelay = null; resolve(); }, delayMs);
@@ -173,7 +204,7 @@ export class Agent {
       this.isReconnecting = false;
       this.reconnectLoopPromise = null;
     } catch (err: any) {
-      console.error(`[Agent] Failed to reconnect with fresh token: ${err.message}`);
+      console.error(`${this.tag} Failed to reconnect with fresh token: ${err.message}`);
       this.isReconnecting = false;
       if (!this.shuttingDown) {
         // Intentional: perpetual retry loop. Per-iteration errors are logged above;
@@ -184,25 +215,38 @@ export class Agent {
   }
 
   constructor(private readonly config: AgentConfig) {
+    this.tag = config.logPrefix ?? '[Agent]';
     this.authProvider = this.buildAuthProvider();
     this.shutdownSignal = new Promise<void>(resolve => { this.resolveShutdown = resolve; });
 
     if (config.unsafeMode) {
-      console.warn('[Agent] WARNING: Unsafe mode enabled. All commands are permitted.');
+      console.warn(`${this.tag} WARNING: Unsafe mode enabled. All commands are permitted.`);
     }
 
     this.wsClient = new WsClient({
       url: config.cloudUrl,
       token: config.token,
+      ca: config.cloudCa,
+      logPrefix: this.tag,
       onOpen: () => this.onWsOpen(),
       onMessage: (data) => this.onWsMessage(data),
-      onClose: (code, reason) => console.log(`[Agent] WS closed: ${code} ${reason}`),
-      onError: (err) => console.error(`[Agent] WS error: ${err.message}`),
+      onClose: (code, reason) => console.log(`${this.tag} WS closed: ${code} ${reason}`),
+      onError: (err) => console.error(`${this.tag} WS error: ${err.message}`),
     });
   }
 
+  /** Live state for status pages: whether both ends of the relay are up. */
+  getStatus(): { valkeyConnected: boolean; cloudConnected: boolean; valkeyVersion: string; cluster: boolean } {
+    return {
+      valkeyConnected: this.valkeyConnected,
+      cloudConnected: this.wsClient.isOpen(),
+      valkeyVersion: this.valkeyVersion,
+      cluster: this.isCluster,
+    };
+  }
+
   async start(): Promise<void> {
-    console.log(`[Agent] Connecting to ${this.config.valkeyHost}:${this.config.valkeyPort}...`);
+    console.log(`${this.tag} Connecting to ${this.config.valkeyHost}:${this.config.valkeyPort}...`);
     try {
       this.client = await this.createValkeyClient('BetterDB-Agent');
       this.attachClientHandlers(this.client);
@@ -211,13 +255,13 @@ export class Agent {
       this.valkeyConnected = true;
 
       await this.detectCapabilities();
-      console.log(`[Agent] Detected ${this.valkeyType} ${this.valkeyVersion}`);
+      console.log(`${this.tag} Detected ${this.valkeyType} ${this.valkeyVersion}`);
       // Mark fully started only after capability detection finishes. Error/close
       // handlers gate their reconnect path on this.started, so any disconnect
       // during detectCapabilities() is also ignored — the catch block handles it.
       this.started = true;
 
-      console.log(`[Agent] Connecting to cloud: ${this.config.cloudUrl}`);
+      console.log(`${this.tag} Connecting to cloud: ${this.config.cloudUrl}`);
       this.wsClient.connect();
     } catch (err) {
       // Agent is single-use: a failed start() is not recoverable on the same
@@ -230,7 +274,7 @@ export class Agent {
   async stop(): Promise<void> {
     this.shuttingDown = true;
     this.resolveShutdown();
-    console.log('[Agent] Shutting down...');
+    console.log(`${this.tag} Shutting down...`);
     this.wsClient.close();
     // If the reconnect loop is sleeping in its backoff delay, wake it immediately
     // so it can observe shuttingDown and exit rather than blocking stop() for up to 30s.
@@ -260,7 +304,7 @@ export class Agent {
     if (this.valkeyConnected) {
       await this.client?.quit().catch(() => {});
     }
-    console.log('[Agent] Stopped');
+    console.log(`${this.tag} Stopped`);
   }
 
   private async detectCapabilities(): Promise<void> {
@@ -320,7 +364,7 @@ export class Agent {
   }
 
   private onWsOpen(): void {
-    console.log('[Agent] WebSocket connected, sending hello');
+    console.log(`${this.tag} WebSocket connected, sending hello`);
     const hello: AgentHelloMessage = {
       type: 'agent_hello',
       version: '0.1.0',
@@ -334,6 +378,8 @@ export class Agent {
       },
       authMode: this.authProvider.mode,
     };
+    if (this.config.identity) hello.identity = this.config.identity;
+    if (this.config.readOnly) hello.readOnly = true;
     this.wsClient.send(JSON.stringify(hello));
   }
 
@@ -342,7 +388,7 @@ export class Agent {
     try {
       msg = JSON.parse(data);
     } catch {
-      console.error('[Agent] Invalid JSON from cloud');
+      console.error(`${this.tag} Invalid JSON from cloud`);
       return;
     }
 
@@ -381,7 +427,7 @@ export class Agent {
         throw new Error('CLI connection invalidated by IAM rotation');
       }
       this.cliExecutor = new CommandExecutor(client, { unsafeMode: this.config.unsafeMode });
-      console.log('[Agent] CLI client connected');
+      console.log(`${this.tag} CLI client connected`);
       return this.cliExecutor;
     })().finally(() => {
       this.cliConnectingPromise = null;
