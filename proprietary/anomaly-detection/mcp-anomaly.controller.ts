@@ -12,11 +12,13 @@ import { AgentTokenGuard } from '@app/common/guards/agent-token.guard';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { ValidateInstanceIdPipe, mapMcpError, safeLimit, safeParseInt } from '@app/mcp/mcp-helpers';
 import { AnomalyService } from './anomaly.service';
+import { withDisputedShardsOnly } from './topology-disagreements';
 import { MetricType } from './types';
 
 const DEFAULT_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 const DIVERGENCE_SERIES_LOOKBACK_MS = 60 * 60 * 1000;
 const METRIC_TYPE_VALUES = new Set<string>(Object.values(MetricType));
+const SHARD_LISTINGS = ['disputed', 'all'];
 
 @Controller('mcp')
 @UseGuards(AgentTokenGuard, LicenseGuard)
@@ -89,6 +91,20 @@ export class McpAnomalyController {
       return this.anomalyService.getHotShards(id);
     } catch (error) {
       throw mapMcpError(this.logger, error, 'Failed to get hot shards');
+    }
+  }
+
+  @Get('instance/:id/anomalies/topology-disagreements')
+  getTopologyDisagreements(@Param('id', ValidateInstanceIdPipe) id: string, @Query('shards') shards?: string) {
+    if (shards !== undefined && !SHARD_LISTINGS.includes(shards)) {
+      throw new BadRequestException(`shards must be one of: ${SHARD_LISTINGS.join(', ')}`);
+    }
+    try {
+      this.registry.get(id);
+      const summary = this.anomalyService.getTopologyDisagreements(id);
+      return shards === 'all' ? summary : withDisputedShardsOnly(summary);
+    } catch (error) {
+      throw mapMcpError(this.logger, error, 'Failed to get topology disagreements');
     }
   }
 

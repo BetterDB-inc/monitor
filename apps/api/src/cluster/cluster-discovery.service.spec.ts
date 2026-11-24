@@ -71,6 +71,9 @@ describe('ClusterDiscoveryService', () => {
       getDefaultId: jest.fn().mockReturnValue('test-connection'),
       getConfig: jest.fn().mockReturnValue({ id: 'test-connection', host: 'localhost', port: 6379 }),
       getNodeAvailabilityZones: jest.fn().mockReturnValue(undefined),
+      getObservedNodeId: jest.fn().mockReturnValue(undefined),
+      findIdObservingNode: jest.fn().mockReturnValue(null),
+      isOutsideCluster: jest.fn().mockReturnValue(false),
       list: jest.fn().mockReturnValue([{
         id: 'test-connection',
         name: 'Test Connection',
@@ -92,6 +95,166 @@ describe('ClusterDiscoveryService', () => {
 
   afterEach(async () => {
     await service.disconnectAll();
+  });
+
+  describe('discoverNodesWithCollection', () => {
+    const configs: Record<string, any> = {
+      'test-connection': { id: 'test-connection', host: 'localhost', port: 6379 },
+      'same-cluster': {
+        id: 'same-cluster',
+        host: '192.168.1.11',
+        port: 6379,
+        membership: { nodeId: 'node2-id-def456' },
+      },
+      'other-cluster': {
+        id: 'other-cluster',
+        host: '192.168.1.11',
+        port: 6379,
+        membership: { nodeId: 'node-of-another-cluster' },
+      },
+      'hand-made': { id: 'hand-made', host: '192.168.1.11', port: 6379 },
+    };
+
+    const replicaCollectedBy = async (connectionId: string) => {
+      mockConnectionRegistry.getConfig.mockImplementation((id: string) => configs[id]);
+      mockConnectionRegistry.findIdByHostPort = jest.fn((host: string) =>
+        host === '192.168.1.11' ? connectionId : null,
+      );
+      const nodes = await service.discoverNodesWithCollection();
+      return nodes.find((node) => node.id === 'node2-id-def456');
+    };
+
+    it('counts a connection that reads a node of this cluster', async () => {
+      expect(await replicaCollectedBy('same-cluster')).toMatchObject({
+        collected: true,
+        connectionId: 'same-cluster',
+      });
+    });
+
+    it('does not count a connection that reads a node of another cluster', async () => {
+      const replica = await replicaCollectedBy('other-cluster');
+
+      expect(replica?.collected).toBe(false);
+      expect(replica?.connectionId).toBeUndefined();
+    });
+
+    it('counts a connection whose own node is not known', async () => {
+      expect(await replicaCollectedBy('hand-made')).toMatchObject({
+        collected: true,
+        connectionId: 'hand-made',
+      });
+    });
+
+    it('does not count a connection that reads another node of this cluster', async () => {
+      configs['moved'] = {
+        id: 'moved',
+        host: '192.168.1.11',
+        port: 6379,
+        membership: { nodeId: 'node1-id-abc123' },
+      };
+
+      const replica = await replicaCollectedBy('moved');
+
+      expect(replica?.collected).toBe(false);
+      expect(replica?.connectionId).toBeUndefined();
+    });
+
+    it('does not count a connection whose last poll found an instance outside a cluster', async () => {
+      mockConnectionRegistry.isOutsideCluster = jest.fn((id: string) => id === 'same-cluster');
+
+      const replica = await replicaCollectedBy('same-cluster');
+
+      expect(replica?.collected).toBe(false);
+      expect(replica?.connectionId).toBeUndefined();
+    });
+
+    describe('with the node each connection was seen reading', () => {
+      const seenReading = (observed: Record<string, string>) => {
+        mockConnectionRegistry.getObservedNodeId = jest.fn((id: string) => observed[id]);
+        mockConnectionRegistry.findIdObservingNode = jest.fn(
+          (nodeId: string) => Object.keys(observed).find((id) => observed[id] === nodeId) ?? null,
+        );
+      };
+
+      it('counts a node that replaced another at the same address before the next sync', async () => {
+        configs['auto-child'] = {
+          id: 'auto-child',
+          host: '192.168.1.11',
+          port: 6379,
+          membership: { nodeId: 'node-that-was-replaced' },
+        };
+        seenReading({ 'auto-child': 'node2-id-def456' });
+
+        expect(await replicaCollectedBy('auto-child')).toMatchObject({
+          collected: true,
+          connectionId: 'auto-child',
+        });
+      });
+
+      it('does not count a dead node still listed at the address of a hand-added connection', async () => {
+        mockDbClient.getClusterNodes.mockResolvedValue([
+          ...mockClusterNodes,
+          {
+            ...mockClusterNodes[1],
+            id: 'dead-node-id',
+            flags: ['slave', 'fail'],
+            linkState: 'disconnected',
+          },
+        ]);
+        seenReading({ 'hand-made': 'node2-id-def456' });
+        mockConnectionRegistry.getConfig.mockImplementation((id: string) => configs[id]);
+        mockConnectionRegistry.findIdByHostPort = jest.fn((host: string) =>
+          host === '192.168.1.11' ? 'hand-made' : null,
+        );
+
+        const nodes = await service.discoverNodesWithCollection();
+
+        expect(nodes.find((node) => node.id === 'dead-node-id')).toMatchObject({ collected: false });
+        expect(nodes.find((node) => node.id === 'node2-id-def456')).toMatchObject({
+          collected: true,
+          connectionId: 'hand-made',
+        });
+      });
+
+      it('counts a connection that reads the node through another address', async () => {
+        configs['behind-nat'] = { id: 'behind-nat', host: 'replica.example.internal', port: 6379 };
+        seenReading({ 'behind-nat': 'node2-id-def456' });
+        mockConnectionRegistry.getConfig.mockImplementation((id: string) => configs[id]);
+        mockConnectionRegistry.findIdByHostPort = jest.fn().mockReturnValue(null);
+
+        const nodes = await service.discoverNodesWithCollection();
+
+        expect(nodes.find((node) => node.id === 'node2-id-def456')).toMatchObject({
+          collected: true,
+          connectionId: 'behind-nat',
+        });
+      });
+    });
+
+    it('keeps the viewing connection it started with when the default changes meanwhile', async () => {
+      mockConnectionRegistry.getConfig.mockImplementation((id: string) => configs[id]);
+      mockConnectionRegistry.findIdByHostPort = jest.fn().mockReturnValue(null);
+      mockConnectionRegistry.getDefaultId
+        .mockReturnValueOnce('test-connection')
+        .mockReturnValue('another-default');
+
+      const nodes = await service.discoverNodesWithCollection();
+
+      expect(nodes.find((node) => node.id === 'node1-id-abc123')).toMatchObject({
+        collected: true,
+        connectionId: 'test-connection',
+      });
+    });
+
+    it('counts the node the viewing connection reads', async () => {
+      await replicaCollectedBy('same-cluster');
+      const nodes = await service.discoverNodesWithCollection();
+
+      expect(nodes.find((node) => node.id === 'node1-id-abc123')).toMatchObject({
+        collected: true,
+        connectionId: 'test-connection',
+      });
+    });
   });
 
   describe('discoverNodes', () => {
@@ -423,6 +586,60 @@ describe('ClusterDiscoveryService', () => {
       const entry = internal.discoveredNodes.get(target.id)!;
       expect(entry.client).toBe(readyClient);
       expect(entry.lastHealthCheck).toBeGreaterThan(staleStamp);
+    });
+
+    describe('command timeout', () => {
+      const previous = process.env.CLUSTER_NODE_COMMAND_TIMEOUT_MS;
+
+      afterEach(() => {
+        if (previous === undefined) delete process.env.CLUSTER_NODE_COMMAND_TIMEOUT_MS;
+        else process.env.CLUSTER_NODE_COMMAND_TIMEOUT_MS = previous;
+      });
+
+      it('gives a node client a 5 second command timeout by default', async () => {
+        delete process.env.CLUSTER_NODE_COMMAND_TIMEOUT_MS;
+        const nodes = await service.discoverNodes();
+
+        await service.getNodeConnection(nodes[0].id, 'test-connection');
+
+        expect(Valkey).toHaveBeenLastCalledWith(expect.objectContaining({ commandTimeout: 5000 }));
+      });
+
+      it('takes the command timeout from CLUSTER_NODE_COMMAND_TIMEOUT_MS', async () => {
+        process.env.CLUSTER_NODE_COMMAND_TIMEOUT_MS = '1500';
+        const nodes = await service.discoverNodes();
+
+        await service.getNodeConnection(nodes[0].id, 'test-connection');
+
+        expect(Valkey).toHaveBeenLastCalledWith(expect.objectContaining({ commandTimeout: 1500 }));
+      });
+
+      it('takes the largest delay a timer can hold', async () => {
+        process.env.CLUSTER_NODE_COMMAND_TIMEOUT_MS = '2147483647';
+        const nodes = await service.discoverNodes();
+
+        await service.getNodeConnection(nodes[0].id, 'test-connection');
+
+        expect(Valkey).toHaveBeenLastCalledWith(expect.objectContaining({ commandTimeout: 2147483647 }));
+      });
+
+      it('falls back to 5 seconds for a value a timer would cut down to 1 ms', async () => {
+        process.env.CLUSTER_NODE_COMMAND_TIMEOUT_MS = '2147483648';
+        const nodes = await service.discoverNodes();
+
+        await service.getNodeConnection(nodes[0].id, 'test-connection');
+
+        expect(Valkey).toHaveBeenLastCalledWith(expect.objectContaining({ commandTimeout: 5000 }));
+      });
+
+      it('falls back to 5 seconds for a value that is not a usable number', async () => {
+        process.env.CLUSTER_NODE_COMMAND_TIMEOUT_MS = 'soon';
+        const nodes = await service.discoverNodes();
+
+        await service.getNodeConnection(nodes[0].id, 'test-connection');
+
+        expect(Valkey).toHaveBeenLastCalledWith(expect.objectContaining({ commandTimeout: 5000 }));
+      });
     });
 
     it("does not hand one connection another connection's node client", async () => {

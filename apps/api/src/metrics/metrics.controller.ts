@@ -4,6 +4,7 @@ import { ApiTags, ApiOperation, ApiResponse, ApiQuery, ApiParam, ApiHeader } fro
 import { MetricsService, SLOT_STATS_FAILED_NODES_HEADER } from './metrics.service';
 import { ClusterDiscoveryService, DiscoveredNode } from '../cluster/cluster-discovery.service';
 import { withHealthy } from '../cluster/node-health-response';
+import type { NodeCollection } from '../cluster/node-collection';
 import { ClusterMetricsService, NodeStats, ClusterSlowlogEntry, ClusterClientEntry, ClusterCommandlogEntry, SlotMigration } from '../cluster/cluster-metrics.service';
 import { ConnectionId } from '../common/decorators';
 import { Roles } from '../auth/guards/roles.decorator';
@@ -725,9 +726,9 @@ export class MetricsController {
   @ApiResponse({ status: 500, description: 'Failed to discover cluster nodes' })
   async discoverClusterNodes(
     @ConnectionId() connectionId?: string,
-  ): Promise<Array<DiscoveredNode & { healthy: boolean }>> {
+  ): Promise<Array<DiscoveredNode & NodeCollection & { healthy: boolean }>> {
     try {
-      return (await this.clusterDiscoveryService.discoverNodes(connectionId)).map(withHealthy);
+      return (await this.clusterDiscoveryService.discoverNodesWithCollection(connectionId)).map(withHealthy);
     } catch (error) {
       throw new HttpException(
         `Failed to discover cluster nodes: ${error instanceof Error ? error.message : 'Unknown error'}`,

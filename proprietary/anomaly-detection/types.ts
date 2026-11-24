@@ -1,3 +1,4 @@
+import type { ClusterNodeRef, ServedClusterNodeRef } from '@betterdb/shared';
 import type { StoredAnomalyEvent } from '@app/common/interfaces/storage-port.interface';
 import type { RegressionKind } from '../latency-regression/types';
 import type { RetryAmplificationContributor } from './retry-amplification-attribution';
@@ -75,6 +76,7 @@ export enum MetricType {
   RESHARD_SHARD_SKEW = 'reshard_shard_skew',
   HOT_SHARD = 'hot_shard',
   TOPOLOGY_DIVERGENCE = 'topology_divergence',
+  PARTIAL_MEMBERSHIP = 'partial_membership',
   RETRY_AMPLIFICATION = 'retry_amplification',
   ERROR_REPLIES = 'error_replies',
   REPLICATION_DIVERGENCE = 'replication_divergence',
@@ -127,6 +129,7 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.RESHARD_SHARD_SKEW,
   MetricType.HOT_SHARD,
   MetricType.TOPOLOGY_DIVERGENCE,
+  MetricType.PARTIAL_MEMBERSHIP,
   MetricType.RETRY_AMPLIFICATION,
   MetricType.ERROR_REPLIES,
   MetricType.REPLICATION_DIVERGENCE,
@@ -257,6 +260,8 @@ export interface AnomalyEvent {
   relatedMetrics?: MetricType[];
   replicaAddr?: string;
   nodeAddr?: string;
+  node?: ClusterNodeRef;
+  nodeSubject?: { nodeId: string; address?: string };
   dedupeKey?: string;
   commands?: string[];
   eventSequence?: number;
@@ -429,3 +434,9 @@ export interface AnomalyWebhookSink {
   dispatchAnomalyWebhook(anomaly: StoredAnomalyEvent): Promise<void>;
   dispatchSequenceWebhook(group: CorrelatedAnomalyGroup): Promise<void>;
 }
+
+export type ServedAnomalyEvent = Omit<AnomalyEvent, 'node'> & { node?: ServedClusterNodeRef };
+
+export type ServedCorrelatedAnomalyGroup = Omit<CorrelatedAnomalyGroup, 'anomalies'> & {
+  anomalies: ServedAnomalyEvent[];
+};

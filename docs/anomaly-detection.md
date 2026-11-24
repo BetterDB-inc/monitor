@@ -14,6 +14,7 @@ Comprehensive guide to BetterDB's real-time anomaly detection system for Valkey 
 - [Detected Patterns](#detected-patterns)
 - [Incident Sequence Rules](#incident-sequence-rules)
 - [Per-node coverage](#per-node-coverage)
+- [Failing node on cluster events](#failing-node-on-cluster-events)
 - [Severity Levels](#severity-levels)
 - [Monitored Metrics](#monitored-metrics)
 - [Configuration](#configuration)
@@ -499,6 +500,62 @@ A node's divergence, backlog coverage, resync escalation, fork memory and output
 
 Each command to a primary gets 2 seconds of its own. One that does not answer in time drops that primary's connection once the poll's other commands on it have answered or timed out, so the next poll starts on a fresh one instead of queueing behind it. A primary that cannot be reached is backed off and logged as unreachable; none of the checks above run on it until it answers again. Z-score metrics and the other state-based detectors run only on registered connections. Register a node to get them. A primary whose replication ID matches a registered primary is treated as that connection and skipped, so a node Sentinel reports by IP is not checked twice when it is registered by hostname. The skip lasts while that connection is connected and polling; once it disconnects, or goes three poll intervals (at least 30 seconds) without a poll, the fan-out checks the primary again.
 
+## Failing node on cluster events
+
+On a cluster connection, an event names the node it is about in a `node` object:
+
+```json
+"node": {
+  "nodeId": "e7d1eecce10fd6bb5eb35b9f99a514335d9ba9ca",
+  "address": "10.0.1.12:6379",
+  "role": "primary",
+  "shardId": "8f3c1d5e0a9b4c7d2e6f1a0b3c4d5e6f7a8b9c0d",
+  "availabilityZone": "eu-west-1a",
+  "collected": true,
+  "connectionId": "conn-7"
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `nodeId` | The node's cluster id |
+| `address` | `host:port` as the cluster reports it, without the bus port |
+| `role` | `primary`, `replica`, or `unknown` for a node that is still joining or has left the cluster view, and when the cluster view is too old to say |
+| `shardId` | From `CLUSTER SHARDS`. Absent on servers without that command, on a Raft cluster (the command is not sent there), and on an event raised before any connection of the cluster has read the shards (a connection reads the nodes at the start of its first poll and the shards later in that poll; when another connection of the cluster has read the shards by then, the event takes them from that read). A poll whose `CLUSTER SHARDS` read fails takes the shards from the last read of the cluster with shards: a primary keeps the shard it had there, and a replica takes the shard its current master had there, so a replica that moved to another master since names the new shard. An event raised after it has no `shardId` only when that read did not list the event's node, or for a replica its master, such as a node that joined since, or when no read had the shards yet. It is stored when the event is raised and not filled in later, so an event raised without a `shardId` keeps none |
+| `availabilityZone` | From the server, or from the connection's zone map. Absent when neither gives one |
+| `collected` | `true` when a registered connection reads this node |
+| `connectionId` | That connection. Absent when `collected` is `false` |
+
+`nodeId`, `address`, `role`, `shardId` and `availabilityZone` are taken from the cluster view when the event is raised and stored with it, so an old event keeps the role and shard the node had then. The connections of one cluster share one view, the latest any of them read. When the view was read more than 3 poll intervals (at least 30 seconds) before or after the time of the event, the node is still named but its `role` is `unknown`, since a failover may have changed it. The node a connection reads is the exception, as described next. The node a connection reads takes its `role` from that connection's own `INFO` in the same poll, when that `INFO` was read within the same 3 poll intervals of the event, not from the view, which is read later in the poll. So an event raised in the poll that sees a failover names the new role. An event of a poll keeps the role of that poll's `INFO` also when another connection of the cluster reads the cluster before the event is raised. Only an event that carries another time than that `INFO` takes the role from the view, when the view was read after the `INFO`. A `replication_role` event always carries the role the node changed to, not the one it had before. `collected` and `connectionId` are not stored: they are worked out each time the event is read, from the connections registered at that moment. A node is collected when a registered connection reads it as its own node, or when a connection that belongs to the same cluster points at its address. A connection of another cluster that announces the same address does not count. Neither does a connection at that address that reads another node id there, which is the case for an event about a node that was replaced at the same address. Nor does a connection at that address whose last poll found an instance that is not part of a cluster. With auto-registration off only the seed is collected, plus any node that was registered as a connection by hand.
+
+Events read from `GET /api/anomaly/events`, the events of each group of `GET /api/anomaly/groups`, the entries of `GET /api/anomaly/incidents` and `GET /api/anomaly/incidents/:id`, and the same reads over MCP all carry `node` on an event that has a node stored. An event that names no node, such as a `cluster_state` event, has no `node` field. Each hot shard of `GET /api/anomaly/hot-shards` carries the `node` of its primary. Webhooks carry it too (see [Failing node on cluster alerts](./webhooks.md#failing-node-on-cluster-alerts)). Existing fields (`nodeAddr`, `replicaAddr`, `sourceHost`, `sourcePort`) keep their meaning.
+
+To see which nodes of a cluster are collected without waiting for an event, read `GET /api/metrics/cluster/nodes/discover` or the `get_cluster_nodes` MCP tool: every node carries `collected` and, when it is collected, `connectionId`. There a node is collected when a registered connection reads it as its own node, or when a connection points at its address or announced hostname. A connection at that address that is known to read another node does not count, whether that node belongs to another cluster, is another node of this one, or replaced a node that the cluster still lists as failed at that address. The node a connection reads is the one its own `CLUSTER NODES` reported on the last anomaly detection poll, the same one alerts use. Before the first poll of a connection, and when anomaly detection is not running, it is the node auto-registration saved for the connection, and a connection added by hand counts by its address alone.
+
+In the web UI the node shows up as a link on the event timeline of the Overview page, in the event lists of the Anomalies page, in the incident list and on each incident timeline entry. The link opens the Nodes tab of the Cluster page with that node's row open, and carries a **Not collected** badge when `collected` is `false`. From that row the node can be connected with one click (see [Connecting a single node](cluster-auto-registration.md#connecting-a-single-node)).
+
+Which node each event type names:
+
+| Event types | `node` |
+| --- | --- |
+| `connections`, `ops_per_sec`, `memory_used`, `input_kbps`, `output_kbps`, `slowlog_last_id`, `slowlog_count`, `acl_denied`, `auth_failure_burst`, `rejected_connections`, `client_saturation`, `client_lockout_risk`, `evicted_clients`, `evicted_keys`, `blocked_clients`, `keyspace_misses`, `fragmentation_ratio`, `cpu_utilization`, `memory_overhead`, `load_saturation`, `large_reply_pressure`, `connection_churn`, `error_replies`, `command_p99`, `dataset_keys`, `persistence_child`, `replication_role`, `resync_loop`, `orphaned_slot_keys`, `lagging_promotion` | The node the connection reads |
+| `primary_without_replicas`, `repl_buffer_pressure`, `fork_memory_risk`, `backlog_coverage_risk`, `retry_amplification`, `reshard_shard_skew` | The primary the reading was taken on: the node the connection reads, or the other primary in `nodeAddr` (see [Per-node coverage](#per-node-coverage)) |
+| `hot_shard` | The primary of the hot shard |
+| `replication_divergence`, `resync_escalation`, `replica_slot_state` | The replica in `replicaAddr`, not the primary the event was read on |
+| `cluster_topology` | Duplicate primary: the primary with the stale claim. Replica stuck on a primary that is gone: the replica |
+| `hostname_staleness` | The node whose announced hostname is stale |
+| `ghost_membership` | Ghost entry: the live node at the endpoint the ghost entries point to. A ghost id is not a node, so the ghost ids stay in the message. Forget and rejoin: the node that rejoined after `CLUSTER FORGET` |
+| `failover_churn` | The primary that owns the shard now |
+| `slot_migration`, `slot_migration_stuck` | The source node of the migration |
+| `config_drift`, `acl_drift` | A drift between nodes: the first node the event lists, which is the connection the event is filed under. The event compares the nodes and does not say which one is wrong, so this node may hold the value the others share; the message lists every node with its value. An ACL reload: the node whose ruleset changed |
+| `topology_divergence` | The node whose view differs when one node disagrees with the others. None when several nodes stand on each side: `GET /api/anomaly/topology-divergence` lists every node of both sides |
+| `partial_membership` | The node that has only partly joined, also when the connection's own node does not know it. None when no view has an address for it |
+| `cluster_state` | None. `cluster_state:fail` is a state of the whole cluster, not of one node |
+| `raft_health` | None. Elections and quorum are a state of the cluster's Raft group, not a fault of one node |
+| `sentinel_endpoint_drift`, `sentinel_loop_stall` | None. These are about a Sentinel process, which is not a cluster node |
+
+An event has no `node` in four more cases: the connection is not a cluster (a standalone or Sentinel-managed instance is its own node, named by `connectionId`); the event was raised before the first cluster view was read; the node it is about was in no view and the detector gave no address for it; or the event was stored by a version that did not have this field, since the node is not worked out again for an old event. A connection that stops being a cluster drops its view on the next poll that reads it, and its later events carry no `node`. A node that has left the view is still named when the detector knows its id and address, with `role` set to `unknown`. Correlated groups carry no `node` of their own; each event in the group does.
+
 ## Severity Levels
 
 ### INFO
@@ -769,7 +826,7 @@ Each new plan is checked together with the plans before it: with all of them app
 
 A later hot shard that gets no plan from the loads the earlier plans leave is planned once more from the measured loads alone. When that gives a plan, the answer is `conflicts_with_other_plan`. When it does not, the answer is the one from the measured loads, `key_level` for example, so a reason and its `pinnedSlots` never describe loads that exist only after plans that nobody has applied.
 
-A plan lists `warnings`, none of which block it: `source_fork` (the hot shard forks for the snapshot while it is the busiest node), `fewer_replicas` (the target has fewer replicas than the hot shard), `target_memory` (the keys moved, at the hot shard's average key size, would take the target past 80% of its `maxmemory`; `memoryShare` is the estimate) and `memory_unknown` (the target has no `maxmemory`, or `INFO` could not be read on it or on the hot shard). The estimate of a plan with `plannedAfter` also counts the keys those earlier plans bring to the same target, each at the average key size of its own hot shard, and is `memory_unknown` when one of those hot shards cannot be read.
+A plan lists `warnings`, none of which block it: `source_fork` (the hot shard forks for the snapshot while it is the busiest node), `fewer_replicas` (the target has fewer replicas than the hot shard), `target_memory` (the keys moved, at the hot shard's average key size, would take the target past 80% of its `maxmemory`; `memoryShare` is the estimate), `memory_unlimited` (the target has no `maxmemory` limit, so there is nothing to check the moved keys against) and `memory_unknown` (`INFO` could not be read on the target or on the hot shard, or the hot shard reports no keys). The estimate of a plan with `plannedAfter` also counts the keys those earlier plans bring to the same target, each at the average key size of its own hot shard, and is `memory_unknown` when one of those hot shards cannot be read. A target with no `maxmemory` limit is `memory_unlimited` whatever could be read on the hot shards.
 
 A plan also says whether the cluster has one command that does the move, in `support`, and gives the command text in `commands`. BetterDB sends it only when an admin runs the plan (see [Running a plan](#running-a-plan)); otherwise it is there to copy.
 
@@ -882,7 +939,7 @@ BetterDB never cancels or restarts a migration.
 - slot owner: two views name different owners for the same slots. Slots that the same nodes disagree about in the same way are one disagreement. A slot that joins such a disagreement later is added to the event's slot list in the report once it has disagreed for 3 rounds itself; the message of the event keeps the slots it was raised with. When two nodes claim a slot at the same config epoch, every view is read as giving it to the node with the smaller id, so the order of `CLUSTER NODES` alone never makes a disagreement
 - membership: one view knows the node, another does not or still has it in handshake
 
-**When an event is raised.** A disagreement has to be seen in 3 rounds in a row, about 10 seconds. A disagreement about failure flags also has to last one `cluster-node-timeout` (read from the cluster, 15 seconds when it cannot be read), because nodes legitimately disagree for that long while a failure is being detected. A membership disagreement has to last 60 seconds, so a node that is joining or was just forgotten is not reported. A slot owner disagreement is held back while one of the two owners is still migrating those slots (`MIGRATING`/`IMPORTING` markers, or an unfinished job in `CLUSTER GETSLOTMIGRATIONS` on Valkey 9.0+); when the owners cannot be asked, it is reported.
+**When an event is raised.** A disagreement has to be seen in 3 rounds in a row, about 10 seconds. A disagreement about failure flags also has to last one `cluster-node-timeout` (read from the cluster, 15 seconds when it cannot be read), because nodes legitimately disagree for that long while a failure is being detected. A membership disagreement has to last 60 seconds, so a node that is joining or was just forgotten is not reported. A membership disagreement about a node that is alive and has only partly joined is not part of this event: it raises [`partial_membership`](#partial_membership), with the command that repairs it. So does a slot owner disagreement that exists only because that node's own view lacks the owner: no slot owner event is raised for it while `partial_membership` covers the node. A slot owner disagreement is also held back while one of the two owners is still migrating those slots (`MIGRATING`/`IMPORTING` markers, or an unfinished job in `CLUSTER GETSLOTMIGRATIONS` on Valkey 9.0+); when an owner cannot be asked, only the view it gave in that round is checked for those markers, and without such a view the disagreement is reported. A membership disagreement that moves between this event and `partial_membership`, in either direction, is counted afresh from that round, so the move never raises the other event at once.
 
 All disagreements that put the same nodes against the rest are one event. The event names the smaller side first:
 
@@ -890,9 +947,13 @@ All disagreements that put the same nodes against the rest are one event. The ev
 Cluster views diverge for 15s: 10.0.1.5:6379 (eu-west-1a) disagrees with 10.0.2.7:6379 (eu-west-1b), 10.0.3.2:6379 (eu-west-1c) about the failure state of 12 nodes and the owner of slots 0-5460.
 ```
 
-It is CRITICAL when slot owners are in dispute, because clients can then be sent to different nodes for the same key, and a WARNING otherwise. When the nodes of an open WARNING start to dispute slot owners as well, the WARNING is closed and a CRITICAL event is raised in its place. An open event is not lowered when the slot dispute ends. When exactly one node stands against the rest, the event carries that node's address as `nodeAddr`. The text is written when the event is raised; [`GET /api/anomaly/topology-divergence`](#get-topology-divergence) returns the current state.
+The time is given in seconds up to two minutes, then in whole minutes, hours or days, rounded down. The same holds for [`partial_membership`](#partial_membership).
 
-**When it closes.** The event closes after the views agree for 3 rounds in a row. A round in which the disagreement shows again starts that count over. A round in which the nodes of one side do not answer, or fewer than two views could be read, is neither agreement nor disagreement: the count is kept as it is and the event stays open. When that lasts 5 minutes the event is closed. An event that is resolved by hand is raised again while the views still differ. The event of a connection that is removed is closed. After a restart the open event is picked up instead of raised a second time.
+It is CRITICAL when slot owners are in dispute, because clients can then be sent to different nodes for the same key, and a WARNING otherwise. When the nodes of an open WARNING start to dispute slot owners as well, the WARNING is closed and a CRITICAL event is raised in its place. An open event is not lowered when the slot dispute ends. When exactly one node stands against the rest, the event carries that node's address as `nodeAddr`. The text is written when the event is raised; [`GET /api/anomaly/topology-divergence`](#get-topology-divergence) returns the current state. [`GET /api/anomaly/topology-disagreements`](#get-topology-disagreements) returns the same state as one line per disagreement with the number of views on each side, and one line per shard, which stays readable on a cluster of hundreds of nodes.
+
+In the web app the same summary is on the **Disagreements** tab of the Cluster page (`/cluster?tab=disagreements`). Each disagreement is one card with the number of views on each side and links to the nodes on it; a line that an open event covers has an **Open event** link to the incident of that event, or to the Anomaly Detection page when the event is older than 30 days. The link opens under the connection that holds the event. A disagreement the last round could not check again shows the time it was last seen, the words "not checked again this round" and no counts. While an event is open for it, it stays in the list and in the count on the tab; without an event it is listed apart under **Not confirmed this round** and is not counted. On a merged line a side names every node that holds it, and `+N more` counts the nodes that are not listed; the table of epochs per node ends with the same count. Below the cards every shard is one row: `Disputed`, `No disagreement` or `Not compared`, with a link to its disagreements and to the unconfirmed ones, and **Only disputed** hides the rest. The tab shows how many nodes were asked and how many answered, and says so when the counts are over a sample of the cluster. The tab needs the anomaly detection licence.
+
+**When it closes.** The event closes after the views agree for 3 rounds in a row. A round in which the disagreement shows again starts that count over. A round in which the nodes of one side do not answer, or fewer than two views could be read, is neither agreement nor disagreement: the count is kept as it is and the event stays open. When that lasts 5 minutes the event is closed. A membership disagreement is held in the same way while a node that lacked the member gives no view, also when another node that lacked it has learned it meanwhile: what the silent node would say is not known, so such a gap can keep the event open for those 5 minutes. That hold is not applied for a silent node that every answering view that lists it flags `fail` or `fail?`. Such a node is taken for dead, and the disagreement is judged by the views that answered. An event that is resolved by hand is raised again while the views still differ. The event of a connection that is removed is closed. After a restart the open event is picked up instead of raised a second time.
 
 **What it costs.** Each round sends one `CLUSTER NODES` to at most 11 other nodes, in parallel, with 2 seconds each. The reply has one line per node of the cluster, so it grows with the cluster. A node that does not answer is asked less often, down to once every 8 rounds. A node that is registered as its own connection is not asked in a round for which that connection has polled since the round before; when it has not, the node is asked like any other. The round runs inside the poll of the connection that samples the cluster, so a node that hangs can hold that poll for about 4 seconds (2 to connect, 2 to answer) until it is backed off. A round that counts a failure flag disagreement also reads `cluster-node-timeout` at most once in 5 minutes, and one that confirms a slot owner dispute asks up to 3 owners for their migrations. A connection that reaches the cluster through an agent never runs the rounds, because the monitor cannot dial the other nodes there. When another connection that can dial them watches the same cluster, that one samples it, and the view of the agent connection is used like that of any registered connection. When only agent connections watch a cluster it is not sampled, and the report says `insufficient_views`.
 
@@ -902,6 +963,43 @@ It is CRITICAL when slot owners are in dispute, because clients can then be sent
 - A partition that heals in less than 3 rounds, and a node that flaps in and out of `fail?` faster than that. The count starts over each time the views agree.
 - A partition the monitor is on one side of. The nodes it cannot reach give no view, so there is nothing to compare them with, and no event is raised. They are listed as `unanswered` in the report, whose `status` stays `ok` as long as two views could be compared; when no other node answers at all it says `insufficient_views`. The views it does get then agree that the other nodes are failing. `cluster_state` and the fan-out coverage report that case.
 - The two sides are in the `message` as text only. The webhook payload has no separate field for them; the full lists are in the report.
+
+### partial_membership
+**What it measures**: Whether a node has joined the cluster on every node or only on some. It looks for a node that some sampled views list and others do not have, or still hold in `handshake` or without an address (`noaddr`)
+**Why anomalies matter**: A `CLUSTER MEET` that reached only part of the cluster, or a cluster bus port that is blocked between two nodes, leaves a node that some peers talk to and others never learn. Each node's own view looks fine, and the cluster does not repair it while the handshake keeps failing
+**Typical baseline**: Every sampled view lists the same nodes
+**Source**: The views of the [`topology_divergence`](#topology_divergence) round. No extra command is sent
+**Detection method**: State-based detector (not z-score based). It runs on gossip clusters only, and not at all when `ANOMALY_TOPOLOGY_DIVERGENCE_ENABLED` is off.
+
+**What counts.** A broken link is a peer that answered and lacks a node another view lists: the node is missing from its view, or is there in `handshake` or `noaddr`. A peer that gave no view is never counted as lacking a node. A stuck join usually shows in both directions: two peers lack the new node, and the new node's own view lacks those two peers.
+
+**Which node is named.** Each broken link is filed under its newer end. A node that owns slots is never the newer end against one that owns none. Between a replica (flagged `slave` or `replica`) and an empty primary, a node that holds no slots and is no replica, the empty primary is the newer end only when a slot owner lacks it: a slot owner cannot itself be the node that is joining, so its gap shows that the empty primary is. Without that the two count as alike. An empty primary the cluster knows that has not yet learned a new replica is then the peer to run the command on, and the replica is named; a new replica or a second new node that has not learned the empty primary is no sign that it is new. Two empty primaries always count as alike, and so do two replicas. What a node is, is read from its own view when it gave one. When it gave none, it is taken from the views of its peers: it owns slots when any of them shows slots for it, and is a replica when any of them flags it so, so the order in which the views were read does not matter. When both ends are alike, it is the node that is not known. When neither knows the other, it is the one that already has an open event, then the one more peers lack, then the one with the smaller id. A node whose event was resolved by hand still counts as having an open event for this, until the event is raised again or the finding is gone. An empty primary and a new replica that lack only each other are each lacked by one peer, so between them it is the one with an open event, and the smaller id when neither or both have one. The peers that lack a node are counted from the links that are kept, so the name does not change in a round in which some of them gave no view. A slot owner that has not yet learned two new nodes is therefore never the named node: each new node gets its own event, and the slot owner is the peer to run the command on. All links filed under a node are one finding. Each link is counted on its own, from the round its peer first lacked the other node: a peer that stops listing a node starts at zero, however long another peer has lacked that node. The count is kept through rounds in which that peer gave no view, until it has given none for 5 minutes; after that it starts over. A round in which the monitor could read no other node is such a round for every peer. The count also ends as soon as a view of that peer lists the node again, so a later gap starts at zero.
+
+The lists name only peers that gave a view in that round. A disagreement that is held because one side gave no view keeps the finding, but the unread peer is left out of the lists and of the command. The link of a peer that gave no view is kept in the same way while other peers still show the same disagreement, and also when another peer that lacked the node has learned it meanwhile, for as long as its count is kept: a node that lacks a peer and gives no view for a few rounds keeps its finding, and when it answers again its count goes on where it was. The peers that did answer are judged by the view they gave in that round: `Known by` names the peers that list the node in that round, so one that has learned the node since is named there and is left out of `Not known by` and of the command, and one that no longer lists it is left out of `Known by`. A link that is gone in this way no longer sets how long the node has been partly joined, as long as another link is left.
+
+A peer that gave no view is taken for dead, not silent, when every peer that lists it flags it `fail` or `fail?`. Its link is dropped in that round and not kept for the 5 minutes: when it was the node's last link, the finding ends and the event closes after 3 rounds as usual. No `CLUSTER MEET` can be run on a dead peer. When that peer was the only one that lacked the node, the gap it last showed is still listed in the report under `divergences` as being counted, until its count is given up after at most 5 minutes; no `topology_divergence` event is raised for it (see [the report](#get-topology-divergence)). When another peer that lacked the node has learned it meanwhile, the gap of the dead peer is dropped in that round. A peer that only gives no view, and that at least one peer lists without those flags, keeps its link.
+
+A node whose own view could not be read is only counted when a peer lists it without `fail` or `fail?`. When every peer that lists it flags it as failing, it is half removed, not half joined, and `CLUSTER MEET` is the wrong advice: that case stays a membership disagreement of `topology_divergence`. When a node moves from one case to the other, its disagreement is counted afresh from that round: the other event is raised only after the node has stayed in the new case for that event's full time, 60 seconds for `topology_divergence` and 90 seconds here, and the event of the old case closes as usual (see below). A flag that comes and goes before that event has closed leaves it as it is and raises no second one.
+
+**When an event is raised.** The finding has to be seen in 3 rounds in a row and to last 90 seconds. The 3 is the default of `ANOMALY_TOPOLOGY_DIVERGENCE_MIN_POLLS`: wherever this section counts 3 rounds, to raise or to close, it is that setting. `CLUSTER FORGET` bans a node for 60 seconds and a forgotten node that is still alive comes back through gossip right after, so a shorter wait would report it. A node that joins normally is known everywhere well inside that time and raises nothing. There is one WARNING per node, with the node's address as `nodeAddr`. Its `value` is the number of peers the node has a broken link with in the round the event is raised. A peer is counted once, also when the link is broken in both directions, and a peer whose link is kept through a round in which it gave no view is still counted. A peer that has learned the node since is not counted. The event is raised only in a round that shows the finding, so the value is at least 1, and an open event keeps the value it was raised with:
+
+```
+Node 10.0.0.7:6379 has only partly joined the cluster for 95s. Known by 10.0.0.1:6379. Not known by 10.0.0.2:6379 (missing), 10.0.0.3:6379 (stuck in handshake). Its own view is missing 10.0.0.2:6379, 10.0.0.3:6379. Run `CLUSTER MEET 10.0.0.7 6379` on 10.0.0.2:6379 and 10.0.0.3:6379. If it still does not join, check that cluster bus port 16379 is reachable between them. BetterDB does not run this command.
+```
+
+The time is written as in [`topology_divergence`](#topology_divergence): seconds up to two minutes, then whole minutes, hours or days, rounded down. The text is written when the event is raised; [`GET /api/anomaly/topology-divergence`](#get-topology-divergence) returns the lists of the latest round in `partialMembership`, and no command once the node is no longer found (`seen` is `false`).
+
+**The command.** `CLUSTER MEET` run on one node for another repairs that pair in both directions, so the event gives one command, naming the half-joined node, and the peers to run it on: every peer that lacks the node and every peer the node's own view is missing. Running it on a third node that knows both fixes neither. The address is the one most peers that list the node without `fail` or `fail?` reach it at, with the bus port they give; an IPv4 address and its IPv6 mapped form count as the same. A peer that flags the node as failing may still hold the address it had before a restart, so its address is left out, however many such peers there are. The address the node gives for itself breaks a tie and is used when no other peer gives one. Only when there is neither is the address taken from the peers that flag the node as failing. The bus port is added as a third argument when it is not the port plus 10000. When no view has an address for the node, the message says so and gives no command. The same holds when the address has a host name where the IP should be, because `CLUSTER MEET` takes an IP address, and when none of the peers that showed the gap gave a view in that round, because there is then no node to run it on. In all three cases the report has `command: null`. BetterDB never sends the command. If the cause is a blocked bus port the `MEET` does not hold, which is why the message names the port to check.
+
+**When it closes.** The event closes after 3 compared rounds in a row without the finding: every view that answers lists the node and the node lists them, or no view lists it any more. A round in which the peers on one side of its links gave no view, or fewer than two views could be read, is neither: the event stays open, for at most 5 minutes. That also holds when another peer still shows the same disagreement in that round. An event that is resolved by hand is raised again while the node is still half known. The event is closed when the connection that holds it is removed; a connection that still watches the cluster raises it again once the finding is confirmed. After a restart the open event is picked up instead of raised a second time. When the node a finding is filed under changes, the old event is handed over to the finding under the new node once that finding is confirmed: the old event is closed in that round and the new one is raised in it. Until then, while the new finding is still being counted because its own link has not lasted 90 seconds, the old event stays open, so one event is open the whole time. The report lists the old event with `seen` `false` and the new finding as being counted, with the disagreement under the new finding only. When the new finding ends before it is confirmed, the old event closes after the usual 3 rounds. The old event stays open in this way for as long as the new finding is kept: until its link has lasted 90 seconds, and through rounds in which a peer of that link gives no view for at most 5 minutes. One case is left to the 3 rounds, so the old and the new event can be open together for that long: a round in which the old node or a peer that lacked it gave no view, because a missed read is not a change of name. An event picked up after a restart is handed over in the same way, by the finding last seen for it since the restart, also when that finding was not confirmed again. When no round since the restart has shown its finding, there is nothing to hand over: the old event closes after the 3 rounds and the new one is raised once its own finding is confirmed, so no event is open in between.
+
+**How it relates to `topology_divergence`.** A membership disagreement that belongs to a finding here does not count toward a `topology_divergence` event. When the named node's own view lacks a slot owner, that view names no owner for the owner's slots either. The missing link explains this slot owner disagreement, so it is held back from the first round the finding is seen, before the WARNING is raised: no CRITICAL slot owner event is raised for it, and the report lists it under the finding. It is held only when the named node owns no slots, its view names no owner at all for the slots, and every view that names none is that of a named node that lacks the owner. It stays with `topology_divergence`, and is raised as CRITICAL after 3 rounds as before, when the named node's view gives the slots to another owner, when a node that knows the owner names none either, or when the named node owns slots itself. The rounds in which a disagreement is held are not counted. Right after the repair a node knows the owner before it has learned the owner's slots, so its view can name no owner for a few more seconds: the finding no longer covers the disagreement then, and it is counted from that round like a new one. The CRITICAL event is raised when it is still there after 3 rounds, and nothing is raised when the node shows the owner before that. An open `topology_divergence` event is never handed over to a finding. When a finding takes over all its disagreements, the event closes after the usual 3 rounds and the WARNING here is raised once the finding has lasted its 90 seconds. That also holds for an open CRITICAL slot owner event: when the node lacks the owner again, the disagreement is held back from that round, the CRITICAL closes after 3 rounds, and the WARNING replaces it 90 seconds after the link broke. In between no event is open, and the report lists the disagreements under the finding as being counted. Everything else is left as it is.
+
+**What it cannot see.**
+
+- Nodes that were not sampled. Both lists name sampled peers only, and a node all sampled views agree on is not reported. No round asks more than 12 nodes.
+- A cluster watched only through agent connections, which is not sampled (see [`topology_divergence`](#topology_divergence)).
+- Why the join is stuck. The event shows which pairs do not know each other, not whether a firewall, a wrong address or a missed `MEET` caused it.
 
 ## Configuration
 
@@ -922,7 +1020,7 @@ ANOMALY_CACHE_TTL_MS=3600000
 # Prometheus metrics update interval (default: 30000 = 30 seconds)
 ANOMALY_PROMETHEUS_INTERVAL_MS=30000
 
-# Cluster view divergence (topology_divergence), gossip clusters only
+# Cluster view divergence (topology_divergence, partial_membership), gossip clusters only
 # Compare the cluster views of several nodes (default: true)
 ANOMALY_TOPOLOGY_DIVERGENCE_ENABLED=true
 # Nodes asked per availability zone (default: 1)
@@ -1088,11 +1186,22 @@ GET /api/anomaly/events?limit=100&severity=critical&metricType=connections
       "message": "WARNING: connections spike detected. Value: 450, Baseline: 250 (80.0% above normal, Z-score: 8.00)",
       "correlationId": "760e9500-f30c-52e5-b827-557766551111",
       "relatedMetrics": ["ops_per_sec"],
-      "resolved": false
+      "resolved": false,
+      "node": {
+        "nodeId": "e7d1eecce10fd6bb5eb35b9f99a514335d9ba9ca",
+        "address": "10.0.1.12:6379",
+        "role": "primary",
+        "shardId": "8f3c1d5e0a9b4c7d2e6f1a0b3c4d5e6f7a8b9c0d",
+        "availabilityZone": "eu-west-1a",
+        "collected": true,
+        "connectionId": "conn-7"
+      }
     }
   ]
 }
 ```
+
+`node` is present on events of a cluster connection that are about one node. It can be absent, for example on an event stored before this field existed, so read it as optional. See [Failing node on cluster events](#failing-node-on-cluster-events).
 
 ### Get Correlated Anomaly Groups
 
@@ -1248,7 +1357,7 @@ X-Connection-ID: <connection-id>
 
 The open [`hot_shard`](#hot_shard) events of one cluster connection, with the numbers behind them. The connection header is required. The list is empty when no shard is hot. It is kept in memory and rebuilt from the next shard load sample after a restart.
 
-`cpu` gives the shard's CPU rate per second, its share of the cluster, the cluster median and the ratio the rule used. `network` gives the same for bytes in plus bytes out, without a ratio: it is detail only, and it includes replication, counted once per replica. `topSlots` (up to 5) are ranked by CPU. `topKeys` (up to 10, full names) are ranked by `freq`, the LFU counter of the key (0 to 255). `keySource` is `lfu` when the keys were read and `unavailable` when they were not, with the reason in `keyNote`. `keysSampledAt` is the time of the read the names come from and `keysSampled` the number of keys whose frequency it got. When a later read gave no names, the names of the earlier read stay and `keyNote` says so. `eventId` is the id of the open event. `captureAvailable` is `true` when the key names are missing and a [capture on the hot primary](#hot_shard) can show them.
+`cpu` gives the shard's CPU rate per second, its share of the cluster, the cluster median and the ratio the rule used. `network` gives the same for bytes in plus bytes out, without a ratio: it is detail only, and it includes replication, counted once per replica. `topSlots` (up to 5) are ranked by CPU. `topKeys` (up to 10, full names) are ranked by `freq`, the LFU counter of the key (0 to 255). `keySource` is `lfu` when the keys were read and `unavailable` when they were not, with the reason in `keyNote`. `keysSampledAt` is the time of the read the names come from and `keysSampled` the number of keys whose frequency it got. When a later read gave no names, the names of the earlier read stay and `keyNote` says so. `eventId` is the id of the open event. `captureAvailable` is `true` when the key names are missing and a [capture on the hot primary](#hot_shard) can show them. `node` names the hot primary, with whether it is collected (see [Failing node on cluster events](#failing-node-on-cluster-events)); it is left out when the primary is not in the cluster view.
 
 `rebalance` is the [rebalance suggestion](#hot_shard): `kind` is `plan` or `no_plan`. A plan has `moves` (each with `targetShardId`, `targetAddr`, inclusive slot `ranges`, and the slots, keys and CPU it moves), `projection` (every shard's CPU, share and ratio to the median `before` and `after`, with its `role`), `medianBefore`, `medianAfter`, `pinnedSlots`, `warnings`, `plannedAfter` (the IDs of the hot shards whose plans its numbers count as applied; empty when it starts from the measured loads), `support` and `commands` (each with the `nodeAddr` to run it on and the command `text`). A `no_plan` has a `reason` and `pinnedSlots`, and `coveredBy` when the reason is `covered_by_other_plan` and `conflictsWith` when it is `conflicts_with_other_plan`. The field is missing for a moment after a restart, until the suggestion is computed again.
 
@@ -1260,6 +1369,12 @@ The open [`hot_shard`](#hot_shard) events of one cluster connection, with the nu
     "captureAvailable": false,
     "shardId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d",
     "nodeAddr": "10.0.0.1:6379",
+    "node": {
+      "nodeId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d",
+      "address": "10.0.0.1:6379",
+      "role": "primary",
+      "collected": false
+    },
     "slotCount": 5461,
     "since": 1704067140000,
     "sampledAt": 1704067200000,
@@ -1332,9 +1447,11 @@ GET /api/anomaly/topology-divergence
 X-Connection-ID: <connection-id>
 ```
 
-What the last [`topology_divergence`](#topology_divergence) round of the connection's cluster saw. The connection header is required. Any connection that watches the cluster returns the same report. It is kept in memory and rebuilt by the first round after a restart.
+What the last [`topology_divergence`](#topology_divergence) round of the connection's cluster saw, with the [`partial_membership`](#partial_membership) findings of the same round. The connection header is required. Any connection that watches the cluster returns the same report. It is kept in memory and rebuilt by the first round after a restart.
 
-`status` is `ok` when at least two views were compared. It means the views that answered were compared, not that the whole cluster agrees: a node listed in `unanswered` gave no view, and a node that was not asked is not in the report at all. `status` is `insufficient_views` when only the connection's own view could be read, and `not_sampled` when no round has run: the connection is not a gossip cluster, the check is off, or the first round is still to come. `observers` are the nodes asked in the round and `unanswered` those that gave no view. Each entry of `divergences` is one group of nodes against the rest: `sides[0]` is the smaller side. `confirmed` is `false` while the disagreement is still being counted and no event is open; `eventId` is then `null`. `positions` lists, for each disagreement, what was claimed and which nodes claimed it. For `failure_flags` the value is `ok` or `failing` (the view flags the node `fail?` or `fail`), for `config_epoch` the epoch, for `slot_owner` the node id of the owner or `unassigned`, and for `membership` one of `known`, `handshake`, `noaddr` or `missing`. `rounds` is the number of rounds in a row the disagreement was seen and `since` when it was first seen.
+`status` is `ok` when at least two views were compared. It means the views that answered were compared, not that the whole cluster agrees: a node listed in `unanswered` gave no view, and a node that was not asked is not in the report at all. `status` is `insufficient_views` when only the connection's own view could be read, and `not_sampled` when no round has run: the connection is not a gossip cluster, the check is off, or the first round is still to come. `observers` are the nodes asked in the round and `unanswered` those that gave no view. Each entry of `divergences` is one group of nodes against the rest: `sides[0]` is the smaller side. `confirmed` is `false` while the disagreement is still being counted and no event is open; `eventId` is then `null`. A group with an open event is listed with the disagreements of the latest round, also those that joined it later and are still being counted, so the event keeps its `eventId` and `confirmed` `true` while it is open. That also holds once a [`partial_membership`](#partial_membership) finding has taken over disagreements of the group: those are listed under the finding only, so the group is listed with the disagreements that are left, or with none, until the event closes. Slots that have joined a confirmed slot owner disagreement are listed once they are confirmed themselves. When none of the slots the event was confirmed with are disputed any more and the same owners dispute other slots, those slots are listed under the open event from the first round, before they are confirmed, so the event is not listed without the dispute it stands for; after 3 rounds they are the confirmed slots of the event. A group whose event was resolved by hand is listed as still being counted, with `eventId` `null`, until the event is raised again, also after the resolved event has been cleared with `DELETE /api/anomaly/resolved`. When the latest round no longer shows the group, it is listed as it was last confirmed until the event closes. A membership disagreement whose only lacking node gave no view is listed too while its count is kept, with `eventId` `null`, `confirmed` `false` and that node on the `missing` side. This is how the last gap of a dead peer is shown once [`partial_membership`](#partial_membership) has let go of it. An open event that was picked up after a restart is listed with its `eventId` and `confirmed` `true` from the first round that shows its disagreement, before the count has reached 3 rounds again. When a later round no longer shows the group, or a finding has taken over its disagreements, it is listed as it was last seen until the event closes. `positions` lists, for each disagreement, what was claimed and which nodes claimed it. For `failure_flags` the value is `ok` or `failing` (the view flags the node `fail?` or `fail`), for `config_epoch` the epoch, for `slot_owner` the node id of the owner or `unassigned`, and for `membership` one of `known`, `handshake`, `noaddr` or `missing`. `rounds` is the number of rounds in a row the disagreement was seen and `since` when it was first seen. Each disagreement also carries the `eventId` and `eventType` (`topology_divergence` or `partial_membership`) of the open event that holds it; both are `null` while it is still being counted.
+
+Each entry of `partialMembership` is one node only part of the cluster knows: `node`, the peers that list it (`knownBy`), the peers that do not (`notKnownBy`, each with `status` `missing`, `handshake` or `noaddr`), the peers its own view lacks (`ownViewMissing`, same `status`), the `command` to run and the peers to run it on (`runOn`). `command` is `null` when no view has an address for the node, when the address is a host name, since `CLUSTER MEET` needs an IP address (`node.address` is still set then), and when none of the peers that showed the gap gave a view in that round. `eventId`, `confirmed` and `since` read as in `divergences`. `seen` is `true` when the round still holds the finding. Its `disagreements` are the membership disagreements behind it and the slot owner disagreements it holds back; a disagreement listed here is not repeated under `divergences`. A disagreement that two findings hold, as when two half-joined nodes lack each other or the same slot owner, is listed under one of them only, with the `eventId` of that finding: first the finding that has an open event, then, when neither or both have one, the finding of the node the disagreement is about, then the finding with the smaller node id. The other finding is listed without it; its other fields are not changed by that. The entries are the findings of the round as the events were judged; a round with `insufficient_views` keeps those of the last compared round. An open event whose node has no finding in the round any more, for example because it has joined, stays open for the closing rounds (3 by default). Until then it is listed with `seen` `false`: `knownBy`, `notKnownBy`, `ownViewMissing`, `runOn` and `disagreements` are empty and `command` is `null`, so the report no longer asks for a `CLUSTER MEET`. An event that was picked up after a restart is listed in the same way when its node joins before the finding was confirmed again. An open `topology_divergence` event stays in `divergences` until it closes, also once a finding holds all its disagreements: it is then listed with its `eventId`, `confirmed` `true` and no `disagreements`, and the disagreements are listed under the finding, counted afresh and with `eventId` `null` until the finding has an event of its own. A finding whose event was resolved by hand is listed as still counted, with `eventId` `null`, until the event is raised again, also after the resolved event has been cleared with `DELETE /api/anomaly/resolved`. A slot owner disagreement that is held back is counted afresh in every round: its `rounds` is 1 and its `since` the time of that round, and it is listed only in a round in which the node's view was read.
 
 **Response**:
 ```json
@@ -1368,13 +1485,162 @@ What the last [`topology_divergence`](#topology_divergence) round of the connect
             { "value": "ok", "observers": [{ "nodeId": "9e3f1a2b44cc7b2e9d3a6b8c0e4f2a3b5c7d9e1f", "address": "10.0.3.2:6379", "role": "primary", "availabilityZone": "eu-west-1c" }] }
           ],
           "rounds": 4,
-          "since": 1704067185000
+          "since": 1704067185000,
+          "eventId": "0b9d2c1e-6f3a-4c57-9a41-2d8e7b5f1c30",
+          "eventType": "topology_divergence"
+        }
+      ]
+    }
+  ],
+  "partialMembership": [
+    {
+      "eventId": "5a7c1f0e-2b6d-4e8a-b3c9-7d1e4f6a8b20",
+      "confirmed": true,
+      "seen": true,
+      "since": 1704067095000,
+      "node": { "nodeId": "b1e4f6a8c2d0e1f3a5b7c9d3f2a9c1e77aa5d0c9", "address": "10.0.4.9:6379", "role": "primary" },
+      "knownBy": [{ "nodeId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d", "address": "10.0.1.5:6379", "role": "primary", "availabilityZone": "eu-west-1a" }],
+      "notKnownBy": [{ "nodeId": "7c1d0e2f55bb6a1d8c2f5a7b9d3e1f2a4b6c8d0e", "address": "10.0.2.7:6379", "role": "primary", "availabilityZone": "eu-west-1b", "status": "handshake" }],
+      "ownViewMissing": [],
+      "command": "CLUSTER MEET 10.0.4.9 6379",
+      "runOn": [{ "nodeId": "7c1d0e2f55bb6a1d8c2f5a7b9d3e1f2a4b6c8d0e", "address": "10.0.2.7:6379", "role": "primary", "availabilityZone": "eu-west-1b" }],
+      "disagreements": [
+        {
+          "kind": "membership",
+          "subject": [{ "nodeId": "b1e4f6a8c2d0e1f3a5b7c9d3f2a9c1e77aa5d0c9", "address": "10.0.4.9:6379", "role": "primary" }],
+          "positions": [
+            { "value": "handshake", "observers": [{ "nodeId": "7c1d0e2f55bb6a1d8c2f5a7b9d3e1f2a4b6c8d0e", "address": "10.0.2.7:6379", "role": "primary", "availabilityZone": "eu-west-1b" }] },
+            { "value": "known", "observers": [{ "nodeId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d", "address": "10.0.1.5:6379", "role": "primary", "availabilityZone": "eu-west-1a" }] }
+          ],
+          "rounds": 22,
+          "since": 1704067095000,
+          "eventId": "5a7c1f0e-2b6d-4e8a-b3c9-7d1e4f6a8b20",
+          "eventType": "partial_membership"
         }
       ]
     }
   ]
 }
 ```
+
+### Get Topology Disagreements
+
+```http
+GET /api/anomaly/topology-disagreements
+X-Connection-ID: <connection-id>
+```
+
+The state of the last [`topology_divergence`](#topology_divergence) round, summarised for large clusters: one line per disagreement with the number of views on each side, and one line per shard. The connection header is required. Any connection that watches the cluster returns the same summary. It is built from the round kept in memory, so it is empty until the first round after a restart. The MCP tool `get_topology_disagreements` returns the same data.
+
+**The counts are over the views that answered, not over every node.** A round asks at most 12 nodes by default, so on a 500-node cluster a line reads "9 views against 3", not "497 against 3". `coverage` says how far the round reached: `nodes` is the number of members of the cluster, `asked` the nodes asked in the round, `answered` those that gave a view, and `complete` is `true` only when every member gave one. `unanswered` lists the nodes that were asked and gave no view, and the nodes a line is waiting for that gave none in this round. The second kind is not counted in `asked`, so `unansweredCount` can be above `asked` minus `answered`. A node that one view lists without an address counts as a member when another view lists it as one, so `complete` is not `true` until it has given a view too. An empty `disagreements` list means only that the views that answered agree with each other. A node that was asked and did not answer gave no view, so it is not known to agree, and with `status: insufficient_views` fewer than two views answered and nothing was compared at all. Read `status` and `coverage` before taking an empty list as agreement; it covers the whole cluster only when `complete` is `true`. `status` has the same meaning as in [Get Topology Divergence](#get-topology-divergence).
+
+Each entry of `disagreements` is one thing the views disagree about:
+
+| Field | Meaning |
+|-------|---------|
+| `kind` | `slot_owner`, `config_epoch`, `failure_flags` or `membership` |
+| `severity` | `critical` for `slot_owner`, `warning` for the others |
+| `open` | `true` for a line of the last round, and for a stale line whose event is still open. The lines that are not open are the stale ones without an open event. A shard is `disputed` only through open lines |
+| `confirmed`, `eventId`, `eventType`, `eventAt`, `eventConnectionId` | `confirmed` is `true` when an open event covers the line; `eventId` and `eventType` then point at that event, `eventAt` is the time it was raised, and `eventConnectionId` is the connection to open it under: the one that asked when it can open the event, otherwise the one that holds it. All four are `null` while the disagreement is still being counted, and after the event was resolved by hand. An event covers a line only while the line still shows what the event was raised for: the same node and kind (for `slot_owner` the same owners and at least one slot in common), with the nodes the event names as disagreeing still apart from the others. A new dispute between the same owners on other slots does not take the event of an ended one. When more than one event covers a line, an open one comes before one that was resolved by hand, then the one that shares the most slots, then the one whose disagreement was confirmed last |
+| `resolvedByHand` | `true` when the event of the line was resolved by hand and the disagreement has not been raised again. The line then has no `eventId` and `confirmed` is `false`, although it was confirmed before. A disagreement that is still confirmed is raised again in the next round, so this is mostly seen for one round, or on a stale line |
+| `since`, `rounds` | When it was first seen, and for how many rounds in a row |
+| `stale`, `lastSeenAt` | `stale` is `true` when the line was not seen in the last round; `lastSeenAt` is the round it was last seen in. See below |
+| `subjects`, `subjectCount` | The nodes the line is about. For `slot_owner` these are the nodes claimed as owner |
+| `slots`, `slotCount` | The disputed slot ranges, for `slot_owner` only |
+| `shardIds` | The shards the line touches: those of the subjects, and for `slot_owner` those that own the disputed slots |
+| `positions` | One entry per side, largest first: `value`, `count` (the number of views on that side), `observers` (the nodes that hold it) and `observerCount` (how many nodes hold it, which is the same as `count` unless the line is merged). For `slot_owner` the value is the node id of the owner, repeated as `owner` with its address, or `unassigned`. Empty on a stale line |
+| `epochs` | On a merged `config_epoch` line only: the epoch each side has for each node, in the order of `positions`. The `value` of the positions is then `null` |
+| `text` | The line in words |
+
+For `failure_flags` the value is `ok`, `fail?` (the view suspects the node) or `fail` (the view has it as failed), so a node that part of the cluster only suspects is told apart from one that part of it has failed. What a node says of itself is not counted, so the views on such a line can add up to one less than `answered`. For `membership` the value is `known`, `handshake`, `noaddr` or `missing`.
+
+Lines of the same kind that have the same nodes on the same sides, with the same counts, and differ only in the node they are about are merged into one: `4 nodes: ok in 9 views, fail? in 3 views.` `subjectCount` is then above 1 and the `id` ends in `+N`. The `id` of a merged line changes when the set of merged lines changes, so it is stable only within one response: do not keep it across polls. Slot owner lines are never merged. On a merged line `count` is the number of views on that side for each node of the line, `observers` lists every node that holds the side for at least one node of the line, and `observerCount` is how many those are. When a zone is cut off, each of its nodes is vouched for by the others, so a side reads `ok in 3 views` with 4 observers. A line is not merged into another when a node would then stand on both sides of the merged line. When two halves of a cluster each flag the other as failing, there is one line for each half, so the sides still say who flags whom. Open lines come first, with the lines of the last round before the stale ones; within those the order is critical first, then confirmed before counting, then oldest first.
+
+**A line that could not be checked again is kept, without counts.** When the nodes that hold one side of a disagreement do not answer, or the round could not compare views at all, the disagreement could not be checked in that round. It is kept for up to 5 minutes with `stale: true`: `positions` is empty, `text` says what the views differed on without numbers (`Slots 0-99: views differed on the owner (10.0.0.1:6379, 10.0.0.3:6379).`), and `lastSeenAt` says when it was last seen. A stale line keeps its event. While that event is open the line has `confirmed: true`, the `eventId` and `open: true`, and its shards stay `disputed`: the event was raised and nothing has cleared it. A stale line without an open event has `open: false`: it was neither confirmed nor cleared, comes after the open lines and does not make a shard `disputed`. Stale lines are only merged with lines last seen in the same round.
+
+Each entry of `shards` is one shard: its `primary`, the number of `replicas`, its `zones`, its `slots`, and `ownViews`, the number of its own nodes that gave a view. `state` is `disputed` when an open line touches the shard (the lines are in `disagreementIds`), also in a round that could not compare views; `undisputed` when no line does; and `not_compared` when the round could not compare views or only lines that are not open touch the shard. The lines that are not open and touch a shard are in `staleDisagreementIds`, whatever its state. Undisputed means no view that answered disagrees about the shard. Disputed shards come first, the rest follow in slot order. `shardTotals` counts the shards by state (`total`, `disputed`, `undisputed`, `notCompared`).
+
+The MCP route and tool return only the disputed shards by default, with `shardsListed: "disputed"` and the same `shardTotals`; `shards=all` (tool argument `shards: "all"`) returns one line per shard.
+
+Node lists (`subjects`, `observers`, `unanswered`, `epochs`) hold at most 25 entries; the counts next to them are exact. The number of lines is not capped: every distinct disagreement adds one. A summary of a 500-node cluster with a few disagreements is under 150 KB, and one with many distinct disagreements is larger.
+
+**Response**:
+```json
+{
+  "status": "ok",
+  "sampledAt": 1704067200000,
+  "coverage": {
+    "nodes": 500,
+    "asked": 12,
+    "answered": 12,
+    "complete": false,
+    "unanswered": [],
+    "unansweredCount": 0
+  },
+  "disagreements": [
+    {
+      "id": "slot_owner:3f2a9c1e|9c4e1b7a",
+      "kind": "slot_owner",
+      "severity": "critical",
+      "open": true,
+      "confirmed": true,
+      "resolvedByHand": false,
+      "eventId": "0c1f6f0e-6d0f-4d3e-9a55-0f2f8f3f6a11",
+      "eventType": "topology_divergence",
+      "eventAt": 1704067180000,
+      "eventConnectionId": "5b0c7d2e-1f7a-4a53-8f0d-2f6f1c9e4b10",
+      "since": 1704067170000,
+      "rounds": 6,
+      "stale": false,
+      "lastSeenAt": 1704067200000,
+      "subjects": [
+        { "nodeId": "3f2a9c1e", "address": "10.0.0.1:6379", "role": "primary", "availabilityZone": "eu-west-1a" },
+        { "nodeId": "9c4e1b7a", "address": "10.0.0.3:6379", "role": "primary", "availabilityZone": "eu-west-1b" }
+      ],
+      "subjectCount": 2,
+      "slots": [[0, 5460]],
+      "slotCount": 5461,
+      "shardIds": ["3f2a9c1e", "9c4e1b7a"],
+      "positions": [
+        {
+          "value": "3f2a9c1e",
+          "owner": { "nodeId": "3f2a9c1e", "address": "10.0.0.1:6379", "role": "primary", "availabilityZone": "eu-west-1a" },
+          "count": 9,
+          "observerCount": 9,
+          "observers": [{ "nodeId": "3f2a9c1e", "address": "10.0.0.1:6379", "role": "primary" }]
+        },
+        {
+          "value": "9c4e1b7a",
+          "owner": { "nodeId": "9c4e1b7a", "address": "10.0.0.3:6379", "role": "primary", "availabilityZone": "eu-west-1b" },
+          "count": 3,
+          "observerCount": 3,
+          "observers": [{ "nodeId": "9c4e1b7a", "address": "10.0.0.3:6379", "role": "primary" }]
+        }
+      ],
+      "text": "Slots 0-5460: owned by 10.0.0.1:6379 in 9 views, by 10.0.0.3:6379 in 3 views."
+    }
+  ],
+  "shards": [
+    {
+      "shardId": "3f2a9c1e",
+      "primary": { "nodeId": "3f2a9c1e", "address": "10.0.0.1:6379", "role": "primary", "availabilityZone": "eu-west-1a" },
+      "replicas": 1,
+      "zones": ["eu-west-1a", "eu-west-1b"],
+      "slots": [[0, 5460]],
+      "slotCount": 5461,
+      "nodes": 2,
+      "ownViews": 1,
+      "state": "disputed",
+      "disagreementIds": ["slot_owner:3f2a9c1e|9c4e1b7a"],
+      "staleDisagreementIds": []
+    }
+  ],
+  "shardTotals": { "total": 250, "disputed": 2, "undisputed": 248, "notCompared": 0 },
+  "shardsListed": "all"
+}
+```
+
+In the example only the first shard is shown, node ids are shortened and the `observers` lists are cut to one entry each.
 
 ### Resolve Anomaly or Group
 

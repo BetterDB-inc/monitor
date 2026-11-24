@@ -271,7 +271,7 @@ export class McpController {
   @Get('instance/:id/cluster/nodes')
   async getClusterNodes(@Param('id', ValidateInstanceIdPipe) id: string) {
     try {
-      return (await this.clusterDiscoveryService.discoverNodes(id)).map(withHealthy);
+      return (await this.clusterDiscoveryService.discoverNodesWithCollection(id)).map(withHealthy);
     } catch (error) {
       const msg = error instanceof Error ? error.message : '';
       if (msg.includes('CLUSTERDOWN') || msg.includes('cluster mode')) {

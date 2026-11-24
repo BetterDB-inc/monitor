@@ -1,6 +1,6 @@
 import { Injectable, Logger, Inject } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { incidentEventUrl } from '@betterdb/shared';
+import { clusterNodeUrl, incidentEventUrl, type ClusterNodeRef } from '@betterdb/shared';
 import { WebhookProService } from './webhook-pro.service';
 import type { StoragePort, StoredAnomalyEvent, StoredCorrelatedGroup } from '@app/common/interfaces/storage-port.interface';
 import type { AnomalyWebhookSink, CorrelatedAnomalyGroup } from '../anomaly-detection/types';
@@ -43,6 +43,8 @@ export class WebhookAnomalyIntegrationService implements AnomalyWebhookSink {
         nodeAddr: anomaly.nodeAddr,
         connectionId: anomaly.connectionId,
         ...this.incidentLink(anomaly.id, anomaly.timestamp, anomaly.connectionId),
+        ...(anomaly.node ? { node: anomaly.node } : {}),
+        ...this.nodeLink(anomaly.node, anomaly.connectionId),
       };
 
       // Always dispatch the generic anomaly.detected event
@@ -88,6 +90,9 @@ export class WebhookAnomalyIntegrationService implements AnomalyWebhookSink {
     if (!anchor?.connectionId) return;
     try {
       const label = group.pattern.replace(/_/g, ' ');
+      const nodes = [
+        ...new Map(group.anomalies.flatMap((a) => (a.node ? [[a.node.nodeId, a.node] as const] : []))).values(),
+      ];
       await this.webhookProService.dispatchAnomalySequenceDetected({
         correlationId: group.correlationId,
         pattern: group.pattern,
@@ -101,6 +106,8 @@ export class WebhookAnomalyIntegrationService implements AnomalyWebhookSink {
         timestamp: anchor.timestamp,
         message: `${label.charAt(0).toUpperCase()}${label.slice(1)}: ${group.diagnosis}`,
         ...this.incidentLink(anchor.id, anchor.timestamp, anchor.connectionId),
+        ...(nodes.length > 0 ? { nodes } : {}),
+        ...this.nodeLink(anchor.node, anchor.connectionId),
         connectionId: anchor.connectionId,
       });
     } catch (error) {
@@ -115,6 +122,11 @@ export class WebhookAnomalyIntegrationService implements AnomalyWebhookSink {
   ): { incidentUrl?: string } {
     const baseUrl = this.configService.get<string>('FRONTEND_URL');
     return baseUrl ? { incidentUrl: incidentEventUrl(baseUrl, anomalyId, at, connectionId) } : {};
+  }
+
+  private nodeLink(node: ClusterNodeRef | undefined, connectionId?: string): { nodeUrl?: string } {
+    const baseUrl = this.configService.get<string>('FRONTEND_URL');
+    return node && baseUrl ? { nodeUrl: clusterNodeUrl(baseUrl, node.nodeId, connectionId) } : {};
   }
 
   /**

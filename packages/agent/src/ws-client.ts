@@ -1,5 +1,8 @@
 import WebSocket from 'ws';
 
+const MAX_RECONNECT_DELAY_MS = 30000;
+const REPLACED_CLOSE_CODE = 4003;
+
 export interface WsClientOptions {
   url: string;
   token: string;
@@ -54,7 +57,13 @@ export class WsClient {
     this.ws.on('close', (code, reason) => {
       this.stopHeartbeat();
       this.options.onClose(code, reason.toString());
-      this.scheduleReconnect();
+      if (code === REPLACED_CLOSE_CODE) {
+        console.warn(
+          '[Agent] Another agent is connected with this token ' +
+          '(a duplicate, or a previous instance still shutting down). Retrying in 30 s.',
+        );
+      }
+      this.scheduleReconnect(code === REPLACED_CLOSE_CODE);
     });
 
     this.ws.on('error', (err) => {
@@ -108,10 +117,12 @@ export class WsClient {
     }
   }
 
-  private scheduleReconnect(): void {
+  private scheduleReconnect(replaced: boolean): void {
     if (this.closed) return;
 
-    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempt), 30000);
+    const delay = replaced
+      ? MAX_RECONNECT_DELAY_MS
+      : Math.min(1000 * Math.pow(2, this.reconnectAttempt), MAX_RECONNECT_DELAY_MS);
     this.reconnectAttempt++;
     console.log(`[Agent] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempt})`);
 

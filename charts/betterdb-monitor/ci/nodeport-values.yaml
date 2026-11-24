@@ -1,0 +1,8 @@
+# CI render matrix (chart-tests.yml): a NodePort Service with a fixed port,
+# the way a kind cluster's host-port mapping reaches the UI.
+service:
+  type: NodePort
+  nodePort: 30301
+  externalTrafficPolicy: Local
+  labels:
+    team: databases

@@ -105,6 +105,30 @@ describe('TopologyDivergenceMonitor', () => {
     ]);
   });
 
+  it('keeps how each view lists a node whose membership is in dispute and the node that lacks it', async () => {
+    const { poll, answers } = harness();
+    answers.set(
+      'b1',
+      viewOf(
+        'b1',
+        {},
+        IDS.filter((id) => id !== 'a2'),
+      ),
+    );
+
+    const round = await poll('conn-1', 'a1', 0);
+
+    expect([...(round?.sightings.keys() ?? [])]).toEqual(['a2', 'b1']);
+    expect(round?.sightings.get('a2')?.map((sighting) => sighting.observerId)).toEqual(['a1', 'c1']);
+    expect(round?.sightings.get('b1')?.map((sighting) => sighting.observerId)).toEqual(['a1', 'b1', 'c1']);
+  });
+
+  it('keeps no sightings while every view lists the same nodes', async () => {
+    const { poll } = harness();
+    const round = await poll('conn-1', 'a1', 0);
+    expect(round?.sightings.size).toBe(0);
+  });
+
   it('runs the rounds of a cluster on one connection only', async () => {
     const { poll, asked } = harness();
 
@@ -195,6 +219,34 @@ describe('TopologyDivergenceMonitor', () => {
 
     expect(asked).toEqual(['c1']);
     expect(round?.disagreements.map((d) => d.key)).toEqual(['failure_flags:c2']);
+  });
+
+  it('starts a count over in the round it is given and in the round it holds', async () => {
+    const { monitor, poll } = harness();
+    await poll('conn-2', 'b1', 0, { c2: failing });
+    const round = await poll('conn-2', 'b1', INTERVAL, { c2: failing });
+    if (!round) throw new Error('no round');
+    const judged = { ...round };
+
+    monitor.recount(judged, ['failure_flags:c2', 'failure_flags:c9']);
+
+    const fresh = [{ key: 'failure_flags:c2', firstSeenAt: INTERVAL, rounds: 1 }];
+    expect(judged.disagreements).toMatchObject(fresh);
+    expect(monitor.lastRound(CLUSTER)?.disagreements).toMatchObject(fresh);
+    const next = await poll('conn-2', 'b1', 2 * INTERVAL, { c2: failing });
+    expect(next?.disagreements).toMatchObject([{ key: 'failure_flags:c2', firstSeenAt: INTERVAL, rounds: 2 }]);
+  });
+
+  it('leaves a round as it is when none of the counts it is asked to start over is tracked', async () => {
+    const { monitor, poll } = harness();
+    await poll('conn-2', 'b1', 0, { c2: failing });
+    const round = await poll('conn-2', 'b1', INTERVAL, { c2: failing });
+    if (!round) throw new Error('no round');
+    const before = round.disagreements;
+
+    monitor.recount(round, ['failure_flags:c9']);
+
+    expect(round.disagreements).toBe(before);
   });
 
   it('says it cannot compare while only a connection that cannot read is polling', async () => {
@@ -326,6 +378,63 @@ describe('TopologyDivergenceMonitor', () => {
     expect(round?.disagreements).toMatchObject([{ key: 'failure_flags:c2', rounds: 1 }]);
   });
 
+  it('keeps asking a node that lacked a member through the rounds it gives no view', async () => {
+    const { poll, answers } = harness();
+    const withoutA2 = IDS.filter((id) => id !== 'a2');
+    answers.set('b1', viewOf('b1', {}, withoutA2));
+    answers.set('c1', viewOf('c1', {}, withoutA2));
+
+    await poll('conn-1', 'a1', 0);
+    answers.set('b1', null);
+    await poll('conn-1', 'a1', INTERVAL);
+    const round = await poll('conn-1', 'a1', 2 * INTERVAL);
+
+    expect(round?.observers).toContain('b1');
+    expect(round?.disagreements).toMatchObject([
+      {
+        key: 'membership:a2',
+        gapStreaks: { b1: { firstSeenAt: 0, rounds: 1 }, c1: { firstSeenAt: 0, rounds: 3 } },
+      },
+    ]);
+  });
+
+  it('lets go of a held gap once every answering view flags the node that gives no view as failed', async () => {
+    const { poll, answers } = harness();
+    const withoutA2 = IDS.filter((id) => id !== 'a2');
+    const dead = { b1: { flags: ['master', 'fail'] } };
+    answers.set('b1', viewOf('b1', {}, withoutA2));
+    answers.set('c1', viewOf('c1', {}, withoutA2));
+
+    await poll('conn-1', 'a1', 0);
+    answers.set('b1', null);
+    answers.set('c1', viewOf('c1'));
+    const held = await poll('conn-1', 'a1', INTERVAL);
+    answers.set('c1', viewOf('c1', dead));
+    const round = await poll('conn-1', 'a1', 2 * INTERVAL, dead);
+
+    expect(held?.disagreements).toMatchObject([{ key: 'membership:a2', lastSeenAt: 0 }]);
+    expect(round?.disagreements).toEqual([]);
+  });
+
+  it('counts a view that still lacks the member as an answer while the disagreement is held', async () => {
+    const { poll, answers } = harness();
+    const withoutA2 = IDS.filter((id) => id !== 'a2');
+    answers.set('b1', viewOf('b1', {}, withoutA2));
+    const lacking = (at: number) => poll('conn-1', 'a1', at, {}, true, withoutA2);
+
+    await lacking(0);
+    answers.set('c1', null);
+    const round = await lacking(INTERVAL);
+
+    expect(round?.disagreements.find((entry) => entry.key === 'membership:a2')).toMatchObject({
+      lastSeenAt: 0,
+      gapStreaks: {
+        a1: { firstSeenAt: 0, lastAnsweredAt: INTERVAL },
+        b1: { firstSeenAt: 0, lastAnsweredAt: INTERVAL },
+      },
+    });
+  });
+
   it('keeps asking an accused node once it is part of a disagreement', async () => {
     const { poll, answers } = harness();
     const isolatedView = Object.fromEntries(IDS.filter((id) => id !== 'c2').map((id) => [id, failing]));
@@ -392,5 +501,60 @@ describe('TopologyDivergenceMonitor', () => {
     monitor.forgetConnection('conn-1');
 
     expect(await poll('conn-2', 'b1', INTERVAL)).toMatchObject({ anchorConnectionId: 'conn-2' });
+  });
+
+  it('records which views show a node as fail? and which as fail', async () => {
+    const { poll, answers } = harness();
+    answers.set('b1', viewOf('b1', { c2: { flags: ['master', 'fail'] } }));
+
+    const round = await poll('conn-1', 'a1', 0, { c2: failing });
+
+    expect([...(round?.failureFlags ?? [])]).toEqual([['c2', { suspected: ['a1'], failed: ['b1'] }]]);
+  });
+
+  it('leaves out what a node says of itself and entries without an address', async () => {
+    const { poll, answers } = harness();
+    answers.set('b1', viewOf('b1', { b1: failing, c2: { flags: ['master', 'fail', 'noaddr'] } }));
+
+    const round = await poll('conn-1', 'a1', 0);
+
+    expect(round?.failureFlags.size).toBe(0);
+    expect(round?.disagreements.map((d) => d.key)).not.toContain('failure_flags:c2');
+  });
+
+  it('keeps the entry of a view that lists a node as a member over one without an address', async () => {
+    const { poll } = harness();
+
+    const round = await poll('conn-1', 'a1', 0, { c2: { flags: ['master', 'noaddr'], address: ':0@0' } });
+
+    expect(round?.nodes.get('c2')).toMatchObject({ flags: ['master'], address: 'c2.internal:6379@16379' });
+    expect(round?.nodes.get('b2')).toMatchObject({ flags: ['master'] });
+  });
+
+  it('keeps the shard and the zone of a node whose entry is taken from another view', async () => {
+    const { poll, answers } = harness();
+    const bare = (observerId: string) =>
+      viewOf(observerId).map(({ availabilityZone: _zone, ...node }) => node);
+    answers.set('b1', bare('b1'));
+    answers.set('c1', bare('c1'));
+
+    const round = await poll('conn-1', 'a1', 0, {
+      c2: { flags: ['master', 'noaddr'], address: ':0@0', shardId: 'shard-c2' },
+    });
+
+    expect(round?.nodes.get('c2')).toMatchObject({
+      flags: ['master'],
+      address: 'c2.internal:6379@16379',
+      shardId: 'shard-c2',
+      availabilityZone: 'c',
+    });
+  });
+
+  it('records no failure flags in a round that cannot compare', async () => {
+    const { poll } = harness();
+
+    const round = await poll('agent', 'a1', 0, { c2: failing }, false);
+
+    expect(round?.failureFlags.size).toBe(0);
   });
 });

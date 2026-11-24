@@ -1,5 +1,6 @@
 import type { ClusterNode } from '@app/common/types/metrics.types';
 import {
+  type DivergenceGroup,
   DivergenceTracker,
   TOPOLOGY_DIVERGENCE_BLIND_MS,
   type TopologyDisagreement,
@@ -7,7 +8,12 @@ import {
   compareTopologyViews,
   confirmedDisagreements,
   dissentOf,
+  durationOf,
+  failingForEveryView,
   groupDivergences,
+  lackingObservers,
+  matchDivergence,
+  membersByObserver,
   migrationTouchesSlots,
   type OpenDivergence,
   settleOpenDivergences,
@@ -594,6 +600,300 @@ describe('DivergenceTracker', () => {
     expect(tracker.tracked()).toEqual([]);
   });
 
+  describe('for a node only some views know', () => {
+    const membership = (subject: string, knownBy: string[], missingBy: string[]): TopologyDisagreement => ({
+      key: `membership:${subject}`,
+      kind: 'membership',
+      subjectIds: [subject],
+      positions: [
+        { value: 'known', observers: knownBy },
+        { value: 'missing', observers: missingBy },
+      ],
+    });
+
+    it('counts how long each observer has lacked the node', () => {
+      const tracker = new DivergenceTracker();
+
+      tracker.observe(round(1000, [membership('p2', ['a'], ['b'])]));
+      tracker.observe(round(6000, [membership('p2', ['a'], ['b', 'c'])]));
+
+      expect(tracker.tracked()[0].gapStreaks).toEqual({
+        b: { firstSeenAt: 1000, lastAnsweredAt: 6000, rounds: 2 },
+        c: { firstSeenAt: 6000, lastAnsweredAt: 6000, rounds: 1 },
+      });
+    });
+
+    it('starts the count of an observer over once it has listed the node', () => {
+      const tracker = new DivergenceTracker();
+
+      tracker.observe(round(1000, [membership('p2', ['a'], ['b', 'c'])]));
+      tracker.observe(round(6000, [membership('p2', ['a', 'b'], ['c'])]));
+      tracker.observe(round(11000, [membership('p2', ['a'], ['b', 'c'])]));
+
+      expect(tracker.tracked()[0].gapStreaks).toEqual({
+        b: { firstSeenAt: 11000, lastAnsweredAt: 11000, rounds: 1 },
+        c: { firstSeenAt: 1000, lastAnsweredAt: 11000, rounds: 3 },
+      });
+    });
+
+    it('holds the count of an observer through a round it gave no view', () => {
+      const tracker = new DivergenceTracker();
+
+      tracker.observe(round(1000, [membership('p2', ['a'], ['b', 'c'])]));
+      tracker.observe(round(6000, [membership('p2', ['a'], ['c'])], ['b']));
+      tracker.observe(round(11000, [membership('p2', ['a'], ['b', 'c'])]));
+
+      expect(tracker.tracked()[0].gapStreaks).toEqual({
+        b: { firstSeenAt: 1000, lastAnsweredAt: 11000, rounds: 2 },
+        c: { firstSeenAt: 1000, lastAnsweredAt: 11000, rounds: 3 },
+      });
+    });
+
+    const held = (at: number, unanswered: string[], lists: Record<string, string[]>) => ({
+      ...round(at, [], unanswered),
+      members: new Map(Object.entries(lists).map(([observer, ids]) => [observer, new Set(ids)])),
+    });
+
+    it('measures the blind limit from the last view an observer gave, also while the disagreement is held', () => {
+      const tracker = new DivergenceTracker();
+      const everyone = membership('p2', ['a'], ['b', 'c']);
+      const throughC = membership('p2', ['a'], ['c']);
+
+      tracker.observe(round(0, [everyone]));
+      for (const at of [60_000, 120_000, 180_000]) tracker.observe(round(at, [throughC], ['b']));
+      for (const at of [210_000, 270_000, 330_000]) tracker.observe(held(at, ['a'], { b: ['a'], c: ['a'] }));
+      expect(tracker.tracked()[0].gapStreaks).toEqual({
+        b: { firstSeenAt: 0, lastAnsweredAt: 330_000, rounds: 1 },
+        c: { firstSeenAt: 0, lastAnsweredAt: 330_000, rounds: 4 },
+      });
+
+      tracker.observe(round(336_000, [throughC], ['b']));
+      tracker.observe(round(342_000, [everyone]));
+      expect(tracker.tracked()[0].gapStreaks?.b).toEqual({ firstSeenAt: 0, lastAnsweredAt: 342_000, rounds: 2 });
+    });
+
+    it('does not count a held round as a view for an observer that gave none', () => {
+      const tracker = new DivergenceTracker();
+
+      tracker.observe(round(0, [membership('p2', ['a'], ['b', 'c'])]));
+      tracker.observe(held(60_000, ['a', 'b'], { c: ['a'] }));
+
+      expect(tracker.tracked()[0].gapStreaks).toEqual({
+        b: { firstSeenAt: 0, lastAnsweredAt: 0, rounds: 1 },
+        c: { firstSeenAt: 0, lastAnsweredAt: 60_000, rounds: 1 },
+      });
+    });
+
+    it('does not take a round with too few views as a view from anyone', () => {
+      const tracker = new DivergenceTracker();
+      const throughC = membership('p2', ['a'], ['c']);
+
+      tracker.observe(round(0, [membership('p2', ['a'], ['b', 'c'])]));
+      for (const at of [120_000, 180_000, 240_000]) tracker.observe(round(at, [], [], 1));
+      tracker.observe(round(270_000, [throughC], ['b']));
+      expect(tracker.tracked()[0].gapStreaks?.b).toEqual({ firstSeenAt: 0, lastAnsweredAt: 0, rounds: 1 });
+
+      tracker.observe(round(360_000, [throughC], ['b']));
+      expect(Object.keys(tracker.tracked()[0].gapStreaks ?? {})).toEqual(['c']);
+    });
+
+    it('ends the count of an observer that lists the node again while the disagreement is held', () => {
+      const tracker = new DivergenceTracker();
+      const everyone = membership('p2', ['a'], ['b', 'c']);
+      const throughC = membership('p2', ['a'], ['c']);
+
+      tracker.observe(round(0, [everyone]));
+      for (const at of [60_000, 120_000]) tracker.observe(round(at, [throughC], ['b']));
+      for (const at of [180_000, 300_000]) tracker.observe(held(at, ['a', 'c'], { b: ['a', 'p2'] }));
+      expect(Object.keys(tracker.tracked()[0].gapStreaks ?? {})).toEqual(['c']);
+
+      tracker.observe(round(360_000, [throughC], ['b']));
+      tracker.observe(round(390_000, [everyone]));
+      expect(tracker.tracked()[0].gapStreaks?.b).toEqual({ firstSeenAt: 390_000, lastAnsweredAt: 390_000, rounds: 1 });
+    });
+
+    it('gives up the count of an observer that gave no view for longer than the blind limit', () => {
+      const tracker = new DivergenceTracker();
+      const withoutB = membership('p2', ['a'], ['c']);
+
+      tracker.observe(round(1000, [membership('p2', ['a'], ['b', 'c'])]));
+      tracker.observe(round(1000 + TOPOLOGY_DIVERGENCE_BLIND_MS, [withoutB], ['b']));
+      expect(tracker.tracked()[0].gapStreaks).toHaveProperty('b');
+
+      tracker.observe(round(1001 + TOPOLOGY_DIVERGENCE_BLIND_MS, [withoutB], ['b']));
+      expect(Object.keys(tracker.tracked()[0].gapStreaks ?? {})).toEqual(['c']);
+    });
+
+    it('starts over for an observer that comes back after the blind limit', () => {
+      const tracker = new DivergenceTracker();
+      const everyone = membership('p2', ['a'], ['b', 'c']);
+      const throughC = membership('p2', ['a'], ['c']);
+
+      tracker.observe(round(5000, [everyone]));
+      for (const at of [60_000, 120_000, 180_000]) tracker.observe(round(at, [throughC], ['b']));
+      for (const at of [240_000, 300_000]) tracker.observe(held(at, ['a', 'b'], { c: ['a'] }));
+      expect(tracker.tracked()[0].gapStreaks?.b).toEqual({ firstSeenAt: 5000, lastAnsweredAt: 5000, rounds: 1 });
+
+      tracker.observe(round(360_000, [everyone]));
+      expect(tracker.tracked()[0].gapStreaks?.b).toEqual({
+        firstSeenAt: 360_000,
+        lastAnsweredAt: 360_000,
+        rounds: 1,
+      });
+    });
+
+    it('starts over for an observer that answers after the blind limit while the disagreement is held', () => {
+      const tracker = new DivergenceTracker();
+
+      tracker.observe(round(5000, [membership('p2', ['a'], ['b', 'c'])]));
+      for (const at of [60_000, 120_000, 180_000]) {
+        tracker.observe(round(at, [membership('p2', ['a'], ['c'])], ['b']));
+      }
+      tracker.observe(held(240_000, ['a', 'b'], { c: ['a'] }));
+      tracker.observe(held(330_000, ['a'], { b: ['a'], c: ['a'] }));
+
+      expect(tracker.tracked()[0].gapStreaks?.b).toEqual({
+        firstSeenAt: 330_000,
+        lastAnsweredAt: 330_000,
+        rounds: 1,
+      });
+    });
+
+    it('gives up a count past the blind limit also while the disagreement is held', () => {
+      const tracker = new DivergenceTracker();
+
+      tracker.observe(round(5000, [membership('p2', ['a'], ['b', 'c'])]));
+      for (const at of [60_000, 120_000, 180_000]) {
+        tracker.observe(round(at, [membership('p2', ['a'], ['c'])], ['b']));
+      }
+      tracker.observe(held(240_000, ['a', 'b'], { c: ['a'] }));
+      tracker.observe(held(330_000, ['a', 'b'], { c: ['a'] }));
+
+      expect(Object.keys(tracker.tracked()[0].gapStreaks ?? {})).toEqual(['c']);
+    });
+
+    describe('when one observer learns the node while another that lacked it gives no view', () => {
+      const learned = (at: number, unanswered: string[]) =>
+        held(at, unanswered, { a: ['p2'], b: ['p2'], ...(unanswered.includes('c') ? {} : { c: ['a'] }) });
+      const start = () => {
+        const tracker = new DivergenceTracker();
+        tracker.observe(round(1000, [membership('p2', ['a'], ['b', 'c'])]));
+        tracker.observe(learned(6000, ['c']));
+        return tracker;
+      };
+
+      it('keeps the count of the one that gave no view and ends the other', () => {
+        expect(start().tracked()).toMatchObject([
+          { key: 'membership:p2', lastSeenAt: 1000, gapStreaks: { c: { firstSeenAt: 1000, lastAnsweredAt: 1000 } } },
+        ]);
+        expect(Object.keys(start().tracked()[0].gapStreaks ?? {})).toEqual(['c']);
+      });
+
+      it('goes on with that count when the observer answers and still lacks the node', () => {
+        const tracker = start();
+        tracker.observe(round(11_000, [membership('p2', ['a', 'b'], ['c'])]));
+
+        expect(tracker.tracked()[0].gapStreaks).toEqual({
+          c: { firstSeenAt: 1000, lastAnsweredAt: 11_000, rounds: 2 },
+        });
+      });
+
+      it('lets go of the disagreement when the observer answers and lists the node', () => {
+        const tracker = start();
+        tracker.observe(held(11_000, [], { a: ['p2'], b: ['p2'], c: ['p2'] }));
+
+        expect(tracker.tracked()).toEqual([]);
+      });
+
+      it('lets go of the disagreement once the observer has given no view for longer than the blind limit', () => {
+        const tracker = start();
+        tracker.observe(learned(1000 + TOPOLOGY_DIVERGENCE_BLIND_MS, ['c']));
+        expect(tracker.tracked()).toHaveLength(1);
+
+        tracker.observe(learned(1001 + TOPOLOGY_DIVERGENCE_BLIND_MS, ['c']));
+        expect(tracker.tracked()).toEqual([]);
+      });
+    });
+
+    describe('when a node that lacked the member gives no view and another has learned the member', () => {
+      const n1 = primary('n1', 7, [], 0);
+      const dead = { p2: failing('fail') };
+      const observeViews = (tracker: DivergenceTracker, at: number, views: TopologyView[], unanswered: string[] = []) =>
+        tracker.observe({
+          at,
+          disagreements: compareTopologyViews(views),
+          unanswered,
+          views: views.length,
+          members: membersByObserver(views),
+          failing: failingForEveryView(views),
+        });
+      const lackedForAMinute = () => {
+        const tracker = new DivergenceTracker();
+        for (let at = 0; at <= 60_000; at += 5_000) {
+          observeViews(tracker, at, [view('p1', {}, [n1]), view('p2'), view('p3')]);
+        }
+        return tracker;
+      };
+      const keys = (tracker: DivergenceTracker) => tracker.tracked().map((entry) => entry.key);
+
+      it('lets go of the gap at once when every answering view flags the silent node as failed', () => {
+        const tracker = lackedForAMinute();
+
+        observeViews(tracker, 65_000, [view('p1', dead, [n1]), view('p3', dead, [n1])], ['p2']);
+
+        expect(keys(tracker)).toEqual([]);
+      });
+
+      it('holds the gap while one answering view does not flag the silent node', () => {
+        const tracker = lackedForAMinute();
+
+        observeViews(tracker, 65_000, [view('p1', dead, [n1]), view('p3', {}, [n1])], ['p2']);
+
+        expect(keys(tracker)).toEqual(['failure_flags:p2', 'membership:n1']);
+      });
+
+      it('holds the gap while no answering view lists the silent node', () => {
+        const tracker = lackedForAMinute();
+
+        observeViews(tracker, 65_000, [view('p1', { p2: null }, [n1]), view('p3', { p2: null }, [n1])], ['p2']);
+
+        expect(keys(tracker)).toEqual(['membership:n1']);
+      });
+
+      it('lets go of a held gap in the round the silent node is flagged by every answering view', () => {
+        const tracker = lackedForAMinute();
+
+        observeViews(tracker, 65_000, [view('p1', {}, [n1]), view('p3', {}, [n1])], ['p2']);
+        expect(keys(tracker)).toEqual(['membership:n1']);
+
+        observeViews(tracker, 70_000, [view('p1', dead, [n1]), view('p3', dead, [n1])], ['p2']);
+        expect(keys(tracker)).toEqual([]);
+      });
+    });
+
+    it('keeps the count through a change between missing and handshake', () => {
+      const tracker = new DivergenceTracker();
+      const stuck: TopologyDisagreement = {
+        ...membership('p2', ['a'], []),
+        positions: [
+          { value: 'handshake', observers: ['b'] },
+          { value: 'known', observers: ['a'] },
+        ],
+      };
+
+      tracker.observe(round(1000, [membership('p2', ['a'], ['b'])]));
+      tracker.observe(round(6000, [stuck]));
+
+      expect(tracker.tracked()[0].gapStreaks).toEqual({ b: { firstSeenAt: 1000, lastAnsweredAt: 6000, rounds: 2 } });
+    });
+
+    it('keeps no such count for another kind of disagreement', () => {
+      const tracker = new DivergenceTracker();
+      tracker.observe(round(1000, [flags('p3', ['a'], ['b'])]));
+      expect(tracker.tracked()[0].gapStreaks).toBeUndefined();
+    });
+  });
+
   it('starts a count over on request', () => {
     const tracker = new DivergenceTracker();
 
@@ -603,6 +903,57 @@ describe('DivergenceTracker', () => {
     tracker.observe(round(11000, [slots([[100, 200]])]));
 
     expect(tracker.tracked()).toMatchObject([{ firstSeenAt: 11000, rounds: 1 }]);
+  });
+
+  it('counts a disagreement afresh from a given round, with the time each observer lacked the node', () => {
+    const tracker = new DivergenceTracker();
+    const lacking: TopologyDisagreement = {
+      key: 'membership:p2',
+      kind: 'membership',
+      subjectIds: ['p2'],
+      positions: [
+        { value: 'known', observers: ['a'] },
+        { value: 'missing', observers: ['b'] },
+      ],
+    };
+    tracker.observe(round(1000, [lacking]));
+    tracker.observe(round(6000, [lacking]));
+
+    const recounted = tracker.recount('membership:p2', 6000);
+
+    const streak = { firstSeenAt: 6000, lastAnsweredAt: 6000, rounds: 1 };
+    const fresh = { firstSeenAt: 6000, rounds: 1, gapStreaks: { b: streak } };
+    expect(recounted).toMatchObject(fresh);
+    expect(tracker.tracked()).toMatchObject([fresh]);
+
+    tracker.observe(round(11000, [lacking]));
+    expect(tracker.tracked()).toMatchObject([
+      { firstSeenAt: 6000, rounds: 2, gapStreaks: { b: { firstSeenAt: 6000, rounds: 2 } } },
+    ]);
+  });
+
+  it('keeps when an observer that gave no view last answered through a count started over', () => {
+    const tracker = new DivergenceTracker();
+    const lackedBy = (missingBy: string[]): TopologyDisagreement => ({
+      key: 'membership:p2',
+      kind: 'membership',
+      subjectIds: ['p2'],
+      positions: [
+        { value: 'known', observers: ['a'] },
+        { value: 'missing', observers: missingBy },
+      ],
+    });
+    tracker.observe(round(1000, [lackedBy(['b', 'c'])]));
+    tracker.observe(round(6000, [lackedBy(['c'])], ['b']));
+
+    expect(tracker.recount('membership:p2', 6000)?.gapStreaks).toEqual({
+      b: { firstSeenAt: 6000, lastAnsweredAt: 1000, rounds: 1 },
+      c: { firstSeenAt: 6000, lastAnsweredAt: 6000, rounds: 1 },
+    });
+  });
+
+  it('has nothing to count afresh for a disagreement it does not hold', () => {
+    expect(new DivergenceTracker().recount('membership:p2', 6000)).toBeUndefined();
   });
 });
 
@@ -775,6 +1126,196 @@ describe('groupDivergences', () => {
   });
 });
 
+describe('matchDivergence', () => {
+  const tracked = (
+    key: string,
+    positions: TopologyDisagreement['positions'],
+    slots?: number[][],
+  ): TopologyDisagreement & { firstSeenAt: number; lastSeenAt: number; rounds: number } => ({
+    key,
+    kind: slots ? 'slot_owner' : 'config_epoch',
+    subjectIds: slots ? positions.map((position) => position.value) : [key.split(':')[1]],
+    ...(slots ? { slots } : {}),
+    positions,
+    firstSeenAt: 0,
+    lastSeenAt: 10000,
+    rounds: 3,
+  });
+  const dispute = (key: string, slots: number[][], dissent: string[], others = ['a', 'd']) =>
+    tracked(
+      key,
+      [
+        { value: 'A', observers: others },
+        { value: 'B', observers: dissent },
+      ],
+      slots,
+    );
+  const epoch = (subject: string, dissent: string[], others = ['a', 'd']) =>
+    tracked(`config_epoch:${subject}`, [
+      { value: '1', observers: others },
+      { value: '9', observers: dissent },
+    ]);
+  const raisedFor = (id: string, ...disagreements: ReturnType<typeof tracked>[]) => {
+    const [group] = groupDivergences(disagreements);
+    return { id, group };
+  };
+
+  it('finds the event of a slot dispute by its owners and its slots, whatever the key says', () => {
+    const first = raisedFor('e1', dispute('slot_owner:A|B', [[9000, 9100]], ['b']));
+    const second = raisedFor('e2', dispute('slot_owner:A|B#2', [[5000, 5100]], ['c']));
+
+    expect(matchDivergence([first, second], dispute('slot_owner:A|B', [[5000, 5100]], ['c']))?.id).toBe('e2');
+    expect(matchDivergence([first, second], dispute('slot_owner:A|B#2', [[9000, 9100]], ['b']))?.id).toBe('e1');
+    expect(matchDivergence([second], dispute('slot_owner:A|B', [[5050, 5100]], ['c']))?.id).toBe('e2');
+  });
+
+  it('finds nothing for a dispute between the same owners on other slots', () => {
+    const ended = raisedFor('e1', dispute('slot_owner:A|B', [[0, 100]], ['b']));
+
+    expect(matchDivergence([ended], dispute('slot_owner:A|B', [[200, 300]], ['b']))).toBeUndefined();
+  });
+
+  it('finds nothing for the same slots between other owners', () => {
+    const raised = raisedFor('e1', dispute('slot_owner:A|B', [[0, 100]], ['b']));
+    const others = tracked(
+      'slot_owner:A|C',
+      [
+        { value: 'A', observers: ['a', 'd'] },
+        { value: 'C', observers: ['b'] },
+      ],
+      [[0, 100]],
+    );
+
+    expect(matchDivergence([raised], others)).toBeUndefined();
+  });
+
+  it('finds nothing once the dissenting node of the event is back with the others', () => {
+    const raised = raisedFor('e1', epoch('x', ['b'], ['a', 'c', 'd']));
+
+    expect(matchDivergence([raised], epoch('x', ['c'], ['a', 'b', 'd']))).toBeUndefined();
+    expect(matchDivergence([raised], epoch('x', ['b'], ['a', 'c', 'd']))?.id).toBe('e1');
+  });
+
+  it('finds nothing for a slot dispute whose dissenting side moved to another node', () => {
+    const raised = raisedFor('e1', dispute('slot_owner:A|B', [[0, 100]], ['b'], ['a', 'c', 'd']));
+
+    expect(matchDivergence([raised], dispute('slot_owner:A|B', [[0, 100]], ['c'], ['a', 'b', 'd']))).toBeUndefined();
+  });
+
+  it('finds nothing for another node, or for another kind about the same node', () => {
+    const raised = raisedFor('e1', epoch('x', ['b']));
+    const flags = { ...epoch('x', ['b']), key: 'failure_flags:x', kind: 'failure_flags' as const };
+
+    expect(matchDivergence([raised], epoch('y', ['b']))).toBeUndefined();
+    expect(matchDivergence([raised], flags)).toBeUndefined();
+  });
+
+  it('keeps the event when more nodes are asked and the dissenting node still stands apart', () => {
+    const raised = raisedFor('e1', epoch('x', ['b'], ['a', 'd']));
+
+    expect(matchDivergence([raised], epoch('x', ['b', 'r7'], ['a', 'd', 'e', 'f', 'g']))?.id).toBe('e1');
+    expect(matchDivergence([raised], epoch('x', ['b', 'e', 'f', 'g'], ['a', 'd']))?.id).toBe('e1');
+    expect(matchDivergence([raised], epoch('x', ['r7'], ['a', 'b', 'd']))).toBeUndefined();
+  });
+
+  it('finds nothing when no node of the dissenting side gave a view', () => {
+    const raised = raisedFor('e1', epoch('x', ['b'], ['a', 'd']));
+
+    expect(matchDivergence([raised], epoch('x', ['r7'], ['a', 'd']))).toBeUndefined();
+  });
+
+  it('takes the group that was confirmed last when two cover a line alike, in whatever order they come', () => {
+    const outgoing = { ...raisedFor('e1', epoch('x', ['b'])), confirmedAt: 1000 };
+    const current = { ...raisedFor('e2', epoch('x', ['b', 'c'])), confirmedAt: 2000 };
+    const line = epoch('x', ['b', 'c']);
+
+    expect(matchDivergence([outgoing, current], line)?.id).toBe('e2');
+    expect(matchDivergence([current, outgoing], line)?.id).toBe('e2');
+  });
+
+  it('takes an event that is open before one that was resolved by hand', () => {
+    const resolved = { ...raisedFor('e1', epoch('x', ['b'])), confirmedAt: 3000, resolvedByHand: true };
+    const open = { ...raisedFor('e2', epoch('x', ['b', 'c'])), confirmedAt: 2000 };
+    const line = epoch('x', ['b', 'c']);
+
+    expect(matchDivergence([resolved, open], line)?.id).toBe('e2');
+    expect(matchDivergence([open, resolved], line)?.id).toBe('e2');
+    expect(matchDivergence([resolved], line)?.id).toBe('e1');
+  });
+
+  it('takes an open event that shares fewer slots before one that was resolved by hand', () => {
+    const resolved = { ...raisedFor('e1', dispute('slot_owner:A|B', [[0, 100]], ['b'])), resolvedByHand: true };
+    const open = raisedFor('e2', dispute('slot_owner:A|B#2', [[50, 50]], ['b']));
+
+    expect(matchDivergence([resolved, open], dispute('slot_owner:A|B', [[0, 100]], ['b']))?.id).toBe('e2');
+  });
+
+  it('takes the event that shares the most slots', () => {
+    const small = raisedFor('e1', dispute('slot_owner:A|B', [[0, 9]], ['b']));
+    const large = raisedFor('e2', dispute('slot_owner:A|B#2', [[10, 99]], ['b']));
+
+    expect(matchDivergence([small, large], dispute('slot_owner:A|B', [[0, 99]], ['b']))?.id).toBe('e2');
+  });
+
+  it('takes the group that was confirmed last when an older one that covers the line is still being counted', () => {
+    const membership = (positions: TopologyDisagreement['positions']) => ({
+      ...tracked('membership:n1', positions),
+      kind: 'membership' as const,
+    });
+    const wide = membership([
+      { value: 'known', observers: ['a', 'd', 'e'] },
+      { value: 'handshake', observers: ['b'] },
+      { value: 'missing', observers: ['c'] },
+    ]);
+    const narrow = membership([
+      { value: 'known', observers: ['a', 'c', 'd', 'e'] },
+      { value: 'handshake', observers: ['b'] },
+    ]);
+    const [both] = groupDivergences([wide]);
+    const [alone] = groupDivergences([narrow]);
+    const open = new Map<string, OpenDivergence>();
+    const settle = (at: number, openSignatures: string[], confirmed: DivergenceGroup[], pending: string[] = []) =>
+      settleOpenDivergences({
+        open,
+        openSignatures,
+        confirmed,
+        pendingSignatures: new Set(pending),
+        comparable: true,
+        at,
+        minRounds: 3,
+      });
+    settle(1000, [both.signature], [both]);
+    settle(2000, [both.signature, alone.signature], [alone]);
+    settle(3000, [both.signature, alone.signature], [both], [alone.signature]);
+
+    const raised = [...open.values()].flatMap(({ group, confirmedAt }) => (group ? [{ group, confirmedAt }] : []));
+
+    expect(raised.map((entry) => entry.group.signature)).toEqual(['topology_divergence:b,c', 'topology_divergence:b']);
+    expect(matchDivergence(raised, wide)?.group.signature).toBe('topology_divergence:b,c');
+    expect(matchDivergence([...raised].reverse(), wide)?.group.signature).toBe('topology_divergence:b,c');
+  });
+
+  it('looks at the sides of a group entry only when it is about the same thing as the line', () => {
+    const subjects = Array.from({ length: 200 }, (_, at) => `n${at}`);
+    const [group] = groupDivergences(subjects.map((subject) => epoch(subject, ['b'])));
+    const sidesRead: string[] = [];
+    const counted = {
+      ...group,
+      disagreements: group.disagreements.map((entry) => ({
+        ...entry,
+        get positions() {
+          sidesRead.push(entry.key);
+          return entry.positions;
+        },
+      })),
+    };
+
+    expect(counted.disagreements).toHaveLength(200);
+    expect(matchDivergence([{ id: 'e1', group: counted }], epoch('n7', ['b']))?.id).toBe('e1');
+    expect(sidesRead).toEqual(['config_epoch:n7']);
+  });
+});
+
 describe('migrationTouchesSlots', () => {
   const owner = primary('p1', 1, [[0, 5460]], 1);
 
@@ -933,11 +1474,93 @@ describe('settleOpenDivergences', () => {
     expect(settle(open, 10000).has(SIGNATURE)).toBe(false);
   });
 
+  it('keeps the confirm time of a group that is only being counted', () => {
+    const WIDER = 'topology_divergence:a,b';
+    const widerGroup = { signature: WIDER, dissent: ['a', 'b'], others: ['c'], disagreements: [] };
+    const open = new Map<string, OpenDivergence>();
+    const both = { openSignatures: [WIDER, SIGNATURE] };
+    settle(open, 1000, { openSignatures: [WIDER], confirmed: [widerGroup] });
+    settle(open, 2000, { ...both, confirmed: [confirmedGroup] });
+    settle(open, 3000, { ...both, confirmed: [widerGroup], pendingSignatures: new Set([SIGNATURE]) });
+
+    expect(open.get(SIGNATURE)).toMatchObject({ group: confirmedGroup, confirmedAt: 2000, lastCountedAt: 3000 });
+    expect(open.get(WIDER)).toMatchObject({ group: widerGroup, confirmedAt: 3000, lastCountedAt: 3000 });
+  });
+
+  it('gives no confirm time to an event whose group it has not seen confirmed', () => {
+    const open = new Map<string, OpenDivergence>();
+    settle(open, 1000, { pendingSignatures: new Set([SIGNATURE]) });
+
+    expect(open.get(SIGNATURE)).toEqual({ lastCountedAt: 1000, clean: 0 });
+  });
+
   it('forgets an event that is no longer open', () => {
     const open = new Map<string, OpenDivergence>();
     settle(open, 0, { confirmed: [confirmedGroup] });
     settle(open, 5000, { openSignatures: [] });
 
     expect(open.size).toBe(0);
+  });
+});
+
+describe('lackingObservers', () => {
+  it('names each observer that does not list the node as a member, with how it holds it', () => {
+    const disagreement: TopologyDisagreement = {
+      key: 'membership:p2',
+      kind: 'membership',
+      subjectIds: ['p2'],
+      positions: [
+        { value: 'handshake', observers: ['c'] },
+        { value: 'known', observers: ['a'] },
+        { value: 'missing', observers: ['b', 'd'] },
+      ],
+    };
+
+    expect(lackingObservers(disagreement)).toEqual([
+      { observer: 'c', status: 'handshake' },
+      { observer: 'b', status: 'missing' },
+      { observer: 'd', status: 'missing' },
+    ]);
+  });
+});
+
+describe('membersByObserver', () => {
+  it('gives the nodes each view lists as members, the observer itself among them', () => {
+    const node = (id: string, flags: string[]): ClusterNode => ({
+      id,
+      address: `10.0.0.${id.length}:6379@16379`,
+      flags,
+      master: '-',
+      pingSent: 0,
+      pongReceived: 0,
+      configEpoch: 0,
+      linkState: 'connected',
+      slots: [],
+    });
+    const views: TopologyView[] = [
+      { observerId: 'a', nodes: [node('a', ['myself', 'master']), node('bb', ['master']), node('ccc', ['handshake'])] },
+      { observerId: 'bb', nodes: [node('bb', ['myself', 'master']), node('dddd', ['master', 'noaddr'])] },
+    ];
+
+    expect([...membersByObserver(views)].map(([observer, ids]) => [observer, [...ids].sort()])).toEqual([
+      ['a', ['a', 'bb']],
+      ['bb', ['bb']],
+    ]);
+  });
+});
+
+describe('durationOf', () => {
+  it('gives seconds up to two minutes, then minutes, hours and days', () => {
+    expect(durationOf(-5)).toBe('0s');
+    expect(durationOf(95_000)).toBe('95s');
+    expect(durationOf(120_000)).toBe('2m');
+    expect(durationOf(179_000)).toBe('2m');
+    expect(durationOf(119 * 60_000)).toBe('119m');
+    expect(durationOf(2 * 3_600_000)).toBe('2h');
+    expect(durationOf(2.5 * 3_600_000)).toBe('2h');
+    expect(durationOf(47.6 * 3_600_000)).toBe('47h');
+    expect(durationOf(47 * 3_600_000)).toBe('47h');
+    expect(durationOf(48 * 3_600_000)).toBe('2d');
+    expect(durationOf(10 * 86_400_000)).toBe('10d');
   });
 });

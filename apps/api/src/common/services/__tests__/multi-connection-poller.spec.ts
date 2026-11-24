@@ -394,3 +394,138 @@ describe('MultiConnectionPoller getPolledConnectionIds', () => {
     expect(poller.coveredIds()).toEqual(['d', 'f']);
   });
 });
+
+describe('MultiConnectionPoller slow lane', () => {
+  class ScriptedPoller extends TestPoller {
+    bound = 20;
+    readonly started: string[] = [];
+    readonly script = new Map<string, Array<() => Promise<void>>>();
+
+    protected getPollTimeoutMs(): number {
+      return this.bound;
+    }
+
+    protected async pollConnection(ctx: ConnectionContext): Promise<void> {
+      this.started.push(ctx.connectionId);
+      const next = this.script.get(ctx.connectionId)?.shift();
+      if (next) {
+        await next();
+      }
+      await super.pollConnection(ctx);
+    }
+
+    next(id: string, ...steps: Array<() => Promise<void>>): void {
+      this.script.set(id, steps);
+    }
+  }
+
+  const never = () => new Promise<void>(() => {});
+  const after = (ms: number) => () => new Promise<void>((resolve) => setTimeout(resolve, ms));
+  const timeoutFailure = () => Promise.reject(new Error('INFO timed out after 5000ms'));
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+  const build = (ids = ['slow', 'ok']) => {
+    let statuses = ids.map((id) => status(id, 'direct'));
+    const registry = { list: () => statuses, get: () => ({}) } as unknown as ConnectionRegistry;
+    const poller = new ScriptedPoller(registry);
+    return { poller, setIds: (next: string[]) => (statuses = next.map((id) => status(id, 'direct'))) };
+  };
+
+  const timed = async (run: () => Promise<void>): Promise<number> => {
+    const startedAt = performance.now();
+    await run();
+    return performance.now() - startedAt;
+  };
+
+  it('does not wait again for a connection whose poll outlived the tick', async () => {
+    const { poller } = build();
+    let release!: () => void;
+    poller.next('slow', () => new Promise<void>((resolve) => (release = resolve)), never);
+
+    await poller.tickNow();
+    release();
+    await flush();
+    poller.bound = 2000;
+
+    expect(await timed(() => poller.tickNow())).toBeLessThan(500);
+    expect(poller.started).toEqual(['slow', 'ok', 'slow', 'ok']);
+  });
+
+  it('does not wait for a connection whose last poll failed with a timeout', async () => {
+    const { poller } = build();
+    poller.bound = 2000;
+    poller.next('slow', timeoutFailure, never);
+
+    await poller.tickNow();
+
+    expect(await timed(() => poller.tickNow())).toBeLessThan(500);
+    expect(poller.polled.map((c) => c.connectionId)).toEqual(['ok', 'ok']);
+  });
+
+  it('keeps waiting for a connection whose poll failed for another reason', async () => {
+    const { poller } = build();
+    poller.bound = 2000;
+    poller.failing.add('slow');
+    await poller.tickNow();
+    poller.failing.clear();
+    poller.next('slow', after(40));
+
+    await poller.tickNow();
+
+    expect(poller.polled.map((c) => c.connectionId)).toEqual(['ok', 'ok', 'slow']);
+  });
+
+  it('starts a poll of a slow connection on every tick', async () => {
+    const { poller } = build(['slow']);
+    poller.next('slow', timeoutFailure, timeoutFailure, timeoutFailure);
+
+    await poller.tickNow();
+    await flush();
+    await poller.tickNow();
+    await flush();
+    await poller.tickNow();
+    await flush();
+
+    expect(poller.started).toEqual(['slow', 'slow', 'slow']);
+  });
+
+  it('waits for the connection again after one poll inside the bound', async () => {
+    const { poller } = build();
+    poller.bound = 2000;
+    poller.next('slow', timeoutFailure, after(0), after(40));
+
+    await poller.tickNow();
+    await poller.tickNow();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(poller.polled.map((c) => c.connectionId)).toEqual(['ok', 'ok', 'slow']);
+
+    await poller.tickNow();
+    expect(poller.polled.map((c) => c.connectionId)).toEqual(['ok', 'ok', 'slow', 'ok', 'slow']);
+  });
+
+  it('leaves a slow connection out of the covered set until it is back in step', async () => {
+    const { poller } = build();
+    poller.bound = 2000;
+    poller.next('slow', timeoutFailure, never);
+
+    await poller.tickNow();
+    await poller.tickNow();
+
+    expect(poller.coveredIds()).toEqual(['ok']);
+  });
+
+  it('forgets a slow connection that is removed', async () => {
+    const { poller, setIds } = build();
+    poller.bound = 2000;
+    poller.next('slow', timeoutFailure);
+    await poller.tickNow();
+
+    setIds(['ok']);
+    await poller.tickNow();
+    setIds(['slow', 'ok']);
+    poller.next('slow', after(40));
+    await poller.tickNow();
+
+    expect(poller.polled.map((c) => c.connectionId)).toEqual(['ok', 'ok', 'ok', 'slow']);
+  });
+});

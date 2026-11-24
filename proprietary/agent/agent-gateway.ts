@@ -1,11 +1,23 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { WebSocketServer, WebSocket } from 'ws';
+import { WebSocketServer, WebSocket, RawData } from 'ws';
 import { IncomingMessage } from 'http';
 import { Socket } from 'net';
 import { AgentTokensService } from './agent-tokens.service';
 import { AgentDatabaseAdapter } from './agent-database-adapter';
 import { ConnectionRegistry } from '../../apps/api/src/connections/connection-registry.service';
 import type { AgentHelloMessage, AgentConnectionInfo } from '@betterdb/shared';
+
+const LIVENESS_CHECK_MS = 5000;
+
+type ConnectionIdClaim = 'free' | 'replaced' | 'taken' | 'closed';
+
+function isPong(data: RawData): boolean {
+  try {
+    return JSON.parse(data.toString()).type === 'pong';
+  } catch {
+    return false;
+  }
+}
 
 interface AgentConnection {
   id: string;
@@ -24,6 +36,7 @@ export class AgentGateway {
   private readonly logger = new Logger(AgentGateway.name);
   private wss: WebSocketServer;
   private agents = new Map<string, AgentConnection>();
+  private claims = new Map<string, Promise<void>>();
 
   constructor(
     private readonly tokenService: AgentTokensService,
@@ -87,7 +100,7 @@ export class AgentGateway {
         if (msg.type === 'agent_hello' && !agent.agentHello) {
           clearTimeout(helloTimeout);
           agent.agentHello = msg as AgentHelloMessage;
-          this.registerAgent(agent);
+          this.queueRegistration(agent);
           return;
         }
 
@@ -112,7 +125,7 @@ export class AgentGateway {
 
     ws.on('close', () => {
       clearTimeout(helloTimeout);
-      this.unregisterAgent(connectionId);
+      this.unregisterAgent(connectionId, ws);
     });
 
     ws.on('error', (err) => {
@@ -120,13 +133,33 @@ export class AgentGateway {
     });
   }
 
+  private queueRegistration(agent: AgentConnection): void {
+    const register = () => this.registerAgent(agent);
+    const prior = this.claims.get(agent.id) ?? Promise.resolve();
+    const claim = prior.then(register, register);
+    this.claims.set(agent.id, claim);
+    void claim.finally(() => {
+      if (this.claims.get(agent.id) === claim) this.claims.delete(agent.id);
+    });
+  }
+
   private async registerAgent(agent: AgentConnection): Promise<void> {
+    if (agent.ws.readyState !== WebSocket.OPEN) return;
+
     const hello = agent.agentHello!;
     this.logger.log(
       `Agent ${agent.id} hello: ${hello.valkey.type} ${hello.valkey.version} ` +
       `(cluster: ${hello.valkey.cluster}, auth: ${hello.authMode ?? 'password'}, ` +
       `capabilities: ${hello.capabilities.join(', ')})`,
     );
+
+    const claim = await this.claimConnectionId(agent);
+    if (claim === 'closed') return;
+    if (claim === 'taken') {
+      this.logger.warn(`Agent ${agent.id}: another agent is already connected with this token, turning the new one away`);
+      agent.ws.close(4003, 'Another agent is connected with this token');
+      return;
+    }
 
     // Create the DatabaseAdapter
     agent.adapter = new AgentDatabaseAdapter(agent.ws, hello);
@@ -144,6 +177,7 @@ export class AgentGateway {
       this.logger.log(`Agent ${agent.id} registered as connection`);
     } catch (err: any) {
       this.logger.error(`Failed to register agent ${agent.id}: ${err.message}`);
+      if (claim === 'replaced') this.connectionRegistry.removeAgentConnection(agent.id);
       agent.ws.close(4002, 'Registration failed');
       return;
     }
@@ -162,22 +196,73 @@ export class AgentGateway {
     }, 30000);
   }
 
-  private unregisterAgent(connectionId: string): void {
-    const agent = this.agents.get(connectionId);
-    if (!agent) return;
+  private async claimConnectionId(agent: AgentConnection): Promise<ConnectionIdClaim> {
+    for (;;) {
+      const previous = this.agents.get(agent.id);
+      if (!previous) return 'free';
 
+      const answered = await this.answersPing(previous.ws, agent.ws);
+      if (agent.ws.readyState !== WebSocket.OPEN) return 'closed';
+      if (this.agents.get(agent.id) !== previous) continue;
+      if (answered && previous.ws.readyState === WebSocket.OPEN) return 'taken';
+
+      this.retireAgent(previous);
+      previous.ws.close(4003, 'Replaced by a new connection');
+      previous.ws.terminate();
+      this.logger.log(`Agent ${agent.id} reconnected, dropped its previous socket`);
+      return 'replaced';
+    }
+  }
+
+  private answersPing(ws: WebSocket, asker: WebSocket): Promise<boolean> {
+    if (ws.readyState !== WebSocket.OPEN) return Promise.resolve(false);
+
+    return new Promise((resolve) => {
+      const finish = (answered: boolean) => {
+        clearTimeout(timer);
+        ws.off('message', onMessage);
+        ws.off('close', onClose);
+        asker.off('close', onClose);
+        resolve(answered);
+      };
+      const onMessage = (data: RawData) => {
+        if (isPong(data)) finish(true);
+      };
+      const onClose = () => finish(false);
+      const timer = setTimeout(() => finish(false), LIVENESS_CHECK_MS);
+
+      ws.on('message', onMessage);
+      ws.on('close', onClose);
+      asker.on('close', onClose);
+      ws.send(JSON.stringify({ type: 'ping', ts: Date.now() }));
+    });
+  }
+
+  private unregisterAgent(connectionId: string, ws: WebSocket): void {
+    const agent = this.agents.get(connectionId);
+    if (!agent || agent.ws !== ws) return;
+
+    this.retireAgent(agent);
+
+    // Remove from ConnectionRegistry
+    this.connectionRegistry.removeAgentConnection(connectionId);
+
+    this.logger.log(`Agent ${connectionId} disconnected and unregistered`);
+  }
+
+  private retireAgent(agent: AgentConnection): void {
     if (agent.pingTimer) clearInterval(agent.pingTimer);
     if (agent.pongTimer) clearTimeout(agent.pongTimer);
+    agent.pingTimer = null;
+    agent.pongTimer = null;
 
     if (agent.adapter) {
       agent.adapter.markDisconnected();
     }
 
-    // Remove from ConnectionRegistry
-    this.connectionRegistry.removeAgentConnection(connectionId);
-
-    this.agents.delete(connectionId);
-    this.logger.log(`Agent ${connectionId} disconnected and unregistered`);
+    if (this.agents.get(agent.id) === agent) {
+      this.agents.delete(agent.id);
+    }
   }
 
   getConnectedAgents(): AgentConnectionInfo[] {

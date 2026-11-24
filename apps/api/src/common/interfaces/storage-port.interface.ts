@@ -149,7 +149,7 @@ import type {
   ScheduledCaptureQueryOptions,
   ScheduledCapturePatch,
 } from '@betterdb/shared';
-import type { AgentToken, TokenType } from '@betterdb/shared';
+import type { AgentToken, ClusterNodeRef, TokenType } from '@betterdb/shared';
 
 /**
  * Totals over stored capture chunks. byteCount uses CaptureWriter's accounting
@@ -191,6 +191,7 @@ export interface StoredAnomalyEvent {
   relatedMetrics?: string[];
   replicaAddr?: string;
   nodeAddr?: string;
+  node?: ClusterNodeRef;
   dedupeKey?: string;
   commands?: string[];
   eventSequence?: number;
