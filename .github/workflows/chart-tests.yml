@@ -5,6 +5,9 @@
 #   - chart: helm lint, the helm-unittest suites in charts/betterdb-monitor/tests,
 #     and helm template | kubeconform -strict for each Service type in
 #     charts/betterdb-monitor/ci/.
+#   - openeverest-chart: helm lint, helm-unittest and helm template for
+#     charts/betterdb-openeverest, whose version follows the agent, not the app.
+#     kubeconform skips its Plugin CR (no public schema for the CRD).
 # helm-publish.yml runs the same version check and lint again when a tag is
 # released.
 name: Chart Tests
@@ -107,5 +110,53 @@ jobs:
             echo "::group::helm template -f ${file}"
             helm template ci charts/betterdb-monitor --namespace betterdb -f "$file" \
               | kubeconform -strict -summary
+            echo "::endgroup::"
+          done
+
+  openeverest-chart:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch || github.ref }}
+          persist-credentials: false
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Lint (defaults and every CI values file)
+        run: |
+          helm lint charts/betterdb-openeverest
+          for values in charts/betterdb-openeverest/ci/*-values.yaml; do
+            helm lint charts/betterdb-openeverest -f "$values"
+          done
+
+      - name: Install helm-unittest
+        run: |
+          helm plugin install https://github.com/helm-unittest/helm-unittest \
+            --version "$HELM_UNITTEST_VERSION" --verify=false
+
+      - name: Unit tests
+        run: helm unittest charts/betterdb-openeverest
+
+      - name: Install kubeconform
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -sSfL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP/bin" kubeconform
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Validate rendered manifests
+        shell: bash
+        run: |
+          for values in default namespaces; do
+            file="charts/betterdb-openeverest/ci/${values}-values.yaml"
+            echo "::group::helm template -f ${file}"
+            helm template ci charts/betterdb-openeverest --namespace everest-system -f "$file" \
+              | kubeconform -strict -summary -ignore-missing-schemas
             echo "::endgroup::"
           done

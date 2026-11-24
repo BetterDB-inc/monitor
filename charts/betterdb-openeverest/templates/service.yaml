@@ -1,0 +1,20 @@
+{{- /*
+ClusterIP only: OpenEverest reaches the backend through
+Plugin.spec.backend.serviceRef, inside the cluster. Nothing here needs to be
+exposed outside it.
+*/ -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "betterdb-openeverest.fullname" . }}
+  labels:
+    {{- include "betterdb-openeverest.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "betterdb-openeverest.selectorLabels" . | nindent 4 }}

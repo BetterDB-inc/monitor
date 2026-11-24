@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+  <ellipse cx="32" cy="14" rx="20" ry="7"/>
+  <path d="M12 14v36c0 3.9 9 7 20 7s20-3.1 20-7V14"/>
+  <path d="M12 32c0 3.9 9 7 20 7s20-3.1 20-7"/>
+  <polyline points="18 46 26 38 32 43 40 33 46 38"/>
+</svg>

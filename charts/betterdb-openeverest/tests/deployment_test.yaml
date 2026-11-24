@@ -1,0 +1,122 @@
+suite: deployment
+templates:
+  - templates/deployment.yaml
+tests:
+  - it: runs the agent image at appVersion in openeverest mode
+    chart:
+      appVersion: 9.8.7
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: betterdb/agent:9.8.7
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BETTERDB_AGENT_MODE
+            value: openeverest
+      - equal:
+          path: spec.strategy.type
+          value: Recreate
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: RELEASE-NAME-betterdb-openeverest
+
+  - it: uses an explicit image tag as given
+    set:
+      image.tag: 1.2.3
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: betterdb/agent:1.2.3
+
+  - it: points the backend at the chart-managed settings Secret and targets ConfigMap
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BETTERDB_SETTINGS_SECRET
+            value: RELEASE-NAME-betterdb-openeverest-settings
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BETTERDB_TARGETS_CONFIGMAP
+            value: RELEASE-NAME-betterdb-openeverest-targets
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: WATCH_NAMESPACES
+        any: true
+      - notExists:
+          path: spec.template.spec.volumes
+
+  - it: uses an existing settings Secret when given
+    set:
+      betterdb.existingSecret: my-betterdb
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BETTERDB_SETTINGS_SECRET
+            value: my-betterdb
+
+  - it: passes watchNamespaces, the OpenEverest API URL and cluster name through
+    set:
+      watchNamespaces: [databases, staging]
+      openeverest.apiUrl: http://everest.everest-system.svc:8080
+      openeverest.clusterName: prod
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: WATCH_NAMESPACES
+            value: databases,staging
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: EVEREST_API_URL
+            value: http://everest.everest-system.svc:8080
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OPENEVEREST_CLUSTER_NAME
+            value: prod
+
+  - it: mounts an inline CA and points BETTERDB_CA_FILE at it
+    set:
+      betterdb.ca: |
+        -----BEGIN CERTIFICATE-----
+        MIIB
+        -----END CERTIFICATE-----
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BETTERDB_CA_FILE
+            value: /etc/betterdb/ca/ca.crt
+      - equal:
+          path: spec.template.spec.volumes[0].secret.secretName
+          value: RELEASE-NAME-betterdb-openeverest-settings
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[0].mountPath
+          value: /etc/betterdb/ca
+
+  - it: accepts a pre-mounted CA path
+    set:
+      betterdb.caFile: /etc/ssl/private/monitor-ca.pem
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BETTERDB_CA_FILE
+            value: /etc/ssl/private/monitor-ca.pem
+      - notExists:
+          path: spec.template.spec.volumes
+
+  - it: runs non-root with a read-only root filesystem by default
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true

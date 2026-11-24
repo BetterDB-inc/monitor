@@ -1,0 +1,17 @@
+The BetterDB plugin for OpenEverest is installing as {{ include "betterdb-openeverest.fullname" . }} (image {{ include "betterdb-openeverest.image" . }}).
+
+OpenEverest picks up the Plugin "{{ .Values.plugin.name }}" on its own; reload the OpenEverest UI
+and open a Valkey instance to see the BetterDB tab.
+{{- if and (not .Values.betterdb.url) (not .Values.betterdb.existingSecret) }}
+
+BetterDB is not configured yet. In OpenEverest go to Settings -> BetterDB and enter:
+  - the agent URL: wss://<workspace>.app.betterdb.com/agent/ws for BetterDB Cloud, or
+    wss://<monitor-host>/api/agent/ws for a self-hosted BetterDB
+  - an agent token, created in BetterDB under Connections -> Via Agent
+{{- end }}
+
+Enabling monitoring on an instance needs the read-connection permission on it. The agent uses
+the instance's connection credentials read-only; no pods are restarted.
+
+Logs:
+  kubectl logs -n {{ .Release.Namespace }} deploy/{{ include "betterdb-openeverest.fullname" . }} -f
