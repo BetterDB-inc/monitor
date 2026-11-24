@@ -2422,7 +2422,7 @@ export class AnomalyService
         }
 
         if (nodes) {
-          this.rememberClusterKey(ctx.connectionId, nodes);
+          this.rememberClusterKey(ctx.connectionId, nodes, this.readIsCurrent(ctx, membershipAtRead));
           if (!isRaft) await this.detectTopologyDivergence(ctx, timestamp, nodes, shards);
           // Orphaned keys in unowned slots after a persistence load
           // (valkey#539): unreachable data silently holding memory. NOT a
@@ -10203,8 +10203,8 @@ export class AnomalyService
       });
   }
 
-  private rememberClusterKey(connectionId: string, nodes: ClusterNode[]): void {
-    this.clusterIdentity?.observe(connectionId, nodes);
+  private rememberClusterKey(connectionId: string, nodes: ClusterNode[], readIsCurrent: boolean): void {
+    if (readIsCurrent) this.clusterIdentity?.observe(connectionId, nodes);
     const clusterKey = this.clusterKeyOfNodes(nodes);
     if (!clusterKey) {
       this.forgetClusterKey(connectionId);
@@ -10239,7 +10239,7 @@ export class AnomalyService
         this.infoTimeoutMs,
         'CLUSTER NODES timed out',
       );
-      this.rememberClusterKey(ctx.connectionId, nodes);
+      this.rememberClusterKey(ctx.connectionId, nodes, this.readIsCurrent(ctx, membershipAtRead));
       this.rememberClusterNodes(
         ctx.connectionId,
         nodes,

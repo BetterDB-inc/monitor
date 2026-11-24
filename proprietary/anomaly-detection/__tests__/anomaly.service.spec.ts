@@ -7300,6 +7300,14 @@ describe('AnomalyService', () => {
         expect(failovers()[1].reasons).toBeUndefined();
       });
 
+      it('keeps the topology read of a connection that was removed meanwhile to itself', async () => {
+        (service as any).connectionRegistry.isRegisteredClient.mockReturnValue(false);
+
+        await poll(clusterCtx('a', CLUSTER_A));
+
+        expect(identity.clusterKeyOf('conn-a')).toBe('conn-a');
+      });
+
       it('forgets the cluster of a connection that no longer runs in cluster mode', async () => {
         const ctx = clusterCtx('a', CLUSTER_A);
         await poll(ctx);
