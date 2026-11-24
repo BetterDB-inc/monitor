@@ -2,6 +2,7 @@ import * as http from 'http';
 import { createHash } from 'crypto';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
+import { EverestApiError } from './everest-client';
 import type { InstanceRef } from './everest-client';
 import type { TargetStatus } from './instance-target';
 
@@ -60,6 +61,16 @@ const DNS_SUBDOMAIN = /^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$/;
 const DNS_LABEL = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
 const MAX_BODY_BYTES = 64 * 1024;
 
+// Errors the routes let through, mapped to a status: the OpenEverest client's
+// own (502 when the API is unreachable), a malformed percent-encoding in the
+// path (400), anything else 500.
+function statusFor(err: unknown): number {
+  if (err instanceof HttpError) return err.status;
+  if (err instanceof EverestApiError) return err.status;
+  if (err instanceof URIError) return 400;
+  return 500;
+}
+
 export function parseInstanceRef(cluster: string, namespace: string, instance: string): InstanceRef {
   const ref = { cluster: decodeURIComponent(cluster), namespace: decodeURIComponent(namespace), instance: decodeURIComponent(instance) };
   if (!DNS_SUBDOMAIN.test(ref.cluster) || !DNS_LABEL.test(ref.namespace) || !DNS_SUBDOMAIN.test(ref.instance)) {
@@ -85,7 +96,7 @@ export function createPluginServer(options: PluginServerOptions): http.Server {
     try {
       await route(req, res, options.backend, bundle);
     } catch (err) {
-      const status = err instanceof HttpError ? err.status : 500;
+      const status = statusFor(err);
       if (status >= 500) options.log(`${req.method} ${req.url}: ${(err as Error).message}`);
       sendJson(res, status, { error: (err as Error).message || 'internal error' });
     }

@@ -139,6 +139,24 @@ describe('plugin server', () => {
     expect(res.status).toBe(400);
   });
 
+  it('answers 400 to a malformed percent-encoding instead of 500', async () => {
+    const res = await fetch(`${base}/api/instances/main/db/%E0%A4%A/status`);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: expect.stringContaining('URI') });
+  });
+
+  it('passes the OpenEverest client\'s own status through when the API is unreachable', async () => {
+    everestStatus = 503;
+
+    const res = await fetch(`${base}/api/instances/main/db/orders/enable`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer user-jwt' },
+    });
+
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ error: expect.stringContaining('503') });
+  });
+
   it('serves settings on GET and refuses PUT with 403 while editing is off, whatever the header', async () => {
     expect(await (await fetch(`${base}/api/settings`)).json()).toEqual(backend.settingsState);
 
