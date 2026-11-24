@@ -64,6 +64,27 @@ const allowlistEnv = (parse: (raw: string) => unknown) =>
       }
     });
 
+// Monitor capture limits. Exported so the capture service and reconciler parse
+// these exactly as boot validation does (e.g. `1e8` is 100000000, not 1).
+export const monitorMaxByteCapSchema = z.coerce
+  .number()
+  .int()
+  .min(1)
+  .default(DEFAULT_MAX_BYTE_CAP);
+export const monitorMaxLineCapSchema = z.coerce
+  .number()
+  .int()
+  .min(1)
+  .default(DEFAULT_MAX_LINE_CAP);
+/**
+ * Unset/blank → undefined, meaning "decide from STORAGE_TYPE" (see
+ * resolveReconcileOnStartup); otherwise false for false/0/no/off, else true.
+ */
+export const monitorCaptureReconcileOnStartupSchema = z
+  .string()
+  .optional()
+  .transform((v) => (v === undefined || v.trim() === '' ? undefined : !isNegativeEnvValue(v)));
+
 /**
  * Environment variable validation schema
  * Validates all environment variables at application startup
@@ -310,17 +331,11 @@ export const envSchema = z
     MONITOR_PERSISTENCE_CRIT_SEC: z.coerce.number().int().min(1).default(600),
 
     // Capture session limits. Reconcile-on-startup fails capture rows left
-    // 'running' by a previous process; the max caps bound manual captures.
-    MONITOR_CAPTURE_RECONCILE_ON_STARTUP: z
-      .string()
-      .default('true')
-      .transform((v) => !isNegativeEnvValue(v)),
-    MONITOR_MAX_BYTE_CAP: z.coerce
-      .number()
-      .int()
-      .min(1)
-      .default(DEFAULT_MAX_BYTE_CAP),
-    MONITOR_MAX_LINE_CAP: z.coerce.number().int().min(1).default(DEFAULT_MAX_LINE_CAP),
+    // 'running' by a previous process (default: on for sqlite/memory, off for
+    // shared storage); the max caps bound manual captures.
+    MONITOR_CAPTURE_RECONCILE_ON_STARTUP: monitorCaptureReconcileOnStartupSchema,
+    MONITOR_MAX_BYTE_CAP: monitorMaxByteCapSchema,
+    MONITOR_MAX_LINE_CAP: monitorMaxLineCapSchema,
 
     // Sentinel loop-stall / TILT RTT-proxy thresholds (valkey-sentinel-tilt-repro).
     // Defaults bracket the 2000ms sentinel_tilt_trigger: warn well below it so the

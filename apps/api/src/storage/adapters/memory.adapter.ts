@@ -67,6 +67,8 @@ import {
   CaptureSessionQueryOptions,
   StoredCaptureChunk,
   CaptureSessionPatch,
+  CaptureChunkStats,
+  UpdateCaptureSessionOptions,
   StoredCaptureTrigger,
   CaptureTriggerQueryOptions,
   CaptureTriggerPatch,
@@ -2604,9 +2606,14 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return session ? { ...session } : null;
   }
 
-  async updateCaptureSession(id: string, patch: CaptureSessionPatch): Promise<boolean> {
+  async updateCaptureSession(
+    id: string,
+    patch: CaptureSessionPatch,
+    options: UpdateCaptureSessionOptions = {},
+  ): Promise<boolean> {
     const session = this.captureSessions.get(id);
     if (!session) return false;
+    if (options.ifStatus !== undefined && session.status !== options.ifStatus) return false;
     if (patch.status !== undefined) session.status = patch.status;
     if (patch.endedAt !== undefined) session.endedAt = patch.endedAt;
     if (patch.durationMs !== undefined) session.durationMs = patch.durationMs;
@@ -2629,17 +2636,23 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       .map((c) => ({ ...c, bytes: Buffer.from(c.bytes) }));
   }
 
-  async getCaptureChunkLastTs(
-    sessionId: string,
-  ): Promise<{ lastTs: number; byNode: Record<string, number> } | null> {
-    let lastTs: number | null = null;
-    const byNode: Record<string, number> = {};
+  async getCaptureChunkStats(sessionId: string): Promise<CaptureChunkStats | null> {
+    let overall: CaptureChunkStats | null = null;
     for (const c of this.captureChunks) {
       if (c.sessionId !== sessionId) continue;
-      lastTs = lastTs === null ? c.lastTs : Math.max(lastTs, c.lastTs);
-      if (c.nodeId) byNode[c.nodeId] = Math.max(byNode[c.nodeId] ?? -Infinity, c.lastTs);
+      const bytes = c.bytes.length + 1;
+      overall ??= { lastTs: c.lastTs, byteCount: 0, lineCount: 0, byNode: {} };
+      overall.lastTs = Math.max(overall.lastTs, c.lastTs);
+      overall.byteCount += bytes;
+      overall.lineCount += c.lineCount;
+      if (c.nodeId) {
+        const n = (overall.byNode[c.nodeId] ??= { lastTs: c.lastTs, byteCount: 0, lineCount: 0 });
+        n.lastTs = Math.max(n.lastTs, c.lastTs);
+        n.byteCount += bytes;
+        n.lineCount += c.lineCount;
+      }
     }
-    return lastTs === null ? null : { lastTs, byNode };
+    return overall;
   }
 
   async getCaptureSessions(

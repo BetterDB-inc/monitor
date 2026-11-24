@@ -22,6 +22,9 @@ import { clusterNodeLabel } from './cluster-node-label';
 import { PreflightPanel } from './preflight-panel';
 
 const FIVE_MINUTES_MS = 5 * 60 * 1000;
+/** Server limit: MAX_DURATION_MS in apps/api/src/monitor/capture-limits.ts. */
+const MAX_DURATION_MS = 15 * 60 * 1000;
+const UNIT_MS = { s: 1000, m: 60_000 } as const;
 const DEFAULT_DURATION_SECONDS = 30;
 const HOT_PRIMARY_DURATION_SECONDS = 10;
 
@@ -111,7 +114,9 @@ export function StartSessionModal({
   const [preflightLoading, setPreflightLoading] = useState(false);
   const [preflightError, setPreflightError] = useState<string | null>(null);
 
-  const durationMs = duration * (unit === 'm' ? 60_000 : 1000);
+  const maxDuration = MAX_DURATION_MS / UNIT_MS[unit]; // 900 s or 15 min
+  // Round: 4.35 min * 60000 = 260999.99999999997, which the API rejects as a non-integer.
+  const durationMs = Math.min(MAX_DURATION_MS, Math.round(duration * UNIT_MS[unit]));
   const exceedsWarn = durationMs > FIVE_MINUTES_MS;
 
   // Drop the confirmation panel when the duration falls back below the warn threshold.
@@ -203,11 +208,22 @@ export function StartSessionModal({
                   id="duration"
                   type="number"
                   min={1}
+                  max={maxDuration}
                   value={duration}
-                  onChange={(e) => setDuration(Math.max(1, Number(e.target.value) || 1))}
+                  onChange={(e) =>
+                    setDuration(Math.min(maxDuration, Math.max(1, Number(e.target.value) || 1)))
+                  }
                 />
               </div>
-              <Select value={unit} onValueChange={(v) => setUnit(v as Unit)}>
+              <Select
+                value={unit}
+                onValueChange={(v) => {
+                  const next = v as Unit;
+                  setUnit(next);
+                  // 900 s is fine; 900 min is not.
+                  setDuration((d) => Math.min(d, MAX_DURATION_MS / UNIT_MS[next]));
+                }}
+              >
                 <SelectTrigger aria-label="Duration unit">
                   <SelectValue />
                 </SelectTrigger>

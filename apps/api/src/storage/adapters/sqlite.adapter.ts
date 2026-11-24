@@ -18,6 +18,7 @@ import type {
   KvCacheSampleTotals,
   LogSource,
 } from '../../common/interfaces/storage-port.interface';
+import { foldChunkStatRows } from './capture-chunk-stats';
 import type {
   ReadinessBand,
   ReadinessDimension,
@@ -87,6 +88,8 @@ import {
   CaptureSessionQueryOptions,
   StoredCaptureChunk,
   CaptureSessionPatch,
+  CaptureChunkStats,
+  UpdateCaptureSessionOptions,
   StoredCaptureTrigger,
   StoredScheduledCapture,
   ScheduledCaptureQueryOptions,
@@ -6950,7 +6953,11 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     };
   }
 
-  async updateCaptureSession(id: string, patch: CaptureSessionPatch): Promise<boolean> {
+  async updateCaptureSession(
+    id: string,
+    patch: CaptureSessionPatch,
+    options: UpdateCaptureSessionOptions = {},
+  ): Promise<boolean> {
     if (!this.db) throw new Error('Database not initialized');
 
     const sets: string[] = [];
@@ -6987,8 +6994,13 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (sets.length === 0) return false;
 
     params.push(id);
+    let where = 'id = ?';
+    if (options.ifStatus !== undefined) {
+      where += ' AND status = ?';
+      params.push(options.ifStatus);
+    }
     const result = this.db
-      .prepare(`UPDATE capture_sessions SET ${sets.join(', ')} WHERE id = ?`)
+      .prepare(`UPDATE capture_sessions SET ${sets.join(', ')} WHERE ${where}`)
       .run(...params);
     return result.changes > 0;
   }
@@ -7035,23 +7047,34 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     }));
   }
 
-  async getCaptureChunkLastTs(
-    sessionId: string,
-  ): Promise<{ lastTs: number; byNode: Record<string, number> } | null> {
+  async getCaptureChunkStats(sessionId: string): Promise<CaptureChunkStats | null> {
     if (!this.db) throw new Error('Database not initialized');
+    // length() of a BLOB is its byte length; + COUNT(*) restores the newline the
+    // writer counts for the last line of each chunk (see CaptureChunkTotals).
     const rows = this.db
       .prepare(
-        'SELECT node_id, MAX(last_ts) AS last_ts FROM capture_chunks WHERE session_id = ? GROUP BY node_id',
+        `SELECT node_id,
+                MAX(last_ts) AS last_ts,
+                SUM(length(bytes)) + COUNT(*) AS byte_count,
+                SUM(line_count) AS line_count
+           FROM capture_chunks
+          WHERE session_id = ?
+          GROUP BY node_id`,
       )
-      .all(sessionId) as Array<{ node_id: string | null; last_ts: number }>;
-    if (rows.length === 0) return null;
-    let lastTs = -Infinity;
-    const byNode: Record<string, number> = {};
-    for (const row of rows) {
-      lastTs = Math.max(lastTs, row.last_ts);
-      if (row.node_id) byNode[row.node_id] = row.last_ts;
-    }
-    return { lastTs, byNode };
+      .all(sessionId) as Array<{
+      node_id: string | null;
+      last_ts: number;
+      byte_count: number;
+      line_count: number;
+    }>;
+    return foldChunkStatRows(
+      rows.map((r) => ({
+        nodeId: r.node_id,
+        lastTs: Number(r.last_ts),
+        byteCount: Number(r.byte_count),
+        lineCount: Number(r.line_count),
+      })),
+    );
   }
 
   async saveCaptureTrigger(trigger: StoredCaptureTrigger): Promise<string> {

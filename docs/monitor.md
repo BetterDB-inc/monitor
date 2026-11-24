@@ -107,9 +107,13 @@ retention cutoff are pruned by the data-retention sweep.
 
 ## If the API restarts during a capture
 
-A capture runs inside the API process, so a restart, crash or out-of-memory kill ends it without a final write. On startup the API marks every capture it left `running` as `failed` with `terminationReason: api_restart`. `endedAt` is the time of the last stored chunk (or the restart time when nothing was stored), and the bytes already captured stay available. A background sweep every minute also fails `running` sessions older than 17 minutes that this process does not own. `failed` sessions send no `monitor.session.ended` webhook.
+A capture runs inside the API process, so a restart, crash or out-of-memory kill ends it without a final write. With SQLite or in-memory storage, the API marks every capture it left `running` as `failed` with `terminationReason: api_restart` on startup. `endedAt` is the time of the last stored chunk (or the restart time when nothing was stored), byte and line counts are rebuilt from the stored chunks, and the captured data stays available.
 
-Capture length and size are bounded: `durationMs` must be 500 ms to 15 minutes, and `byteCap` / `lineCap` must be positive and at most `MONITOR_MAX_BYTE_CAP` / `MONITOR_MAX_LINE_CAP`. Out-of-range values answer `400`. See [Configuration](configuration.md).
+With PostgreSQL or Turso storage the startup pass is off by default, since several API instances may share the database (see `MONITOR_CAPTURE_RECONCILE_ON_STARTUP` in [Configuration](configuration.md)). On every storage type a background sweep fails, once a minute, `running` sessions older than 17 minutes (the 15-minute maximum plus 2 minutes) that this process does not own, with `terminationReason: stale`. `failed` sessions send no `monitor.session.ended` webhook.
+
+The sweep assumes every API instance enforces the 15-minute maximum and that instance clocks agree within 2 minutes. During a rolling upgrade from a version without the limit, a longer capture still running on an old instance is marked `stale` after 17 minutes; if it then finishes normally, its final status overwrites `failed`.
+
+Capture length and size are bounded: `durationMs` must be an integer from 500 ms to 15 minutes, and `byteCap` / `lineCap` must be positive integers at most `MONITOR_MAX_BYTE_CAP` / `MONITOR_MAX_LINE_CAP`. Out-of-range values answer `400`.
 
 ## Top keys of a capture
 

@@ -111,15 +111,26 @@ describe('MonitorCaptureService', () => {
   });
 
   describe('startup reconciliation', () => {
-    it('resolves whenReady() even if the reconciler throws', async () => {
+    it('resolves whenReady() only after startup reconciliation, then starts the sweep', async () => {
+      let finish!: () => void;
       const reconciler = {
-        reconcileOnStartup: jest.fn().mockRejectedValue(new Error('boom')),
+        reconcileOnStartup: jest.fn(() => new Promise<void>((r) => (finish = r))),
         startSweep: jest.fn(),
         stopSweep: jest.fn(),
       };
       const { service } = makeService(reconciler);
-      await service.onModuleInit();
-      await expect(service.whenReady()).resolves.toBeUndefined();
+      let ready = false;
+      void service.whenReady().then(() => (ready = true));
+
+      const init = service.onModuleInit();
+      await Promise.resolve();
+      expect(ready).toBe(false);
+      expect(reconciler.startSweep).not.toHaveBeenCalled();
+
+      finish();
+      await init;
+      await Promise.resolve();
+      expect(ready).toBe(true);
       expect(reconciler.startSweep).toHaveBeenCalled();
       service.onModuleDestroy();
       expect(reconciler.stopSweep).toHaveBeenCalled();
@@ -130,18 +141,25 @@ describe('MonitorCaptureService', () => {
       let release!: (s: FakeSource) => void;
       service.setMonitorSourceFactory(() => new Promise<FakeSource>((r) => (release = r)));
       const reconciler = new CaptureSessionReconciler(storage);
-      const ids = () => (service as unknown as { activeIds(): ReadonlySet<string> }).activeIds();
+      const isOwned = (id: string) =>
+        (service as unknown as { isOwned(id: string): boolean }).isOwned(id);
 
       const starting = service.startSession({ connectionId: CONNECTION_ID });
-      for (let i = 0; i < 20 && ids().size === 0; i++) await new Promise((r) => setImmediate(r));
-      expect(ids().size).toBe(1);
+      let rows = await storage.getCaptureSessions({ status: 'running' });
+      for (let i = 0; i < 20 && rows.length === 0; i++) {
+        await new Promise((r) => setImmediate(r));
+        rows = await storage.getCaptureSessions({ status: 'running' });
+      }
+      expect(rows).toHaveLength(1);
+      expect(isOwned(rows[0].id)).toBe(true);
 
-      expect(await reconciler.reconcile('stale', ids, () => true)).toBe(0);
+      expect(await reconciler.reconcile('stale', isOwned, () => true)).toBe(0);
 
       release(new FakeSource());
       const session = await starting;
-      expect(ids().has(session.id)).toBe(true);
+      expect(isOwned(session.id)).toBe(true);
       await service.stopSession(session.id);
+      expect(isOwned(session.id)).toBe(false);
     });
   });
 
@@ -614,6 +632,28 @@ describe('MonitorCaptureService', () => {
       expect(byId.B.status).toBe('failed');
       expect(byId.B.terminationReason).toContain('monitor_open_failed');
       expect(persisted?.status).toBe('failed');
+    });
+
+    it('persists an open failure while the capture runs, so a crash keeps the cause', async () => {
+      const { service, storage, cluster } = makeService();
+      configureCluster(cluster, [
+        { id: 'A', address: 'h1:6379' },
+        { id: 'B', address: 'h2:6379' },
+      ]);
+      service.setMonitorSourceFactory(async (_connId, nodeId) => {
+        if (nodeId === 'B') throw new Error('NOPERM');
+        return new FakeSource();
+      });
+
+      const session = await service.startSession({ connectionId: CONNECTION_ID, fanOut: true });
+      await new Promise((r) => setImmediate(r));
+
+      const running = await storage.getCaptureSession(session.id);
+      expect(running?.status).toBe('running');
+      const b = running?.nodeSegments?.find((seg) => seg.nodeId === 'B');
+      expect(b).toMatchObject({ status: 'failed', terminationReason: 'monitor_open_failed: NOPERM' });
+      expect(running?.nodeSegments?.find((seg) => seg.nodeId === 'A')?.status).toBe('running');
+      await service.stopSession(session.id);
     });
 
     it('falls back to a single-node start when the connection is not a cluster', async () => {

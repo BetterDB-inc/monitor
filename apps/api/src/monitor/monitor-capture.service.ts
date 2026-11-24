@@ -19,12 +19,8 @@ import { withTimeout } from '../common/utils/with-timeout';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
 import { CaptureWriter, CaptureWriterResult, MonitorSource } from './capture-writer';
-import {
-  assertCap,
-  assertDuration,
-  DEFAULT_MAX_BYTE_CAP,
-  DEFAULT_MAX_LINE_CAP,
-} from './capture-limits';
+import { monitorMaxByteCapSchema, monitorMaxLineCapSchema } from '../config/env.schema';
+import { assertCap, assertDuration } from './capture-limits';
 import { CaptureSessionReconciler } from './capture-session-reconciler';
 import { createIovalkeyMonitorSource } from './iovalkey-monitor-source';
 
@@ -35,9 +31,9 @@ export const DEFAULT_DURATION_MS = 30_000;
 const COMMUNITY_BYTE_CAP = 50 * 1024 * 1024; // 50 MB
 const COMMUNITY_LINE_CAP = 5_000_000;
 
-// Fallbacks come from capture-limits.ts, the same constants env.schema.ts defaults to.
-export const MAX_BYTE_CAP = parsePositiveInt(process.env.MONITOR_MAX_BYTE_CAP, DEFAULT_MAX_BYTE_CAP);
-export const MAX_LINE_CAP = parsePositiveInt(process.env.MONITOR_MAX_LINE_CAP, DEFAULT_MAX_LINE_CAP);
+// Parsed with the same schemas boot validation uses, so the two cannot drift.
+export const MAX_BYTE_CAP = monitorMaxByteCapSchema.parse(process.env.MONITOR_MAX_BYTE_CAP);
+export const MAX_LINE_CAP = monitorMaxLineCapSchema.parse(process.env.MONITOR_MAX_LINE_CAP);
 
 /** A default above the max would let a capture without explicit caps exceed the limit, so clamp it. */
 function clampDefault(name: string, value: number, max: number): number {
@@ -155,25 +151,26 @@ export class MonitorCaptureService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleInit(): Promise<void> {
-    try {
-      await this.reconciler.reconcileOnStartup(() => this.activeIds());
-    } catch (err) {
-      this.logger.warn(`Startup reconciliation failed: ${(err as Error).message}`);
-    } finally {
-      this.readyResolve();
-      this.reconciler.startSweep(() => this.activeIds());
-    }
+    // reconcileOnStartup never rejects: storage errors are logged and it stops
+    // itself after its timeout, so readiness always resolves.
+    const isOwned = (id: string) => this.isOwned(id);
+    await this.reconciler.reconcileOnStartup(isOwned);
+    this.readyResolve();
+    this.reconciler.startSweep(isOwned);
   }
 
   onModuleDestroy(): void {
     this.reconciler.stopSweep();
   }
 
-  private activeIds(): ReadonlySet<string> {
-    // `active` is keyed by connectionId; the session id is on the value.
-    return new Set(
-      [...this.active.values()].map((a) => a.session.id).concat([...this.startingSessionIds]),
-    );
+  /** True for sessions this process is running or still starting; never orphans. */
+  private isOwned(sessionId: string): boolean {
+    if (this.startingSessionIds.has(sessionId)) return true;
+    // `active` is keyed by connectionId (one session each), so this stays small.
+    for (const a of this.active.values()) {
+      if (a.session.id === sessionId) return true;
+    }
+    return false;
   }
 
   /** Test seam — overrides the default iovalkey-backed source factory. */
@@ -454,6 +451,21 @@ export class MonitorCaptureService implements OnModuleInit, OnModuleDestroy {
             seg.terminationReason = `writer_threw: ${err.message}`;
           }),
       );
+    }
+
+    if ([...segments.values()].some((seg) => seg.status === 'failed')) {
+      // Persist open failures now: if the process dies before finalize, the
+      // reconciler keeps these segments' real cause instead of api_restart.
+      // CAS on 'running' so a fast finalize is never overwritten.
+      void this.storage
+        .updateCaptureSession(
+          session.id,
+          { nodeSegments: [...segments.values()].map((seg) => ({ ...seg })) },
+          { ifStatus: 'running' },
+        )
+        .catch((err: Error) =>
+          this.logger.warn(`Failed to persist fan-out open failures: ${err.message}`),
+        );
     }
 
     const finalize = Promise.all(segmentPromises)

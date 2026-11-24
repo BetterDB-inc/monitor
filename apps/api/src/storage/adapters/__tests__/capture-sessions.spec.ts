@@ -175,23 +175,30 @@ describe.each([
     });
   });
 
-  it('getCaptureChunkLastTs returns overall and per-node max without chunk bytes', async () => {
+  it('getCaptureChunkStats returns max last_ts and writer-equivalent totals per node', async () => {
     const session = makeSession({ status: 'running' });
     await storage.saveCaptureSession(session, CONNECTION_ID);
-    expect(await storage.getCaptureChunkLastTs(session.id)).toBeNull();
+    expect(await storage.getCaptureChunkStats(session.id)).toBeNull();
 
-    const base = { sessionId: session.id, bytes: Buffer.from('x'), lineCount: 1 };
-    await storage.saveCaptureChunk({ ...base, chunkIndex: 0, firstTs: 1, lastTs: 10, nodeId: 'a' });
-    await storage.saveCaptureChunk({ ...base, chunkIndex: 1, firstTs: 11, lastTs: 30, nodeId: 'a' });
-    await storage.saveCaptureChunk({ ...base, chunkIndex: 2, firstTs: 2, lastTs: 20, nodeId: 'b' });
+    // A 2-line chunk 'ab\ncd' is 5 bytes; the writer counts (2+1)+(2+1) = 6.
+    const two = { sessionId: session.id, bytes: Buffer.from('ab\ncd'), lineCount: 2 };
+    const one = { sessionId: session.id, bytes: Buffer.from('xyz'), lineCount: 1 };
+    await storage.saveCaptureChunk({ ...two, chunkIndex: 0, firstTs: 1, lastTs: 10, nodeId: 'a' });
+    await storage.saveCaptureChunk({ ...one, chunkIndex: 1, firstTs: 11, lastTs: 30, nodeId: 'a' });
+    await storage.saveCaptureChunk({ ...one, chunkIndex: 2, firstTs: 2, lastTs: 20, nodeId: 'b' });
 
-    expect(await storage.getCaptureChunkLastTs(session.id)).toEqual({
+    expect(await storage.getCaptureChunkStats(session.id)).toEqual({
       lastTs: 30,
-      byNode: { a: 30, b: 20 },
+      byteCount: 6 + 4 + 4,
+      lineCount: 4,
+      byNode: {
+        a: { lastTs: 30, byteCount: 10, lineCount: 3 },
+        b: { lastTs: 20, byteCount: 4, lineCount: 1 },
+      },
     });
   });
 
-  it('getCaptureChunkLastTs counts chunks without a node id in the overall max only', async () => {
+  it('getCaptureChunkStats counts chunks without a node id in the overall totals only', async () => {
     const session = makeSession({ status: 'running' });
     await storage.saveCaptureSession(session, CONNECTION_ID);
     await storage.saveCaptureChunk({
@@ -202,7 +209,33 @@ describe.each([
       firstTs: 1,
       lastTs: 50,
     });
-    expect(await storage.getCaptureChunkLastTs(session.id)).toEqual({ lastTs: 50, byNode: {} });
+    expect(await storage.getCaptureChunkStats(session.id)).toEqual({
+      lastTs: 50,
+      byteCount: 2,
+      lineCount: 1,
+      byNode: {},
+    });
+  });
+
+  it('updateCaptureSession with ifStatus only writes while the status matches', async () => {
+    const session = makeSession({ status: 'running' });
+    await storage.saveCaptureSession(session, CONNECTION_ID);
+
+    await storage.updateCaptureSession(session.id, { status: 'completed', endedAt: 900 });
+    const applied = await storage.updateCaptureSession(
+      session.id,
+      { status: 'failed', terminationReason: 'api_restart' },
+      { ifStatus: 'running' },
+    );
+
+    expect(applied).toBe(false);
+    expect(await storage.getCaptureSession(session.id)).toMatchObject({
+      status: 'completed',
+      endedAt: 900,
+    });
+    expect(
+      await storage.updateCaptureSession(session.id, { lineCount: 3 }, { ifStatus: 'completed' }),
+    ).toBe(true);
   });
 
   it('saveCaptureChunk + getCaptureChunks round-trip preserves bytes and order', async () => {

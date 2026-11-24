@@ -2,10 +2,10 @@ import { randomUUID } from 'crypto';
 import { MemoryAdapter } from '../../storage/adapters/memory.adapter';
 import { StoredCaptureSession } from '../../common/interfaces/storage-port.interface';
 import { ORPHAN_AGE_MS } from '../capture-limits';
-import { CaptureSessionReconciler } from '../capture-session-reconciler';
+import { CaptureSessionReconciler, resolveReconcileOnStartup } from '../capture-session-reconciler';
 
 const CONN = 'conn-1';
-const NONE = (): ReadonlySet<string> => new Set();
+const NONE = (): boolean => false;
 
 function session(overrides: Partial<StoredCaptureSession> = {}): StoredCaptureSession {
   return {
@@ -14,39 +14,43 @@ function session(overrides: Partial<StoredCaptureSession> = {}): StoredCaptureSe
     status: 'running',
     source: 'manual',
     startedAt: 500,
-    byteCount: 111,
-    lineCount: 7,
+    byteCount: 0,
+    lineCount: 0,
     byteCap: 1000,
     lineCap: 1000,
     ...overrides,
   };
 }
 
+/** One chunk of `lines` one-byte lines: bytes = 2*lines - 1, writer count = 2*lines. */
 async function chunk(
   storage: MemoryAdapter,
   sessionId: string,
   chunkIndex: number,
   lastTs: number,
   nodeId?: string,
+  lines = 1,
 ): Promise<void> {
   await storage.saveCaptureChunk({
     sessionId,
     chunkIndex,
-    bytes: Buffer.from('x'),
-    lineCount: 1,
+    bytes: Buffer.from(Array(lines).fill('x').join('\n')),
+    lineCount: lines,
     firstTs: lastTs - 1,
     lastTs,
     nodeId,
   });
 }
 
+const ENV_KEYS = ['MONITOR_CAPTURE_RECONCILE_ON_STARTUP', 'STORAGE_TYPE'] as const;
+
 describe('CaptureSessionReconciler', () => {
   let storage: MemoryAdapter;
   let reconciler: CaptureSessionReconciler;
-  const savedEnv = process.env.MONITOR_CAPTURE_RECONCILE_ON_STARTUP;
+  const savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 
   beforeEach(async () => {
-    delete process.env.MONITOR_CAPTURE_RECONCILE_ON_STARTUP;
+    for (const k of ENV_KEYS) delete process.env[k];
     storage = new MemoryAdapter();
     await storage.initialize();
     reconciler = new CaptureSessionReconciler(storage);
@@ -56,27 +60,39 @@ describe('CaptureSessionReconciler', () => {
     reconciler.stopSweep();
     jest.useRealTimers();
     jest.restoreAllMocks();
-    if (savedEnv === undefined) delete process.env.MONITOR_CAPTURE_RECONCILE_ON_STARTUP;
-    else process.env.MONITOR_CAPTURE_RECONCILE_ON_STARTUP = savedEnv;
+    for (const k of ENV_KEYS) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
   });
 
-  it('fails a running orphan using the last chunk time and keeps counts', async () => {
+  it('fails a running orphan at the last chunk time and recovers counts from the chunks', async () => {
     const s = session();
     await storage.saveCaptureSession(s, CONN);
-    await chunk(storage, s.id, 0, 1000);
-    await chunk(storage, s.id, 1, 2000);
+    await chunk(storage, s.id, 0, 1000, undefined, 3);
+    await chunk(storage, s.id, 1, 2000, undefined, 2);
 
     await reconciler.reconcileOnStartup(NONE);
 
-    expect(await storage.getCaptureSession(s.id)).toMatchObject({
+    const row = await storage.getCaptureSession(s.id);
+    expect(row).toMatchObject({
       status: 'failed',
       terminationReason: 'api_restart',
       endedAt: 2000,
-      durationMs: 2000 - 500,
-      byteCount: 111,
-      lineCount: 7,
+      byteCount: 6 + 4,
+      lineCount: 5,
     });
+    // Not written: readers derive it from endedAt - startedAt.
+    expect(row?.durationMs).toBeUndefined();
     expect(await storage.getCaptureChunks(s.id)).toHaveLength(2);
+  });
+
+  it('never lowers counts the row already has', async () => {
+    const s = session({ byteCount: 111, lineCount: 7 });
+    await storage.saveCaptureSession(s, CONN);
+    await chunk(storage, s.id, 0, 1000);
+    await reconciler.reconcileOnStartup(NONE);
+    expect(await storage.getCaptureSession(s.id)).toMatchObject({ byteCount: 111, lineCount: 7 });
   });
 
   it('uses now as endedAt when there are no chunks', async () => {
@@ -107,42 +123,85 @@ describe('CaptureSessionReconciler', () => {
     }
   });
 
-  it('fails running fan-out segments with their own last chunk time', async () => {
+  it('does not overwrite a row that finishes between the snapshot and the write', async () => {
+    const s = session();
+    await storage.saveCaptureSession(s, CONN);
+    // The owner finalizes while the reconciler is reading chunk stats.
+    jest.spyOn(storage, 'getCaptureChunkStats').mockImplementation(async (id) => {
+      await storage.updateCaptureSession(id, {
+        status: 'completed',
+        endedAt: 4000,
+        terminationReason: 'duration',
+      });
+      return null;
+    });
+
+    expect(await reconciler.reconcile('api_restart', NONE, () => true)).toBe(0);
+    expect(await storage.getCaptureSession(s.id)).toMatchObject({
+      status: 'completed',
+      endedAt: 4000,
+      terminationReason: 'duration',
+    });
+  });
+
+  it('fails running fan-out segments with their own chunk time and counts', async () => {
     const s = session({
       nodeSegments: [
-        { nodeId: 'a', address: 'a:1', status: 'running', byteCount: 1, lineCount: 1 },
+        { nodeId: 'a', address: 'a:1', status: 'running', byteCount: 0, lineCount: 0 },
         {
           nodeId: 'b',
           address: 'b:1',
           status: 'completed',
           byteCount: 2,
-          lineCount: 2,
+          lineCount: 1,
           endedAt: 1200,
+        },
+        {
+          nodeId: 'c',
+          address: 'c:1',
+          status: 'failed',
+          byteCount: 0,
+          lineCount: 0,
+          endedAt: 600,
+          terminationReason: 'monitor_open_failed: NOPERM',
         },
       ],
     });
     await storage.saveCaptureSession(s, CONN);
-    await chunk(storage, s.id, 0, 1500, 'a');
-    await chunk(storage, s.id, 10_000_000, 1800, 'b');
+    await chunk(storage, s.id, 0, 1500, 'a', 4);
+    await chunk(storage, s.id, 10_000_000, 1200, 'b');
 
     await reconciler.reconcileOnStartup(NONE);
 
     const row = await storage.getCaptureSession(s.id);
-    expect(row?.status).toBe('failed');
-    expect(row?.endedAt).toBe(1800);
-    const [a, b] = row!.nodeSegments!;
-    expect(a).toMatchObject({ status: 'failed', terminationReason: 'api_restart', endedAt: 1500 });
+    expect(row).toMatchObject({ status: 'failed', endedAt: 1500, byteCount: 8 + 2, lineCount: 5 });
+    const [a, b, c] = row!.nodeSegments!;
+    expect(a).toMatchObject({
+      status: 'failed',
+      terminationReason: 'api_restart',
+      endedAt: 1500,
+      byteCount: 8,
+      lineCount: 4,
+    });
     expect(b).toMatchObject({ status: 'completed', endedAt: 1200 });
+    expect(c).toMatchObject({ status: 'failed', terminationReason: 'monitor_open_failed: NOPERM' });
   });
 
   it('skips rows this process owns, in both passes', async () => {
     const s = session({ startedAt: Date.now() - 60 * 60_000 });
     await storage.saveCaptureSession(s, CONN);
-    const owned = (): ReadonlySet<string> => new Set([s.id]);
+    const owned = (id: string): boolean => id === s.id;
 
     await reconciler.reconcileOnStartup(owned);
     await reconciler.reconcile('stale', owned, (x) => x.startedAt < Date.now() - ORPHAN_AGE_MS);
 
+    expect((await storage.getCaptureSession(s.id))?.status).toBe('running');
+  });
+
+  it('startup pass skips rows started after this process booted', async () => {
+    const s = session({ startedAt: Date.now() + 60_000 });
+    await storage.saveCaptureSession(s, CONN);
+    await reconciler.reconcileOnStartup(NONE);
     expect((await storage.getCaptureSession(s.id))?.status).toBe('running');
   });
 
@@ -174,6 +233,26 @@ describe('CaptureSessionReconciler', () => {
     expect(warn).toHaveBeenCalled();
   });
 
+  it('gives up after the startup timeout and writes nothing afterwards', async () => {
+    jest.useFakeTimers();
+    const s = session();
+    await storage.saveCaptureSession(s, CONN);
+    let release!: (rows: StoredCaptureSession[]) => void;
+    jest.spyOn(storage, 'getCaptureSessions').mockReturnValue(new Promise((r) => (release = r)));
+    const update = jest.spyOn(storage, 'updateCaptureSession');
+    jest
+      .spyOn((reconciler as unknown as { logger: { warn: () => void } }).logger, 'warn')
+      .mockImplementation(() => undefined);
+
+    const done = reconciler.reconcileOnStartup(NONE);
+    await jest.advanceTimersByTimeAsync(10_000);
+    await expect(done).resolves.toBeUndefined();
+
+    release([s]); // storage answers late
+    await jest.advanceTimersByTimeAsync(0);
+    expect(update).not.toHaveBeenCalled();
+  });
+
   it('is idempotent', async () => {
     const a = session();
     const b = session();
@@ -192,9 +271,35 @@ describe('CaptureSessionReconciler', () => {
     const off = new CaptureSessionReconciler(storage);
     const s = session();
     await storage.saveCaptureSession(s, CONN);
-
     await off.reconcileOnStartup(NONE);
-
     expect((await storage.getCaptureSession(s.id))?.status).toBe('running');
+  });
+
+  it('does nothing at startup on postgres unless explicitly enabled', async () => {
+    process.env.STORAGE_TYPE = 'postgres';
+    const s = session();
+    await storage.saveCaptureSession(s, CONN);
+    await new CaptureSessionReconciler(storage).reconcileOnStartup(NONE);
+    expect((await storage.getCaptureSession(s.id))?.status).toBe('running');
+
+    process.env.MONITOR_CAPTURE_RECONCILE_ON_STARTUP = 'true';
+    await new CaptureSessionReconciler(storage).reconcileOnStartup(NONE);
+    expect((await storage.getCaptureSession(s.id))?.status).toBe('failed');
+  });
+
+  describe('resolveReconcileOnStartup', () => {
+    it.each([
+      [{}, true],
+      [{ STORAGE_TYPE: 'sqlite' }, true],
+      [{ STORAGE_TYPE: 'memory' }, true],
+      [{ STORAGE_TYPE: 'postgres' }, false],
+      [{ STORAGE_TYPE: 'postgresql' }, false],
+      [{ STORAGE_TYPE: 'turso' }, false],
+      [{ STORAGE_TYPE: 'postgres', MONITOR_CAPTURE_RECONCILE_ON_STARTUP: 'true' }, true],
+      [{ STORAGE_TYPE: 'sqlite', MONITOR_CAPTURE_RECONCILE_ON_STARTUP: ' Off ' }, false],
+      [{ STORAGE_TYPE: 'postgres', MONITOR_CAPTURE_RECONCILE_ON_STARTUP: '' }, false],
+    ])('%p → %p', (env, expected) => {
+      expect(resolveReconcileOnStartup(env as NodeJS.ProcessEnv)).toBe(expected);
+    });
   });
 });

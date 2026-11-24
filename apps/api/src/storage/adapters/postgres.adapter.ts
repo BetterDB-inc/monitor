@@ -18,6 +18,7 @@ import type {
   KvCacheSampleTotals,
   LogSource,
 } from '../../common/interfaces/storage-port.interface';
+import { foldChunkStatRows } from './capture-chunk-stats';
 import type {
   ReadinessDimension,
   ScalingReadinessSettings,
@@ -84,6 +85,8 @@ import {
   CaptureSessionQueryOptions,
   StoredCaptureChunk,
   CaptureSessionPatch,
+  CaptureChunkStats,
+  UpdateCaptureSessionOptions,
   StoredCaptureTrigger,
   CaptureTriggerQueryOptions,
   CaptureTriggerPatch,
@@ -7349,7 +7352,11 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     };
   }
 
-  async updateCaptureSession(id: string, patch: CaptureSessionPatch): Promise<boolean> {
+  async updateCaptureSession(
+    id: string,
+    patch: CaptureSessionPatch,
+    options: UpdateCaptureSessionOptions = {},
+  ): Promise<boolean> {
     if (!this.pool) throw new Error('Database not initialized');
 
     const sets: string[] = [];
@@ -7387,8 +7394,13 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (sets.length === 0) return false;
 
     params.push(id);
+    let where = `id = $${p++}`;
+    if (options.ifStatus !== undefined) {
+      where += ` AND status = $${p++}`;
+      params.push(options.ifStatus);
+    }
     const result = await this.pool.query(
-      `UPDATE capture_sessions SET ${sets.join(', ')} WHERE id = $${p}`,
+      `UPDATE capture_sessions SET ${sets.join(', ')} WHERE ${where}`,
       params,
     );
     return (result.rowCount ?? 0) > 0;
@@ -7713,24 +7725,29 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     }));
   }
 
-  async getCaptureChunkLastTs(
-    sessionId: string,
-  ): Promise<{ lastTs: number; byNode: Record<string, number> } | null> {
+  async getCaptureChunkStats(sessionId: string): Promise<CaptureChunkStats | null> {
     if (!this.pool) throw new Error('Database not initialized');
+    // octet_length() reads the stored length, not the bytes; + COUNT(*) restores
+    // the newline the writer counts for the last line of each chunk.
     const result = await this.pool.query(
-      'SELECT node_id, MAX(last_ts) AS last_ts FROM capture_chunks WHERE session_id = $1 GROUP BY node_id',
+      `SELECT node_id,
+              MAX(last_ts) AS last_ts,
+              SUM(octet_length(bytes)) + COUNT(*) AS byte_count,
+              SUM(line_count) AS line_count
+         FROM capture_chunks
+        WHERE session_id = $1
+        GROUP BY node_id`,
       [sessionId],
     );
-    if (result.rows.length === 0) return null;
-    let lastTs = -Infinity;
-    const byNode: Record<string, number> = {};
-    for (const row of result.rows) {
-      const ts =
-        typeof row.last_ts === 'string' ? parseInt(row.last_ts, 10) : (row.last_ts as number);
-      lastTs = Math.max(lastTs, ts);
-      if (row.node_id) byNode[row.node_id as string] = ts;
-    }
-    return { lastTs, byNode };
+    // BIGINT / NUMERIC come back as strings from node-postgres.
+    return foldChunkStatRows(
+      result.rows.map((r) => ({
+        nodeId: (r.node_id as string | null) ?? null,
+        lastTs: Number(r.last_ts),
+        byteCount: Number(r.byte_count),
+        lineCount: Number(r.line_count),
+      })),
+    );
   }
 
   getInvitationRepository(): InvitationRepository {

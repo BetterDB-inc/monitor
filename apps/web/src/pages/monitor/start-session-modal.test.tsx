@@ -136,4 +136,31 @@ describe('StartSessionModal', () => {
 
     expect(startSession.mock.calls[0][0].targetNodeId).toBeUndefined();
   });
+
+  it('caps the duration at 15 minutes, the server limit', async () => {
+    renderModal();
+    const input = screen.getByLabelText('Duration');
+    expect(input).toHaveAttribute('max', '900');
+
+    fireEvent.change(input, { target: { value: '2000' } });
+    expect(input).toHaveValue(900);
+
+    const button = screen.getByRole('button', { name: 'Start session' });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button); // > 5 min asks for confirmation first
+    fireEvent.click(await screen.findByRole('button', { name: 'Yes, start session' }));
+    await waitFor(() => expect(startSession).toHaveBeenCalled());
+
+    expect(startSession.mock.calls[0][0].durationMs).toBe(900_000);
+  });
+
+  it('sends a whole number of milliseconds for a fractional duration', async () => {
+    renderModal();
+    fireEvent.change(screen.getByLabelText('Duration'), { target: { value: '2.0004' } });
+    await start();
+
+    const { durationMs } = startSession.mock.calls[0][0];
+    expect(Number.isInteger(durationMs)).toBe(true);
+    expect(durationMs).toBe(2000);
+  });
 });
