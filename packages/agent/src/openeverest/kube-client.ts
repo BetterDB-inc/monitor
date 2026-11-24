@@ -120,16 +120,16 @@ export class KubeClient {
     });
   }
 
-  private async json<T>(method: string, path: string, body?: unknown, headers?: Record<string, string>): Promise<T> {
-    const res = await this.request(method, path, body, headers);
+  private async json<T>(method: string, path: string, body?: unknown, headers?: Record<string, string>, signal?: AbortSignal): Promise<T> {
+    const res = await this.request(method, path, body, headers, signal);
     const text = await readBody(res);
     const status = res.statusCode ?? 0;
     if (status < 200 || status >= 300) throw new KubeApiError(status, path, text);
     return (text ? JSON.parse(text) : undefined) as T;
   }
 
-  get<T>(path: string): Promise<T> {
-    return this.json<T>('GET', path);
+  get<T>(path: string, signal?: AbortSignal): Promise<T> {
+    return this.json<T>('GET', path, undefined, undefined, signal);
   }
 
   post<T>(path: string, body: unknown): Promise<T> {
@@ -262,11 +262,16 @@ export class Informer<T extends KubeObject> {
     const signal = this.controller.signal;
     while (!signal.aborted) {
       try {
-        const list = await this.options.client.get<KubeList<T>>(this.listPath());
+        // Every request is tied to the abort signal, and nothing that
+        // resolved after stop() reaches the cache: a stopped informer must
+        // not deliver stale data.
+        const list = await this.options.client.get<KubeList<T>>(this.listPath(), signal);
+        if (signal.aborted) return;
         this.reconcile(list.items);
         this.attempt = 0;
         this.options.onSynced?.();
         await this.options.client.watch<T>(this.listPath(), list.metadata.resourceVersion, (event) => {
+          if (signal.aborted) return;
           if (event.type === 'ERROR') {
             // Typically 410 Gone: the resourceVersion is too old. Relist.
             throw new Error(`watch error: ${JSON.stringify(event.object).slice(0, 200)}`);
