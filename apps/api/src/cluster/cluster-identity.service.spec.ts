@@ -82,6 +82,37 @@ describe('ClusterIdentityService', () => {
       expect(service.clusterKeyOf('member-1')).toBe(key);
     });
 
+    it.each(['fail', 'fail?', 'noaddr', 'handshake'])(
+      'is not shared with a cluster that only lists one of its nodes as %s',
+      (flag) => {
+        service.observe('member-1', [...view('a', 'b'), { id: 'moved', flags: ['master', flag] }]);
+        service.observe('manual', view('moved', 'z'));
+
+        expect(service.clusterKeyOf('manual')).not.toBe(service.clusterKeyOf('member-1'));
+      },
+    );
+
+    it('keeps the last key when every node in the view is failed', () => {
+      service.observe('member-1', view('a', 'b'));
+      const key = service.clusterKeyOf('member-1');
+
+      service.observe('member-1', [{ id: 'z', flags: ['master', 'fail'] }]);
+
+      expect(service.clusterKeyOf('member-1')).toBe(key);
+    });
+
+    it('settles on one key when two clusters that were read apart are joined', () => {
+      service.observe('member-1', view('a', 'b'));
+      service.observe('manual', view('d', 'c'));
+
+      for (let poll = 0; poll < 2; poll++) {
+        service.observe('member-1', view('a', 'b', 'c'));
+        service.observe('manual', view('d', 'c'));
+      }
+
+      expect(service.clusterKeyOf('manual')).toBe(service.clusterKeyOf('member-1'));
+    });
+
     it('is the seed id for a member and its seed before either has read a view', () => {
       expect(service.clusterKeyOf('member-1')).toBe(SEED);
       expect(service.clusterKeyOf(SEED)).toBe(SEED);

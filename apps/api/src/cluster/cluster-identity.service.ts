@@ -15,6 +15,7 @@ interface HeldClaim {
   readonly epoch?: number;
 }
 
+const NOT_LIVE_FLAGS = ['handshake', 'noaddr', 'fail', 'fail?'];
 const STATE_HOLD_MS = 60_000;
 const PROMOTION_HOLD_MS = 10 * 60_000;
 
@@ -59,10 +60,21 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
     this.stopListening = undefined;
   }
 
-  observe(connectionId: string, nodes: ReadonlyArray<{ id?: string }>): void {
-    const nodeIds = new Set(nodes.map((node) => node.id).filter((id): id is string => !!id));
+  observe(
+    connectionId: string,
+    nodes: ReadonlyArray<{ id?: string; flags?: ReadonlyArray<string> }>,
+  ): void {
+    const nodeIds = new Set(
+      nodes
+        .filter((node) => !node.flags?.some((flag) => NOT_LIVE_FLAGS.includes(flag)))
+        .map((node) => node.id)
+        .filter((id): id is string => !!id),
+    );
     if (nodeIds.size === 0) return;
-    const known = [...nodeIds].map((id) => this.keyByNode.get(id)).find(Boolean);
+    const [known] = [...nodeIds]
+      .map((id) => this.keyByNode.get(id))
+      .filter((key): key is string => !!key)
+      .sort();
     const clusterKey = known ?? `cluster:${randomUUID()}`;
     const previous = this.views.get(connectionId);
     this.views.set(connectionId, nodeIds);
