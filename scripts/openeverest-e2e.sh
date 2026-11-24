@@ -1,39 +1,53 @@
 #!/usr/bin/env bash
 # End-to-end check of the BetterDB plugin for OpenEverest on a throwaway kind
-# (or k3d) cluster:
+# cluster:
 #
-#   1. create the cluster and install OpenEverest core + provider-valkey
-#   2. install a self-hosted betterdb-monitor and mint an agent token
-#   3. build the betterdb/agent image from this checkout, load it, install
-#      charts/betterdb-openeverest pointing at the Monitor
+#   1. create the cluster (Kubernetes >= 1.32, three workers) and install
+#      OpenEverest core 2.0.0-alpha.1 + provider-valkey 0.2.0 the way the
+#      OpenEverest docs do
+#   2. build the Monitor and agent images from this checkout, load them, and
+#      install a self-hosted betterdb-monitor; mint an agent token
+#   3. install charts/betterdb-openeverest pointing at the Monitor
 #   4. create a Valkey instance (TLS on, cluster topology), enable monitoring
-#      through the plugin backend with an OpenEverest admin token
-#   5. assert the plugin reports "monitoring" with one node per Valkey pod and
-#      that the Monitor lists them as read-only agent connections
+#      through the plugin proxy with an OpenEverest admin session
+#   5. assert the plugin reports "monitoring" with every Valkey pod streaming,
+#      that the Monitor lists them as read-only agent connections, that a
+#      mutation is refused, and that disabling removes them
 #
-# Needs: docker, kind (or k3d), kubectl, helm, curl, node. Takes ~10 min.
+# Needs: docker, kind, kubectl, helm, curl, node. ~15 min on a laptop; the
+# cluster takes about 8 GB.
 #
-#   scripts/openeverest-e2e.sh            run everything, keep the cluster on failure
+#   scripts/openeverest-e2e.sh            run everything; the cluster is kept on failure
 #   KEEP=1 scripts/openeverest-e2e.sh     keep the cluster afterwards
+#   SKIP_BUILD=1 ...                      reuse betterdb/monitor:e2e and betterdb/agent:e2e
 #   scripts/openeverest-e2e.sh teardown   delete the cluster
 #
-# Versions are pinned below; OE_VERSION tracks the alpha the design doc was
-# verified against. The OpenEverest install steps follow its docs for
-# alpha.1 (helm chart from oci://ghcr.io/openeverest/charts); adjust
-# OE_CHART/OE_VALUES if the alpha's chart layout differs.
+# Verified against the OpenEverest docs (quick-install.md) and the clones:
+# core chart openeverest/openeverest (needs --version, kubeVersion >= 1.32),
+# provider chart oci://ghcr.io/openeverest/charts/provider-valkey 0.2.0
+# (Provider named "valkey"), login POST /v1/auth/token (grant_type=password,
+# JWT in access_token; see scripts/e2e/plugin-action.mjs), API Service
+# `everest`:8080, single cluster "main".
 set -euo pipefail
 
 CLUSTER_NAME="${CLUSTER_NAME:-betterdb-oe}"
+KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-kindest/node:v1.32.0}"
 OE_VERSION="${OE_VERSION:-2.0.0-alpha.1}"
-OE_CHART="${OE_CHART:-oci://ghcr.io/openeverest/charts/everest}"
+OE_REPO="${OE_REPO:-https://openeverest.github.io/helm-charts/}"
 PROVIDER_VALKEY_CHART="${PROVIDER_VALKEY_CHART:-oci://ghcr.io/openeverest/charts/provider-valkey}"
 PROVIDER_VALKEY_VERSION="${PROVIDER_VALKEY_VERSION:-0.2.0}"
 OE_NAMESPACE="everest-system"
+OE_ADMIN_PASSWORD="${OE_ADMIN_PASSWORD:-e2e-admin-password}"
 DB_NAMESPACE="${DB_NAMESPACE:-databases}"
 MONITOR_NAMESPACE="betterdb"
 INSTANCE="${INSTANCE:-orders}"
+NUM_SHARDS="${NUM_SHARDS:-3}"
+REPLICAS_PER_SHARD="${REPLICAS_PER_SHARD:-1}"
+MONITOR_IMAGE="betterdb/monitor:e2e"
 AGENT_IMAGE="betterdb/agent:e2e"
-TIMEOUT="${TIMEOUT:-600s}"
+TIMEOUT="${TIMEOUT:-900s}"
+MONITOR_PORT="${MONITOR_PORT:-13001}"
+EVEREST_PORT="${EVEREST_PORT:-18080}"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
@@ -41,64 +55,80 @@ cd "$repo_root"
 log() { printf '\n==> %s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
-cluster_tool() {
-  if command -v kind >/dev/null; then echo kind; elif command -v k3d >/dev/null; then echo k3d; else die "need kind or k3d"; fi
-}
-
-teardown() {
-  case "$(cluster_tool)" in
-    kind) kind delete cluster --name "$CLUSTER_NAME" ;;
-    k3d) k3d cluster delete "$CLUSTER_NAME" ;;
-  esac
-}
+teardown() { kind delete cluster --name "$CLUSTER_NAME"; }
 
 if [ "${1:-}" = "teardown" ]; then teardown; exit 0; fi
 
-for tool in docker kubectl helm curl node; do command -v "$tool" >/dev/null || die "need $tool"; done
+for tool in docker kind kubectl helm curl node; do command -v "$tool" >/dev/null || die "need $tool"; done
 
-log "Creating cluster $CLUSTER_NAME"
-case "$(cluster_tool)" in
-  kind)
-    kind get clusters | grep -qx "$CLUSTER_NAME" || kind create cluster --name "$CLUSTER_NAME" --wait 120s
-    kubectl config use-context "kind-$CLUSTER_NAME"
-    ;;
-  k3d)
-    k3d cluster list | grep -q "^$CLUSTER_NAME " || k3d cluster create "$CLUSTER_NAME" --wait
-    kubectl config use-context "k3d-$CLUSTER_NAME"
-    ;;
-esac
+pids=()
+cleanup() { for pid in "${pids[@]:-}"; do [ -n "$pid" ] && kill "$pid" 2>/dev/null || true; done; }
+trap cleanup EXIT
+
+# kubectl port-forward in the background, waiting until the local port answers.
+forward() {
+  local ns="$1" svc="$2" local_port="$3" remote_port="$4"
+  kubectl -n "$ns" port-forward "svc/$svc" "$local_port:$remote_port" >/dev/null 2>&1 &
+  pids+=($!)
+  for _ in $(seq 1 30); do
+    if curl -s -o /dev/null "http://localhost:$local_port/"; then return 0; fi
+    sleep 1
+  done
+  die "port-forward to $ns/$svc did not come up"
+}
+
+log "Creating kind cluster $CLUSTER_NAME ($KIND_NODE_IMAGE)"
+if ! kind get clusters 2>/dev/null | grep -qx "$CLUSTER_NAME"; then
+  kind create cluster --name "$CLUSTER_NAME" --image "$KIND_NODE_IMAGE" \
+    --config scripts/e2e/kind-config.yaml --wait 180s
+fi
+kubectl config use-context "kind-$CLUSTER_NAME" >/dev/null
 
 log "Installing OpenEverest $OE_VERSION"
-helm upgrade --install everest "$OE_CHART" --version "$OE_VERSION" \
-  --namespace "$OE_NAMESPACE" --create-namespace --wait --timeout "$TIMEOUT"
+helm repo add openeverest "$OE_REPO" >/dev/null 2>&1 || true
+helm repo update openeverest >/dev/null
+# Plain install, skipped on a rerun: the core chart's pre-upgrade hook runs
+# preflight checks that fail on a same-version `helm upgrade`.
+installed() { helm status "$1" --namespace "$OE_NAMESPACE" >/dev/null 2>&1; }
+if installed everest-core; then
+  echo "everest-core already installed"
+else
+  helm install everest-core openeverest/openeverest --version "$OE_VERSION" \
+    --namespace "$OE_NAMESPACE" --create-namespace --wait --timeout "$TIMEOUT" \
+    --set server.initialAdminPassword="$OE_ADMIN_PASSWORD" --set telemetry=false
+fi
 
 log "Installing provider-valkey $PROVIDER_VALKEY_VERSION"
-helm upgrade --install provider-valkey "$PROVIDER_VALKEY_CHART" --version "$PROVIDER_VALKEY_VERSION" \
-  --namespace "$OE_NAMESPACE" --wait --timeout "$TIMEOUT"
+if installed provider-valkey; then
+  echo "provider-valkey already installed"
+else
+  helm install provider-valkey "$PROVIDER_VALKEY_CHART" --version "$PROVIDER_VALKEY_VERSION" \
+    --namespace "$OE_NAMESPACE" --wait --timeout "$TIMEOUT"
+fi
+kubectl get providers.core.openeverest.io valkey >/dev/null
+
+if [ -z "${SKIP_BUILD:-}" ]; then
+  log "Building $MONITOR_IMAGE and $AGENT_IMAGE from this checkout"
+  # The Monitor must carry this branch's gateway (identity-derived ids,
+  # read-only), so the published image will not do.
+  docker build --build-arg APP_VERSION="$(node -p 'require("./package.json").version')" \
+    --target production-no-ai -t "$MONITOR_IMAGE" .
+  docker build -f packages/agent/Dockerfile -t "$AGENT_IMAGE" .
+fi
+log "Loading images into kind"
+kind load docker-image "$MONITOR_IMAGE" --name "$CLUSTER_NAME"
+kind load docker-image "$AGENT_IMAGE" --name "$CLUSTER_NAME"
 
 log "Installing a self-hosted BetterDB Monitor"
 helm upgrade --install betterdb-monitor charts/betterdb-monitor \
   --namespace "$MONITOR_NAMESPACE" --create-namespace --wait --timeout "$TIMEOUT" \
-  --set db.host="" --set storage.type=memory
-MONITOR_URL="http://betterdb-monitor.$MONITOR_NAMESPACE.svc:3001"
+  --set image.repository="${MONITOR_IMAGE%%:*}" --set image.tag="${MONITOR_IMAGE##*:}" \
+  --set image.pullPolicy=Never --set storage.type=memory
 
 log "Minting an agent token in the Monitor"
-# The Monitor's bootstrap admin is created on first start; the token API is the
-# same one the UI's "Via Agent" tab calls.
-MONITOR_PF_PID=""
-kubectl -n "$MONITOR_NAMESPACE" port-forward svc/betterdb-monitor 13001:3001 >/dev/null 2>&1 &
-MONITOR_PF_PID=$!
-trap '[ -n "$MONITOR_PF_PID" ] && kill "$MONITOR_PF_PID" 2>/dev/null || true' EXIT
-sleep 3
-AGENT_TOKEN="$(node scripts/e2e/mint-agent-token.mjs http://localhost:13001 2>/dev/null || true)"
-[ -n "$AGENT_TOKEN" ] || die "could not mint an agent token; see scripts/e2e/mint-agent-token.mjs"
-
-log "Building and loading $AGENT_IMAGE"
-docker build -f packages/agent/Dockerfile -t "$AGENT_IMAGE" .
-case "$(cluster_tool)" in
-  kind) kind load docker-image "$AGENT_IMAGE" --name "$CLUSTER_NAME" ;;
-  k3d) k3d image import "$AGENT_IMAGE" -c "$CLUSTER_NAME" ;;
-esac
+forward "$MONITOR_NAMESPACE" betterdb-monitor "$MONITOR_PORT" 3001
+AGENT_TOKEN="$(node scripts/e2e/mint-agent-token.mjs "http://localhost:$MONITOR_PORT")"
+[ -n "$AGENT_TOKEN" ] || die "could not mint an agent token"
 
 log "Installing the BetterDB plugin"
 helm upgrade --install betterdb-openeverest charts/betterdb-openeverest \
@@ -108,8 +138,9 @@ helm upgrade --install betterdb-openeverest charts/betterdb-openeverest \
   --set betterdb.url="ws://betterdb-monitor.$MONITOR_NAMESPACE.svc:3001/api/agent/ws" \
   --set betterdb.token="$AGENT_TOKEN"
 
-log "Creating Valkey instance $DB_NAMESPACE/$INSTANCE (TLS on, cluster topology)"
-kubectl create namespace "$DB_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+log "Creating Valkey instance $DB_NAMESPACE/$INSTANCE (TLS on, cluster, $NUM_SHARDS shards x $((REPLICAS_PER_SHARD + 1)))"
+kubectl create namespace "$DB_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+# Shape from provider-valkey/examples/instance-cluster.yaml; TLS is on by default.
 kubectl apply -f - <<EOF
 apiVersion: core.openeverest.io/v1alpha1
 kind: Instance
@@ -123,52 +154,84 @@ spec:
   topology:
     type: cluster
     parameters:
-      numShards: 3
+      numShards: $NUM_SHARDS
   components:
     engine:
-      replicas: 1
+      type: valkey
+      replicas: $REPLICAS_PER_SHARD
+      resources:
+        requests: {cpu: 100m, memory: 128Mi}
+        limits: {memory: 512Mi}
       storage:
         size: 1Gi
 EOF
+expected_nodes=$((NUM_SHARDS * (REPLICAS_PER_SHARD + 1)))
+log "Waiting for $expected_nodes Valkey pods and the connection Secret"
 kubectl -n "$DB_NAMESPACE" wait instance/"$INSTANCE" --for=jsonpath='{.status.connectionSecretRef.name}' --timeout="$TIMEOUT"
-kubectl -n "$DB_NAMESPACE" wait instance/"$INSTANCE" --for=jsonpath='{.status.phase}'=Provisioned --timeout="$TIMEOUT" || true
-
-log "Enabling monitoring through the plugin proxy"
-# An OpenEverest admin session token: the alpha's CLI/UI login both end in a
-# JWT; EVEREST_TOKEN lets a caller pass one minted elsewhere.
-EVEREST_TOKEN="${EVEREST_TOKEN:-$(kubectl -n "$OE_NAMESPACE" get secret everest-accounts -o jsonpath='{.data.admin-token}' 2>/dev/null | base64 -d || true)}"
-[ -n "$EVEREST_TOKEN" ] || die "set EVEREST_TOKEN to an OpenEverest admin JWT"
-kubectl -n "$OE_NAMESPACE" port-forward svc/everest 18080:8080 >/dev/null 2>&1 &
-EVEREST_PF_PID=$!
-trap 'kill "$MONITOR_PF_PID" "$EVEREST_PF_PID" 2>/dev/null || true' EXIT
-sleep 3
-PLUGIN_BASE="http://localhost:18080/v1/clusters/main/plugins/betterdb"
-curl -fsS -X POST -H "Authorization: Bearer $EVEREST_TOKEN" \
-  "$PLUGIN_BASE/api/instances/main/$DB_NAMESPACE/$INSTANCE/enable" | tee /dev/stderr | grep -q '"enabled":true'
-
-log "Waiting for the plugin to report monitoring"
-expected_nodes="$(kubectl -n "$DB_NAMESPACE" get pods -l "valkey.io/cluster=$INSTANCE" --no-headers | wc -l)"
-for _ in $(seq 1 60); do
-  status="$(curl -fsS "$PLUGIN_BASE/api/instances/main/$DB_NAMESPACE/$INSTANCE/status")"
-  state="$(printf '%s' "$status" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);console.log(j.status.state, j.status.nodes.filter(n=>n.cloudConnected).length)})')"
-  read -r st connected <<<"$state"
-  if [ "$st" = "monitoring" ] && [ "$connected" -ge "$expected_nodes" ]; then
-    echo "monitoring: $connected/$expected_nodes nodes streaming"
-    break
-  fi
+for _ in $(seq 1 120); do
+  ready="$(kubectl -n "$DB_NAMESPACE" get pods -l "valkey.io/cluster=$INSTANCE" -o jsonpath='{range .items[*]}{.status.containerStatuses[0].ready}{"\n"}{end}' 2>/dev/null | grep -c true || true)"
+  [ "$ready" -ge "$expected_nodes" ] && break
   sleep 5
 done
-[ "${st:-}" = "monitoring" ] || die "plugin did not reach monitoring: $status"
+[ "$ready" -ge "$expected_nodes" ] || die "only $ready/$expected_nodes Valkey pods are ready"
+kubectl -n "$DB_NAMESPACE" get pods -l "valkey.io/cluster=$INSTANCE" -o wide
 
-log "Checking the Monitor lists the nodes as read-only agent connections"
-connections="$(node scripts/e2e/list-connections.mjs http://localhost:13001)"
-printf '%s\n' "$connections"
-printf '%s' "$connections" | grep -q "\"readOnly\":true" || die "agent connections are not read-only"
-[ "$(printf '%s' "$connections" | grep -o "\"connectionType\":\"agent\"" | wc -l)" -ge "$expected_nodes" ] || die "fewer agent connections than nodes"
+log "Reaching the plugin through OpenEverest's proxy"
+forward "$OE_NAMESPACE" everest "$EVEREST_PORT" 8080
+EVEREST="http://localhost:$EVEREST_PORT"
+# The proxy path OpenEverest's UI uses; the cluster is always "main" in alpha.1.
+PLUGIN_BASE="$EVEREST/v1/clusters/main/plugins/betterdb"
+curl -fsS "$PLUGIN_BASE/healthz" >/dev/null || die "plugin backend not reachable through the proxy"
+plugin() { node scripts/e2e/plugin-action.mjs "$EVEREST" "$OE_ADMIN_PASSWORD" "$DB_NAMESPACE" "$INSTANCE" "$@"; }
+
+log "Enabling monitoring through the plugin proxy"
+# A forged session must be turned away (by the proxy's JWT check) before anything is stored.
+code="$(plugin on --forged | head -n1)"
+[ "$code" = "401" ] || die "a forged token was not refused (HTTP $code)"
+enabled="$(plugin on)"
+printf '%s\n' "$enabled"
+printf '%s' "$enabled" | grep -q '"enabled":true' || die "enable failed"
+
+log "Waiting for the plugin to report monitoring with $expected_nodes nodes streaming"
+status=""
+for _ in $(seq 1 60); do
+  status="$(plugin status | tail -n +2)"
+  read -r st connected <<<"$(printf '%s' "$status" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);console.log(j.status.state, j.status.nodes.filter(n=>n.cloudConnected&&n.valkeyConnected).length)})')"
+  if [ "$st" = "monitoring" ] && [ "$connected" -ge "$expected_nodes" ]; then break; fi
+  sleep 5
+done
+printf '%s\n' "$status"
+[ "${st:-}" = "monitoring" ] && [ "${connected:-0}" -ge "$expected_nodes" ] || die "plugin did not reach monitoring with all nodes"
+
+log "Checking the Monitor lists $expected_nodes read-only agent connections"
+connections_file="$(mktemp)"
+# Dies when the listing itself fails, so an API error never reads as "no connections".
+list_connections() {
+  node scripts/e2e/list-connections.mjs "http://localhost:$MONITOR_PORT" > "$connections_file" || die "listing the Monitor's connections failed"
+}
+count_in() { grep -c -- "$1" "$connections_file" || true; }
+list_connections
+cat "$connections_file"
+agent_count="$(count_in '"connectionType":"agent"')"
+readonly_count="$(count_in '"readOnly":true')"
+[ "$agent_count" -ge "$expected_nodes" ] || die "expected $expected_nodes agent connections, found $agent_count"
+[ "$readonly_count" -ge "$expected_nodes" ] || die "expected every agent connection read-only, found $readonly_count"
+grep -q '"host":"agent"' "$connections_file" || die "agent connections missing"
+
+log "Checking a mutation is refused and a read works on an agent connection"
+first_id="$(grep '"connectionType":"agent"' "$connections_file" | head -n1 | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).id))')"
+node scripts/e2e/check-read-only.mjs "http://localhost:$MONITOR_PORT" "$first_id"
 
 log "Disabling and checking the connections go away"
-curl -fsS -X POST -H "Authorization: Bearer $EVEREST_TOKEN" \
-  "$PLUGIN_BASE/api/instances/main/$DB_NAMESPACE/$INSTANCE/disable" | grep -q '"enabled":false'
+plugin off | grep -q '"enabled":false' || die "disable failed"
+remaining=""
+for _ in $(seq 1 24); do
+  list_connections
+  remaining="$(count_in '"connectionType":"agent"')"
+  [ "$remaining" = "0" ] && break
+  sleep 5
+done
+[ "${remaining:-1}" = "0" ] || die "$remaining agent connections still listed after disable"
 
-log "PASS"
+log "PASS: $expected_nodes nodes of $DB_NAMESPACE/$INSTANCE streamed read-only and were removed on disable"
 if [ -z "${KEEP:-}" ]; then teardown; fi
