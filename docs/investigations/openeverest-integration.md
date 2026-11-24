@@ -246,7 +246,7 @@ Facts learned while implementing that correct the plan above:
 - **"Connect OpenEverest" screen** in self-hosted and Cloud: issue the agent token and print the `helm install` command.
 - **Summary endpoint** for the plugin tab (ops/sec, memory, clients, top slow commands), authenticated with the agent token. The tab shows connection state only.
 - **Cluster topology and slot metrics** when each node arrives as a separate agent target: check what the cluster pollers do with per-node agent connections.
-- **Settings panel authorization.** Any user with `use` on the plugin can change the BetterDB URL and token (the proxy's check); OpenEverest exposes no admin check a plugin backend can call. Revisit when plugin service tokens (spec 003 phase 3) exist.
 - **MonitoringClass integration** and the second hub formula, once provider-valkey publishes connection sources and a monitor credential.
 - **Monitor profile ACL**: validate the appendix against Valkey 9.0/9.1 command names before proposing it.
-- **E2E on kind/k3d** (`scripts/openeverest-e2e.sh`): written, not run; needs an OpenEverest alpha.1 install and an admin JWT.
+- **E2E in CI.** `scripts/openeverest-e2e.sh` passes locally on kind (Kubernetes 1.32, OpenEverest 2.0.0-alpha.1, provider-valkey 0.2.0: a TLS 3-shard instance, 6 nodes streaming read-only, removed on disable). It is not wired into a workflow yet; it needs docker + kind and about 15 minutes.
+- **Settings editing is off by default** (`plugin.allowSettingsEdit`); with it on, the backend re-checks the session against `/v1/clusters/{cluster}/plugin-context` and the chart's NetworkPolicy limits ingress to everest-server. Revisit when OpenEverest offers an admin check or plugin service tokens.
