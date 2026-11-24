@@ -273,6 +273,7 @@ import {
   type SlotMigrationReport,
   parseSlotMigrationJobs,
 } from '@app/cluster/cluster-metrics.service';
+import { ClusterIdentityService, clusterStateSignature } from '@app/cluster/cluster-identity.service';
 import { withConfiguredZones, withShardMetadata } from '@app/cluster/shard-metadata';
 import { resolveNodeRef, toClusterNodeRef, type NodeSubject } from '@app/cluster/node-ref';
 import {
@@ -1291,6 +1292,8 @@ export class AnomalyService
     private readonly shardLoad?: ShardLoadService,
     @Optional()
     private readonly clusterMetrics?: ClusterMetricsService,
+    @Optional()
+    private readonly clusterIdentity?: ClusterIdentityService,
   ) {
     super(connectionRegistry);
     this.correlator = new Correlator(this.correlationIntervalMs, (anomaly) =>
@@ -2332,27 +2335,7 @@ export class AnomalyService
                 );
                 await this.addAnomaly(clusterEvent, ctx);
 
-                // cluster.failover is mirrored to OTLP once from
-                // PrometheusService, the always-loaded core detector, so a
-                // single failover yields one OTLP record. Emitting here too
-                // would double-count it (and also on recovery, which is not a
-                // failover). The webhook below is unchanged.
-                if (this.webhookEventsProService) {
-                  this.webhookEventsProService
-                    .dispatchClusterFailover({
-                      clusterState,
-                      previousState: lastState,
-                      slotsAssigned: parseInt(clusterInfo.cluster_slots_assigned) || 0,
-                      slotsFailed: parseInt(clusterInfo.cluster_slots_fail) || 0,
-                      knownNodes: parseInt(clusterInfo.cluster_known_nodes) || 0,
-                      timestamp: Date.now(),
-                      instance: { host: ctx.host, port: ctx.port },
-                      connectionId: ctx.connectionId,
-                    })
-                    .catch((err) => {
-                      this.logger.error('Failed to dispatch cluster.failover webhook', err);
-                    });
-                }
+                this.reportClusterStateChange(ctx, lastState, clusterState, clusterInfo);
               }
             }
             this.lastClusterState.set(ctx.connectionId, clusterState);
@@ -10162,7 +10145,48 @@ export class AnomalyService
     this.announceSaved(event, event);
   }
 
+  private reportClusterStateChange(
+    ctx: ConnectionContext,
+    lastState: string,
+    clusterState: string,
+    clusterInfo: Record<string, string>,
+  ): void {
+    const identity = this.clusterIdentity;
+    const signature = clusterStateSignature(lastState, clusterState);
+    if (identity && !identity.claimFailover(identity.clusterKeyOf(ctx.connectionId), signature, Date.now())) return;
+    const filedUnder = identity?.eventConnectionOf(ctx.connectionId) ?? ctx.connectionId;
+    const filedConfig = filedUnder === ctx.connectionId ? ctx : this.connectionRegistry.getConfig(filedUnder);
+    const slotsFailed = parseInt(clusterInfo.cluster_slots_fail) || 0;
+    const knownNodes = parseInt(clusterInfo.cluster_known_nodes) || 0;
+    if (identity && clusterState === 'fail') {
+      try {
+        this.otelEvents?.dispatch(
+          WebhookEventType.CLUSTER_FAILOVER,
+          { clusterState, slotsFailed, knownNodes, reasons: 'cluster_state' },
+          filedUnder,
+        );
+      } catch (err) {
+        this.logger.error('Failed to dispatch cluster.failover OTLP event', err);
+      }
+    }
+    this.webhookEventsProService
+      ?.dispatchClusterFailover({
+        clusterState,
+        previousState: lastState,
+        slotsAssigned: parseInt(clusterInfo.cluster_slots_assigned) || 0,
+        slotsFailed,
+        knownNodes,
+        timestamp: Date.now(),
+        instance: { host: filedConfig?.host ?? ctx.host, port: filedConfig?.port ?? ctx.port },
+        connectionId: filedUnder,
+      })
+      .catch((err) => {
+        this.logger.error('Failed to dispatch cluster.failover webhook', err);
+      });
+  }
+
   private rememberClusterKey(connectionId: string, nodes: ClusterNode[]): void {
+    this.clusterIdentity?.observe(connectionId, nodes);
     const clusterKey = this.clusterKeyOfNodes(nodes);
     if (!clusterKey) {
       this.forgetClusterKey(connectionId);

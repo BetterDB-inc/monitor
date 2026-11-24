@@ -1,7 +1,7 @@
 import { WebhookEventType } from '@betterdb/shared';
 import { ConfigService } from '@nestjs/config';
 import { PrometheusService } from './prometheus.service';
-import { ClusterIdentityService } from '../cluster/cluster-identity.service';
+import { ClusterIdentityService, clusterStateSignature } from '../cluster/cluster-identity.service';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
 import { SlowLogAnalyticsService } from '../slowlog-analytics/slowlog-analytics.service';
@@ -303,6 +303,21 @@ describe('PrometheusService cluster.failover per cluster', () => {
     for (const id of [SEED, ...MEMBERS]) {
       expect([...service['getConnectionState'](id).demotionWatch.keys()]).toEqual(['a']);
     }
+  });
+
+  it('sends nothing for a state change another poller already reported', async () => {
+    await pollAll([SEED, ...MEMBERS], HEALTHY);
+    identity.claimFailover(
+      identity.clusterKeyOf(SEED),
+      clusterStateSignature('ok', 'fail'),
+      Date.now(),
+    );
+    for (const id of [SEED, ...MEMBERS]) clusterInfos[id] = clusterInfo({ cluster_state: 'fail' });
+
+    await pollAll([SEED, ...MEMBERS], HEALTHY);
+
+    expect(failoverEvents()).toHaveLength(0);
+    expect(otlpFailovers()).toHaveLength(0);
   });
 
   it('tells the identity service which cluster a connection reads', async () => {
