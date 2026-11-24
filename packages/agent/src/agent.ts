@@ -321,10 +321,12 @@ export class Agent {
       : infoStr.match(/redis_version:(\S+)/);
     this.valkeyVersion = versionMatch?.[1] || 'unknown';
 
-    // Check cluster
+    // Check cluster. cluster_enabled is in INFO's cluster section; CLUSTER
+    // INFO never carries it, so reading it there reported every server as
+    // standalone and the CLUSTER capability was never advertised.
     try {
-      const clusterInfo = (await this.client!.call('CLUSTER', 'INFO')) as string;
-      this.isCluster = clusterInfo.includes('cluster_enabled:1');
+      const clusterSection = (await this.client!.info('cluster')) as string;
+      this.isCluster = /cluster_enabled:1/.test(clusterSection);
     } catch {
       this.isCluster = false;
     }

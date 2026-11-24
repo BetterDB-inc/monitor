@@ -25,12 +25,20 @@ export interface DiscoveryClient {
 }
 
 export async function discoverNodes(client: DiscoveryClient, seed: { host: string; port: number }): Promise<DiscoveredNode[]> {
+  // cluster_enabled lives in INFO's cluster section (CLUSTER INFO has
+  // cluster_state and the like, never cluster_enabled). CLUSTER INFO itself is
+  // the fallback: it errors on a standalone server ("This instance has
+  // cluster support disabled") and answers on a cluster node.
   let clusterEnabled = false;
   try {
-    const info = String(await client.call('CLUSTER', 'INFO'));
-    clusterEnabled = info.includes('cluster_enabled:1');
+    clusterEnabled = /cluster_enabled:1/.test(String(await client.call('INFO', 'cluster')));
   } catch {
-    // CLUSTER INFO errors on a standalone server ("This instance has cluster support disabled").
+    try {
+      await client.call('CLUSTER', 'INFO');
+      clusterEnabled = true;
+    } catch {
+      clusterEnabled = false;
+    }
   }
   if (!clusterEnabled) {
     return [{ id: `${seed.host}:${seed.port}`, host: seed.host, port: seed.port, role: 'primary' }];

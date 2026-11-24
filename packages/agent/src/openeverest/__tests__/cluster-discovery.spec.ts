@@ -69,7 +69,7 @@ describe('discoverNodes', () => {
 
   it('returns the per-node target set from CLUSTER SHARDS, sorted and deduplicated', async () => {
     const client = fakeClient({
-      'CLUSTER INFO': 'cluster_state:ok\r\ncluster_enabled:1\r\n',
+      'INFO cluster': '# Cluster\r\ncluster_enabled:1\r\n',
       'CLUSTER SHARDS': [...SHARDS, SHARDS[0]],
     });
 
@@ -77,12 +77,12 @@ describe('discoverNodes', () => {
 
     expect(nodes.map((n) => n.id)).toEqual(['aaa', 'bbb', 'ccc']);
     expect(nodes.every((n) => n.host !== seed.host)).toBe(true);
-    expect(client.calls).toEqual(['CLUSTER INFO', 'CLUSTER SHARDS']);
+    expect(client.calls).toEqual(['INFO cluster', 'CLUSTER SHARDS']);
   });
 
   it('falls back to CLUSTER NODES on servers without CLUSTER SHARDS', async () => {
     const client = fakeClient({
-      'CLUSTER INFO': 'cluster_enabled:1',
+      'INFO cluster': 'cluster_enabled:1',
       'CLUSTER SHARDS': new Error("ERR unknown subcommand 'SHARDS'"),
       'CLUSTER NODES': 'aaa 10.0.0.11:6379@16379 master - 0 0 1 connected 0-16383\n',
     });
@@ -93,15 +93,25 @@ describe('discoverNodes', () => {
   });
 
   it('monitors a standalone server as a single node keyed by its address', async () => {
-    const client = fakeClient({ 'CLUSTER INFO': new Error('ERR This instance has cluster support disabled') });
+    const client = fakeClient({ 'INFO cluster': '# Cluster\r\ncluster_enabled:0\r\n' });
 
     expect(await discoverNodes(client, seed)).toEqual([
       { id: 'valkey-x.db.svc.cluster.local:6379', host: seed.host, port: 6379, role: 'primary' },
     ]);
   });
 
+  it('falls back to CLUSTER INFO answering when INFO cluster is unavailable', async () => {
+    const client = fakeClient({
+      'INFO cluster': new Error('NOPERM'),
+      'CLUSTER INFO': 'cluster_state:ok',
+      'CLUSTER SHARDS': SHARDS,
+    });
+
+    expect((await discoverNodes(client, seed)).map((n) => n.id)).toEqual(['aaa', 'bbb', 'ccc']);
+  });
+
   it('fails loudly when the cluster reports no reachable node', async () => {
-    const client = fakeClient({ 'CLUSTER INFO': 'cluster_enabled:1', 'CLUSTER SHARDS': [] });
+    const client = fakeClient({ 'INFO cluster': 'cluster_enabled:1', 'CLUSTER SHARDS': [] });
 
     await expect(discoverNodes(client, seed)).rejects.toThrow(/no reachable nodes/);
   });
