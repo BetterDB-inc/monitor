@@ -99,11 +99,7 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
   }
 
   clusterKeyOf(connectionId: string): string {
-    return (
-      this.keyByConnection.get(connectionId) ??
-      this.connectionRegistry.getConfig(connectionId)?.membership?.seedId ??
-      connectionId
-    );
+    return this.observedKeyOf(connectionId) ?? this.seedIdOf(connectionId) ?? connectionId;
   }
 
   claimFailover(
@@ -132,13 +128,22 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
   eventConnectionOf(connectionId: string): string {
     const membership = this.connectionRegistry.getConfig(connectionId)?.membership;
     if (membership?.origin !== 'auto') return connectionId;
-    return this.connectionRegistry.getConfig(membership.seedId) ? membership.seedId : connectionId;
+    if (!this.connectionRegistry.getConfig(membership.seedId)) return connectionId;
+    const ownKey = this.keyByConnection.get(connectionId);
+    const seedKey = this.keyByConnection.get(membership.seedId);
+    const readsAnotherCluster = ownKey !== undefined && seedKey !== undefined && ownKey !== seedKey;
+    return readsAnotherCluster ? connectionId : membership.seedId;
   }
 
   otherClusterConnections(connectionId: string): ScopedConnection[] {
     const clusterKey = this.clusterKeyOf(connectionId);
     const filedUnder = this.eventConnectionOf(connectionId);
     const registered = this.connectionRegistry.list();
+    const observedKey = this.observedKeyOf(connectionId);
+    const readsAnotherCluster = (id: string): boolean => {
+      const key = this.observedKeyOf(id);
+      return observedKey !== undefined && key !== undefined && key !== observedKey;
+    };
     const anchors = new Set(
       registered
         .filter((connection) => this.clusterKeyOf(connection.id) === clusterKey)
@@ -148,9 +153,21 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
       .filter(
         ({ id, membership }) =>
           id !== filedUnder &&
+          !readsAnotherCluster(id) &&
           (anchors.has(id) || (membership !== undefined && anchors.has(membership.seedId))),
       )
       .map(({ id, host, port }) => ({ connectionId: id, instance: { host, port } }));
+  }
+
+  private observedKeyOf(connectionId: string): string | undefined {
+    const ownKey = this.keyByConnection.get(connectionId);
+    if (ownKey !== undefined) return ownKey;
+    const seedId = this.seedIdOf(connectionId);
+    return seedId === undefined ? undefined : this.keyByConnection.get(seedId);
+  }
+
+  private seedIdOf(connectionId: string): string | undefined {
+    return this.connectionRegistry.getConfig(connectionId)?.membership?.seedId;
   }
 
   private join(joinedKey: string, clusterKey: string): void {

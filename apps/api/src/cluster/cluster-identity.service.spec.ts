@@ -148,6 +148,12 @@ describe('ClusterIdentityService', () => {
       expect(service.clusterKeyOf(SEED)).toBe(SEED);
     });
 
+    it('is the key of the seed for a member that has not read a view yet', () => {
+      service.observe(SEED, view('a', 'b'));
+
+      expect(service.clusterKeyOf('member-1')).toBe(service.clusterKeyOf(SEED));
+    });
+
     it('is the connection id for a connection without a seed and without a view', () => {
       expect(service.clusterKeyOf('manual')).toBe('manual');
     });
@@ -412,6 +418,20 @@ describe('ClusterIdentityService', () => {
       expect(others('manual')).toEqual([]);
     });
 
+    it('leaves out a member that reads another cluster than its seed', () => {
+      service.observe(SEED, view('a', 'b'));
+      service.observe('member-1', view('x', 'y'));
+
+      expect(others(SEED)).toEqual(['member-2']);
+    });
+
+    it('leaves out the seed and its members for a member that reads another cluster', () => {
+      service.observe(SEED, view('a', 'b'));
+      service.observe('member-1', view('x', 'y'));
+
+      expect(others('member-1')).toEqual([]);
+    });
+
     it('gives each connection its own host and port', () => {
       service.observe(SEED, view('a', 'b'));
 
@@ -429,6 +449,21 @@ describe('ClusterIdentityService', () => {
 
     it('is the seed also while the seed is not connected', () => {
       connected.delete(SEED);
+
+      expect(service.eventConnectionOf('member-1')).toBe(SEED);
+    });
+
+    it('is the member itself when it reads another cluster than its seed', () => {
+      service.observe(SEED, view('a', 'b'));
+      service.observe('member-1', view('x', 'y'));
+
+      expect(service.eventConnectionOf('member-1')).toBe('member-1');
+    });
+
+    it('is the seed for a member whose view was joined with the view of the seed', () => {
+      service.observe(SEED, view('a', 'b'));
+      service.observe('member-1', view('x', 'y'));
+      service.observe('member-1', view('x', 'y', 'a'));
 
       expect(service.eventConnectionOf('member-1')).toBe(SEED);
     });
