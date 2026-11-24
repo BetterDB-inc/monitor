@@ -513,6 +513,12 @@ A state failure and slot failures count as one outage, whichever is seen first a
 
 The event is filed under the seed connection when the connection that saw the change was registered automatically from that seed, also while the seed itself is not connected. Otherwise it is filed under the connection that saw it first. The same rule decides which connection the OTLP log record is sent for.
 
+Every webhook of the cluster receives the event once:
+
+- A global webhook and a webhook scoped to the filing connection receive it under the filing connection.
+- A webhook scoped to any other connection of the same cluster, a second connection you added or an automatically registered node, also receives it. In that delivery `connectionId` and `instance` are the connection the webhook is scoped to; the rest of the payload is the same.
+- A webhook scoped to a connection of another cluster does not receive it.
+
 #### anomaly.detected (Pro)
 
 ```json

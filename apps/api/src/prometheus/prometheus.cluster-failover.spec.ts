@@ -129,7 +129,7 @@ describe('PrometheusService cluster.failover per cluster', () => {
     const registry = {
       getConfig: jest.fn((id: string) => configs[id] ?? null),
       get: jest.fn((id: string) => ({ isConnected: () => connected.has(id) })),
-      list: jest.fn().mockReturnValue([]),
+      list: jest.fn(() => Object.entries(configs).map(([id, config]) => ({ id, ...config }))),
       addConnectionRemovalListener: jest.fn().mockReturnValue(() => undefined),
     } as unknown as ConnectionRegistry;
     identity = new ClusterIdentityService(registry);
@@ -375,6 +375,45 @@ describe('PrometheusService cluster.failover per cluster', () => {
 
     expect(failoverEvents()).toHaveLength(0);
     expect(otlpFailovers()).toHaveLength(0);
+  });
+
+  it('names the other user-added connection of the cluster for its scoped webhooks', async () => {
+    await pollAll(['manual-1', 'manual-2'], HEALTHY);
+
+    await pollAll(['manual-1', 'manual-2'], B_PROMOTED);
+
+    expect(failoverEvents()).toHaveLength(1);
+    expect(failoverEvents()[0]).toMatchObject({
+      connectionId: 'manual-1',
+      alsoScopedTo: [{ connectionId: 'manual-2', instance: { host: '10.0.1.2', port: 6379 } }],
+    });
+  });
+
+  it('names the members for their scoped webhooks when the seed is down', async () => {
+    connected.delete(SEED);
+    await pollAll(MEMBERS, HEALTHY);
+
+    await pollAll(MEMBERS, B_PROMOTED);
+
+    expect(failoverEvents()).toHaveLength(1);
+    expect(failoverEvents()[0]).toMatchObject({
+      connectionId: SEED,
+      alsoScopedTo: [
+        { connectionId: 'member-1', instance: { host: '10.0.0.2', port: 6379 } },
+        { connectionId: 'member-2', instance: { host: '10.0.0.3', port: 6379 } },
+      ],
+    });
+  });
+
+  it('names no connection of another cluster', async () => {
+    await pollAll([SEED, ...MEMBERS], HEALTHY);
+    await pollAll(['manual-1', 'manual-2'], OTHER_CLUSTER);
+
+    await pollAll(['manual-1'], OTHER_CLUSTER_Q_PROMOTED);
+
+    expect(failoverEvents()[0].alsoScopedTo).toEqual([
+      { connectionId: 'manual-2', instance: { host: '10.0.1.2', port: 6379 } },
+    ]);
   });
 
   it('reports only what is new when a poll sees a reported state change and a promotion', async () => {

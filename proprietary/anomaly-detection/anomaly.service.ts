@@ -10193,6 +10193,7 @@ export class AnomalyService
         timestamp: Date.now(),
         instance: { host: filedConfig?.host ?? ctx.host, port: filedConfig?.port ?? ctx.port },
         connectionId: filedUnder,
+        alsoScopedTo: identity?.otherClusterConnections(ctx.connectionId),
       })
       .catch((err) => {
         this.logger.error('Failed to dispatch cluster.failover webhook', err);

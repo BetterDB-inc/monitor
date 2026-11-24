@@ -287,28 +287,39 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
     timestamp: number;
     instance: { host: string; port: number };
     connectionId?: string;
+    alsoScopedTo?: ReadonlyArray<{ connectionId: string; instance: { host: string; port: number } }>;
   }): Promise<void> {
     if (!this.isEnabled()) {
       this.logger.debug('Cluster failover event skipped - requires PRO license');
       return;
     }
 
-    await this.webhookDispatcher.dispatchEvent(
-      WebhookEventType.CLUSTER_FAILOVER,
-      {
-        clusterState: data.clusterState,
-        previousState: data.previousState,
-        slotsAssigned: data.slotsAssigned,
-        slotsFailed: data.slotsFailed,
-        knownNodes: data.knownNodes,
-        reasons: data.reasons,
-        changedNodes: data.changedNodes,
-        message: clusterFailoverMessage(data),
-        timestamp: data.timestamp,
-        instance: data.instance,
-      },
-      data.connectionId,
-    );
+    const payload = {
+      clusterState: data.clusterState,
+      previousState: data.previousState,
+      slotsAssigned: data.slotsAssigned,
+      slotsFailed: data.slotsFailed,
+      knownNodes: data.knownNodes,
+      reasons: data.reasons,
+      changedNodes: data.changedNodes,
+      message: clusterFailoverMessage(data),
+      timestamp: data.timestamp,
+    };
+    await Promise.all([
+      this.webhookDispatcher.dispatchEvent(
+        WebhookEventType.CLUSTER_FAILOVER,
+        { ...payload, instance: data.instance },
+        data.connectionId,
+      ),
+      ...(data.alsoScopedTo ?? []).map((scoped) =>
+        this.webhookDispatcher.dispatchEvent(
+          WebhookEventType.CLUSTER_FAILOVER,
+          { ...payload, instance: scoped.instance },
+          scoped.connectionId,
+          { skip: (webhook) => webhook.connectionId !== scoped.connectionId },
+        ),
+      ),
+    ]);
   }
 
   /**

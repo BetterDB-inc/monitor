@@ -485,6 +485,7 @@ export interface IWebhookEventsProService {
     timestamp: number;
     instance: WebhookInstanceInfo;
     connectionId?: string;
+    alsoScopedTo?: ReadonlyArray<{ connectionId: string; instance: WebhookInstanceInfo }>;
   }): Promise<void>;
 
   /**

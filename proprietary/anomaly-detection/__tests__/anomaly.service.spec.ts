@@ -7138,6 +7138,14 @@ describe('AnomalyService', () => {
         configs = {};
         const registry = (service as any).connectionRegistry;
         registry.getConfig.mockImplementation((id: string) => configs[id] ?? null);
+        registry.list = jest.fn(() =>
+          [...CLUSTER_A, ...CLUSTER_X].map((id) => ({
+            id: `conn-${id}`,
+            host: `10.0.0.${id.charCodeAt(0)}`,
+            port: 6379,
+            ...((configs[`conn-${id}`] as object | undefined) ?? {}),
+          })),
+        );
         identity = new ClusterIdentityService(registry);
         (service as any).clusterIdentity = identity;
       });
@@ -7197,6 +7205,22 @@ describe('AnomalyService', () => {
         await pollCluster(CLUSTER_A, ['c', 'b', 'a']);
 
         expect(failovers().map((event) => event.clusterState)).toEqual(['fail', 'ok', 'fail']);
+      });
+
+      it('names the other connections of the cluster for their scoped webhooks', async () => {
+        await pollCluster(CLUSTER_A);
+        await pollCluster(CLUSTER_X);
+        setState(CLUSTER_A, 'fail');
+
+        await pollCluster(CLUSTER_A);
+
+        expect(failovers()[0]).toMatchObject({
+          connectionId: 'conn-a',
+          alsoScopedTo: [
+            { connectionId: 'conn-b', instance: { host: '10.0.0.98', port: 6379 } },
+            { connectionId: 'conn-c', instance: { host: '10.0.0.99', port: 6379 } },
+          ],
+        });
       });
 
       it('sends one cluster.failover per cluster when two clusters fail', async () => {

@@ -2888,6 +2888,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
               timestamp: Date.now(),
               instance,
               connectionId: filedUnder,
+              alsoScopedTo: this.clusterIdentity?.otherClusterConnections(connectionId),
             });
           } catch (err) {
             this.logger.error('Failed to dispatch cluster.failover webhook', err);
