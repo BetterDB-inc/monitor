@@ -1,0 +1,314 @@
+import { WebhookEventType } from '@betterdb/shared';
+import { ConfigService } from '@nestjs/config';
+import { PrometheusService } from './prometheus.service';
+import { ClusterIdentityService } from '../cluster/cluster-identity.service';
+import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
+import { SlowLogAnalyticsService } from '../slowlog-analytics/slowlog-analytics.service';
+import { CommandLogAnalyticsService } from '../commandlog-analytics/commandlog-analytics.service';
+import { HealthService } from '../health/health.service';
+import { OtelEventDispatcherService } from '../otel-telemetry/otel-event-dispatcher.service';
+import { StoragePort } from '../common/interfaces/storage-port.interface';
+import { ClusterNode } from '../common/types/metrics.types';
+
+const SEED = 'seed';
+const MEMBERS = ['member-1', 'member-2'];
+const POLL_INTERVAL_MS = 5000;
+
+interface FakeConfig {
+  host: string;
+  port: number;
+  membership?: { seedId: string; nodeId: string; origin: 'auto' | 'adopted'; source: 'cluster' };
+}
+
+function primary(id: string, configEpoch = 1): ClusterNode {
+  return {
+    id,
+    address: `${id}:6379`,
+    flags: ['master'],
+    master: '-',
+    pingSent: 0,
+    pongReceived: 0,
+    configEpoch,
+    linkState: 'connected',
+    slots: [[0, 100]],
+  };
+}
+
+function replica(id: string, masterId: string): ClusterNode {
+  return { ...primary(id), flags: ['slave'], master: masterId, slots: [] };
+}
+
+const HEALTHY = [
+  primary('a'),
+  replica('b', 'a'),
+  replica('c', 'a'),
+  primary('x'),
+  replica('y', 'x'),
+];
+const B_PROMOTED = [
+  replica('a', 'b'),
+  primary('b', 7),
+  replica('c', 'b'),
+  primary('x'),
+  replica('y', 'x'),
+];
+const B_AND_Y_PROMOTED = [...B_PROMOTED.slice(0, 3), replica('x', 'y'), primary('y', 9)];
+const OTHER_CLUSTER = [primary('p'), replica('q', 'p')];
+const OTHER_CLUSTER_Q_PROMOTED = [replica('p', 'q'), primary('q', 7)];
+
+describe('PrometheusService cluster.failover per cluster', () => {
+  let service: PrometheusService;
+  let configs: Record<string, FakeConfig>;
+  let connected: Set<string>;
+  let views: Record<string, ClusterNode[]>;
+  let clusterInfos: Record<string, Record<string, string>>;
+  let dispatchClusterFailover: jest.Mock;
+  let otelDispatch: jest.Mock;
+  let identity: ClusterIdentityService;
+
+  const member = (seedId: string, host: string): FakeConfig => ({
+    host,
+    port: 6379,
+    membership: { seedId, nodeId: host, origin: 'auto', source: 'cluster' },
+  });
+
+  const clusterInfo = (overrides: Record<string, string> = {}): Record<string, string> => ({
+    cluster_state: 'ok',
+    cluster_slots_fail: '0',
+    cluster_slots_assigned: '16384',
+    cluster_known_nodes: '5',
+    cluster_size: '2',
+    ...overrides,
+  });
+
+  async function poll(connectionId: string): Promise<void> {
+    const client = {
+      getClusterInfo: jest.fn(async () => clusterInfos[connectionId] ?? clusterInfo()),
+      getClusterNodes: jest.fn(async () => views[connectionId]),
+      getCapabilities: jest.fn().mockReturnValue({ hasClusterSlotStats: false }),
+    };
+    await service['updateClusterMetricsFromInfo'](
+      client as never,
+      { cluster: { cluster_enabled: '1' } } as never,
+      connectionId,
+      connectionId,
+      service['getConnectionState'](connectionId),
+      configs[connectionId],
+    );
+  }
+
+  async function pollAll(connectionIds: string[], nodes: ClusterNode[]): Promise<void> {
+    for (const connectionId of connectionIds) {
+      views[connectionId] = nodes;
+      await poll(connectionId);
+    }
+  }
+
+  const failoverEvents = (): Array<Record<string, unknown>> =>
+    dispatchClusterFailover.mock.calls.map(([event]) => event);
+
+  const otlpFailovers = (): unknown[][] =>
+    otelDispatch.mock.calls.filter(([type]) => type === WebhookEventType.CLUSTER_FAILOVER);
+
+  beforeEach(() => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+    jest.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    configs = {
+      [SEED]: { host: '10.0.0.1', port: 6379 },
+      'member-1': member(SEED, '10.0.0.2'),
+      'member-2': member(SEED, '10.0.0.3'),
+      'manual-1': { host: '10.0.1.1', port: 6379 },
+      'manual-2': { host: '10.0.1.2', port: 6379 },
+    };
+    connected = new Set(Object.keys(configs));
+    views = {};
+    clusterInfos = {};
+    dispatchClusterFailover = jest.fn().mockResolvedValue(undefined);
+    otelDispatch = jest.fn();
+    const registry = {
+      getConfig: jest.fn((id: string) => configs[id] ?? null),
+      get: jest.fn((id: string) => ({ isConnected: () => connected.has(id) })),
+      list: jest.fn().mockReturnValue([]),
+      addConnectionRemovalListener: jest.fn().mockReturnValue(() => undefined),
+    } as unknown as ConnectionRegistry;
+    identity = new ClusterIdentityService(registry);
+    service = new PrometheusService(
+      {} as StoragePort,
+      registry,
+      {
+        get: jest.fn((key: string, fallback?: unknown) =>
+          key === 'PROMETHEUS_STALENESS_MS' ? undefined : (fallback ?? POLL_INTERVAL_MS),
+        ),
+      } as unknown as ConfigService,
+      { isAvailable: () => true, recordFailure: jest.fn() } as unknown as RuntimeCapabilityTracker,
+      {} as SlowLogAnalyticsService,
+      {} as CommandLogAnalyticsService,
+      {} as HealthService,
+      undefined,
+      { dispatchClusterFailover } as never,
+      undefined,
+      undefined,
+      { dispatch: otelDispatch } as unknown as OtelEventDispatcherService,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      identity,
+    );
+    jest.spyOn(service['logger'], 'error').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('sends one event when every connection of the cluster sees the promotion', async () => {
+    await pollAll([SEED, ...MEMBERS], HEALTHY);
+
+    await pollAll([SEED, ...MEMBERS], B_PROMOTED);
+
+    expect(failoverEvents()).toHaveLength(1);
+    expect(otlpFailovers()).toHaveLength(1);
+  });
+
+  it('reports every changed node of the failover in that one event', async () => {
+    await pollAll([SEED, ...MEMBERS], HEALTHY);
+
+    await pollAll([SEED, ...MEMBERS], B_PROMOTED);
+
+    const [event] = failoverEvents();
+    expect((event.changedNodes as Array<{ nodeId: string }>).map((c) => c.nodeId).sort()).toEqual([
+      'a',
+      'b',
+      'c',
+    ]);
+    expect(event.reasons).toEqual(['role_change', 'primary_change']);
+  });
+
+  it('sends one event when the connections see different parts in different polls', async () => {
+    await pollAll([SEED, ...MEMBERS], HEALTHY);
+    const promotionOnly = [primary('a'), primary('b', 7), replica('c', 'a'), ...HEALTHY.slice(3)];
+    const replicaFollowed = [primary('a'), primary('b', 7), replica('c', 'b'), ...HEALTHY.slice(3)];
+
+    await pollAll([SEED], promotionOnly);
+    await pollAll(['member-1'], promotionOnly);
+    await pollAll(['member-1'], replicaFollowed);
+    jest.setSystemTime(Date.now() + 5 * 60_000);
+    await pollAll(['member-2'], B_PROMOTED);
+
+    expect(failoverEvents()).toHaveLength(1);
+  });
+
+  it('sends one event for two connections a user added to the same cluster', async () => {
+    await pollAll(['manual-1', 'manual-2'], HEALTHY);
+
+    await pollAll(['manual-1', 'manual-2'], B_PROMOTED);
+
+    expect(failoverEvents()).toHaveLength(1);
+    expect(failoverEvents()[0]).toMatchObject({
+      connectionId: 'manual-1',
+      instance: { host: '10.0.1.1', port: 6379 },
+    });
+  });
+
+  it('sends one event per cluster when two clusters fail over', async () => {
+    await pollAll([SEED, ...MEMBERS], HEALTHY);
+    await pollAll(['manual-1', 'manual-2'], OTHER_CLUSTER);
+
+    await pollAll([SEED, ...MEMBERS], B_PROMOTED);
+    await pollAll(['manual-1', 'manual-2'], OTHER_CLUSTER_Q_PROMOTED);
+
+    expect(failoverEvents().map((event) => event.connectionId)).toEqual([SEED, 'manual-1']);
+  });
+
+  it('sends a second event when another shard fails over in the same minute', async () => {
+    await pollAll([SEED, ...MEMBERS], HEALTHY);
+    await pollAll([SEED, ...MEMBERS], B_PROMOTED);
+    jest.setSystemTime(Date.now() + 10_000);
+
+    await pollAll([SEED, ...MEMBERS], B_AND_Y_PROMOTED);
+
+    expect(failoverEvents()).toHaveLength(2);
+    expect(
+      (failoverEvents()[1].changedNodes as Array<{ nodeId: string }>).map((c) => c.nodeId).sort(),
+    ).toEqual(['x', 'y']);
+  });
+
+  it('files the event under the seed when a member sees the failover first', async () => {
+    await pollAll([...MEMBERS, SEED], HEALTHY);
+
+    await pollAll([...MEMBERS, SEED], B_PROMOTED);
+
+    expect(failoverEvents()).toHaveLength(1);
+    expect(failoverEvents()[0]).toMatchObject({
+      connectionId: SEED,
+      instance: { host: '10.0.0.1', port: 6379 },
+    });
+    expect(otlpFailovers()[0][2]).toBe(SEED);
+  });
+
+  it('files the event under the member that saw it while the seed is not connected', async () => {
+    await pollAll(MEMBERS, HEALTHY);
+    connected.delete(SEED);
+
+    await pollAll(MEMBERS, B_PROMOTED);
+
+    expect(failoverEvents()).toHaveLength(1);
+    expect(failoverEvents()[0]).toMatchObject({
+      connectionId: 'member-1',
+      instance: { host: '10.0.0.2', port: 6379 },
+    });
+  });
+
+  it('sends one event when every connection sees the cluster state fail', async () => {
+    await pollAll([SEED, ...MEMBERS], HEALTHY);
+    for (const id of [SEED, ...MEMBERS]) clusterInfos[id] = clusterInfo({ cluster_state: 'fail' });
+
+    await pollAll([SEED, ...MEMBERS], HEALTHY);
+
+    expect(failoverEvents()).toHaveLength(1);
+    expect(failoverEvents()[0]).toMatchObject({ reasons: ['cluster_state'], connectionId: SEED });
+    expect(otlpFailovers()).toHaveLength(1);
+  });
+
+  it('sends one event when every connection sees slots fail', async () => {
+    await pollAll([SEED, ...MEMBERS], HEALTHY);
+    for (const id of [SEED, ...MEMBERS]) {
+      clusterInfos[id] = clusterInfo({ cluster_slots_fail: '100' });
+    }
+
+    await pollAll([SEED, ...MEMBERS], HEALTHY);
+
+    expect(failoverEvents()).toHaveLength(1);
+    expect(failoverEvents()[0]).toMatchObject({ reasons: ['slot_failures'] });
+  });
+
+  it('reports only what is new when a poll sees a reported state change and a promotion', async () => {
+    await pollAll([SEED, ...MEMBERS], HEALTHY);
+    for (const id of [SEED, ...MEMBERS]) clusterInfos[id] = clusterInfo({ cluster_state: 'fail' });
+    await pollAll([SEED], HEALTHY);
+
+    await pollAll(['member-1'], B_PROMOTED);
+
+    expect(failoverEvents()).toHaveLength(2);
+    expect(failoverEvents()[1].reasons).toEqual(['role_change', 'primary_change']);
+  });
+
+  it('still watches each connection for a demoted primary that takes writes', async () => {
+    await pollAll([SEED, ...MEMBERS], HEALTHY);
+
+    await pollAll([SEED, ...MEMBERS], B_PROMOTED);
+
+    for (const id of [SEED, ...MEMBERS]) {
+      expect([...service['getConnectionState'](id).demotionWatch.keys()]).toEqual(['a']);
+    }
+  });
+
+  it('tells the identity service which cluster a connection reads', async () => {
+    await pollAll(['manual-1', 'manual-2'], HEALTHY);
+
+    expect(identity.clusterKeyOf('manual-1')).toBe(identity.clusterKeyOf('manual-2'));
+    expect(identity.clusterKeyOf('manual-1')).not.toBe('manual-1');
+  });
+});

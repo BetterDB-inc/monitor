@@ -15,6 +15,11 @@ import { ShardLoadService } from './shard-load.service';
     ShardLoadService,
     ClusterNodeConnectService,
   ],
-  exports: [ClusterDiscoveryService, ClusterIdentityService, ClusterMetricsService, ShardLoadService],
+  exports: [
+    ClusterDiscoveryService,
+    ClusterIdentityService,
+    ClusterMetricsService,
+    ShardLoadService,
+  ],
 })
 export class ClusterModule {}
