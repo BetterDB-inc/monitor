@@ -53,8 +53,9 @@ plugin:
 
 openeverest:
   # OpenEverest API the backend calls for the authorization check. Empty uses
-  # the in-cluster default (EVEREST_SERVICE_HOST, then
-  # everest-server.everest-system.svc.cluster.local:8080).
+  # the in-cluster default: the EVEREST_SERVICE_HOST/PORT environment of a pod
+  # in everest-system, then everest.everest-system.svc.cluster.local:8080
+  # (the alpha.1 chart's API Service is named `everest`).
   apiUrl: ""
   # OpenEverest's name for the Kubernetes cluster this chart is installed in.
   # The plugin only reaches instances of this cluster, through its ServiceAccount.

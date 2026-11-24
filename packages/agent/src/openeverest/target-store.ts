@@ -18,13 +18,6 @@ export function targetKey(ref: InstanceRef): string {
   return `${ref.cluster}/${ref.namespace}/${ref.instance}`;
 }
 
-export function parseTargetKey(key: string): InstanceRef | null {
-  const parts = key.split('/');
-  if (parts.length !== 3 || parts.some((p) => p.length === 0)) return null;
-  const [cluster, namespace, instance] = parts;
-  return { cluster, namespace, instance };
-}
-
 // ConfigMap keys allow [-._a-zA-Z0-9]; the refs are DNS names, so only the
 // separator needs mapping. Instance names can contain `.`, so use a run that
 // no DNS name can.

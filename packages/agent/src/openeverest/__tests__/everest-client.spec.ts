@@ -71,6 +71,6 @@ describe('everestApiUrl', () => {
   it('follows the plugin template lookup order', () => {
     expect(everestApiUrl({ EVEREST_API_URL: 'http://e:1/' })).toBe('http://e:1');
     expect(everestApiUrl({ EVEREST_SERVICE_HOST: '10.1.2.3', EVEREST_SERVICE_PORT: '9090' })).toBe('http://10.1.2.3:9090');
-    expect(everestApiUrl({})).toBe('http://everest-server.everest-system.svc.cluster.local:8080');
+    expect(everestApiUrl({})).toBe('http://everest.everest-system.svc.cluster.local:8080');
   });
 });

@@ -35,7 +35,8 @@ const DEFAULT_TIMEOUT_MS = 10_000;
 export function everestApiUrl(env: NodeJS.ProcessEnv = process.env): string {
   if (env.EVEREST_API_URL) return env.EVEREST_API_URL.replace(/\/+$/, '');
   if (env.EVEREST_SERVICE_HOST) return `http://${env.EVEREST_SERVICE_HOST}:${env.EVEREST_SERVICE_PORT || '8080'}`;
-  return 'http://everest-server.everest-system.svc.cluster.local:8080';
+  // The alpha.1 chart names the API Service `everest` (the Deployment is everest-server).
+  return 'http://everest.everest-system.svc.cluster.local:8080';
 }
 
 export class EverestClient {

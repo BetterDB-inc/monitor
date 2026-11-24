@@ -1,5 +1,5 @@
 import { KubeApiError } from '../kube-client';
-import { TargetStore, parseTargetKey, targetKey } from '../target-store';
+import { TargetStore, targetKey } from '../target-store';
 
 // A ConfigMap API with optimistic locking, enough for the store's read-modify-write.
 class FakeKube {
@@ -67,11 +67,8 @@ describe('TargetStore', () => {
   });
 });
 
-describe('target keys', () => {
-  it('round-trips cluster/namespace/instance', () => {
+describe('targetKey', () => {
+  it('joins cluster/namespace/instance', () => {
     expect(targetKey(ORDERS)).toBe('main/db/orders.cache');
-    expect(parseTargetKey('main/db/orders.cache')).toEqual(ORDERS);
-    expect(parseTargetKey('main/db')).toBeNull();
-    expect(parseTargetKey('main//x')).toBeNull();
   });
 });

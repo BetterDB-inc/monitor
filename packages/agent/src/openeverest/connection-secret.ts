@@ -19,7 +19,8 @@ export interface SecretLike {
   stringData?: Record<string, string>;
 }
 
-function decode(secret: SecretLike, key: string): string | undefined {
+/** A Secret value by key, from stringData or base64 data; undefined when absent. */
+export function decodeSecretValue(secret: SecretLike, key: string): string | undefined {
   const plain = secret.stringData?.[key];
   if (plain !== undefined) return plain;
   const encoded = secret.data?.[key];
@@ -33,25 +34,25 @@ function decode(secret: SecretLike, key: string): string | undefined {
  * claims TLS without a CA, which the agent could not verify anything with.
  */
 export function parseConnectionSecret(secret: SecretLike): ConnectionCredentials {
-  const host = decode(secret, 'host')?.trim();
+  const host = decodeSecretValue(secret, 'host')?.trim();
   if (!host) throw new Error('connection secret has no host yet');
 
-  const rawPort = decode(secret, 'port')?.trim();
+  const rawPort = decodeSecretValue(secret, 'port')?.trim();
   const port = rawPort ? parseInt(rawPort, 10) : 6379;
   if (!Number.isInteger(port) || port <= 0 || port > 65535) {
     throw new Error(`connection secret has an invalid port: ${rawPort}`);
   }
 
-  const uri = decode(secret, 'uri');
-  const ssl = decode(secret, 'ssl')?.trim().toLowerCase();
+  const uri = decodeSecretValue(secret, 'uri');
+  const ssl = decodeSecretValue(secret, 'ssl')?.trim().toLowerCase();
   const tlsOn = ssl === 'true' || (ssl === undefined && uri?.startsWith('rediss://') === true);
 
   let tls: ConnectionCredentials['tls'] = null;
   if (tlsOn) {
-    const ca = decode(secret, 'ca.crt');
+    const ca = decodeSecretValue(secret, 'ca.crt');
     if (!ca) throw new Error('connection secret enables TLS but carries no ca.crt');
-    const cert = decode(secret, 'tls.crt');
-    const key = decode(secret, 'tls.key');
+    const cert = decodeSecretValue(secret, 'tls.crt');
+    const key = decodeSecretValue(secret, 'tls.key');
     if ((cert && !key) || (!cert && key)) {
       throw new Error('connection secret has only one half of the client certificate');
     }
@@ -61,9 +62,9 @@ export function parseConnectionSecret(secret: SecretLike): ConnectionCredentials
   return {
     host,
     port,
-    username: decode(secret, 'username') || 'default',
-    password: decode(secret, 'password') ?? '',
+    username: decodeSecretValue(secret, 'username') || 'default',
+    password: decodeSecretValue(secret, 'password') ?? '',
     tls,
-    type: decode(secret, 'type')?.trim() || undefined,
+    type: decodeSecretValue(secret, 'type')?.trim() || undefined,
   };
 }
