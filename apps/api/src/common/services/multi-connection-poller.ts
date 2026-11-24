@@ -367,6 +367,7 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
         const timeoutMs = this.getPollTimeoutMs();
         const waitedFor = !this.slowLane.has(conn.id);
         const startedAt = performance.now();
+        let outlivedTheWait = false;
         this.inFlight.add(conn.id);
         const poll = (async () => {
           let timedOut = false;
@@ -396,7 +397,7 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
             this.logger.warn(`Poll failed for ${describe}: ${error instanceof Error ? error.message : error}`);
           } finally {
             this.inFlight.delete(conn.id);
-            if (timedOut || performance.now() - startedAt >= timeoutMs) {
+            if (timedOut || outlivedTheWait || performance.now() - startedAt >= timeoutMs) {
               this.markSlow(conn.id, describe);
             } else if (this.slowLane.delete(conn.id)) {
               this.logger.log(`${describe} answers in time again; ticks wait for its polls again`);
@@ -413,6 +414,7 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
           return;
         }
         await withTimeout(poll, timeoutMs).catch(() => {
+          outlivedTheWait = true;
           this.logger.warn(`Poll of ${describe} still running after ${timeoutMs}ms; skipping it until it settles`);
           this.markSlow(conn.id, describe);
         });
