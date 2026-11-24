@@ -7,6 +7,7 @@ import { withHealthy } from '../cluster/node-health-response';
 import type { NodeCollection } from '../cluster/node-collection';
 import { ClusterMetricsService, NodeStats, ClusterSlowlogEntry, ClusterClientEntry, ClusterCommandlogEntry, SlotMigration } from '../cluster/cluster-metrics.service';
 import { ConnectionId } from '../common/decorators';
+import { AGENT_READ_ONLY_MESSAGE } from '@betterdb/shared';
 import { Roles } from '../auth/guards/roles.decorator';
 import { ExternalConnectionUnsupportedError } from '../external-metrics/external-connection-unsupported.error';
 import {
@@ -56,6 +57,16 @@ import {
   ClusterCommandlogEntryDto,
   SlotMigrationDto,
 } from '../common/dto/metrics.dto';
+
+/**
+ * Error for a failed state-changing call. A refusal from a read-only agent
+ * connection is the caller's problem (403), not a server failure.
+ */
+function resetFailure(prefix: string, error: unknown, fallback = HttpStatus.INTERNAL_SERVER_ERROR): HttpException {
+  const message = error instanceof Error ? error.message : 'Unknown error';
+  const status = message === AGENT_READ_ONLY_MESSAGE ? HttpStatus.FORBIDDEN : fallback;
+  return new HttpException(`${prefix}: ${message}`, status);
+}
 
 @ApiTags('metrics')
 @Controller('metrics')
@@ -152,10 +163,7 @@ export class MetricsController {
       await this.metricsService.resetSlowLog(connectionId);
       return { success: true };
     } catch (error) {
-      throw new HttpException(
-        `Failed to reset slowlog: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
+      throw resetFailure('Failed to reset slowlog', error);
     }
   }
 
@@ -255,10 +263,7 @@ export class MetricsController {
       const status = error instanceof Error && error.message.includes('not supported')
         ? HttpStatus.NOT_IMPLEMENTED
         : HttpStatus.INTERNAL_SERVER_ERROR;
-      throw new HttpException(
-        `Failed to reset commandlog: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        status,
-      );
+      throw resetFailure('Failed to reset commandlog', error, status);
     }
   }
 
@@ -384,10 +389,7 @@ export class MetricsController {
       await this.metricsService.resetLatencyEvents(eventName, connectionId);
       return { success: true };
     } catch (error) {
-      throw new HttpException(
-        `Failed to reset latency events: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
+      throw resetFailure('Failed to reset latency events', error);
     }
   }
 
