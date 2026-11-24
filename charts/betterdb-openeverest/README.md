@@ -49,7 +49,8 @@ and every write on these connections. No pod is restarted and no database CR is 
 | `betterdb.url` | `""` | Agent URL: `wss://<workspace>.app.betterdb.com/agent/ws` (Cloud) or `wss://<host>/api/agent/ws` (self-hosted). |
 | `betterdb.token` | `""` | Agent token from BetterDB (Connections → Via Agent). |
 | `betterdb.existingSecret` | `""` | Existing Secret with keys `url` and `token`, instead of the two values above. |
-| `betterdb.ca` | `""` | PEM bundle to trust for a self-hosted Monitor behind a private CA (mounted, `BETTERDB_CA_FILE`). |
+| `betterdb.ca` | `""` | PEM bundle to trust, on top of the public roots, for a self-hosted Monitor behind a private CA (own Secret, mounted, `BETTERDB_CA_FILE`). |
+| `betterdb.existingCaSecret.name` / `.key` | `""` / `ca.crt` | Existing Secret holding that bundle instead of `betterdb.ca`. |
 | `betterdb.caFile` | `""` | Path to a CA bundle already mounted via `extraVolumes`; ignored when `betterdb.ca` is set. |
 | `watchNamespaces` | `[]` | Namespaces whose Instances and Secrets the plugin may read. Empty: cluster-wide. |
 | `openeverest.apiUrl` | `""` | OpenEverest API for the authorization check; empty uses the in-cluster default. |

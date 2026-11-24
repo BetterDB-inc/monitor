@@ -87,3 +87,47 @@ tests:
     asserts:
       - hasDocuments:
           count: 0
+
+  - it: renders the CA in its own Secret, also alongside an existing settings Secret
+    template: templates/secret.yaml
+    set:
+      betterdb.existingSecret: mine
+      betterdb.ca: |
+        -----BEGIN CERTIFICATE-----
+        MIIB
+        -----END CERTIFICATE-----
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-betterdb-openeverest-ca
+      - matchRegex:
+          path: stringData["ca.crt"]
+          pattern: BEGIN CERTIFICATE
+
+  - it: keeps the CA out of the settings Secret when both are inline
+    template: templates/secret.yaml
+    set:
+      betterdb.url: wss://x/agent/ws
+      betterdb.token: t
+      betterdb.ca: PEM
+    asserts:
+      - hasDocuments:
+          count: 2
+      - notExists:
+          path: stringData["ca.crt"]
+        documentIndex: 0
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-betterdb-openeverest-ca
+        documentIndex: 1
+
+  - it: refuses an inline CA together with an existing CA Secret
+    template: templates/secret.yaml
+    set:
+      betterdb.ca: PEM
+      betterdb.existingCaSecret.name: corp-ca
+    asserts:
+      - failedTemplate:
+          errorMessage: "set either betterdb.ca or betterdb.existingCaSecret.name, not both"

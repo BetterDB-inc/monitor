@@ -76,11 +76,17 @@ betterdb:
   # values above. The backend updates this Secret from the settings panel, so
   # it needs patch access to it (granted by the chart's Role).
   existingSecret: ""
-  # PEM bundle to trust for the BetterDB WebSocket, for a self-hosted Monitor
-  # behind a private CA. Mounted into the pod and passed as BETTERDB_CA_FILE.
+  # PEM bundle to trust for the BetterDB WebSocket (added to the public
+  # roots), for a self-hosted Monitor behind a private CA. Rendered into its
+  # own Secret, mounted, and passed as BETTERDB_CA_FILE; independent of
+  # existingSecret.
   ca: ""
-  # Alternatively, a path inside the container to an already-mounted CA bundle
-  # (via extraVolumes/extraVolumeMounts). Ignored when `ca` is set.
+  # Or an existing Secret holding the bundle (key defaults to ca.crt).
+  existingCaSecret:
+    name: ""
+    key: ca.crt
+  # Or a path inside the container to a bundle mounted through
+  # extraVolumes/extraVolumeMounts. Ignored when `ca` or existingCaSecret is set.
   caFile: ""
 
 # Namespaces whose Instances and connection Secrets the plugin may read. Empty

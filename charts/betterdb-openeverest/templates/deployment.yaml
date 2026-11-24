@@ -90,9 +90,9 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-          {{- if or .Values.betterdb.ca .Values.extraVolumeMounts }}
+          {{- if or (include "betterdb-openeverest.mountCa" .) .Values.extraVolumeMounts }}
           volumeMounts:
-            {{- if .Values.betterdb.ca }}
+            {{- if include "betterdb-openeverest.mountCa" . }}
             - name: betterdb-ca
               mountPath: /etc/betterdb/ca
               readOnly: true
@@ -101,14 +101,14 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
           {{- end }}
-      {{- if or .Values.betterdb.ca .Values.extraVolumes }}
+      {{- if or (include "betterdb-openeverest.mountCa" .) .Values.extraVolumes }}
       volumes:
-        {{- if .Values.betterdb.ca }}
+        {{- if include "betterdb-openeverest.mountCa" . }}
         - name: betterdb-ca
           secret:
-            secretName: {{ include "betterdb-openeverest.settingsSecretName" . }}
+            secretName: {{ include "betterdb-openeverest.caSecretName" . }}
             items:
-              - key: ca.crt
+              - key: {{ include "betterdb-openeverest.caSecretKey" . }}
                 path: ca.crt
         {{- end }}
         {{- with .Values.extraVolumes }}

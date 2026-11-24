@@ -113,10 +113,54 @@ tests:
             value: /etc/betterdb/ca/ca.crt
       - equal:
           path: spec.template.spec.volumes[0].secret.secretName
-          value: RELEASE-NAME-betterdb-openeverest-settings
+          value: RELEASE-NAME-betterdb-openeverest-ca
+      - equal:
+          path: spec.template.spec.volumes[0].secret.items[0].key
+          value: ca.crt
       - equal:
           path: spec.template.spec.containers[0].volumeMounts[0].mountPath
           value: /etc/betterdb/ca
+
+  - it: keeps the inline CA when the settings come from an existing Secret
+    set:
+      betterdb.existingSecret: my-betterdb
+      betterdb.ca: |
+        -----BEGIN CERTIFICATE-----
+        MIIB
+        -----END CERTIFICATE-----
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BETTERDB_SETTINGS_SECRET
+            value: my-betterdb
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BETTERDB_CA_FILE
+            value: /etc/betterdb/ca/ca.crt
+      - equal:
+          path: spec.template.spec.volumes[0].secret.secretName
+          value: RELEASE-NAME-betterdb-openeverest-ca
+
+  - it: mounts an existing CA Secret under its own key
+    set:
+      betterdb.existingCaSecret.name: corp-ca
+      betterdb.existingCaSecret.key: bundle.pem
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BETTERDB_CA_FILE
+            value: /etc/betterdb/ca/ca.crt
+      - equal:
+          path: spec.template.spec.volumes[0].secret.secretName
+          value: corp-ca
+      - equal:
+          path: spec.template.spec.volumes[0].secret.items[0]
+          value:
+            key: bundle.pem
+            path: ca.crt
 
   - it: accepts a pre-mounted CA path
     set:
