@@ -1,5 +1,10 @@
 import { ClusterNode } from '../../common/types/metrics.types';
-import { diffClusterTopology, roleFromFlags, snapshotTopology } from '../topology-diff';
+import {
+  diffClusterTopology,
+  roleFromFlags,
+  snapshotTopology,
+  unclaimedFailovers,
+} from '../topology-diff';
 
 function node(overrides: Partial<ClusterNode> & { id: string }): ClusterNode {
   return {
@@ -188,5 +193,112 @@ describe('roleFromFlags', () => {
     [['noaddr'], null],
   ])('maps %j to %s', (flags, expected) => {
     expect(roleFromFlags(flags as string[])).toBe(expected);
+  });
+});
+
+describe('unclaimedFailovers', () => {
+  const SHARD_A = [node({ id: 'a' }), replica('b', 'a'), replica('c', 'a')];
+  const SHARD_X = [node({ id: 'x' }), replica('y', 'x')];
+  const BEFORE = snapshotTopology([...SHARD_A, ...SHARD_X]);
+  const B_PROMOTED = [node({ id: 'b', configEpoch: 7 }), replica('a', 'b'), replica('c', 'b')];
+  const Y_PROMOTED = [node({ id: 'y', configEpoch: 9 }), replica('x', 'y')];
+
+  const claimAll = (): boolean => true;
+  const claimNone = (): boolean => false;
+
+  it('asks once for a promotion, its demoted primary and the replicas that followed', () => {
+    const after = snapshotTopology([...B_PROMOTED, ...SHARD_X]);
+    const claim = jest.fn(claimAll);
+
+    unclaimedFailovers(diffClusterTopology(BEFORE, after), after, claim);
+
+    expect(claim.mock.calls).toEqual([['b', 7]]);
+  });
+
+  it('names the same new primary when only the demoted primary is seen changing', () => {
+    const before = snapshotTopology([node({ id: 'a' }), node({ id: 'b', configEpoch: 7 })]);
+    const after = snapshotTopology([replica('a', 'b'), node({ id: 'b', configEpoch: 7 })]);
+    const claim = jest.fn(claimAll);
+
+    unclaimedFailovers(diffClusterTopology(before, after), after, claim);
+
+    expect(claim.mock.calls).toEqual([['b', 7]]);
+  });
+
+  it('names the same new primary when only a replica is seen following it', () => {
+    const before = snapshotTopology([node({ id: 'b', configEpoch: 7 }), replica('c', 'a')]);
+    const after = snapshotTopology([node({ id: 'b', configEpoch: 7 }), replica('c', 'b')]);
+    const claim = jest.fn(claimAll);
+
+    unclaimedFailovers(diffClusterTopology(before, after), after, claim);
+
+    expect(claim.mock.calls).toEqual([['b', 7]]);
+  });
+
+  it('returns the diff as it is when every failover in it is claimed here', () => {
+    const after = snapshotTopology([...B_PROMOTED, ...SHARD_X]);
+    const diff = diffClusterTopology(BEFORE, after);
+
+    expect(unclaimedFailovers(diff, after, claimAll)).toEqual(diff);
+  });
+
+  it('reports no change when every failover in it was claimed before', () => {
+    const after = snapshotTopology([...B_PROMOTED, ...SHARD_X]);
+
+    const result = unclaimedFailovers(diffClusterTopology(BEFORE, after), after, claimNone);
+
+    expect(result).toEqual({ changed: false, reasons: [], changedNodes: [] });
+  });
+
+  it('keeps only the failover that was not claimed before when two shards fail over', () => {
+    const after = snapshotTopology([...B_PROMOTED, ...Y_PROMOTED]);
+
+    const result = unclaimedFailovers(
+      diffClusterTopology(BEFORE, after),
+      after,
+      (primaryId) => primaryId === 'y',
+    );
+
+    expect(result.changed).toBe(true);
+    expect(result.changedNodes.map((change) => change.nodeId).sort()).toEqual(['x', 'y']);
+    expect(result.reasons).toEqual(['role_change']);
+  });
+
+  it("keeps another node's epoch bump with a failover that is reported", () => {
+    const after = snapshotTopology([...B_PROMOTED, node({ id: 'x', configEpoch: 4 }), SHARD_X[1]]);
+
+    const result = unclaimedFailovers(diffClusterTopology(BEFORE, after), after, claimAll);
+
+    expect(result.changedNodes).toContainEqual(
+      expect.objectContaining({ nodeId: 'x', reason: 'epoch_bump' }),
+    );
+    expect(result.reasons).toContain('epoch_bump');
+  });
+
+  it('drops an epoch bump when no failover is left to report', () => {
+    const after = snapshotTopology([...B_PROMOTED, node({ id: 'x', configEpoch: 4 }), SHARD_X[1]]);
+
+    const result = unclaimedFailovers(diffClusterTopology(BEFORE, after), after, claimNone);
+
+    expect(result.changed).toBe(false);
+  });
+
+  it('asks for nothing when the diff has no change', () => {
+    const claim = jest.fn(claimAll);
+
+    const result = unclaimedFailovers(diffClusterTopology(BEFORE, BEFORE), BEFORE, claim);
+
+    expect(result.changed).toBe(false);
+    expect(claim).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the changed node when its new primary is not in the view', () => {
+    const before = snapshotTopology([replica('c', 'a', { configEpoch: 3 })]);
+    const after = snapshotTopology([replica('c', 'gone', { configEpoch: 5 })]);
+    const claim = jest.fn(claimAll);
+
+    unclaimedFailovers(diffClusterTopology(before, after), after, claim);
+
+    expect(claim.mock.calls).toEqual([['gone', 5]]);
   });
 });

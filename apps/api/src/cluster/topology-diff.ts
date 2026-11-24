@@ -146,3 +146,33 @@ export function diffClusterTopology(
 
   return { changed: true, reasons: [...reasons], changedNodes };
 }
+
+export type FailoverClaim = (primaryId: string, configEpoch: number) => boolean;
+
+function newPrimaryOf(change: TopologyNodeChange, current: TopologySnapshot): string {
+  const node = current.get(change.nodeId);
+  return node?.role === 'replica' && node.masterId ? node.masterId : change.nodeId;
+}
+
+export function unclaimedFailovers(
+  diff: TopologyDiff,
+  current: TopologySnapshot,
+  claim: FailoverClaim,
+): TopologyDiff {
+  const claimed = new Map<string, boolean>();
+  const changedNodes = diff.changedNodes.filter((change) => {
+    if (change.reason === 'epoch_bump') return true;
+    const primaryId = newPrimaryOf(change, current);
+    const configEpoch =
+      current.get(primaryId)?.configEpoch ?? current.get(change.nodeId)?.configEpoch ?? 0;
+    const failover = `${primaryId}:${configEpoch}`;
+    if (!claimed.has(failover)) claimed.set(failover, claim(primaryId, configEpoch));
+    return claimed.get(failover);
+  });
+  if (!changedNodes.some((change) => change.reason !== 'epoch_bump')) return NO_CHANGE;
+  return {
+    changed: true,
+    reasons: [...new Set(changedNodes.map((change) => change.reason))],
+    changedNodes,
+  };
+}
