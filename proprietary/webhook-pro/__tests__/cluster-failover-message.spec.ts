@@ -60,7 +60,17 @@ describe('clusterFailoverMessage', () => {
         previousState: 'fail',
         reasons: ['role_change'],
       }),
-    ).toBe('Cluster failover detected while state stayed ok: a node changed role');
+    ).toBe('Cluster failover detected (state ok): a node changed role');
+  });
+
+  it('does not say the state stayed when it moved and that move was reported before', () => {
+    expect(
+      clusterFailoverMessage({
+        clusterState: 'fail',
+        previousState: 'ok',
+        reasons: ['role_change', 'primary_change'],
+      }),
+    ).toBe("Cluster failover detected (state fail): a node changed role, a shard's primary changed");
   });
 
   it('renders the topology signals alongside a real state transition', () => {

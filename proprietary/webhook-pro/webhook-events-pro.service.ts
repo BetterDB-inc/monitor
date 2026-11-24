@@ -931,6 +931,9 @@ export function clusterFailoverMessage(data: {
   if (labels === '') {
     return `Cluster failover detected (state ${data.clusterState})`;
   }
+  if (data.previousState !== undefined && data.previousState !== data.clusterState) {
+    return `Cluster failover detected (state ${data.clusterState}): ${labels}`;
+  }
   return `Cluster failover detected while state stayed ${data.clusterState}: ${labels}`;
 }
 
