@@ -428,6 +428,67 @@ describe('ClusterIdentityService', () => {
       ).toBe(false);
     });
 
+    it('is given for a second outage after a join when the shorter hold saw the recovery', () => {
+      service.observe('member-1', view('a', 'b'));
+      service.observe('manual', view('c', 'd'));
+      const [first, second] = [service.clusterKeyOf('member-1'), service.clusterKeyOf('manual')];
+      service.claimFailover(first, outageSignature(), NOW);
+      service.claimFailover(second, outageSignature(), NOW + 5_000);
+      service.claimFailover(first, recoverySightingSignature(), NOW + 10_000, NOW);
+
+      service.observe(SEED, view('a', 'b', 'c', 'd'));
+
+      expect(
+        service.claimFailover(
+          service.clusterKeyOf(SEED),
+          outageSignature(),
+          NOW + 30_000,
+          NOW + 10_000,
+        ),
+      ).toBe(true);
+    });
+
+    it('stays held after a join when the other cluster claimed it after the recovery', () => {
+      service.observe('member-1', view('a', 'b'));
+      service.observe('manual', view('c', 'd'));
+      const [first, second] = [service.clusterKeyOf('member-1'), service.clusterKeyOf('manual')];
+      service.claimFailover(first, outageSignature(), NOW);
+      service.claimFailover(first, recoverySightingSignature(), NOW + 10_000, NOW);
+      service.claimFailover(second, outageSignature(), NOW + 15_000);
+
+      service.observe(SEED, view('a', 'b', 'c', 'd'));
+
+      expect(
+        service.claimFailover(
+          service.clusterKeyOf(SEED),
+          outageSignature(),
+          NOW + 30_000,
+          NOW + 10_000,
+        ),
+      ).toBe(false);
+    });
+
+    it('counts a reported sighting from when it was sighted when clusters are joined', () => {
+      service.observe('member-1', view('a', 'b'));
+      service.observe('manual', view('c', 'd'));
+      const [first, second] = [service.clusterKeyOf('member-1'), service.clusterKeyOf('manual')];
+      service.claimFailover(second, recoverySightingSignature(), NOW + 9_000);
+      service.claimFailover(first, recoverySightingSignature(), NOW + 10_000);
+      service.claimFailover(second, outageSignature(), NOW + 10_500);
+      service.claimFailover(first, clusterStateSignature('ok'), NOW + 11_000);
+
+      service.observe(SEED, view('a', 'b', 'c', 'd'));
+
+      expect(
+        service.claimFailover(
+          service.clusterKeyOf(SEED),
+          clusterStateSignature('ok'),
+          NOW + 13_000,
+          NOW + 12_000,
+        ),
+      ).toBe(true);
+    });
+
     it('is given once for a recovery that is sighted and not reported', () => {
       service.claimFailover('cluster-1', outageSignature(), NOW);
 

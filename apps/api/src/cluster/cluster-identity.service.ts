@@ -17,6 +17,7 @@ export interface ScopedConnection {
 }
 
 interface HeldClaim {
+  readonly claimedAt: number;
   readonly heldUntil: number;
   readonly epoch?: number;
   readonly releasedAt?: number;
@@ -52,12 +53,16 @@ export function promotionSignature(primaryId: string, configEpoch: number): Fail
 }
 
 function claimOfBoth(kept: HeldClaim, joined: HeldClaim): HeldClaim {
-  const longer = kept.heldUntil < joined.heldUntil ? joined : kept;
+  const claimedAt = Math.max(kept.claimedAt, joined.claimedAt);
   const epochs = [kept.epoch, joined.epoch].filter((epoch): epoch is number => epoch !== undefined);
+  const releases = [kept.releasedAt, joined.releasedAt].filter(
+    (releasedAt): releasedAt is number => releasedAt !== undefined && releasedAt >= claimedAt,
+  );
   return {
-    heldUntil: longer.heldUntil,
+    claimedAt,
+    heldUntil: Math.max(kept.heldUntil, joined.heldUntil),
     epoch: epochs.length > 0 ? Math.max(...epochs) : undefined,
-    releasedAt: longer.releasedAt,
+    releasedAt: releases.length > 0 ? Math.min(...releases) : undefined,
     sightingOnly: kept.sightingOnly && joined.sightingOnly,
   };
 }
@@ -153,6 +158,7 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
       held.releasedAt === undefined;
     if (held && !renewed && !released && !reportsSighting) return false;
     this.claims.set(claim, {
+      claimedAt: reportsSighting ? held.claimedAt : now,
       heldUntil: now + signature.holdMs,
       epoch: signature.epoch,
       sightingOnly: signature.sightingOnly,
