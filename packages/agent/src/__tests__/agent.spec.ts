@@ -155,6 +155,36 @@ describe('Agent.reconnectWithFreshToken', () => {
   });
 });
 
+describe('Agent.stop', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockQuit.mockResolvedValue(undefined);
+  });
+
+  it('disconnects a client whose connect() failed, so it stops retrying', async () => {
+    mockConnect.mockRejectedValueOnce(new Error('ECONNREFUSED'));
+    const agent = new Agent({ ...IAM_CONFIG, authMode: 'password', valkeyPassword: 'p', valkeyTls: false });
+
+    await expect(agent.start()).rejects.toThrow('ECONNREFUSED');
+    await agent.stop();
+
+    expect(mockDisconnect).toHaveBeenCalledTimes(1);
+    expect(mockQuit).not.toHaveBeenCalled();
+  });
+
+  it('quits and then disconnects a connected client', async () => {
+    mockConnect.mockResolvedValue(undefined);
+    const agent = new Agent({ ...IAM_CONFIG, authMode: 'password', valkeyPassword: 'p', valkeyTls: false }) as any;
+    agent.client = new (Valkey as any)();
+    agent.valkeyConnected = true;
+
+    await agent.stop();
+
+    expect(mockQuit).toHaveBeenCalledTimes(1);
+    expect(mockDisconnect).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('Agent.createValkeyClient - retryStrategy', () => {
   beforeEach(() => jest.clearAllMocks());
 

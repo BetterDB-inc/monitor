@@ -302,11 +302,15 @@ export class Agent {
         this.reconnectLoopPromise = null;
       }
     }
+    // Quit politely when connected, then disconnect regardless: a client that
+    // never connected or is mid-reconnect would otherwise keep retrying forever.
     if (this.cliClient) {
       await this.cliClient.quit().catch(() => {});
+      try { this.cliClient.disconnect(); } catch { /* ignore */ }
     }
-    if (this.valkeyConnected) {
-      await this.client?.quit().catch(() => {});
+    if (this.client) {
+      if (this.valkeyConnected) await this.client.quit().catch(() => {});
+      try { this.client.disconnect(); } catch { /* ignore */ }
     }
     console.log(`${this.tag} Stopped`);
   }
