@@ -27,6 +27,10 @@
 # are rebuilt over master's docs/charts, so a release cut from an older commit
 # never drops versions published since. A version that is already published
 # (its .tgz exists in docs/charts on master) is a no-op.
+#
+# After the classic publish, the `oci` job pushes the same chart version to
+# oci://ghcr.io/betterdb/charts through helm-publish-oci.yml, which is also
+# what publishes charts/betterdb-openeverest (on its own tags).
 name: Publish Helm Chart
 
 on:
@@ -56,14 +60,18 @@ on:
         required: true
         type: string
 
-# The commit to master is made with HELM_PUBLISH_TOKEN, not GITHUB_TOKEN.
+# The commit to master is made with HELM_PUBLISH_TOKEN, not GITHUB_TOKEN;
+# packages: write is for the OCI push only (see the `oci` job).
 permissions:
   contents: read
+  packages: write
 
 jobs:
   release:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
     # queue: max keeps every pending publish (by default a newer pending run
     # replaces an older one, which would skip that release's chart).
     concurrency:
@@ -231,3 +239,17 @@ jobs:
             }' > "$RUNNER_TEMP/commit-payload.json"
           gh api graphql --input "$RUNNER_TEMP/commit-payload.json"
           echo "Published betterdb-monitor ${VERSION}"
+
+  # Same version, second channel: the OpenEverest hub and `helm install
+  # oci://...` users read the chart from ghcr. Runs after the classic publish so
+  # the two never disagree on what the latest version is; a version already in
+  # the registry is a no-op there too.
+  oci:
+    needs: release
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/helm-publish-oci.yml
+    with:
+      chart: betterdb-monitor
+      ref: refs/tags/${{ needs.release.outputs.tag }}
