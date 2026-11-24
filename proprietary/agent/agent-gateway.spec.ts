@@ -2,7 +2,7 @@ jest.mock('../../apps/api/src/database/adapters/unified.adapter');
 
 import { EventEmitter } from 'events';
 import type { WebSocket } from 'ws';
-import { AgentGateway } from './agent-gateway';
+import { AgentGateway, agentConnectionId, agentConnectionName } from './agent-gateway';
 import { ConnectionRegistry } from '../../apps/api/src/connections/connection-registry.service';
 import { ExternalMetricsStore } from '../../apps/api/src/external-metrics/external-metrics-store';
 import { DiscoveredInstancesStore } from '../../apps/api/src/external-metrics/discovered-instances.store';
@@ -356,5 +356,113 @@ describe('AgentGateway reconnects', () => {
     expect(registry.isListed(CONNECTION_ID)).toBe(false);
     expect(gateway.getConnectedAgents()).toHaveLength(0);
     expect(socket.pings()).toBe(0);
+  });
+});
+
+describe('agentConnectionId', () => {
+  const identity = {
+    platform: 'openeverest' as const,
+    clusterId: '7d2c1f0e-k8s-uid',
+    cluster: 'main',
+    namespace: 'databases',
+    instance: 'orders-cache',
+    node: '07c37dfeb235213a872192d90877d0cd55635b91',
+    nodeName: 'valkey-orders-cache-0',
+  };
+
+  it('keeps the token-based id for single-target agents', () => {
+    expect(agentConnectionId('tok-1')).toBe('agent-tok-1');
+    expect(agentConnectionName('Agent')).toBe('Agent');
+  });
+
+  it('derives the same id for the same node whatever the token', () => {
+    const a = agentConnectionId('tok-1', identity);
+    const b = agentConnectionId('tok-2', { ...identity });
+    expect(a).toBe(b);
+    expect(a).toMatch(/^agent-openeverest-[0-9a-f]{16}$/);
+  });
+
+  it('gives every node, instance, namespace and cluster its own id', () => {
+    const base = agentConnectionId('tok-1', identity);
+    expect(agentConnectionId('tok-1', { ...identity, node: 'other-node' })).not.toBe(base);
+    expect(agentConnectionId('tok-1', { ...identity, instance: 'sessions' })).not.toBe(base);
+    expect(agentConnectionId('tok-1', { ...identity, namespace: 'staging' })).not.toBe(base);
+    expect(agentConnectionId('tok-1', { ...identity, clusterId: 'another-cluster' })).not.toBe(base);
+  });
+
+  it('ignores the readable node name and falls back to the cluster name without a cluster id', () => {
+    expect(agentConnectionId('tok-1', { ...identity, nodeName: 'renamed' })).toBe(agentConnectionId('tok-1', identity));
+    const { clusterId: _omit, ...unlabelled } = identity;
+    expect(agentConnectionId('tok-1', unlabelled)).not.toBe(agentConnectionId('tok-1', identity));
+    expect(agentConnectionId('tok-1', unlabelled)).toBe(agentConnectionId('tok-9', { ...unlabelled, cluster: 'main' }));
+  });
+
+  it('names the connection after the namespace, instance and node', () => {
+    expect(agentConnectionName('Agent', identity)).toBe('databases/orders-cache/valkey-orders-cache-0');
+    const { nodeName: _omit, ...unnamed } = identity;
+    expect(agentConnectionName('Agent', unnamed)).toBe(`databases/orders-cache/${identity.node}`);
+  });
+});
+
+describe('AgentGateway identified agents', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  const identity = { platform: 'openeverest', cluster: 'main', namespace: 'db', instance: 'vk', node: 'n1', nodeName: 'vk-0' };
+
+  function connectIdentified(gateway: AgentGateway, tokenId: string, node: string): FakeSocket {
+    const socket = new FakeSocket(true);
+    (gateway as unknown as { onConnection: (ws: WebSocket, id: string, name: string) => void }).onConnection(
+      socket as unknown as WebSocket,
+      tokenId,
+      'OpenEverest',
+    );
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'agent_hello',
+      version: '1.0.0',
+      capabilities: [],
+      valkey: { type: 'valkey', version: '8.0.0', tls: true, cluster: true },
+      identity: { ...identity, node },
+      readOnly: true,
+    })));
+    return socket;
+  }
+
+  it('registers each node under its identity-derived id, read-only, over one token', async () => {
+    const registry = buildRegistry();
+    const gateway = new AgentGateway({} as never, registry);
+    connectIdentified(gateway, TOKEN_ID, 'n1');
+    connectIdentified(gateway, TOKEN_ID, 'n2');
+    await jest.advanceTimersByTimeAsync(0);
+
+    const ids = gateway.getConnectedAgents().map((a) => a.id).sort();
+    expect(ids).toEqual([
+      agentConnectionId(TOKEN_ID, { ...identity, node: 'n1' } as never),
+      agentConnectionId(TOKEN_ID, { ...identity, node: 'n2' } as never),
+    ].sort());
+    expect(registry.isListed(`agent-${TOKEN_ID}`)).toBe(false);
+    const listed = registry.list().filter((c) => ids.includes(c.id));
+    expect(listed.map((c) => c.readOnly)).toEqual([true, true]);
+    expect(listed.map((c) => c.name)).toEqual(['db/vk/vk-0', 'db/vk/vk-0']);
+  });
+
+  it('lets a restarted agent on a new token take over the same node id', async () => {
+    const registry = buildRegistry();
+    const gateway = new AgentGateway({} as never, registry);
+    const first = connectIdentified(gateway, 'tok-a', 'n1');
+    await jest.advanceTimersByTimeAsync(0);
+    const id = gateway.getConnectedAgents()[0].id;
+    first.drop();
+
+    connectIdentified(gateway, 'tok-b', 'n1');
+    await jest.advanceTimersByTimeAsync(0);
+
+    expect(gateway.getConnectedAgents().map((a) => a.id)).toEqual([id]);
+    expect(registry.isListed(id)).toBe(true);
   });
 });

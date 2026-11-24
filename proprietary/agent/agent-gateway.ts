@@ -2,12 +2,36 @@ import { Injectable, Logger } from '@nestjs/common';
 import { WebSocketServer, WebSocket, RawData } from 'ws';
 import { IncomingMessage } from 'http';
 import { Socket } from 'net';
+import { createHash } from 'crypto';
 import { AgentTokensService } from './agent-tokens.service';
 import { AgentDatabaseAdapter } from './agent-database-adapter';
 import { ConnectionRegistry } from '../../apps/api/src/connections/connection-registry.service';
-import type { AgentHelloMessage, AgentConnectionInfo } from '@betterdb/shared';
+import type { AgentHelloMessage, AgentConnectionInfo, AgentIdentity } from '@betterdb/shared';
 
 const LIVENESS_CHECK_MS = 5000;
+
+/**
+ * Connection id for an agent. A single-target agent is its token: one token,
+ * one database. A multi-target agent (OpenEverest) sends an identity with each
+ * node it relays, and the id is derived from that instead, so a node keeps its
+ * id (and its history) when the agent pod restarts, fails over to another
+ * replica or the token is rotated. The Kubernetes cluster id is preferred over
+ * the OpenEverest cluster name, which is only a label the user picked.
+ */
+export function agentConnectionId(tokenId: string, identity?: AgentIdentity): string {
+  if (!identity) return `agent-${tokenId}`;
+  const cluster = identity.clusterId || identity.cluster;
+  const digest = createHash('sha256')
+    .update([identity.platform, cluster, identity.namespace, identity.instance, identity.node].join('\0'))
+    .digest('hex');
+  return `agent-${identity.platform}-${digest.slice(0, 16)}`;
+}
+
+/** Display name for an identified agent connection: namespace/instance/node. */
+export function agentConnectionName(tokenName: string, identity?: AgentIdentity): string {
+  if (!identity) return tokenName;
+  return `${identity.namespace}/${identity.instance}/${identity.nodeName || identity.node}`;
+}
 
 type ConnectionIdClaim = 'free' | 'replaced' | 'taken' | 'closed';
 
@@ -72,7 +96,9 @@ export class AgentGateway {
   }
 
   private onConnection(ws: WebSocket, tokenId: string, tokenName: string): void {
-    const connectionId = `agent-${tokenId}`;
+    // The id is provisional until agent_hello: an identified agent gets one
+    // derived from its labels (see agentConnectionId).
+    let connectionId = `agent-${tokenId}`;
     this.logger.log(`Agent connected: ${connectionId} (token: ${tokenName})`);
 
     const agent: AgentConnection = {
@@ -100,6 +126,9 @@ export class AgentGateway {
         if (msg.type === 'agent_hello' && !agent.agentHello) {
           clearTimeout(helloTimeout);
           agent.agentHello = msg as AgentHelloMessage;
+          agent.id = agentConnectionId(tokenId, agent.agentHello.identity);
+          agent.name = agentConnectionName(tokenName, agent.agentHello.identity);
+          connectionId = agent.id;
           this.queueRegistration(agent);
           return;
         }
@@ -150,7 +179,9 @@ export class AgentGateway {
     this.logger.log(
       `Agent ${agent.id} hello: ${hello.valkey.type} ${hello.valkey.version} ` +
       `(cluster: ${hello.valkey.cluster}, auth: ${hello.authMode ?? 'password'}, ` +
-      `capabilities: ${hello.capabilities.join(', ')})`,
+      `capabilities: ${hello.capabilities.join(', ')}` +
+      (hello.identity ? `, identity: ${agent.name}` : '') +
+      (hello.readOnly ? ', read-only' : '') + ')',
     );
 
     const claim = await this.claimConnectionId(agent);
@@ -172,7 +203,7 @@ export class AgentGateway {
         agent.id,
         agent.name,
         agent.adapter,
-        { serverless: hello.valkey.serverless === true },
+        { serverless: hello.valkey.serverless === true, readOnly: hello.readOnly === true },
       );
       this.logger.log(`Agent ${agent.id} registered as connection`);
     } catch (err: any) {
@@ -277,6 +308,8 @@ export class AgentGateway {
           agentVersion: agent.agentHello.version,
           valkey: agent.agentHello.valkey,
           authMode: agent.agentHello.authMode,
+          identity: agent.agentHello.identity,
+          readOnly: agent.agentHello.readOnly,
         });
       }
     }

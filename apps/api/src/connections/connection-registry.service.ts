@@ -1218,6 +1218,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         credentialStatus: config.credentialStatus,
         credentialError: config.credentialError,
         connectionType: config.host === 'agent' ? 'agent' : (config.connectionType ?? 'direct'),
+        readOnly: config.readOnly,
         dialsDataNodes: dialsDataNodes(this.zoneMapOwner(config)),
         autoRegisterNodes: config.autoRegisterNodes,
         membership: config.membership,
@@ -1327,7 +1328,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     id: string,
     name: string,
     adapter: DatabasePort,
-    options: { serverless?: boolean } = {},
+    options: { serverless?: boolean; readOnly?: boolean } = {},
   ): Promise<void> {
     const now = Date.now();
     const config: DatabaseConnectionConfig = {
@@ -1339,6 +1340,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       createdAt: now,
       updatedAt: now,
       credentialStatus: 'valid',
+      ...(options.readOnly === true ? { readOnly: true } : {}),
     };
 
     this.connections.set(id, adapter);

@@ -43,6 +43,7 @@ import {
   FIELD_NAME_RE,
 } from '../../apps/api/src/database/parsers/vector-index.parser';
 import type { AgentHelloMessage, KeyAnalyticsOptions, KeyAnalyticsResult } from '@betterdb/shared';
+import { checkAgentReadOnly } from '@betterdb/shared';
 
 const COMMAND_TIMEOUT_MS = 15000;
 
@@ -56,6 +57,10 @@ export class AgentDatabaseAdapter implements DatabasePort {
   private capabilities: DatabaseCapabilities;
   private pendingRequests = new Map<string, PendingRequest>();
   private _connected = false;
+  // Set when the agent asked for read-only (OpenEverest hands it the admin
+  // user). Enforced here, on every command, so neither the UI nor the CLI can
+  // change state through this connection whatever the agent itself allows.
+  private readonly readOnly: boolean;
 
   constructor(
     private ws: WebSocket,
@@ -73,6 +78,7 @@ export class AgentDatabaseAdapter implements DatabasePort {
       hasConfig: agentHello.capabilities.includes('CONFIG'),
       hasVectorSearch: agentHello.capabilities.includes('FT'),
     };
+    this.readOnly = agentHello.readOnly === true;
 
     ws.on('message', (data) => {
       try {
@@ -112,6 +118,13 @@ export class AgentDatabaseAdapter implements DatabasePort {
       if (!this._connected || this.ws.readyState !== WebSocket.OPEN) {
         reject(new Error('Agent connection is closed'));
         return;
+      }
+      if (this.readOnly) {
+        const denied = checkAgentReadOnly(cmd.toUpperCase(), args);
+        if (denied !== null) {
+          reject(new Error(denied));
+          return;
+        }
       }
 
       const id = randomUUID();
@@ -348,6 +361,10 @@ export class AgentDatabaseAdapter implements DatabasePort {
 
   async killClient(_filters: ClientFilters): Promise<number> {
     throw new Error('killClient is not supported through agent connections');
+  }
+
+  isReadOnly(): boolean {
+    return this.readOnly;
   }
 
   // --- ACL ---

@@ -135,3 +135,30 @@ export function checkMemberReadOnly(command: string, subCommand?: string): strin
   }
   return checkSafeMode(command, subCommand);
 }
+
+const READ_ONLY_DENIED_SUBCOMMANDS: Readonly<Record<string, ReadonlySet<string>>> = {
+  SLOWLOG: new Set(['RESET']),
+  COMMANDLOG: new Set(['RESET']),
+  LATENCY: new Set(['RESET']),
+};
+
+export const AGENT_READ_ONLY_MESSAGE = 'This agent connection is read-only.';
+
+/**
+ * Check if a command may run on a read-only agent connection, one where the
+ * agent holds admin credentials it is not meant to change state with (the
+ * OpenEverest plugin). Read-only is the safe-mode allowlist minus everything
+ * that mutates the server: the RESET sub-commands and ACL LOG RESET on top of
+ * what safe mode already keeps out (CLIENT KILL, CONFIG SET, writes).
+ * Returns an error message string, or null if allowed.
+ */
+export function checkAgentReadOnly(command: string, args?: readonly string[]): string | null {
+  const subCommand = args?.[0]?.toUpperCase();
+  if (subCommand !== undefined && READ_ONLY_DENIED_SUBCOMMANDS[command]?.has(subCommand)) {
+    return AGENT_READ_ONLY_MESSAGE;
+  }
+  if (command === 'ACL' && subCommand === 'LOG' && args?.[1]?.toUpperCase() === 'RESET') {
+    return AGENT_READ_ONLY_MESSAGE;
+  }
+  return checkSafeMode(command, subCommand) === null ? null : AGENT_READ_ONLY_MESSAGE;
+}
