@@ -42,8 +42,17 @@ describe('parseClusterShards', () => {
     ]);
   });
 
-  it('prefers tls-port over a zero plain port, as a TLS-only cluster reports', () => {
-    expect(parseClusterShards(SHARDS)[0].port).toBe(6379);
+  it('falls back to the other port when the preferred one is 0, as a TLS-only cluster reports', () => {
+    expect(parseClusterShards(SHARDS, { tls: false })[0].port).toBe(6379);
+    expect(parseClusterShards(SHARDS, { tls: true })[0].port).toBe(6379);
+  });
+
+  it('picks tls-port or port by the connection TLS setting when a node serves both', () => {
+    const both = [['slots', [0, 16383], 'nodes', [
+      ['id', 'aaa', 'port', 6379, 'tls-port', 6380, 'ip', '10.0.0.11', 'endpoint', '10.0.0.11', 'role', 'master', 'health', 'online'],
+    ]]];
+    expect(parseClusterShards(both, { tls: false })[0].port).toBe(6379);
+    expect(parseClusterShards(both, { tls: true })[0].port).toBe(6380);
   });
 });
 

@@ -261,7 +261,7 @@ export class InstanceTarget {
     client.on('error', () => { /* surfaced by connect()/call() */ });
     try {
       await client.connect();
-      const nodes = await discoverNodes(client, credentials);
+      const nodes = await discoverNodes(client, credentials, { tls: credentials.tls !== null });
       return Promise.all(nodes.map(async (node) => ({ ...node, hostname: node.hostname || await reverseName(node.host) })));
     } finally {
       client.disconnect();

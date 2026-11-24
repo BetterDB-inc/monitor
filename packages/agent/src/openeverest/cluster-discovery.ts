@@ -24,7 +24,16 @@ export interface DiscoveryClient {
   call(command: string, ...args: string[]): Promise<unknown>;
 }
 
-export async function discoverNodes(client: DiscoveryClient, seed: { host: string; port: number }): Promise<DiscoveredNode[]> {
+export interface DiscoveryOptions {
+  /** Whether the seed connection uses TLS: picks `tls-port` or `port` from CLUSTER SHARDS. */
+  tls: boolean;
+}
+
+export async function discoverNodes(
+  client: DiscoveryClient,
+  seed: { host: string; port: number },
+  options: DiscoveryOptions = { tls: false },
+): Promise<DiscoveredNode[]> {
   // cluster_enabled lives in INFO's cluster section (CLUSTER INFO has
   // cluster_state and the like, never cluster_enabled). CLUSTER INFO itself is
   // the fallback: it errors on a standalone server ("This instance has
@@ -46,7 +55,7 @@ export async function discoverNodes(client: DiscoveryClient, seed: { host: strin
 
   let nodes: DiscoveredNode[] = [];
   try {
-    nodes = parseClusterShards(await client.call('CLUSTER', 'SHARDS'));
+    nodes = parseClusterShards(await client.call('CLUSTER', 'SHARDS'), options);
   } catch {
     nodes = parseClusterNodes(String(await client.call('CLUSTER', 'NODES')));
   }
@@ -58,10 +67,12 @@ export async function discoverNodes(client: DiscoveryClient, seed: { host: strin
 
 /**
  * CLUSTER SHARDS (Valkey 7+): an array of shards, each a flat key/value list
- * with a `nodes` entry that is itself an array of flat key/value lists.
+ * with a `nodes` entry that is itself an array of flat key/value lists. A node
+ * reports both `port` and `tls-port` (0 for the one it does not serve); the
+ * one matching the connection's TLS setting is used, the other as fallback.
  * Nodes that report `health` other than `online` are left out.
  */
-export function parseClusterShards(raw: unknown): DiscoveredNode[] {
+export function parseClusterShards(raw: unknown, options: DiscoveryOptions = { tls: false }): DiscoveredNode[] {
   if (!Array.isArray(raw)) throw new Error('unexpected CLUSTER SHARDS reply');
   const nodes: DiscoveredNode[] = [];
   for (const shard of raw) {
@@ -71,7 +82,9 @@ export function parseClusterShards(raw: unknown): DiscoveredNode[] {
     for (const member of members) {
       const node = toMap(member);
       const id = String(node.get('id') ?? '');
-      const port = Number(node.get('tls-port') || node.get('port'));
+      const port = options.tls
+        ? Number(node.get('tls-port') || node.get('port'))
+        : Number(node.get('port') || node.get('tls-port'));
       const health = node.get('health');
       const endpoint = str(node.get('endpoint'));
       const ip = str(node.get('ip'));
