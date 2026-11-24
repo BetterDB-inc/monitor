@@ -2,6 +2,8 @@
 
 _Status: plan, 2026-11-24. Verified in code against OpenEverest core `v2.0.0-alpha.1` (main has identical monitoring code), provider-valkey v0.2.0, provider-sdk v0.4.0, `openeverest/hub`, and the plugin repos listed below._
 
+_Implementation status: see [What shipped in the first PR](#what-shipped-in-the-first-pr) at the end._
+
 ## Goal
 
 Get BetterDB **listed on the OpenEverest hub**, with an extension that **works today** on provider-valkey instances. Constraints:
@@ -216,3 +218,35 @@ These are the commands BetterDB sends on its read-only monitoring path, taken fr
 ```
 
 Before proposing it, validate it against Valkey 9.0/9.1 command names.
+
+## What shipped in the first PR
+
+Branch `feat/openeverest-plugin`, in this monorepo rather than a separate plugin repo: one place for the agent, the chart and the frontend. The chart and the frontend package are Apache-2.0 on their own.
+
+| Area | Shipped | Where |
+|---|---|---|
+| Agent `openeverest` mode | Plugin backend (enable / disable / status, settings, `/main.js`), ConfigMap opt-in store, Instance and Secret informers through the ServiceAccount, per-node connections with no redirects, chain-only TLS, `BETTERDB_CA_FILE`, identity labels and read-only in the hello | `packages/agent/src/openeverest/` |
+| Monitor server | Connection id derived from identity labels (`agent-openeverest-<hash>`), read-only enforced in `AgentDatabaseAdapter` on every command, `readOnly` on the connection status | `proprietary/agent/`, `packages/shared/src/types/{agent-protocol,command-safety}.ts` |
+| Frontend | ESM bundle, `clusterDetailTab` (valkey only) and `settingsPanel`, built into the `betterdb/agent` image | `packages/openeverest-plugin/` |
+| Chart | Plugin CR, Deployment, Service, ServiceAccount, ClusterRole or per-namespace Roles, state Role, settings Secret; helm-unittest suites | `charts/betterdb-openeverest/` |
+| Publishing | `helm-publish-oci.yml` pushes to `oci://ghcr.io/betterdb/charts` (both charts) | `.github/workflows/` |
+| Docs and hub | Install guide, draft formula + README validated against `formula-v1.json` | `docs/install/openeverest.md`, `charts/betterdb-openeverest/hub/` |
+
+Facts learned while implementing that correct the plan above:
+
+- The plugin proxy base is `/v1/clusters/{cluster}/plugins/{name}`, not `/v1/plugins/{name}`, and the backend sees bare paths (`/api/...`, `/main.js`, `/healthz`). GET requests are **not** authenticated at the proxy; POST/PUT/DELETE need a session and `use` on the plugin. The backend therefore serves nothing sensitive on GET and gates enable *and* disable on the `/connection` check.
+- `providers` scoping lives on the extension point (in the CR's `frontend.extensionPoints[]` and in `registerExtension`), not at the top of the Plugin spec. The tab props carry `instanceName` and `namespace`; the cluster name comes from `api.basePath`.
+- `status.connectionSecretRef` is an object `{name}`. provider-valkey always runs `cluster-enabled yes`, so per-node discovery is the only path; the agent's single-node fallback is for other sources.
+- Node identity uses the Valkey cluster node id (stable in `nodes.conf` on the volume), with the pod name from reverse DNS for display. Pod IPs change on restart, so they are not part of the identity.
+
+### TODO (out of scope of the first PR)
+
+- **UI grouping by OpenEverest instance** in the Monitor app (cluster → namespace → instance → nodes). The identity labels are on `AgentConnectionInfo` already; the connections list shows one entry per node named `namespace/instance/pod`.
+- **Hide or disable state-changing actions** in the Monitor UI for `readOnly` connections. The server refuses them today; the UI still shows the buttons and surfaces the error.
+- **"Connect OpenEverest" screen** in self-hosted and Cloud: issue the agent token and print the `helm install` command.
+- **Summary endpoint** for the plugin tab (ops/sec, memory, clients, top slow commands), authenticated with the agent token. The tab shows connection state only.
+- **Cluster topology and slot metrics** when each node arrives as a separate agent target: check what the cluster pollers do with per-node agent connections.
+- **Settings panel authorization.** Any user with `use` on the plugin can change the BetterDB URL and token (the proxy's check); OpenEverest exposes no admin check a plugin backend can call. Revisit when plugin service tokens (spec 003 phase 3) exist.
+- **MonitoringClass integration** and the second hub formula, once provider-valkey publishes connection sources and a monitor credential.
+- **Monitor profile ACL**: validate the appendix against Valkey 9.0/9.1 command names before proposing it.
+- **E2E on kind/k3d** (`scripts/openeverest-e2e.sh`): written, not run; needs an OpenEverest alpha.1 install and an admin JWT.
