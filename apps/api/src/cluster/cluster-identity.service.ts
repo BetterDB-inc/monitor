@@ -77,11 +77,13 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
         .filter((id): id is string => !!id),
     );
     if (nodeIds.size === 0) return;
-    const [known] = [...nodeIds]
-      .map((id) => this.keyByNode.get(id))
-      .filter((key): key is string => !!key)
-      .sort();
+    const [known, ...joined] = [
+      ...new Set(
+        [...nodeIds].map((id) => this.keyByNode.get(id)).filter((key): key is string => !!key),
+      ),
+    ].sort();
     const clusterKey = known ?? `cluster:${randomUUID()}`;
+    joined.forEach((key) => this.join(key, clusterKey));
     const previous = this.views.get(connectionId);
     this.views.set(connectionId, nodeIds);
     this.keyByConnection.set(connectionId, clusterKey);
@@ -149,6 +151,23 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
           (anchors.has(id) || (membership !== undefined && anchors.has(membership.seedId))),
       )
       .map(({ id, host, port }) => ({ connectionId: id, instance: { host, port } }));
+  }
+
+  private join(joinedKey: string, clusterKey: string): void {
+    for (const [nodeId, key] of this.keyByNode) {
+      if (key === joinedKey) this.keyByNode.set(nodeId, clusterKey);
+    }
+    for (const [connectionId, key] of this.keyByConnection) {
+      if (key === joinedKey) this.keyByConnection.set(connectionId, clusterKey);
+    }
+    const prefix = `${joinedKey}|`;
+    for (const [claim, held] of [...this.claims]) {
+      if (!claim.startsWith(prefix)) continue;
+      const moved = `${clusterKey}|${claim.slice(prefix.length)}`;
+      const kept = this.claims.get(moved);
+      this.claims.delete(claim);
+      if (!kept || kept.heldUntil < held.heldUntil) this.claims.set(moved, held);
+    }
   }
 
   private release(claim: string, now: number): void {

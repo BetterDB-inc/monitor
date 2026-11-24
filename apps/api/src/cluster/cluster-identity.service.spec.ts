@@ -121,6 +121,28 @@ describe('ClusterIdentityService', () => {
       expect(service.clusterKeyOf('manual')).toBe(service.clusterKeyOf('member-1'));
     });
 
+    it('moves every connection of two joined clusters to one key without a new read', () => {
+      service.observe('member-1', view('a', 'b'));
+      service.observe('manual', view('c', 'd'));
+
+      service.observe(SEED, view('a', 'b', 'c', 'd'));
+
+      expect(service.clusterKeyOf('member-1')).toBe(service.clusterKeyOf(SEED));
+      expect(service.clusterKeyOf('manual')).toBe(service.clusterKeyOf(SEED));
+    });
+
+    it('keeps a third cluster on its own key when two others are joined', () => {
+      service.observe('member-1', view('a', 'b'));
+      service.observe('manual', view('c', 'd'));
+      service.observe('member-2', view('x', 'y'));
+      const apart = service.clusterKeyOf('member-2');
+
+      service.observe(SEED, view('a', 'b', 'c', 'd'));
+
+      expect(service.clusterKeyOf('member-2')).toBe(apart);
+      expect(service.clusterKeyOf(SEED)).not.toBe(apart);
+    });
+
     it('is the seed id for a member and its seed before either has read a view', () => {
       expect(service.clusterKeyOf('member-1')).toBe(SEED);
       expect(service.clusterKeyOf(SEED)).toBe(SEED);
@@ -293,6 +315,33 @@ describe('ClusterIdentityService', () => {
 
       expect(
         service.claimFailover('cluster-1', clusterStateSignature('ok'), NOW + 12_000, NOW - 5_000),
+      ).toBe(false);
+    });
+
+    it('stays held when the cluster it was made in is joined with another', () => {
+      service.observe('member-1', view('a', 'b'));
+      service.observe('manual', view('c', 'd'));
+      service.claimFailover(service.clusterKeyOf('member-1'), promotionSignature('a', 7), NOW);
+      service.claimFailover(service.clusterKeyOf('manual'), promotionSignature('c', 7), NOW);
+
+      service.observe(SEED, view('a', 'b', 'c', 'd'));
+
+      const joined = service.clusterKeyOf(SEED);
+      expect(service.claimFailover(joined, promotionSignature('a', 7), NOW + 1_000)).toBe(false);
+      expect(service.claimFailover(joined, promotionSignature('c', 7), NOW + 1_000)).toBe(false);
+    });
+
+    it('stays held for the longer time when both joined clusters made it', () => {
+      service.observe('member-1', view('a', 'b'));
+      service.observe('manual', view('c', 'd'));
+      const [early, late] = [service.clusterKeyOf('member-1'), service.clusterKeyOf('manual')];
+      service.claimFailover(early, outageSignature(), NOW);
+      service.claimFailover(late, outageSignature(), NOW + 30_000);
+
+      service.observe(SEED, view('a', 'b', 'c', 'd'));
+
+      expect(
+        service.claimFailover(service.clusterKeyOf(SEED), outageSignature(), NOW + 70_000),
       ).toBe(false);
     });
 
