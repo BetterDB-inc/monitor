@@ -260,10 +260,10 @@ describe('ClusterIdentityService', () => {
       expect(service.eventConnectionOf('member-1')).toBe(SEED);
     });
 
-    it('is the member itself while the seed is not connected', () => {
+    it('is the seed also while the seed is not connected', () => {
       connected.delete(SEED);
 
-      expect(service.eventConnectionOf('member-1')).toBe('member-1');
+      expect(service.eventConnectionOf('member-1')).toBe(SEED);
     });
 
     it('is the member itself when the seed no longer exists', () => {

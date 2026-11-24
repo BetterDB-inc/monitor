@@ -115,15 +115,7 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
   eventConnectionOf(connectionId: string): string {
     const membership = this.connectionRegistry.getConfig(connectionId)?.membership;
     if (membership?.origin !== 'auto') return connectionId;
-    return this.isConnected(membership.seedId) ? membership.seedId : connectionId;
-  }
-
-  private isConnected(connectionId: string): boolean {
-    try {
-      return this.connectionRegistry.get(connectionId).isConnected();
-    } catch {
-      return false;
-    }
+    return this.connectionRegistry.getConfig(membership.seedId) ? membership.seedId : connectionId;
   }
 
   private releaseNodes(nodeIds: ReadonlySet<string>): void {

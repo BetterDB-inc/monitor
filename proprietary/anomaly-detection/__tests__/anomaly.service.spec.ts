@@ -7138,7 +7138,6 @@ describe('AnomalyService', () => {
         configs = {};
         const registry = (service as any).connectionRegistry;
         registry.getConfig.mockImplementation((id: string) => configs[id] ?? null);
-        registry.get.mockReturnValue({ isConnected: () => true });
         identity = new ClusterIdentityService(registry);
         (service as any).clusterIdentity = identity;
       });

@@ -260,9 +260,23 @@ describe('PrometheusService cluster.failover per cluster', () => {
     expect(otlpFailovers()[0][2]).toBe(SEED);
   });
 
-  it('files the event under the member that saw it while the seed is not connected', async () => {
+  it('files the event under the seed also while the seed is not connected', async () => {
     await pollAll(MEMBERS, HEALTHY);
     connected.delete(SEED);
+
+    await pollAll(MEMBERS, B_PROMOTED);
+
+    expect(failoverEvents()).toHaveLength(1);
+    expect(failoverEvents()[0]).toMatchObject({
+      connectionId: SEED,
+      instance: { host: '10.0.0.1', port: 6379 },
+    });
+    expect(otlpFailovers()[0][2]).toBe(SEED);
+  });
+
+  it('files the event under the member that saw it when the seed was removed', async () => {
+    await pollAll(MEMBERS, HEALTHY);
+    delete configs[SEED];
 
     await pollAll(MEMBERS, B_PROMOTED);
 

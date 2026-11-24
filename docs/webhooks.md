@@ -505,13 +505,13 @@ The event is sent once per cluster, not once per registered connection. When sev
 
 | Change | Reported again after |
 |---|---|
-| Outage: cluster state goes to `fail`, new slot failures, or both | 1 minute |
-| Cluster state goes back to `ok` | 1 minute |
-| A replica is promoted | 10 minutes, for the same new primary at the same config epoch |
+| Outage: cluster state goes to `fail`, new slot failures, or both | 1 minute, or as soon as a recovery was reported |
+| Recovery: cluster state goes back to `ok` | 1 minute, or as soon as another outage was reported |
+| A replica is promoted | 10 minutes for the same new primary, or as soon as that node is promoted again at a later config epoch |
 
-A state failure and slot failures count as one outage, whichever is seen first and by whichever connection. An outage and a promotion are separate changes, so a failover that also takes the cluster down sends one event for each. Connections belong to the same cluster when their `CLUSTER NODES` views share a node.
+A state failure and slot failures count as one outage, whichever is seen first and by whichever connection. An outage and a promotion are separate changes, so a failover that also takes the cluster down sends one event for each. The old primary coming back as a replica and replicas moving to the new primary belong to that promotion and are not reported again. Connections belong to the same cluster when their `CLUSTER NODES` views share a node that is not flagged `fail`, `fail?`, `noaddr` or `handshake`.
 
-The event is filed under the seed connection when the connection that saw the change was registered automatically from that seed and the seed is connected. Otherwise it is filed under the connection that saw it first. The same rule decides which connection the OTLP log record is sent for.
+The event is filed under the seed connection when the connection that saw the change was registered automatically from that seed, also while the seed itself is not connected. Otherwise it is filed under the connection that saw it first. The same rule decides which connection the OTLP log record is sent for.
 
 #### anomaly.detected (Pro)
 
