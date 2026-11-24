@@ -7175,6 +7175,30 @@ describe('AnomalyService', () => {
         expect(otlpFailovers()).toHaveLength(2);
       });
 
+      it('reports one outage and one recovery when a second node sees both late', async () => {
+        await pollCluster(CLUSTER_A);
+        for (const [id, state] of [['a', 'fail'], ['a', 'ok'], ['b', 'fail'], ['b', 'ok']]) {
+          states[id] = state;
+          await pollCluster(CLUSTER_A, [id]);
+        }
+
+        expect(failovers().map((event) => event.clusterState)).toEqual(['fail', 'ok']);
+        expect(otlpFailovers()).toHaveLength(1);
+      });
+
+      it('reports a second outage seen first by a node that was not the first to recover', async () => {
+        await pollCluster(CLUSTER_A);
+        for (const state of ['fail', 'ok']) {
+          setState(CLUSTER_A, state);
+          await pollCluster(CLUSTER_A);
+        }
+        setState(CLUSTER_A, 'fail');
+
+        await pollCluster(CLUSTER_A, ['c', 'b', 'a']);
+
+        expect(failovers().map((event) => event.clusterState)).toEqual(['fail', 'ok', 'fail']);
+      });
+
       it('sends one cluster.failover per cluster when two clusters fail', async () => {
         await pollCluster(CLUSTER_A);
         await pollCluster(CLUSTER_X);

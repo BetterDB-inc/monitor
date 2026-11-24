@@ -221,20 +221,71 @@ describe('ClusterIdentityService', () => {
       expect(service.claimFailover('cluster-1', clusterStateSignature('ok'), NOW)).toBe(true);
     });
 
-    it('is given for a second outage once the recovery from the first was reported', () => {
+    it('is given for a second outage to a poller that saw the reported recovery', () => {
       service.claimFailover('cluster-1', outageSignature(), NOW);
       service.claimFailover('cluster-1', clusterStateSignature('ok'), NOW + 10_000);
 
-      expect(service.claimFailover('cluster-1', outageSignature(), NOW + 30_000)).toBe(true);
+      expect(
+        service.claimFailover('cluster-1', outageSignature(), NOW + 30_000, NOW + 10_000),
+      ).toBe(true);
     });
 
-    it('is given for a second recovery once another outage was reported', () => {
+    it('holds the second outage again once it was reported', () => {
+      service.claimFailover('cluster-1', outageSignature(), NOW);
+      service.claimFailover('cluster-1', clusterStateSignature('ok'), NOW + 10_000);
+      service.claimFailover('cluster-1', outageSignature(), NOW + 30_000, NOW + 10_000);
+
+      expect(
+        service.claimFailover('cluster-1', outageSignature(), NOW + 31_000, NOW + 11_000),
+      ).toBe(false);
+    });
+
+    it.each([
+      ['whose state last changed before the recovery was reported', NOW - MINUTE_MS],
+      ['that never saw the state change', undefined],
+    ])('is not given for the late failure of a poller %s', (_name, changedAt) => {
+      service.claimFailover('cluster-1', outageSignature(), NOW);
+      service.claimFailover('cluster-1', clusterStateSignature('ok'), NOW + 10_000);
+
+      expect(service.claimFailover('cluster-1', outageSignature(), NOW + 12_000, changedAt)).toBe(
+        false,
+      );
+    });
+
+    it('reports one outage and one recovery when a second node sees both late', () => {
+      const reported = [
+        service.claimFailover('cluster-1', outageSignature(), NOW),
+        service.claimFailover('cluster-1', clusterStateSignature('ok'), NOW + 5_000, NOW),
+        service.claimFailover('cluster-1', outageSignature(), NOW + 6_000),
+        service.claimFailover('cluster-1', clusterStateSignature('ok'), NOW + 8_000, NOW + 6_000),
+      ];
+
+      expect(reported).toEqual([true, true, false, false]);
+    });
+
+    it('is given to any poller once the hold of the recovered outage has passed', () => {
+      service.claimFailover('cluster-1', outageSignature(), NOW);
+      service.claimFailover('cluster-1', clusterStateSignature('ok'), NOW + 10_000);
+
+      expect(service.claimFailover('cluster-1', outageSignature(), NOW + MINUTE_MS)).toBe(true);
+    });
+
+    it('is given for a second recovery to a poller that saw the reported outage', () => {
       service.claimFailover('cluster-1', clusterStateSignature('ok'), NOW);
       service.claimFailover('cluster-1', outageSignature(), NOW + 10_000);
 
-      expect(service.claimFailover('cluster-1', clusterStateSignature('ok'), NOW + 30_000)).toBe(
-        true,
-      );
+      expect(
+        service.claimFailover('cluster-1', clusterStateSignature('ok'), NOW + 30_000, NOW + 10_000),
+      ).toBe(true);
+    });
+
+    it('is not given for the late recovery of a poller that failed before the reported outage', () => {
+      service.claimFailover('cluster-1', clusterStateSignature('ok'), NOW);
+      service.claimFailover('cluster-1', outageSignature(), NOW + 10_000);
+
+      expect(
+        service.claimFailover('cluster-1', clusterStateSignature('ok'), NOW + 12_000, NOW - 5_000),
+      ).toBe(false);
     });
 
     it('keeps the outage of another cluster claimed when this one recovers', () => {

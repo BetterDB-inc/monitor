@@ -871,6 +871,7 @@ export class AnomalyService
   private replicaFanoutUnreachable = new Map<string, number>();
   private lastReplicationRole = new Map<string, number>();
   private lastClusterState = new Map<string, string>();
+  private clusterStateChangedAt = new Map<string, number>();
   private lastPersistenceState = new Map<string, ConnectionPersistenceState>();
   // Per-connection set of active duplicate-primary conflict signatures, so each
   // distinct conflict is alerted once rather than on every poll tick.
@@ -1572,6 +1573,7 @@ export class AnomalyService
     this.clientEvictionLimit.delete(connectionId);
     this.lastReplicationRole.delete(connectionId);
     this.lastClusterState.delete(connectionId);
+    this.clusterStateChangedAt.delete(connectionId);
     this.lastPersistenceState.delete(connectionId);
     this.activeTopologyConflicts.delete(connectionId);
     this.closeConnectionEventsOnRemoval(connectionId);
@@ -2336,6 +2338,7 @@ export class AnomalyService
                 await this.addAnomaly(clusterEvent, ctx);
 
                 this.reportClusterStateChange(ctx, lastState, clusterState, clusterInfo);
+                this.clusterStateChangedAt.set(ctx.connectionId, Date.now());
               }
             }
             this.lastClusterState.set(ctx.connectionId, clusterState);
@@ -10153,7 +10156,13 @@ export class AnomalyService
   ): void {
     const identity = this.clusterIdentity;
     const signature = clusterStateSignature(clusterState);
-    if (identity && !identity.claimFailover(identity.clusterKeyOf(ctx.connectionId), signature, Date.now())) return;
+    const stateChangedAt = this.clusterStateChangedAt.get(ctx.connectionId);
+    if (
+      identity &&
+      !identity.claimFailover(identity.clusterKeyOf(ctx.connectionId), signature, Date.now(), stateChangedAt)
+    ) {
+      return;
+    }
     const filedUnder = identity?.eventConnectionOf(ctx.connectionId) ?? ctx.connectionId;
     const filedConfig = filedUnder === ctx.connectionId ? ctx : this.connectionRegistry.getConfig(filedUnder);
     const slotsFailed = parseInt(clusterInfo.cluster_slots_fail) || 0;

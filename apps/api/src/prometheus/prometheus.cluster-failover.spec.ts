@@ -364,6 +364,19 @@ describe('PrometheusService cluster.failover per cluster', () => {
     expect(otlpFailovers()).toHaveLength(2);
   });
 
+  it('sends nothing for the late failure of a node after the recovery was reported', async () => {
+    await pollAll([SEED, ...MEMBERS], HEALTHY);
+    const clusterKey = identity.clusterKeyOf(SEED);
+    identity.claimFailover(clusterKey, clusterStateSignature('fail'), Date.now());
+    identity.claimFailover(clusterKey, clusterStateSignature('ok'), Date.now());
+    clusterInfos['member-1'] = clusterInfo({ cluster_state: 'fail', cluster_slots_fail: '100' });
+
+    await pollAll(['member-1'], HEALTHY);
+
+    expect(failoverEvents()).toHaveLength(0);
+    expect(otlpFailovers()).toHaveLength(0);
+  });
+
   it('reports only what is new when a poll sees a reported state change and a promotion', async () => {
     await pollAll([SEED, ...MEMBERS], HEALTHY);
     for (const id of [SEED, ...MEMBERS]) clusterInfos[id] = clusterInfo({ cluster_state: 'fail' });

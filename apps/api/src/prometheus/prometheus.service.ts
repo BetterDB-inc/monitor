@@ -162,6 +162,7 @@ interface IncidentCount {
 // Per-connection state for tracking previous values and stale labels
 interface ConnectionMetricState {
   previousClusterState: string | null;
+  clusterRecoverySeenAt?: number;
   previousSlotsFail: number;
   previousCrcMismatch: number | null;
   previousTopology: TopologySnapshot | null;
@@ -1928,10 +1929,19 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.connectionEpochs.set(connectionId, this.currentEpoch(connectionId) + 1);
   }
 
-  private claimFailover(connectionId: string, signature: FailoverSignature): boolean {
+  private claimFailover(
+    connectionId: string,
+    signature: FailoverSignature,
+    stateChangedAt?: number,
+  ): boolean {
     const identity = this.clusterIdentity;
     if (!identity) return true;
-    return identity.claimFailover(identity.clusterKeyOf(connectionId), signature, Date.now());
+    return identity.claimFailover(
+      identity.clusterKeyOf(connectionId),
+      signature,
+      Date.now(),
+      stateChangedAt,
+    );
   }
 
   private isSuperseded(connectionId: string, epoch: number): boolean {
@@ -2800,7 +2810,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       const reasons: string[] = [];
       if (
         (stateChanged || newSlotFailures) &&
-        this.claimFailover(connectionId, outageSignature())
+        this.claimFailover(connectionId, outageSignature(), state.clusterRecoverySeenAt)
       ) {
         if (stateChanged) reasons.push('cluster_state');
         if (newSlotFailures) reasons.push('slot_failures');
@@ -2822,6 +2832,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       // Advance the baseline before the dispatches, the way the CRC edge does:
       // a pass abandoned at its bound mid-dispatch has already emitted the
       // event, and leaving the edge uncommitted would page again next poll.
+      if (previousClusterState === 'fail' && clusterState === 'ok') {
+        state.clusterRecoverySeenAt = Date.now();
+      }
       state.previousClusterState = clusterState;
       state.previousSlotsFail = slotsFail;
       if (topology !== null) {

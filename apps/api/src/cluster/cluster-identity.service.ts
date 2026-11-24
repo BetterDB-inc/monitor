@@ -13,6 +13,7 @@ export interface FailoverSignature {
 interface HeldClaim {
   readonly heldUntil: number;
   readonly epoch?: number;
+  readonly releasedAt?: number;
 }
 
 const NOT_LIVE_FLAGS = ['handshake', 'noaddr', 'fail', 'fail?'];
@@ -98,7 +99,12 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  claimFailover(clusterKey: string, signature: FailoverSignature, now: number): boolean {
+  claimFailover(
+    clusterKey: string,
+    signature: FailoverSignature,
+    now: number,
+    stateChangedAt?: number,
+  ): boolean {
     for (const [claim, held] of this.claims) {
       if (held.heldUntil <= now) this.claims.delete(claim);
     }
@@ -106,9 +112,13 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
     const held = this.claims.get(claim);
     const renewed =
       signature.renewsOnLaterEpoch === true && (signature.epoch ?? 0) > (held?.epoch ?? 0);
-    if (held && !renewed) return false;
+    const released =
+      held?.releasedAt !== undefined &&
+      stateChangedAt !== undefined &&
+      stateChangedAt >= held.releasedAt;
+    if (held && !renewed && !released) return false;
     this.claims.set(claim, { heldUntil: now + signature.holdMs, epoch: signature.epoch });
-    if (signature.releases) this.claims.delete(`${clusterKey}|${signature.releases}`);
+    if (signature.releases) this.release(`${clusterKey}|${signature.releases}`, now);
     return true;
   }
 
@@ -116,6 +126,11 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
     const membership = this.connectionRegistry.getConfig(connectionId)?.membership;
     if (membership?.origin !== 'auto') return connectionId;
     return this.connectionRegistry.getConfig(membership.seedId) ? membership.seedId : connectionId;
+  }
+
+  private release(claim: string, now: number): void {
+    const held = this.claims.get(claim);
+    if (held) this.claims.set(claim, { ...held, releasedAt: now });
   }
 
   private releaseNodes(nodeIds: ReadonlySet<string>): void {
