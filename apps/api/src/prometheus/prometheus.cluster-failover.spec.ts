@@ -377,6 +377,25 @@ describe('PrometheusService cluster.failover per cluster', () => {
     expect(otlpFailovers()).toHaveLength(2);
   });
 
+  it('reports a second outage after another service reported the recovery it sighted', async () => {
+    const everyone = [SEED, ...MEMBERS];
+    await pollAll(everyone, HEALTHY);
+    for (const state of ['fail', 'ok']) {
+      jest.advanceTimersByTime(POLL_INTERVAL_MS);
+      for (const id of everyone) clusterInfos[id] = clusterInfo({ cluster_state: state });
+      await pollAll(everyone, HEALTHY);
+    }
+    jest.advanceTimersByTime(1000);
+    identity.claimFailover(identity.clusterKeyOf(SEED), clusterStateSignature('ok'), Date.now());
+    jest.advanceTimersByTime(POLL_INTERVAL_MS - 1000);
+    for (const id of everyone) clusterInfos[id] = clusterInfo({ cluster_state: 'fail' });
+
+    await pollAll(everyone, HEALTHY);
+
+    expect(failoverEvents()).toHaveLength(2);
+    expect(otlpFailovers()).toHaveLength(2);
+  });
+
   it('sends nothing more when a node shows the first recovery after the second outage', async () => {
     await pollAll([SEED, 'member-1'], HEALTHY);
     const seen: Array<[string, string]> = [

@@ -419,6 +419,16 @@ describe('ClusterIdentityService', () => {
       );
     });
 
+    it('is given for a second outage to a poller whose sighting was then reported', () => {
+      service.claimFailover('cluster-1', outageSignature(), NOW);
+      service.claimFailover('cluster-1', recoverySightingSignature(), NOW + 10_000, NOW);
+      service.claimFailover('cluster-1', clusterStateSignature('ok'), NOW + 11_000);
+
+      expect(
+        service.claimFailover('cluster-1', outageSignature(), NOW + 30_000, NOW + 10_000),
+      ).toBe(true);
+    });
+
     it('is not given as a sighting of a recovery that was reported', () => {
       service.claimFailover('cluster-1', clusterStateSignature('ok'), NOW);
 

@@ -146,7 +146,9 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
       epoch: signature.epoch,
       sightingOnly: signature.sightingOnly,
     });
-    if (signature.releases) this.release(`${clusterKey}|${signature.releases}`, now);
+    if (signature.releases && !reportsSighting) {
+      this.release(`${clusterKey}|${signature.releases}`, now);
+    }
     return true;
   }
 
