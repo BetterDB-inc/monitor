@@ -132,6 +132,20 @@ describe('trackedKeyOf', () => {
     expect(trackedKeyOf(tracked, dispute(SECOND, [[8990, 9100]]))).toBe(FIRST);
   });
 
+  it('takes the lower key when two tracked disputes share as many slots', () => {
+    const both = dispute(FIRST, [[8950, 9049]]);
+
+    expect(trackedKeyOf(tracked, both)).toBe(FIRST);
+    expect(trackedKeyOf([...tracked].reverse(), both)).toBe(FIRST);
+  });
+
+  it('takes the preferred one of two tracked disputes that share as many slots', () => {
+    const both = dispute(FIRST, [[8950, 9049]]);
+
+    expect(trackedKeyOf(tracked, both, (key) => key === SECOND)).toBe(SECOND);
+    expect(trackedKeyOf(tracked, dispute(FIRST, [[8951, 9049]]), (key) => key === SECOND)).toBe(FIRST);
+  });
+
   it('gives no key when no tracked dispute between the same owners shares a slot', () => {
     expect(trackedKeyOf(tracked, dispute(FIRST, [[10000, 10010]]))).toBeUndefined();
     expect(trackedKeyOf(tracked, dispute('slot_owner:p3|unassigned', [[9000, 9100]], 'p3'))).toBeUndefined();

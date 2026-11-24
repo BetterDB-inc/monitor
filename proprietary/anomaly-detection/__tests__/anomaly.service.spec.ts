@@ -30300,13 +30300,23 @@ describe('AnomalyService', () => {
             delete MEMBERS.m;
           });
 
-          it('gives each slot line of a full check the event of the sampled line over the same slots', async () => {
+          const fullCheckLines = async (unanswering: string[] = []) => {
             (discovery as any).onNodeClientOnce = jest.fn(
-              async (node: { id: string }, _connectionId: string, _timeoutMs: number, run: (client: unknown) => unknown) =>
-                run({ call: jest.fn(async () => memberView(node.id)) }),
+              async (node: { id: string }, _connectionId: string, _timeoutMs: number, run: (client: unknown) => unknown) => {
+                if (unanswering.includes(node.id)) throw new Error('ECONNREFUSED');
+                return run({ call: jest.fn(async () => memberView(node.id)) });
+              },
             );
             (service as any).connectionRegistry.get.mockReturnValue(dbClient);
             (service as any).connectionRegistry.getConfig.mockImplementation((id: string) => ({ id, host: 'seed' }));
+            expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'started' });
+            for (let i = 0; i < 50 && service.getTopologyFullCheck('conn-1').state !== 'done'; i++) {
+              await new Promise((resolve) => setImmediate(resolve));
+            }
+            return service.getTopologyFullCheck('conn-1').summary?.disagreements ?? [];
+          };
+
+          it('gives each slot line of a full check the event of the sampled line over the same slots', async () => {
             const [partial] = openPartialEvents();
             const sampled = bySlots(service.getTopologyDisagreements('conn-1').disagreements);
             expect(sampled[OLDER].id).toBe('slot_owner:b|unassigned');
@@ -30317,14 +30327,20 @@ describe('AnomalyService', () => {
             });
             expect(sampled[OLDER].eventId).not.toBe(partial.id);
 
-            expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'started' });
-            for (let i = 0; i < 50 && service.getTopologyFullCheck('conn-1').state !== 'done'; i++) {
-              await new Promise((resolve) => setImmediate(resolve));
-            }
-
-            const checked = bySlots(service.getTopologyFullCheck('conn-1').summary?.disagreements ?? []);
+            const checked = bySlots(await fullCheckLines());
             expect(checked[OF_THE_NODE].id).toBe('slot_owner:b|unassigned');
             expect(eventsOf(checked)).toEqual(eventsOf(sampled));
+          });
+
+          it('gives a line of a full check that covers as much of both disputes the event of the finding', async () => {
+            const [partial] = openPartialEvents();
+            slotsBy = { ...slotsBy, c: { b: '5461-8949 9050-10922' } };
+
+            const checked = (await fullCheckLines(['m', 'n'])).filter((line) => line.slots);
+
+            expect(checked).toMatchObject([
+              { slots: [[8950, 9049]], eventId: partial.id, eventType: MetricType.PARTIAL_MEMBERSHIP },
+            ]);
           });
         });
 

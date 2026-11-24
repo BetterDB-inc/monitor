@@ -11532,15 +11532,10 @@ export class AnomalyService
         now: () => Date.now(),
         onProgress,
       });
-      const tracked = this.topologyDivergence.lastRound(clusterKey)?.disagreements ?? [];
+      const sampled = this.topologyDivergence.lastRound(clusterKey)?.disagreements ?? [];
       return fullCheckResult(
         outcome,
-        this.topologyDisagreementEventOf(
-          clusterKey,
-          connectionId,
-          (holder) => holder,
-          (disagreement) => trackedKeyOf(tracked, disagreement),
-        ),
+        this.topologyDisagreementEventOf(clusterKey, connectionId, (holder) => holder, sampled),
       );
     });
     if (started.result === 'started') this.topologyFullCheckOwners.set(clusterKey, connectionId);
@@ -11556,7 +11551,7 @@ export class AnomalyService
     clusterKey: string,
     connectionId: string,
     placed: (holder: string) => string = this.topologyEventPlaceFor(connectionId),
-    trackedKey: (disagreement: TopologyDisagreement) => string | undefined = (disagreement) => disagreement.key,
+    sampled?: readonly TopologyDisagreement[],
   ): DisagreementEventOf {
     const anchor = this.topologyDivergence.lastRound(clusterKey)?.anchorConnectionId;
     const lineEvent = this.topologyLineEventOf(connectionId, anchor, placed);
@@ -11569,9 +11564,12 @@ export class AnomalyService
       eventId: eventIds?.get(finding.signature) ?? null,
     }));
     return (disagreement) => {
-      const key = trackedKey(disagreement);
-      const holder =
-        key === undefined ? undefined : findingThatHolds(findings, { key, subjectIds: disagreement.subjectIds });
+      const { subjectIds } = disagreement;
+      const holderOf = (key: string) => findingThatHolds(findings, { key, subjectIds });
+      const key = sampled
+        ? trackedKeyOf(sampled, disagreement, (tracked) => (holderOf(tracked)?.eventId ?? null) !== null)
+        : disagreement.key;
+      const holder = key === undefined ? undefined : holderOf(key);
       if (!holder) return ofGroup(disagreement);
       if (holder.eventId !== null) return lineEvent(holder.eventId, MetricType.PARTIAL_MEMBERSHIP);
       return closedByHand?.has(holder.finding.signature) ? lineEvent(null, MetricType.PARTIAL_MEMBERSHIP) : undefined;

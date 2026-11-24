@@ -650,18 +650,17 @@ function sharedWith(entry: TopologyDisagreement, disagreement: TopologyDisagreem
 export function trackedKeyOf(
   tracked: readonly TopologyDisagreement[],
   disagreement: TopologyDisagreement,
+  preferred: (key: string) => boolean = () => false,
 ): string | undefined {
   if (!disagreement.slots) return disagreement.key;
-  let key: string | undefined;
-  let most = 0;
-  for (const entry of tracked) {
-    const shared = sharedWith(entry, disagreement);
-    if (shared === 0 || shared < most) continue;
-    if (shared === most && key !== undefined && compareText(key, entry.key) <= 0) continue;
-    key = entry.key;
-    most = shared;
-  }
-  return key;
+  const [closest] = tracked
+    .map((entry) => ({ key: entry.key, shared: sharedWith(entry, disagreement) }))
+    .filter((entry) => entry.shared > 0)
+    .sort(
+      (a, b) =>
+        b.shared - a.shared || Number(preferred(b.key)) - Number(preferred(a.key)) || compareText(a.key, b.key),
+    );
+  return closest?.key;
 }
 
 function keepsSidesOf(
