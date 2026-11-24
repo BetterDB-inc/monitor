@@ -6,6 +6,13 @@ export interface FailoverSignature {
   readonly key: string;
   readonly holdMs: number;
   readonly releases?: string;
+  readonly epoch?: number;
+  readonly renewsOnLaterEpoch?: boolean;
+}
+
+interface HeldClaim {
+  readonly heldUntil: number;
+  readonly epoch?: number;
 }
 
 const STATE_HOLD_MS = 60_000;
@@ -23,8 +30,12 @@ export function clusterStateSignature(state: string): FailoverSignature {
   return { key: RECOVERY, holdMs: STATE_HOLD_MS, releases: OUTAGE };
 }
 
+export function followerSignature(primaryId: string, configEpoch: number): FailoverSignature {
+  return { key: `primary:${primaryId}`, holdMs: PROMOTION_HOLD_MS, epoch: configEpoch };
+}
+
 export function promotionSignature(primaryId: string, configEpoch: number): FailoverSignature {
-  return { key: `primary:${primaryId}:${configEpoch}`, holdMs: PROMOTION_HOLD_MS };
+  return { ...followerSignature(primaryId, configEpoch), renewsOnLaterEpoch: true };
 }
 
 @Injectable()
@@ -32,7 +43,7 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
   private readonly views = new Map<string, ReadonlySet<string>>();
   private readonly keyByConnection = new Map<string, string>();
   private readonly keyByNode = new Map<string, string>();
-  private readonly claims = new Map<string, number>();
+  private readonly claims = new Map<string, HeldClaim>();
   private stopListening: (() => void) | undefined;
 
   constructor(private readonly connectionRegistry: ConnectionRegistry) {}
@@ -76,12 +87,15 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
   }
 
   claimFailover(clusterKey: string, signature: FailoverSignature, now: number): boolean {
-    for (const [claim, heldUntil] of this.claims) {
-      if (heldUntil <= now) this.claims.delete(claim);
+    for (const [claim, held] of this.claims) {
+      if (held.heldUntil <= now) this.claims.delete(claim);
     }
     const claim = `${clusterKey}|${signature.key}`;
-    if (this.claims.has(claim)) return false;
-    this.claims.set(claim, now + signature.holdMs);
+    const held = this.claims.get(claim);
+    const renewed =
+      signature.renewsOnLaterEpoch === true && (signature.epoch ?? 0) > (held?.epoch ?? 0);
+    if (held && !renewed) return false;
+    this.claims.set(claim, { heldUntil: now + signature.holdMs, epoch: signature.epoch });
     if (signature.releases) this.claims.delete(`${clusterKey}|${signature.releases}`);
     return true;
   }

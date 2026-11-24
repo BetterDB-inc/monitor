@@ -147,7 +147,7 @@ export function diffClusterTopology(
   return { changed: true, reasons: [...reasons], changedNodes };
 }
 
-export type FailoverClaim = (primaryId: string, configEpoch: number) => boolean;
+export type FailoverClaim = (primaryId: string, configEpoch: number, promoted: boolean) => boolean;
 
 function newPrimaryOf(change: TopologyNodeChange, current: TopologySnapshot): string {
   const node = current.get(change.nodeId);
@@ -159,16 +159,24 @@ export function unclaimedFailovers(
   current: TopologySnapshot,
   claim: FailoverClaim,
 ): TopologyDiff {
-  const claimed = new Map<string, boolean>();
-  const changedNodes = diff.changedNodes.filter((change) => {
-    if (change.reason === 'epoch_bump') return true;
+  const failovers = new Map<string, TopologyNodeChange[]>();
+  for (const change of diff.changedNodes) {
+    if (change.reason === 'epoch_bump') continue;
     const primaryId = newPrimaryOf(change, current);
+    failovers.set(primaryId, [...(failovers.get(primaryId) ?? []), change]);
+  }
+  const unclaimed = new Set<TopologyNodeChange>();
+  for (const [primaryId, changes] of failovers) {
+    const promoted = changes.some(
+      (change) => change.nodeId === primaryId && change.reason === 'role_change',
+    );
     const configEpoch =
-      current.get(primaryId)?.configEpoch ?? current.get(change.nodeId)?.configEpoch ?? 0;
-    const failover = `${primaryId}:${configEpoch}`;
-    if (!claimed.has(failover)) claimed.set(failover, claim(primaryId, configEpoch));
-    return claimed.get(failover);
-  });
+      current.get(primaryId)?.configEpoch ?? current.get(changes[0].nodeId)?.configEpoch ?? 0;
+    if (claim(primaryId, configEpoch, promoted)) changes.forEach((change) => unclaimed.add(change));
+  }
+  const changedNodes = diff.changedNodes.filter(
+    (change) => change.reason === 'epoch_bump' || unclaimed.has(change),
+  );
   if (!changedNodes.some((change) => change.reason !== 'epoch_bump')) return NO_CHANGE;
   return {
     changed: true,

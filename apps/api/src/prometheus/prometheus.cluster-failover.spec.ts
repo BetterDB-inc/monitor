@@ -200,6 +200,18 @@ describe('PrometheusService cluster.failover per cluster', () => {
     expect(failoverEvents()).toHaveLength(1);
   });
 
+  it('sends no second event when the old primary rejoins after the epoch of the new one moved', async () => {
+    const everyone = [SEED, ...MEMBERS];
+    const rest = HEALTHY.slice(3);
+    await pollAll(everyone, HEALTHY);
+    await pollAll(everyone, [primary('a'), primary('b', 7), replica('c', 'b'), ...rest]);
+    jest.setSystemTime(Date.now() + 2 * 60_000);
+
+    await pollAll(everyone, [replica('a', 'b'), primary('b', 8), replica('c', 'b'), ...rest]);
+
+    expect(failoverEvents()).toHaveLength(1);
+  });
+
   it('sends one event for two connections a user added to the same cluster', async () => {
     await pollAll(['manual-1', 'manual-2'], HEALTHY);
 

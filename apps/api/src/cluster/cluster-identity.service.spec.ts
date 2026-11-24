@@ -3,6 +3,7 @@ import { ConnectionRegistry } from '../connections/connection-registry.service';
 import {
   ClusterIdentityService,
   clusterStateSignature,
+  followerSignature,
   outageSignature,
   promotionSignature,
 } from './cluster-identity.service';
@@ -132,6 +133,29 @@ describe('ClusterIdentityService', () => {
 
     it('is given again when the same node is promoted at a later epoch', () => {
       service.claimFailover('cluster-1', promotionSignature('node-b', 7), NOW);
+
+      expect(service.claimFailover('cluster-1', promotionSignature('node-b', 9), NOW)).toBe(true);
+    });
+
+    it('is not given for a node following a reported promotion after the epoch moved', () => {
+      service.claimFailover('cluster-1', promotionSignature('node-b', 7), NOW);
+
+      expect(service.claimFailover('cluster-1', followerSignature('node-b', 9), NOW)).toBe(false);
+    });
+
+    it('is not given for a promotion seen at an older epoch than the reported one', () => {
+      service.claimFailover('cluster-1', promotionSignature('node-b', 9), NOW);
+
+      expect(service.claimFailover('cluster-1', promotionSignature('node-b', 7), NOW)).toBe(false);
+    });
+
+    it('is given for a node following a primary whose promotion nobody reported', () => {
+      expect(service.claimFailover('cluster-1', followerSignature('node-b', 7), NOW)).toBe(true);
+      expect(service.claimFailover('cluster-1', promotionSignature('node-b', 7), NOW)).toBe(false);
+    });
+
+    it('is given for a later promotion of a primary that was first seen through a follower', () => {
+      service.claimFailover('cluster-1', followerSignature('node-b', 7), NOW);
 
       expect(service.claimFailover('cluster-1', promotionSignature('node-b', 9), NOW)).toBe(true);
     });

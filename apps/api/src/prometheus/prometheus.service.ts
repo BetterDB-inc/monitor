@@ -54,6 +54,7 @@ import { ShardLoadService } from '../cluster/shard-load.service';
 import {
   ClusterIdentityService,
   FailoverSignature,
+  followerSignature,
   outageSignature,
   promotionSignature,
 } from '../cluster/cluster-identity.service';
@@ -2806,8 +2807,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       }
       const unreported =
         topology !== null && topologyDiff !== null
-          ? unclaimedFailovers(topologyDiff, topology, (primaryId, configEpoch) =>
-              this.claimFailover(connectionId, promotionSignature(primaryId, configEpoch)),
+          ? unclaimedFailovers(topologyDiff, topology, (primaryId, configEpoch, promoted) =>
+              this.claimFailover(
+                connectionId,
+                promoted
+                  ? promotionSignature(primaryId, configEpoch)
+                  : followerSignature(primaryId, configEpoch),
+              ),
             )
           : null;
       const changedNodes = unreported?.changedNodes ?? [];

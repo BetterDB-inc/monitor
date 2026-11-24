@@ -212,7 +212,7 @@ describe('unclaimedFailovers', () => {
 
     unclaimedFailovers(diffClusterTopology(BEFORE, after), after, claim);
 
-    expect(claim.mock.calls).toEqual([['b', 7]]);
+    expect(claim.mock.calls).toEqual([['b', 7, true]]);
   });
 
   it('names the same new primary when only the demoted primary is seen changing', () => {
@@ -222,7 +222,7 @@ describe('unclaimedFailovers', () => {
 
     unclaimedFailovers(diffClusterTopology(before, after), after, claim);
 
-    expect(claim.mock.calls).toEqual([['b', 7]]);
+    expect(claim.mock.calls).toEqual([['b', 7, false]]);
   });
 
   it('names the same new primary when only a replica is seen following it', () => {
@@ -232,7 +232,25 @@ describe('unclaimedFailovers', () => {
 
     unclaimedFailovers(diffClusterTopology(before, after), after, claim);
 
-    expect(claim.mock.calls).toEqual([['b', 7]]);
+    expect(claim.mock.calls).toEqual([['b', 7, false]]);
+  });
+
+  it('asks once per new primary when the epoch is all that tells two changes apart', () => {
+    const before = snapshotTopology([
+      node({ id: 'a' }),
+      node({ id: 'b', configEpoch: 7 }),
+      replica('c', 'a'),
+    ]);
+    const after = snapshotTopology([
+      replica('a', 'b'),
+      node({ id: 'b', configEpoch: 8 }),
+      replica('c', 'b'),
+    ]);
+    const claim = jest.fn(claimAll);
+
+    unclaimedFailovers(diffClusterTopology(before, after), after, claim);
+
+    expect(claim.mock.calls).toEqual([['b', 8, false]]);
   });
 
   it('returns the diff as it is when every failover in it is claimed here', () => {
@@ -299,6 +317,6 @@ describe('unclaimedFailovers', () => {
 
     unclaimedFailovers(diffClusterTopology(before, after), after, claim);
 
-    expect(claim.mock.calls).toEqual([['gone', 5]]);
+    expect(claim.mock.calls).toEqual([['gone', 5, false]]);
   });
 });
