@@ -51,6 +51,17 @@ export function promotionSignature(primaryId: string, configEpoch: number): Fail
   return { ...followerSignature(primaryId, configEpoch), renewsOnLaterEpoch: true };
 }
 
+function claimOfBoth(kept: HeldClaim, joined: HeldClaim): HeldClaim {
+  const longer = kept.heldUntil < joined.heldUntil ? joined : kept;
+  const epochs = [kept.epoch, joined.epoch].filter((epoch): epoch is number => epoch !== undefined);
+  return {
+    heldUntil: longer.heldUntil,
+    epoch: epochs.length > 0 ? Math.max(...epochs) : undefined,
+    releasedAt: longer.releasedAt,
+    sightingOnly: kept.sightingOnly && joined.sightingOnly,
+  };
+}
+
 @Injectable()
 export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
   private readonly views = new Map<string, ReadonlySet<string>>();
@@ -210,7 +221,7 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
       const moved = `${clusterKey}|${claim.slice(prefix.length)}`;
       const kept = this.claims.get(moved);
       this.claims.delete(claim);
-      if (!kept || kept.heldUntil < held.heldUntil) this.claims.set(moved, held);
+      this.claims.set(moved, kept ? claimOfBoth(kept, held) : held);
     }
   }
 

@@ -390,6 +390,44 @@ describe('ClusterIdentityService', () => {
       ).toBe(false);
     });
 
+    it('keeps the later epoch when the joined cluster held an earlier one for longer', () => {
+      service.observe('member-1', view('a', 'b'));
+      service.observe('manual', view('c', 'd'));
+      service.claimFailover(service.clusterKeyOf('member-1'), promotionSignature('a', 9), NOW);
+      service.claimFailover(
+        service.clusterKeyOf('manual'),
+        followerSignature('a', 7),
+        NOW + 30_000,
+      );
+
+      service.observe(SEED, view('a', 'b', 'c', 'd'));
+
+      expect(
+        service.claimFailover(service.clusterKeyOf(SEED), promotionSignature('a', 9), NOW + 60_000),
+      ).toBe(false);
+    });
+
+    it('stays reported when the joined cluster only sighted the recovery', () => {
+      service.observe('member-1', view('a', 'b'));
+      service.observe('manual', view('c', 'd'));
+      service.claimFailover(service.clusterKeyOf('member-1'), clusterStateSignature('ok'), NOW);
+      service.claimFailover(
+        service.clusterKeyOf('manual'),
+        recoverySightingSignature(),
+        NOW + 30_000,
+      );
+
+      service.observe(SEED, view('a', 'b', 'c', 'd'));
+
+      expect(
+        service.claimFailover(
+          service.clusterKeyOf(SEED),
+          clusterStateSignature('ok'),
+          NOW + 31_000,
+        ),
+      ).toBe(false);
+    });
+
     it('is given once for a recovery that is sighted and not reported', () => {
       service.claimFailover('cluster-1', outageSignature(), NOW);
 
