@@ -82,10 +82,16 @@ describe('PrometheusService cluster.failover per cluster', () => {
     ...overrides,
   });
 
-  async function poll(connectionId: string): Promise<void> {
+  async function poll(
+    connectionId: string,
+    duringTopologyRead: () => void = () => undefined,
+  ): Promise<void> {
     const client = {
       getClusterInfo: jest.fn(async () => clusterInfos[connectionId] ?? clusterInfo()),
-      getClusterNodes: jest.fn(async () => views[connectionId]),
+      getClusterNodes: jest.fn(async () => {
+        duringTopologyRead();
+        return views[connectionId];
+      }),
       getCapabilities: jest.fn().mockReturnValue({ hasClusterSlotStats: false }),
     };
     await service['updateClusterMetricsFromInfo'](
@@ -549,5 +555,13 @@ describe('PrometheusService cluster.failover per cluster', () => {
 
     expect(identity.clusterKeyOf('manual-1')).toBe(identity.clusterKeyOf('manual-2'));
     expect(identity.clusterKeyOf('manual-1')).not.toBe('manual-1');
+  });
+
+  it('keeps the topology of a pass that was replaced during the read to itself', async () => {
+    views['manual-1'] = HEALTHY;
+
+    await poll('manual-1', () => service['retireEpoch']('manual-1'));
+
+    expect(identity.clusterKeyOf('manual-1')).toBe('manual-1');
   });
 });

@@ -2790,6 +2790,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       let topologyDiff: TopologyDiff | null = null;
       try {
         const nodes = await client.getClusterNodes();
+        if (this.isSuperseded(connectionId, epoch)) {
+          return;
+        }
         this.clusterIdentity?.observe(connectionId, nodes);
         topology = snapshotTopology(nodes);
         topologyDiff = diffClusterTopology(state.previousTopology, topology);
