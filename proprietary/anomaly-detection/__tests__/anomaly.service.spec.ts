@@ -7271,6 +7271,51 @@ describe('AnomalyService', () => {
         expect(failovers().map((event) => event.clusterState)).toEqual(['fail', 'ok']);
       });
 
+      it('names the state change as the reason of the outage webhook', async () => {
+        await pollCluster(CLUSTER_A);
+        setState(CLUSTER_A, 'fail');
+
+        await pollCluster(CLUSTER_A);
+
+        expect(failovers()[0].reasons).toEqual(['cluster_state']);
+      });
+
+      it('names failed slots as a second reason of the outage webhook', async () => {
+        await pollCluster(CLUSTER_A);
+        setState(CLUSTER_A, 'fail');
+        slotsFailed = '128';
+
+        await pollCluster(CLUSTER_A);
+
+        expect(failovers()[0].reasons).toEqual(['cluster_state', 'slot_failures']);
+      });
+
+      it('gives the recovery webhook no reasons', async () => {
+        await pollCluster(CLUSTER_A);
+        for (const state of ['fail', 'ok']) {
+          setState(CLUSTER_A, state);
+          await pollCluster(CLUSTER_A);
+        }
+
+        expect(failovers()[1].reasons).toBeUndefined();
+      });
+
+      it('forgets the cluster of a connection that no longer runs in cluster mode', async () => {
+        const ctx = clusterCtx('a', CLUSTER_A);
+        await poll(ctx);
+        (ctx.client.getInfoParsed as jest.Mock).mockResolvedValue({
+          server: { redis_version: '8.0.0' },
+          replication: { role: 'master' },
+          clients: { connected_clients: '10', blocked_clients: '0' },
+          memory: { used_memory: '1000000' },
+          stats: { instantaneous_ops_per_sec: '100', cluster_enabled: '0' },
+        });
+
+        await poll(ctx);
+
+        expect(identity.clusterKeyOf('conn-a')).toBe('conn-a');
+      });
+
       it('sends nothing when the Prometheus poller already reported the outage', async () => {
         await pollCluster(CLUSTER_A);
         identity.claimFailover(identity.clusterKeyOf('conn-a'), outageSignature(), Date.now());

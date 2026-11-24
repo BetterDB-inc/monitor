@@ -10168,6 +10168,7 @@ export class AnomalyService
     const filedConfig = filedUnder === ctx.connectionId ? ctx : this.connectionRegistry.getConfig(filedUnder);
     const slotsFailed = parseInt(clusterInfo.cluster_slots_fail) || 0;
     const knownNodes = parseInt(clusterInfo.cluster_known_nodes) || 0;
+    const outageReasons = slotsFailed > 0 ? ['cluster_state', 'slot_failures'] : ['cluster_state'];
     if (identity && clusterState === 'fail') {
       try {
         this.otelEvents?.dispatch(
@@ -10176,7 +10177,7 @@ export class AnomalyService
             clusterState,
             slotsFailed,
             knownNodes,
-            reasons: slotsFailed > 0 ? 'cluster_state,slot_failures' : 'cluster_state',
+            reasons: outageReasons.join(','),
           },
           filedUnder,
         );
@@ -10188,6 +10189,7 @@ export class AnomalyService
       ?.dispatchClusterFailover({
         clusterState,
         previousState: lastState,
+        reasons: clusterState === 'fail' ? outageReasons : undefined,
         slotsAssigned: parseInt(clusterInfo.cluster_slots_assigned) || 0,
         slotsFailed,
         knownNodes,
