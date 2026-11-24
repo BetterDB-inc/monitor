@@ -32,6 +32,7 @@ import {
   ClusterIdentityService,
   clusterStateSignature,
   outageSignature,
+  recoverySightingSignature,
 } from '@app/cluster/cluster-identity.service';
 import { nodeAclDigest, clusterKeyFromNodes } from '../acl-drift-detector';
 import { RETRY_AMP_LATENCY_VERDICT_TTL_MS } from '../retry-amplification-detector';
@@ -7256,6 +7257,18 @@ describe('AnomalyService', () => {
 
         expect(failovers()).toHaveLength(0);
         expect(otlpFailovers()).toHaveLength(0);
+      });
+
+      it('reports the recovery the Prometheus poller sighted first', async () => {
+        await pollCluster(CLUSTER_A);
+        setState(CLUSTER_A, 'fail');
+        await pollCluster(CLUSTER_A);
+        identity.claimFailover(identity.clusterKeyOf('conn-a'), recoverySightingSignature(), Date.now());
+        setState(CLUSTER_A, 'ok');
+
+        await pollCluster(CLUSTER_A);
+
+        expect(failovers().map((event) => event.clusterState)).toEqual(['fail', 'ok']);
       });
 
       it('sends nothing when the Prometheus poller already reported the outage', async () => {

@@ -8,6 +8,7 @@ export interface FailoverSignature {
   readonly releases?: string;
   readonly epoch?: number;
   readonly renewsOnLaterEpoch?: boolean;
+  readonly sightingOnly?: boolean;
 }
 
 export interface ScopedConnection {
@@ -19,6 +20,7 @@ interface HeldClaim {
   readonly heldUntil: number;
   readonly epoch?: number;
   readonly releasedAt?: number;
+  readonly sightingOnly?: boolean;
 }
 
 const NOT_LIVE_FLAGS = ['handshake', 'noaddr', 'fail', 'fail?'];
@@ -35,6 +37,10 @@ export function outageSignature(): FailoverSignature {
 export function clusterStateSignature(state: string): FailoverSignature {
   if (state === 'fail') return outageSignature();
   return { key: RECOVERY, holdMs: STATE_HOLD_MS, releases: OUTAGE };
+}
+
+export function recoverySightingSignature(): FailoverSignature {
+  return { ...clusterStateSignature('ok'), sightingOnly: true };
 }
 
 export function followerSignature(primaryId: string, configEpoch: number): FailoverSignature {
@@ -119,8 +125,16 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
       held?.releasedAt !== undefined &&
       stateChangedAt !== undefined &&
       stateChangedAt >= held.releasedAt;
-    if (held && !renewed && !released) return false;
-    this.claims.set(claim, { heldUntil: now + signature.holdMs, epoch: signature.epoch });
+    const reportsSighting =
+      held?.sightingOnly === true &&
+      signature.sightingOnly !== true &&
+      held.releasedAt === undefined;
+    if (held && !renewed && !released && !reportsSighting) return false;
+    this.claims.set(claim, {
+      heldUntil: now + signature.holdMs,
+      epoch: signature.epoch,
+      sightingOnly: signature.sightingOnly,
+    });
     if (signature.releases) this.release(`${clusterKey}|${signature.releases}`, now);
     return true;
   }

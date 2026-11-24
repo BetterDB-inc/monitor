@@ -6,6 +6,7 @@ import {
   followerSignature,
   outageSignature,
   promotionSignature,
+  recoverySightingSignature,
 } from './cluster-identity.service';
 
 const SEED = 'seed';
@@ -348,6 +349,64 @@ describe('ClusterIdentityService', () => {
 
       expect(
         service.claimFailover(service.clusterKeyOf(SEED), outageSignature(), NOW + 70_000),
+      ).toBe(false);
+    });
+
+    it('is given once for a recovery that is sighted and not reported', () => {
+      service.claimFailover('cluster-1', outageSignature(), NOW);
+
+      expect(service.claimFailover('cluster-1', recoverySightingSignature(), NOW + 10_000)).toBe(
+        true,
+      );
+      expect(service.claimFailover('cluster-1', recoverySightingSignature(), NOW + 11_000)).toBe(
+        false,
+      );
+    });
+
+    it('is given for a second outage to a poller that sighted the recovery', () => {
+      service.claimFailover('cluster-1', outageSignature(), NOW);
+      service.claimFailover('cluster-1', recoverySightingSignature(), NOW + 10_000, NOW);
+
+      expect(
+        service.claimFailover('cluster-1', outageSignature(), NOW + 30_000, NOW + 10_000),
+      ).toBe(true);
+    });
+
+    it('is given once to a reporter for a recovery that was only sighted', () => {
+      service.claimFailover('cluster-1', recoverySightingSignature(), NOW);
+
+      expect(service.claimFailover('cluster-1', clusterStateSignature('ok'), NOW + 500)).toBe(true);
+      expect(service.claimFailover('cluster-1', clusterStateSignature('ok'), NOW + 900)).toBe(
+        false,
+      );
+    });
+
+    it('is not given as a sighting of a recovery that was reported', () => {
+      service.claimFailover('cluster-1', clusterStateSignature('ok'), NOW);
+
+      expect(service.claimFailover('cluster-1', recoverySightingSignature(), NOW + 500)).toBe(
+        false,
+      );
+    });
+
+    it('is not given to a reporter for a sighted recovery once a new outage was reported', () => {
+      service.claimFailover('cluster-1', outageSignature(), NOW);
+      service.claimFailover('cluster-1', recoverySightingSignature(), NOW + 10_000, NOW);
+      service.claimFailover('cluster-1', outageSignature(), NOW + 12_000, NOW + 10_000);
+
+      expect(
+        service.claimFailover('cluster-1', clusterStateSignature('ok'), NOW + 12_500, NOW + 1_000),
+      ).toBe(false);
+    });
+
+    it('keeps the second outage held when a node sights the first recovery late', () => {
+      service.claimFailover('cluster-1', outageSignature(), NOW);
+      service.claimFailover('cluster-1', recoverySightingSignature(), NOW + 10_000, NOW);
+      service.claimFailover('cluster-1', outageSignature(), NOW + 12_000, NOW + 10_000);
+      service.claimFailover('cluster-1', recoverySightingSignature(), NOW + 12_500, NOW + 1_000);
+
+      expect(
+        service.claimFailover('cluster-1', outageSignature(), NOW + 17_500, NOW + 12_500),
       ).toBe(false);
     });
 

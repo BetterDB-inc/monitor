@@ -57,6 +57,7 @@ import {
   followerSignature,
   outageSignature,
   promotionSignature,
+  recoverySightingSignature,
 } from '../cluster/cluster-identity.service';
 import {
   demotedWritesMessage,
@@ -163,6 +164,7 @@ interface IncidentCount {
 interface ConnectionMetricState {
   previousClusterState: string | null;
   clusterRecoverySeenAt?: number;
+  clusterFailureSeenAt?: number;
   previousSlotsFail: number;
   previousCrcMismatch: number | null;
   previousTopology: TopologySnapshot | null;
@@ -2833,7 +2835,11 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       // a pass abandoned at its bound mid-dispatch has already emitted the
       // event, and leaving the edge uncommitted would page again next poll.
       if (previousClusterState === 'fail' && clusterState === 'ok') {
+        this.claimFailover(connectionId, recoverySightingSignature(), state.clusterFailureSeenAt);
         state.clusterRecoverySeenAt = Date.now();
+      }
+      if (stateChanged) {
+        state.clusterFailureSeenAt = Date.now();
       }
       state.previousClusterState = clusterState;
       state.previousSlotsFail = slotsFail;

@@ -364,6 +364,39 @@ describe('PrometheusService cluster.failover per cluster', () => {
     expect(otlpFailovers()).toHaveLength(2);
   });
 
+  it('reports a second outage within a minute when no other service reports the recovery', async () => {
+    const everyone = [SEED, ...MEMBERS];
+    await pollAll(everyone, HEALTHY);
+    for (const state of ['fail', 'ok', 'fail']) {
+      jest.advanceTimersByTime(POLL_INTERVAL_MS);
+      for (const id of everyone) clusterInfos[id] = clusterInfo({ cluster_state: state });
+      await pollAll(everyone, HEALTHY);
+    }
+
+    expect(failoverEvents()).toHaveLength(2);
+    expect(otlpFailovers()).toHaveLength(2);
+  });
+
+  it('sends nothing more when a node shows the first recovery after the second outage', async () => {
+    await pollAll([SEED, 'member-1'], HEALTHY);
+    const seen: Array<[string, string]> = [
+      [SEED, 'fail'],
+      ['member-1', 'fail'],
+      [SEED, 'ok'],
+      [SEED, 'fail'],
+      ['member-1', 'ok'],
+      ['member-1', 'fail'],
+    ];
+    for (const [id, state] of seen) {
+      jest.advanceTimersByTime(POLL_INTERVAL_MS);
+      clusterInfos[id] = clusterInfo({ cluster_state: state });
+      await pollAll([id], HEALTHY);
+    }
+
+    expect(failoverEvents()).toHaveLength(2);
+    expect(otlpFailovers()).toHaveLength(2);
+  });
+
   it('sends nothing for the late failure of a node after the recovery was reported', async () => {
     await pollAll([SEED, ...MEMBERS], HEALTHY);
     const clusterKey = identity.clusterKeyOf(SEED);
