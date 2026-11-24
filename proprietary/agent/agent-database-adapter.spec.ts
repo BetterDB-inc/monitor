@@ -37,6 +37,24 @@ describe('AgentDatabaseAdapter getInfo', () => {
   });
 });
 
+describe('AgentDatabaseAdapter capabilities', () => {
+  function slotStats(type: 'valkey' | 'redis', version: string, capabilities = ['CLUSTER']) {
+    const hello = { valkey: { type, version }, capabilities };
+    const adapter = new AgentDatabaseAdapter(new FakeSocket() as unknown as WebSocket, hello as never);
+    return adapter.getCapabilities().hasClusterSlotStats;
+  }
+
+  it('gates CLUSTER SLOT-STATS on the server version, not on cluster mode alone', () => {
+    expect(slotStats('valkey', '7.2.5')).toBe(false);
+    expect(slotStats('valkey', '8.0.1')).toBe(true);
+    expect(slotStats('valkey', '9.0.6')).toBe(true);
+    expect(slotStats('redis', '7.2.4')).toBe(false);
+    expect(slotStats('redis', '8.0.0')).toBe(false);
+    expect(slotStats('redis', '8.2.1')).toBe(true);
+    expect(slotStats('valkey', '9.0.6', [])).toBe(false);
+  });
+});
+
 describe('AgentDatabaseAdapter read-only', () => {
   const identity = { platform: 'openeverest', cluster: 'main', namespace: 'db', instance: 'vk', node: 'n1' };
 
