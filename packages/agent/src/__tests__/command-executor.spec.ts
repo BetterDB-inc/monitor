@@ -190,6 +190,19 @@ describe('CommandExecutor read-only', () => {
     expect(call.mock.calls.map((c) => c.join(' '))).toEqual(['SLOWLOG GET 10', 'CLUSTER NODES']);
   });
 
+  it('redacts credentials from CONFIG GET replies, including a glob that covers them', async () => {
+    const config = jest.fn().mockResolvedValue(['requirepass', 's3cret', 'maxmemory', '0', 'masterauth', 's3cret']);
+    const client = { call: jest.fn(), config, info: jest.fn() } as unknown as Valkey;
+
+    const readOnly = new CommandExecutor(client, { readOnly: true });
+    expect(await readOnly.execute('CONFIG', ['GET', '*'])).toEqual(['requirepass', '<redacted>', 'maxmemory', '0', 'masterauth', '<redacted>']);
+    expect(await readOnly.execute('CONFIG', ['GET', 'requirepass'])).toEqual(['requirepass', '<redacted>', 'maxmemory', '0', 'masterauth', '<redacted>']);
+    expect(config).toHaveBeenLastCalledWith('GET', 'requirepass');
+
+    const plain = new CommandExecutor(client, {});
+    expect(await plain.execute('CONFIG', ['GET', '*'])).toEqual(['requirepass', 's3cret', 'maxmemory', '0', 'masterauth', 's3cret']);
+  });
+
   it('allows the RESET sub-commands when not read-only, as before', async () => {
     const { executor, call } = executorWith({});
 

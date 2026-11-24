@@ -1,4 +1,27 @@
-import { checkAgentReadOnly, AGENT_READ_ONLY_MESSAGE } from '@betterdb/shared';
+import { checkAgentReadOnly, isConfigGet, redactConfigGetReply, AGENT_READ_ONLY_MESSAGE } from '@betterdb/shared';
+
+describe('redactConfigGetReply', () => {
+  it('redacts every credential parameter in a flat reply and keeps the rest', () => {
+    expect(redactConfigGetReply(['requirepass', 'p', 'maxmemory', '1gb', 'masterauth', 'p', 'MasterUser', 'u', 'tls-key-file-pass', 'k']))
+      .toEqual(['requirepass', '<redacted>', 'maxmemory', '1gb', 'masterauth', '<redacted>', 'MasterUser', '<redacted>', 'tls-key-file-pass', '<redacted>']);
+  });
+
+  it('leaves an unset credential empty, so "no password" still reads as such', () => {
+    expect(redactConfigGetReply(['requirepass', ''])).toEqual(['requirepass', '']);
+  });
+
+  it('handles RESP3 maps and passes anything else through', () => {
+    expect(redactConfigGetReply({ requirepass: 'p', maxmemory: '0' })).toEqual({ requirepass: '<redacted>', maxmemory: '0' });
+    expect(redactConfigGetReply('OK')).toBe('OK');
+    expect(redactConfigGetReply(['odd'])).toEqual(['odd']);
+  });
+
+  it('identifies CONFIG GET case-insensitively and nothing else', () => {
+    expect(isConfigGet('config', ['get', '*'])).toBe(true);
+    expect(isConfigGet('CONFIG', ['SET', 'x', 'y'])).toBe(false);
+    expect(isConfigGet('INFO', ['server'])).toBe(false);
+  });
+});
 
 describe('checkAgentReadOnly', () => {
   it.each([

@@ -5,12 +5,16 @@ import { AgentDatabaseAdapter } from './agent-database-adapter';
 class FakeSocket extends EventEmitter {
   readyState = 1;
   commands: Array<{ id: string; cmd: string; args: string[] }> = [];
+  /** Reply for a command; defaults to an INFO-shaped section for the first arg. */
+  reply: (command: { cmd: string; args: string[] }) => unknown = (command) => {
+    const [section] = command.args;
+    return `# ${section}\r\n${section}_field:1\r\n`;
+  };
 
   send(payload: string): void {
     const command = JSON.parse(payload);
     this.commands.push(command);
-    const [section] = command.args;
-    const data = `# ${section}\r\n${section}_field:1\r\n`;
+    const data = this.reply(command);
     setImmediate(() => {
       this.emit('message', JSON.stringify({ id: command.id, type: 'response', data }));
     });
@@ -52,7 +56,30 @@ describe('AgentDatabaseAdapter read-only', () => {
     await expect(adapter.killClient({})).rejects.toThrow();
 
     expect(socket.commands).toHaveLength(0);
-    expect(adapter.isReadOnly()).toBe(true);
+  });
+
+  it('redacts credential values in CONFIG GET replies, whatever pattern was asked for', async () => {
+    const socket = new FakeSocket();
+    socket.reply = () => ['requirepass', 'hunter2', 'maxmemory', '0', 'masterauth', 'hunter2', 'appendonly', 'no'];
+    const hello = { valkey: { type: 'valkey', version: '8.1.0' }, capabilities: ['CONFIG'], readOnly: true, identity };
+    const adapter = new AgentDatabaseAdapter(socket as unknown as WebSocket, hello as never);
+
+    expect(await adapter.call('CONFIG', ['GET', '*'], { cli: true })).toEqual([
+      'requirepass', '<redacted>', 'maxmemory', '0', 'masterauth', '<redacted>', 'appendonly', 'no',
+    ]);
+    expect(await adapter.call('config', ['get', 'requirepass'], { cli: true })).toEqual([
+      'requirepass', '<redacted>', 'maxmemory', '0', 'masterauth', '<redacted>', 'appendonly', 'no',
+    ]);
+    expect(await adapter.getConfigValue('maxmemory')).toBe('0');
+  });
+
+  it('leaves CONFIG GET replies alone when the agent did not ask for read-only', async () => {
+    const socket = new FakeSocket();
+    socket.reply = () => ['requirepass', 'hunter2'];
+    const hello = { valkey: { type: 'valkey', version: '8.1.0' }, capabilities: ['CONFIG'], readOnly: false };
+    const adapter = new AgentDatabaseAdapter(socket as unknown as WebSocket, hello as never);
+
+    expect(await adapter.call('CONFIG', ['GET', 'requirepass'], { cli: true })).toEqual(['requirepass', 'hunter2']);
   });
 
   it('refuses CLIENT KILL and CONFIG SET sent through call(), as the CLI does', async () => {
@@ -80,6 +107,5 @@ describe('AgentDatabaseAdapter read-only', () => {
     await adapter.resetSlowLog();
 
     expect(socket.commands.map((c) => [c.cmd, ...c.args])).toEqual([['SLOWLOG', 'RESET']]);
-    expect(adapter.isReadOnly()).toBe(false);
   });
 });

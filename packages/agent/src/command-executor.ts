@@ -1,6 +1,6 @@
 import Valkey from 'iovalkey';
 import type { KeyAnalyticsOptions, KeyDetail, KeyPatternData } from '@betterdb/shared';
-import { extractPattern, checkAgentReadOnly, checkBlocked, checkSafeMode, pruneKeyDetails, KEY_DETAILS_PRUNE_AT, STALE_KEY_IDLE_SECONDS } from '@betterdb/shared';
+import { extractPattern, checkAgentReadOnly, checkBlocked, checkSafeMode, pruneKeyDetails, redactConfigGetReply, KEY_DETAILS_PRUNE_AT, STALE_KEY_IDLE_SECONDS } from '@betterdb/shared';
 
 // OBJECT IDLETIME is rejected under an LFU maxmemory-policy and OBJECT FREQ
 // under any other; both errors name the LFU policy.
@@ -83,7 +83,9 @@ export class CommandExecutor {
     }
 
     if (upperCmd === 'CONFIG' && args) {
-      return this.client.config('GET', ...args.slice(1));
+      const reply = await this.client.config('GET', ...args.slice(1));
+      // Read-only holds the admin user: never ship requirepass/masterauth out.
+      return this.readOnly ? redactConfigGetReply(reply) : reply;
     }
 
     if (upperCmd === 'COLLECT_KEY_ANALYTICS' && args) {

@@ -43,7 +43,7 @@ import {
   FIELD_NAME_RE,
 } from '../../apps/api/src/database/parsers/vector-index.parser';
 import type { AgentHelloMessage, KeyAnalyticsOptions, KeyAnalyticsResult } from '@betterdb/shared';
-import { checkAgentReadOnly } from '@betterdb/shared';
+import { checkAgentReadOnly, isConfigGet, redactConfigGetReply } from '@betterdb/shared';
 
 const COMMAND_TIMEOUT_MS = 15000;
 
@@ -109,6 +109,17 @@ export class AgentDatabaseAdapter implements DatabasePort {
   }
 
   private sendCommandWithBinary(
+    cmd: string,
+    args?: string[],
+    binaryArgs?: Record<string, string>,
+    options?: { cli?: boolean },
+  ): Promise<unknown> {
+    const reply = this.exchange(cmd, args, binaryArgs, options);
+    // The agent redacts too; this covers an older agent that does not.
+    return this.readOnly && isConfigGet(cmd, args) ? reply.then(redactConfigGetReply) : reply;
+  }
+
+  private exchange(
     cmd: string,
     args?: string[],
     binaryArgs?: Record<string, string>,
@@ -361,10 +372,6 @@ export class AgentDatabaseAdapter implements DatabasePort {
 
   async killClient(_filters: ClientFilters): Promise<number> {
     throw new Error('killClient is not supported through agent connections');
-  }
-
-  isReadOnly(): boolean {
-    return this.readOnly;
   }
 
   // --- ACL ---

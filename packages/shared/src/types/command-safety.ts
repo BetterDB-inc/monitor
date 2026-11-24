@@ -136,13 +136,61 @@ export function checkMemberReadOnly(command: string, subCommand?: string): strin
   return checkSafeMode(command, subCommand);
 }
 
-const READ_ONLY_DENIED_SUBCOMMANDS: Readonly<Record<string, ReadonlySet<string>>> = {
-  SLOWLOG: new Set(['RESET']),
-  COMMANDLOG: new Set(['RESET']),
-  LATENCY: new Set(['RESET']),
-};
-
 export const AGENT_READ_ONLY_MESSAGE = 'This agent connection is read-only.';
+
+/**
+ * CONFIG parameters whose values are credentials. A read-only agent connection
+ * holds the admin user, so CONFIG GET on these (or on a glob covering them,
+ * like `*`) must not hand the password to whoever can reach the Monitor.
+ */
+export const SECRET_CONFIG_PARAMETERS: ReadonlySet<string> = new Set([
+  'requirepass',
+  'masterauth',
+  'masteruser',
+  'primaryauth',
+  'primaryuser',
+  'tls-key-file-pass',
+  'tls-client-key-file-pass',
+]);
+
+export const REDACTED_CONFIG_VALUE = '<redacted>';
+
+export function isSecretConfigParameter(name: string): boolean {
+  return SECRET_CONFIG_PARAMETERS.has(name.toLowerCase());
+}
+
+/**
+ * Redacts credential values in a CONFIG GET reply, which is a flat
+ * [name, value, name, value, ...] array (RESP2) or a name -> value object
+ * (RESP3). Anything else is returned untouched. Redacting rather than denying
+ * keeps `CONFIG GET *` and the Monitor's own maxmemory/eviction reads working.
+ */
+export function redactConfigGetReply(reply: unknown): unknown {
+  if (Array.isArray(reply)) {
+    if (reply.length % 2 !== 0) return reply;
+    const out = reply.slice();
+    for (let i = 0; i + 1 < out.length; i += 2) {
+      const name = out[i];
+      if (typeof name === 'string' && isSecretConfigParameter(name) && out[i + 1] !== '') {
+        out[i + 1] = REDACTED_CONFIG_VALUE;
+      }
+    }
+    return out;
+  }
+  if (reply !== null && typeof reply === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [name, value] of Object.entries(reply as Record<string, unknown>)) {
+      out[name] = isSecretConfigParameter(name) && value !== '' ? REDACTED_CONFIG_VALUE : value;
+    }
+    return out;
+  }
+  return reply;
+}
+
+/** True for `CONFIG GET ...`, the one read whose reply needs redactConfigGetReply. */
+export function isConfigGet(command: string, args?: readonly string[]): boolean {
+  return command.toUpperCase() === 'CONFIG' && args?.[0]?.toUpperCase() === 'GET';
+}
 
 /**
  * Check if a command may run on a read-only agent connection, one where the
@@ -154,7 +202,8 @@ export const AGENT_READ_ONLY_MESSAGE = 'This agent connection is read-only.';
  */
 export function checkAgentReadOnly(command: string, args?: readonly string[]): string | null {
   const subCommand = args?.[0]?.toUpperCase();
-  if (subCommand !== undefined && READ_ONLY_DENIED_SUBCOMMANDS[command]?.has(subCommand)) {
+  // The same RESET sub-commands a read-only member may not run.
+  if (subCommand !== undefined && MEMBER_DENIED_SUBCOMMANDS[command]?.has(subCommand)) {
     return AGENT_READ_ONLY_MESSAGE;
   }
   if (command === 'ACL' && subCommand === 'LOG' && args?.[1]?.toUpperCase() === 'RESET') {
