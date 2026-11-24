@@ -65,6 +65,10 @@ export class Agent {
   private capabilities: string[] = [];
   private readonly tag: string;
 
+  private executorOptions(): { unsafeMode: boolean; readOnly: boolean } {
+    return { unsafeMode: this.config.unsafeMode, readOnly: this.config.readOnly === true };
+  }
+
   private tlsOptions(): TlsConnectionOptions {
     const options = this.config.valkeyTlsOptions;
     if (!options) return {};
@@ -189,7 +193,7 @@ export class Agent {
       this.attachClientHandlers(this.client);
       // Assign executor before connect() so any WS command that arrives in the
       // same tick as the 'connect' event dispatches to the live client.
-      this.executor = new CommandExecutor(this.client, { unsafeMode: this.config.unsafeMode });
+      this.executor = new CommandExecutor(this.client, this.executorOptions());
       await this.client.connect();
       // Mirror start(): explicitly set the flag so commands aren't rejected
       // if the 'connect' event fires in a deferred tick.
@@ -250,7 +254,7 @@ export class Agent {
     try {
       this.client = await this.createValkeyClient('BetterDB-Agent');
       this.attachClientHandlers(this.client);
-      this.executor = new CommandExecutor(this.client, { unsafeMode: this.config.unsafeMode });
+      this.executor = new CommandExecutor(this.client, this.executorOptions());
       await this.client.connect();
       this.valkeyConnected = true;
 
@@ -426,7 +430,7 @@ export class Agent {
         client.quit().catch(() => {});
         throw new Error('CLI connection invalidated by IAM rotation');
       }
-      this.cliExecutor = new CommandExecutor(client, { unsafeMode: this.config.unsafeMode });
+      this.cliExecutor = new CommandExecutor(client, this.executorOptions());
       console.log(`${this.tag} CLI client connected`);
       return this.cliExecutor;
     })().finally(() => {

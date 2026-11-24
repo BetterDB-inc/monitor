@@ -1,6 +1,6 @@
 import Valkey from 'iovalkey';
 import type { KeyAnalyticsOptions, KeyDetail, KeyPatternData } from '@betterdb/shared';
-import { extractPattern, checkBlocked, checkSafeMode, pruneKeyDetails, KEY_DETAILS_PRUNE_AT, STALE_KEY_IDLE_SECONDS } from '@betterdb/shared';
+import { extractPattern, checkAgentReadOnly, checkBlocked, checkSafeMode, pruneKeyDetails, KEY_DETAILS_PRUNE_AT, STALE_KEY_IDLE_SECONDS } from '@betterdb/shared';
 
 // OBJECT IDLETIME is rejected under an LFU maxmemory-policy and OBJECT FREQ
 // under any other; both errors name the LFU policy.
@@ -19,15 +19,20 @@ const SIZE_COMMAND_BY_TYPE = new Map<string, string>([
 
 export class CommandExecutor {
   private readonly unsafeMode: boolean;
+  // Read-only is enforced here as well as in the Monitor: the OpenEverest mode
+  // holds the admin password, and a compromised or impersonated server must
+  // not be able to turn that into a mutation. It overrides unsafeMode.
+  private readonly readOnly: boolean;
   // Which OBJECT probe the key scan sends; flips when the server's eviction
   // policy rejects the current one (see isLfuPolicyMismatch).
   private keyScanUsesLfu = false;
 
   constructor(
     private readonly client: Valkey,
-    options?: { unsafeMode?: boolean },
+    options?: { unsafeMode?: boolean; readOnly?: boolean },
   ) {
     this.unsafeMode = options?.unsafeMode ?? false;
+    this.readOnly = options?.readOnly ?? false;
   }
 
   isAllowed(cmd: string, args?: string[]): boolean {
@@ -35,6 +40,10 @@ export class CommandExecutor {
     const subCommand = args?.[0]?.toUpperCase();
 
     if (checkBlocked(upperCmd, subCommand)) {
+      return false;
+    }
+
+    if (this.readOnly && checkAgentReadOnly(upperCmd, args) !== null) {
       return false;
     }
 

@@ -149,3 +149,52 @@ describe('CommandExecutor COLLECT_KEY_ANALYTICS', () => {
     expect(result.keyDetails?.filter((k) => k.freqScore === 7)).toHaveLength(2);
   });
 });
+
+describe('CommandExecutor read-only', () => {
+  function executorWith(options: { unsafeMode?: boolean; readOnly?: boolean }) {
+    const call = jest.fn().mockResolvedValue('OK');
+    const client = { call, config: jest.fn().mockResolvedValue([]), info: jest.fn().mockResolvedValue('') } as unknown as Valkey;
+    return { executor: new CommandExecutor(client, options), call };
+  }
+
+  it.each([
+    ['SLOWLOG', ['RESET']],
+    ['COMMANDLOG', ['RESET', 'slow']],
+    ['LATENCY', ['RESET']],
+    ['ACL', ['LOG', 'RESET']],
+    ['CLIENT', ['KILL', 'ID', '7']],
+    ['CONFIG', ['SET', 'maxmemory', '0']],
+    ['FLUSHALL', []],
+  ])('refuses %s %j locally, before it reaches the server', async (cmd, args) => {
+    const { executor, call } = executorWith({ readOnly: true });
+
+    expect(executor.isAllowed(cmd, args)).toBe(false);
+    await expect(executor.execute(cmd, args)).rejects.toThrow('Command not allowed');
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it('keeps refusing mutations even with unsafe mode on', async () => {
+    const { executor, call } = executorWith({ readOnly: true, unsafeMode: true });
+
+    await expect(executor.execute('SET', ['k', 'v'])).rejects.toThrow('Command not allowed');
+    await expect(executor.execute('SLOWLOG', ['RESET'])).rejects.toThrow('Command not allowed');
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it('still runs reads', async () => {
+    const { executor, call } = executorWith({ readOnly: true });
+
+    await executor.execute('SLOWLOG', ['GET', '10']);
+    await executor.execute('CLUSTER', ['NODES']);
+
+    expect(call.mock.calls.map((c) => c.join(' '))).toEqual(['SLOWLOG GET 10', 'CLUSTER NODES']);
+  });
+
+  it('allows the RESET sub-commands when not read-only, as before', async () => {
+    const { executor, call } = executorWith({});
+
+    await executor.execute('SLOWLOG', ['RESET']);
+
+    expect(call).toHaveBeenCalledWith('SLOWLOG', 'RESET');
+  });
+});
