@@ -5,18 +5,22 @@ import { ConnectionRegistry } from '../connections/connection-registry.service';
 export interface FailoverSignature {
   readonly key: string;
   readonly holdMs: number;
+  readonly releases?: string;
 }
 
 const STATE_HOLD_MS = 60_000;
 const PROMOTION_HOLD_MS = 10 * 60_000;
 
+const OUTAGE = 'outage';
+const RECOVERY = 'recovery';
+
 export function outageSignature(): FailoverSignature {
-  return { key: 'outage', holdMs: STATE_HOLD_MS };
+  return { key: OUTAGE, holdMs: STATE_HOLD_MS, releases: RECOVERY };
 }
 
-export function clusterStateSignature(from: string, to: string): FailoverSignature {
-  if (to === 'fail') return outageSignature();
-  return { key: `state:${from}>${to}`, holdMs: STATE_HOLD_MS };
+export function clusterStateSignature(state: string): FailoverSignature {
+  if (state === 'fail') return outageSignature();
+  return { key: RECOVERY, holdMs: STATE_HOLD_MS, releases: OUTAGE };
 }
 
 export function promotionSignature(primaryId: string, configEpoch: number): FailoverSignature {
@@ -78,6 +82,7 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
     const claim = `${clusterKey}|${signature.key}`;
     if (this.claims.has(claim)) return false;
     this.claims.set(claim, now + signature.holdMs);
+    if (signature.releases) this.claims.delete(`${clusterKey}|${signature.releases}`);
     return true;
   }
 

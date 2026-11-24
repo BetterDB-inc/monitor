@@ -10152,7 +10152,7 @@ export class AnomalyService
     clusterInfo: Record<string, string>,
   ): void {
     const identity = this.clusterIdentity;
-    const signature = clusterStateSignature(lastState, clusterState);
+    const signature = clusterStateSignature(clusterState);
     if (identity && !identity.claimFailover(identity.clusterKeyOf(ctx.connectionId), signature, Date.now())) return;
     const filedUnder = identity?.eventConnectionOf(ctx.connectionId) ?? ctx.connectionId;
     const filedConfig = filedUnder === ctx.connectionId ? ctx : this.connectionRegistry.getConfig(filedUnder);

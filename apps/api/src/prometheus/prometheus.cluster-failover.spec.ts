@@ -311,11 +311,7 @@ describe('PrometheusService cluster.failover per cluster', () => {
 
   it('sends nothing for slot failures of an outage the anomaly service already reported', async () => {
     await pollAll([SEED, ...MEMBERS], HEALTHY);
-    identity.claimFailover(
-      identity.clusterKeyOf(SEED),
-      clusterStateSignature('ok', 'fail'),
-      Date.now(),
-    );
+    identity.claimFailover(identity.clusterKeyOf(SEED), clusterStateSignature('fail'), Date.now());
     for (const id of [SEED, ...MEMBERS]) {
       clusterInfos[id] = clusterInfo({ cluster_state: 'fail', cluster_slots_fail: '100' });
     }
@@ -324,6 +320,22 @@ describe('PrometheusService cluster.failover per cluster', () => {
 
     expect(failoverEvents()).toHaveLength(0);
     expect(otlpFailovers()).toHaveLength(0);
+  });
+
+  it('reports a second outage that follows a reported recovery within a minute', async () => {
+    const everyone = [SEED, ...MEMBERS];
+    await pollAll(everyone, HEALTHY);
+    for (const id of everyone) clusterInfos[id] = clusterInfo({ cluster_state: 'fail' });
+    await pollAll(everyone, HEALTHY);
+    identity.claimFailover(identity.clusterKeyOf(SEED), clusterStateSignature('ok'), Date.now());
+    for (const id of everyone) clusterInfos[id] = clusterInfo();
+    await pollAll(everyone, HEALTHY);
+    for (const id of everyone) clusterInfos[id] = clusterInfo({ cluster_state: 'fail' });
+
+    await pollAll(everyone, HEALTHY);
+
+    expect(failoverEvents()).toHaveLength(2);
+    expect(otlpFailovers()).toHaveLength(2);
   });
 
   it('reports only what is new when a poll sees a reported state change and a promotion', async () => {
@@ -349,11 +361,7 @@ describe('PrometheusService cluster.failover per cluster', () => {
 
   it('sends nothing for a state change another poller already reported', async () => {
     await pollAll([SEED, ...MEMBERS], HEALTHY);
-    identity.claimFailover(
-      identity.clusterKeyOf(SEED),
-      clusterStateSignature('ok', 'fail'),
-      Date.now(),
-    );
+    identity.claimFailover(identity.clusterKeyOf(SEED), clusterStateSignature('fail'), Date.now());
     for (const id of [SEED, ...MEMBERS]) clusterInfos[id] = clusterInfo({ cluster_state: 'fail' });
 
     await pollAll([SEED, ...MEMBERS], HEALTHY);

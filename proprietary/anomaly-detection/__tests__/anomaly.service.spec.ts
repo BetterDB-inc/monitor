@@ -7165,6 +7165,17 @@ describe('AnomalyService', () => {
         expect(failovers()[1]).toMatchObject({ clusterState: 'ok', previousState: 'fail' });
       });
 
+      it('reports a second outage and its recovery within a minute of the first', async () => {
+        await pollCluster(CLUSTER_A);
+        for (const state of ['fail', 'ok', 'fail', 'ok']) {
+          setState(CLUSTER_A, state);
+          await pollCluster(CLUSTER_A);
+        }
+
+        expect(failovers().map((event) => event.clusterState)).toEqual(['fail', 'ok', 'fail', 'ok']);
+        expect(otlpFailovers()).toHaveLength(2);
+      });
+
       it('sends one cluster.failover per cluster when two clusters fail', async () => {
         await pollCluster(CLUSTER_A);
         await pollCluster(CLUSTER_X);
@@ -7191,7 +7202,7 @@ describe('AnomalyService', () => {
 
       it('sends nothing when the failure was already reported for the cluster', async () => {
         await pollCluster(CLUSTER_A);
-        identity.claimFailover(identity.clusterKeyOf('conn-a'), clusterStateSignature('ok', 'fail'), Date.now());
+        identity.claimFailover(identity.clusterKeyOf('conn-a'), clusterStateSignature('fail'), Date.now());
         setState(CLUSTER_A, 'fail');
 
         await pollCluster(CLUSTER_A);

@@ -146,7 +146,7 @@ describe('ClusterIdentityService', () => {
 
     it.each([
       ['an outage', outageSignature()],
-      ['a recovery', clusterStateSignature('fail', 'ok')],
+      ['a recovery', clusterStateSignature('ok')],
     ])('holds %s for one minute', (_name, signature) => {
       service.claimFailover('cluster-1', signature, NOW);
 
@@ -155,17 +155,40 @@ describe('ClusterIdentityService', () => {
     });
 
     it('treats a state failure and new slot failures as one outage', () => {
-      service.claimFailover('cluster-1', clusterStateSignature('ok', 'fail'), NOW);
+      service.claimFailover('cluster-1', clusterStateSignature('fail'), NOW);
 
       expect(service.claimFailover('cluster-1', outageSignature(), NOW)).toBe(false);
     });
 
     it('treats a failure and the recovery from it as two changes', () => {
-      service.claimFailover('cluster-1', clusterStateSignature('ok', 'fail'), NOW);
+      service.claimFailover('cluster-1', clusterStateSignature('fail'), NOW);
 
-      expect(service.claimFailover('cluster-1', clusterStateSignature('fail', 'ok'), NOW)).toBe(
+      expect(service.claimFailover('cluster-1', clusterStateSignature('ok'), NOW)).toBe(true);
+    });
+
+    it('is given for a second outage once the recovery from the first was reported', () => {
+      service.claimFailover('cluster-1', outageSignature(), NOW);
+      service.claimFailover('cluster-1', clusterStateSignature('ok'), NOW + 10_000);
+
+      expect(service.claimFailover('cluster-1', outageSignature(), NOW + 30_000)).toBe(true);
+    });
+
+    it('is given for a second recovery once another outage was reported', () => {
+      service.claimFailover('cluster-1', clusterStateSignature('ok'), NOW);
+      service.claimFailover('cluster-1', outageSignature(), NOW + 10_000);
+
+      expect(service.claimFailover('cluster-1', clusterStateSignature('ok'), NOW + 30_000)).toBe(
         true,
       );
+    });
+
+    it('keeps the outage of another cluster claimed when this one recovers', () => {
+      service.claimFailover('cluster-1', outageSignature(), NOW);
+      service.claimFailover('cluster-2', outageSignature(), NOW);
+
+      service.claimFailover('cluster-1', clusterStateSignature('ok'), NOW + 10_000);
+
+      expect(service.claimFailover('cluster-2', outageSignature(), NOW + 30_000)).toBe(false);
     });
 
     it('drops claims whose hold has passed', () => {
