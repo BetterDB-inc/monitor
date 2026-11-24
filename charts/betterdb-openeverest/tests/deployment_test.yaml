@@ -130,11 +130,15 @@ tests:
       - notExists:
           path: spec.template.spec.volumes
 
-  - it: runs non-root with a read-only root filesystem by default
+  - it: runs non-root, as the image's numeric uid, with a read-only root filesystem by default
     asserts:
       - equal:
           path: spec.template.spec.containers[0].securityContext.runAsNonRoot
           value: true
+      # runAsNonRoot needs a numeric uid; the image's USER is a name (agent, uid 100).
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsUser
+          value: 100
       - equal:
           path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
           value: true

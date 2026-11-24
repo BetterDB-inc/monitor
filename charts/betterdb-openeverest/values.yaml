@@ -125,6 +125,11 @@ podSecurityContext:
     type: RuntimeDefault
 securityContext:
   runAsNonRoot: true
+  # The betterdb/agent image runs as the `agent` user (uid 100, gid 101).
+  # The uid has to be numeric here: with runAsNonRoot the kubelet refuses to
+  # start a container whose image names its user instead of numbering it.
+  runAsUser: 100
+  runAsGroup: 101
   allowPrivilegeEscalation: false
   readOnlyRootFilesystem: true
   capabilities:
