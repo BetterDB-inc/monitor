@@ -74,8 +74,10 @@ helm install betterdb-openeverest oci://ghcr.io/betterdb/charts/betterdb-openeve
   --set-file betterdb.ca=./internal-ca.pem
 ```
 
-The bundle is mounted into the pod and passed as `BETTERDB_CA_FILE`; the system trust store still
-applies. `betterdb.caFile` points at a bundle you mount yourself through `extraVolumes`.
+The bundle goes into its own Secret (so it combines with `betterdb.existingSecret`), is mounted
+into the pod and passed as `BETTERDB_CA_FILE`; the agent trusts it in addition to the public
+roots. `betterdb.existingCaSecret.name` (key `ca.crt` by default) uses a Secret you already have,
+and `betterdb.caFile` points at a bundle you mount yourself through `extraVolumes`.
 
 The Monitor's ingress must pass WebSocket upgrades on `/api/agent/ws`; see the
 [Kubernetes guide](kubernetes.md).

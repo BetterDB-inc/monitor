@@ -238,6 +238,8 @@ Facts learned while implementing that correct the plan above:
 - `providers` scoping lives on the extension point (in the CR's `frontend.extensionPoints[]` and in `registerExtension`), not at the top of the Plugin spec. The tab props carry `instanceName` and `namespace`; the cluster name comes from `api.basePath`.
 - `status.connectionSecretRef` is an object `{name}`. provider-valkey always runs `cluster-enabled yes`, so per-node discovery is the only path; the agent's single-node fallback is for other sources.
 - Node identity uses the Valkey cluster node id (stable in `nodes.conf` on the volume), with the pod name from reverse DNS for display. Pod IPs change on restart, so they are not part of the identity.
+- Connection ids are scoped by the agent token's **name**, not its id: tokens have no owner today, and the name is the handle an admin controls. Rotating a token under the same name keeps the ids; a token under another name cannot take a node over. Identities are validated on arrival and capped at 512 per token.
+- Read-only connections redact `requirepass`, `masterauth`/`primaryauth` and the TLS passphrases in `CONFIG GET` replies (agent and Monitor both), rather than denying `CONFIG GET`, so the Monitor's own config reads keep working.
 
 ### TODO (out of scope of the first PR)
 

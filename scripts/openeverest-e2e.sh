@@ -222,16 +222,42 @@ log "Checking a mutation is refused and a read works on an agent connection"
 first_id="$(grep '"connectionType":"agent"' "$connections_file" | head -n1 | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).id))')"
 node scripts/e2e/check-read-only.mjs "http://localhost:$MONITOR_PORT" "$first_id"
 
-log "Disabling and checking the connections go away"
-plugin off | grep -q '"enabled":false' || die "disable failed"
-remaining=""
-for _ in $(seq 1 24); do
-  list_connections
-  remaining="$(count_in '"connectionType":"agent"')"
-  [ "$remaining" = "0" ] && break
+wait_for_agents() {
+  local want="$1" remaining=""
+  for _ in $(seq 1 36); do
+    list_connections
+    remaining="$(count_in '"connectionType":"agent"')"
+    [ "$remaining" = "$want" ] && return 0
+    sleep 5
+  done
+  die "expected $want agent connections, still $remaining"
+}
+
+log "Restarting the plugin pod and checking the opt-in survives, then disabling"
+kubectl -n "$OE_NAMESPACE" rollout restart deploy/betterdb-openeverest >/dev/null
+kubectl -n "$OE_NAMESPACE" rollout status deploy/betterdb-openeverest --timeout=180s >/dev/null
+for _ in $(seq 1 30); do
+  st="$(plugin status | tail -n +2 | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).enabled+" "+JSON.parse(s).status.state))' 2>/dev/null || echo "")"
+  [ "$st" = "true monitoring" ] && break
   sleep 5
 done
-[ "${remaining:-1}" = "0" ] || die "$remaining agent connections still listed after disable"
+[ "${st:-}" = "true monitoring" ] || die "after a restart the plugin reports: ${st:-nothing}"
+wait_for_agents "$expected_nodes"
+plugin off | grep -q '"enabled":false' || die "disable after restart failed"
+wait_for_agents 0
+
+log "Enabling again, deleting the Instance and checking the opt-in goes with it"
+plugin on | grep -q '"enabled":true' || die "re-enable failed"
+wait_for_agents "$expected_nodes"
+kubectl -n "$DB_NAMESPACE" delete instance "$INSTANCE" --wait=false >/dev/null
+for _ in $(seq 1 36); do
+  enabled="$(plugin status | tail -n +2 | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).enabled))' 2>/dev/null || echo "")"
+  [ "$enabled" = "false" ] && break
+  sleep 5
+done
+[ "${enabled:-}" = "false" ] || die "the opt-in outlived the Instance"
+wait_for_agents 0
+kubectl -n "$OE_NAMESPACE" get configmap betterdb-openeverest-targets -o jsonpath='{.data}' | grep -q "$INSTANCE" && die "the ConfigMap still lists $INSTANCE"
 
 log "PASS: $expected_nodes nodes of $DB_NAMESPACE/$INSTANCE streamed read-only and were removed on disable"
 if [ -z "${KEEP:-}" ]; then teardown; fi
