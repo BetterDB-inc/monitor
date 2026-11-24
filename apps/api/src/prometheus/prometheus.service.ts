@@ -53,10 +53,9 @@ import {
 import { ShardLoadService } from '../cluster/shard-load.service';
 import {
   ClusterIdentityService,
-  clusterStateSignature,
   FailoverSignature,
+  outageSignature,
   promotionSignature,
-  slotFailureSignature,
 } from '../cluster/cluster-identity.service';
 import {
   demotedWritesMessage,
@@ -2798,11 +2797,12 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       // trips the CLUSTER INFO edges and churns the topology at the same time,
       // and two events for one failover would double-page.
       const reasons: string[] = [];
-      if (stateChanged && this.claimFailover(connectionId, clusterStateSignature('ok', 'fail'))) {
-        reasons.push('cluster_state');
-      }
-      if (newSlotFailures && this.claimFailover(connectionId, slotFailureSignature())) {
-        reasons.push('slot_failures');
+      if (
+        (stateChanged || newSlotFailures) &&
+        this.claimFailover(connectionId, outageSignature())
+      ) {
+        if (stateChanged) reasons.push('cluster_state');
+        if (newSlotFailures) reasons.push('slot_failures');
       }
       const unreported =
         topology !== null && topologyDiff !== null

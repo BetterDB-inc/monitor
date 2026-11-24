@@ -10,12 +10,13 @@ export interface FailoverSignature {
 const STATE_HOLD_MS = 60_000;
 const PROMOTION_HOLD_MS = 10 * 60_000;
 
-export function clusterStateSignature(from: string, to: string): FailoverSignature {
-  return { key: `state:${from}>${to}`, holdMs: STATE_HOLD_MS };
+export function outageSignature(): FailoverSignature {
+  return { key: 'outage', holdMs: STATE_HOLD_MS };
 }
 
-export function slotFailureSignature(): FailoverSignature {
-  return { key: 'slots:failed', holdMs: STATE_HOLD_MS };
+export function clusterStateSignature(from: string, to: string): FailoverSignature {
+  if (to === 'fail') return outageSignature();
+  return { key: `state:${from}>${to}`, holdMs: STATE_HOLD_MS };
 }
 
 export function promotionSignature(primaryId: string, configEpoch: number): FailoverSignature {

@@ -505,11 +505,11 @@ The event is sent once per cluster, not once per registered connection. When sev
 
 | Change | Reported again after |
 |---|---|
-| Cluster state goes from `ok` to `fail`, or back | 1 minute |
-| New slot failures | 1 minute |
+| Outage: cluster state goes to `fail`, new slot failures, or both | 1 minute |
+| Cluster state goes back to `ok` | 1 minute |
 | A replica is promoted | 10 minutes, for the same new primary at the same config epoch |
 
-A state change, slot failures and a promotion are separate changes, so one outage can still send more than one event. Connections belong to the same cluster when their `CLUSTER NODES` views share a node.
+A state failure and slot failures count as one outage, whichever is seen first and by whichever connection. An outage and a promotion are separate changes, so a failover that also takes the cluster down sends one event for each. Connections belong to the same cluster when their `CLUSTER NODES` views share a node.
 
 The event is filed under the seed connection when the connection that saw the change was registered automatically from that seed and the seed is connected. Otherwise it is filed under the connection that saw it first. The same rule decides which connection the OTLP log record is sent for.
 

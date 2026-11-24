@@ -10162,7 +10162,12 @@ export class AnomalyService
       try {
         this.otelEvents?.dispatch(
           WebhookEventType.CLUSTER_FAILOVER,
-          { clusterState, slotsFailed, knownNodes, reasons: 'cluster_state' },
+          {
+            clusterState,
+            slotsFailed,
+            knownNodes,
+            reasons: slotsFailed > 0 ? 'cluster_state,slot_failures' : 'cluster_state',
+          },
           filedUnder,
         );
       } catch (err) {

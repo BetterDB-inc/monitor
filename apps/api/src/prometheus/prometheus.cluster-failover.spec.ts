@@ -284,6 +284,48 @@ describe('PrometheusService cluster.failover per cluster', () => {
     expect(failoverEvents()[0]).toMatchObject({ reasons: ['slot_failures'] });
   });
 
+  it('reports a state failure and slot failures seen in one poll as one event', async () => {
+    await pollAll([SEED, ...MEMBERS], HEALTHY);
+    for (const id of [SEED, ...MEMBERS]) {
+      clusterInfos[id] = clusterInfo({ cluster_state: 'fail', cluster_slots_fail: '100' });
+    }
+
+    await pollAll([SEED, ...MEMBERS], HEALTHY);
+
+    expect(failoverEvents()).toHaveLength(1);
+    expect(failoverEvents()[0]).toMatchObject({ reasons: ['cluster_state', 'slot_failures'] });
+    expect(otlpFailovers()).toHaveLength(1);
+  });
+
+  it('sends one event when one connection sees the state fail and another sees slots fail', async () => {
+    await pollAll([SEED, ...MEMBERS], HEALTHY);
+    clusterInfos[SEED] = clusterInfo({ cluster_state: 'fail' });
+    clusterInfos['member-1'] = clusterInfo({ cluster_slots_fail: '100' });
+
+    await pollAll([SEED, 'member-1'], HEALTHY);
+
+    expect(failoverEvents()).toHaveLength(1);
+    expect(failoverEvents()[0]).toMatchObject({ reasons: ['cluster_state'] });
+    expect(otlpFailovers()).toHaveLength(1);
+  });
+
+  it('sends nothing for slot failures of an outage the anomaly service already reported', async () => {
+    await pollAll([SEED, ...MEMBERS], HEALTHY);
+    identity.claimFailover(
+      identity.clusterKeyOf(SEED),
+      clusterStateSignature('ok', 'fail'),
+      Date.now(),
+    );
+    for (const id of [SEED, ...MEMBERS]) {
+      clusterInfos[id] = clusterInfo({ cluster_state: 'fail', cluster_slots_fail: '100' });
+    }
+
+    await pollAll([SEED, ...MEMBERS], HEALTHY);
+
+    expect(failoverEvents()).toHaveLength(0);
+    expect(otlpFailovers()).toHaveLength(0);
+  });
+
   it('reports only what is new when a poll sees a reported state change and a promotion', async () => {
     await pollAll([SEED, ...MEMBERS], HEALTHY);
     for (const id of [SEED, ...MEMBERS]) clusterInfos[id] = clusterInfo({ cluster_state: 'fail' });

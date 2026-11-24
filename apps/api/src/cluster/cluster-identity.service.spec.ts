@@ -3,8 +3,8 @@ import { ConnectionRegistry } from '../connections/connection-registry.service';
 import {
   ClusterIdentityService,
   clusterStateSignature,
+  outageSignature,
   promotionSignature,
-  slotFailureSignature,
 } from './cluster-identity.service';
 
 const SEED = 'seed';
@@ -145,13 +145,19 @@ describe('ClusterIdentityService', () => {
     });
 
     it.each([
-      ['a cluster state change', clusterStateSignature('ok', 'fail')],
-      ['new slot failures', slotFailureSignature()],
+      ['an outage', outageSignature()],
+      ['a recovery', clusterStateSignature('fail', 'ok')],
     ])('holds %s for one minute', (_name, signature) => {
       service.claimFailover('cluster-1', signature, NOW);
 
       expect(service.claimFailover('cluster-1', signature, NOW + MINUTE_MS - 1)).toBe(false);
       expect(service.claimFailover('cluster-1', signature, NOW + MINUTE_MS)).toBe(true);
+    });
+
+    it('treats a state failure and new slot failures as one outage', () => {
+      service.claimFailover('cluster-1', clusterStateSignature('ok', 'fail'), NOW);
+
+      expect(service.claimFailover('cluster-1', outageSignature(), NOW)).toBe(false);
     });
 
     it('treats a failure and the recovery from it as two changes', () => {
@@ -163,7 +169,7 @@ describe('ClusterIdentityService', () => {
     });
 
     it('drops claims whose hold has passed', () => {
-      service.claimFailover('cluster-1', slotFailureSignature(), NOW);
+      service.claimFailover('cluster-1', outageSignature(), NOW);
 
       service.claimFailover('cluster-1', promotionSignature('node-b', 7), NOW + MINUTE_MS);
 

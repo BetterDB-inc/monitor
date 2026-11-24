@@ -28,7 +28,11 @@ import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import { ClusterNode, SentinelNodeInfo } from '@app/common/types/metrics.types';
 import type { NodeSlotStats } from '@app/cluster/shard-load';
 import { ShardLoadService } from '@app/cluster/shard-load.service';
-import { ClusterIdentityService, clusterStateSignature } from '@app/cluster/cluster-identity.service';
+import {
+  ClusterIdentityService,
+  clusterStateSignature,
+  outageSignature,
+} from '@app/cluster/cluster-identity.service';
 import { nodeAclDigest, clusterKeyFromNodes } from '../acl-drift-detector';
 import { RETRY_AMP_LATENCY_VERDICT_TTL_MS } from '../retry-amplification-detector';
 import { NODE_ATTRIBUTION_UNAVAILABLE } from '../retry-amplification-attribution';
@@ -7074,6 +7078,7 @@ describe('AnomalyService', () => {
       const CLUSTER_X = ['x', 'y'];
       let identity: ClusterIdentityService;
       let states: Record<string, string>;
+      let slotsFailed: string;
       let configs: Record<string, unknown>;
 
       function clusterCtx(id: string, cluster: string[]): ConnectionContext {
@@ -7105,7 +7110,7 @@ describe('AnomalyService', () => {
             getClusterInfo: jest.fn(async () => ({
               cluster_state: states[id] ?? 'ok',
               cluster_slots_assigned: '16384',
-              cluster_slots_fail: '0',
+              cluster_slots_fail: slotsFailed,
               cluster_known_nodes: String(cluster.length),
             })),
             getClusterNodes: jest.fn().mockResolvedValue(nodes),
@@ -7129,6 +7134,7 @@ describe('AnomalyService', () => {
 
       beforeEach(() => {
         states = {};
+        slotsFailed = '0';
         configs = {};
         const registry = (service as any).connectionRegistry;
         registry.getConfig.mockImplementation((id: string) => configs[id] ?? null);
@@ -7192,6 +7198,34 @@ describe('AnomalyService', () => {
 
         expect(failovers()).toHaveLength(0);
         expect(otlpFailovers()).toHaveLength(0);
+      });
+
+      it('sends nothing when the Prometheus poller already reported the outage', async () => {
+        await pollCluster(CLUSTER_A);
+        identity.claimFailover(identity.clusterKeyOf('conn-a'), outageSignature(), Date.now());
+        setState(CLUSTER_A, 'fail');
+        slotsFailed = '128';
+
+        await pollCluster(CLUSTER_A);
+
+        expect(failovers()).toHaveLength(0);
+        expect(otlpFailovers()).toHaveLength(0);
+      });
+
+      it('names the slot failures in the OTLP record of the outage it reports', async () => {
+        await pollCluster(CLUSTER_A);
+        setState(CLUSTER_A, 'fail');
+        slotsFailed = '128';
+
+        await pollCluster(CLUSTER_A);
+
+        expect(otlpFailovers()).toEqual([
+          [
+            WebhookEventType.CLUSTER_FAILOVER,
+            { clusterState: 'fail', slotsFailed: 128, knownNodes: 3, reasons: 'cluster_state,slot_failures' },
+            'conn-a',
+          ],
+        ]);
       });
 
       it('files the event under the seed when an auto-registered member sees it first', async () => {
