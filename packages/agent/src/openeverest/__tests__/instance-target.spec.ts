@@ -20,7 +20,7 @@ const agentState = {
 class FakeAgent {
   stopped = false;
   cloudError: string | undefined;
-  constructor(readonly config: { valkeyHost: string; valkeyPort: number; identity: { node: string; nodeName?: string } }) {}
+  constructor(readonly config: { valkeyHost: string; valkeyPort: number; clusterReplica?: boolean; identity: { node: string; nodeName?: string } }) {}
   async start(): Promise<void> {
     agentState.starts.push(this);
     agentState.inFlight += 1;
@@ -44,7 +44,7 @@ class FakeAgent {
 
 jest.mock('../../agent', () => ({ Agent: FakeAgent }));
 
-const valkeyState = { shards: [] as unknown[] };
+const valkeyState = { shards: [] as unknown[], shardsError: null as Error | null };
 
 jest.mock('iovalkey', () => ({
   __esModule: true,
@@ -54,7 +54,10 @@ jest.mock('iovalkey', () => ({
     disconnect: jest.fn(),
     call: jest.fn(async (command: string, sub?: string) => {
       if (command === 'INFO' && sub === 'cluster') return 'cluster_enabled:1';
-      if (command === 'CLUSTER' && sub === 'SHARDS') return valkeyState.shards;
+      if (command === 'CLUSTER' && sub === 'SHARDS') {
+        if (valkeyState.shardsError) throw valkeyState.shardsError;
+        return valkeyState.shards;
+      }
       throw new Error(`unexpected ${command} ${sub}`);
     }),
   })),
@@ -107,6 +110,7 @@ beforeEach(() => {
   agentState.inFlight = 0;
   agentState.maxInFlight = 0;
   valkeyState.shards = [shard('aaa', 'master', 0)];
+  valkeyState.shardsError = null;
 });
 
 afterEach(() => {
@@ -182,17 +186,37 @@ describe('InstanceTarget reconcile loop', () => {
     expect(jest.getTimerCount()).toBe(0);
   });
 
-  it('refreshes a node\'s role in place after a failover instead of restarting its agent', async () => {
+  it('restarts a node\'s agent as a replica after a failover at the same address, so READONLY is sent', async () => {
     const { target } = build();
     target.setConnectionSecret('orders-conn');
     await settle();
     expect(target.status().nodes.map((n) => n.role)).toEqual(['primary']);
+    expect(agentState.starts[0].config.clusterReplica).toBe(false);
 
     valkeyState.shards = [shard('aaa', 'replica', 0)];
     await jest.advanceTimersByTimeAsync(60_000);
     await settle();
 
     expect(target.status().nodes.map((n) => n.role)).toEqual(['replica']);
+    expect(agentState.starts).toHaveLength(2);
+    expect(agentState.starts[0].stopped).toBe(true);
+    expect(agentState.starts[1].config.clusterReplica).toBe(true);
+    await target.stop();
+  });
+
+  it('keeps streaming nodes and stays monitoring through a failed rediscovery', async () => {
+    const { target } = build();
+    target.setConnectionSecret('orders-conn');
+    await settle();
+    expect(target.status().state).toBe('monitoring');
+
+    valkeyState.shardsError = new Error('LOADING server is loading');
+    await jest.advanceTimersByTimeAsync(60_000);
+    await settle();
+
+    const status = target.status();
+    expect(status.state).toBe('monitoring');
+    expect(status.error).toMatch(/node discovery failed/);
     expect(agentState.starts).toHaveLength(1);
     expect(agentState.starts[0].stopped).toBe(false);
     await target.stop();

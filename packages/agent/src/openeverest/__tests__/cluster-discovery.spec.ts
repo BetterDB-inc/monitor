@@ -119,6 +119,24 @@ describe('discoverNodes', () => {
     expect((await discoverNodes(client, seed)).map((n) => n.id)).toEqual(['aaa', 'bbb', 'ccc']);
   });
 
+  it('treats a server that says cluster support is disabled as standalone', async () => {
+    const client = fakeClient({
+      'INFO cluster': new Error('NOPERM'),
+      'CLUSTER INFO': new Error('ERR This instance has cluster support disabled'),
+    });
+
+    expect((await discoverNodes(client, seed)).map((n) => n.id)).toEqual(['valkey-x.db.svc.cluster.local:6379']);
+  });
+
+  it('fails instead of concluding standalone when both cluster probes fail for another reason', async () => {
+    const client = fakeClient({
+      'INFO cluster': new Error('LOADING server is loading'),
+      'CLUSTER INFO': new Error('LOADING server is loading'),
+    });
+
+    await expect(discoverNodes(client, seed)).rejects.toThrow(/cluster probe failed/);
+  });
+
   it('fails loudly when the cluster reports no reachable node', async () => {
     const client = fakeClient({ 'INFO cluster': 'cluster_enabled:1', 'CLUSTER SHARDS': [] });
 

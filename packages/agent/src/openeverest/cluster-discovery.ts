@@ -38,15 +38,23 @@ export async function discoverNodes(
   // cluster_state and the like, never cluster_enabled). CLUSTER INFO itself is
   // the fallback: it errors on a standalone server ("This instance has
   // cluster support disabled") and answers on a cluster node.
-  let clusterEnabled = false;
+  // Standalone is only ever concluded from an explicit answer; a probe that
+  // fails for any other reason is an error, so a transient hiccup never
+  // turns a cluster's node set into "one standalone seed" and tears the
+  // node agents down.
+  let clusterEnabled: boolean;
   try {
     clusterEnabled = /cluster_enabled:1/.test(String(await client.call('INFO', 'cluster')));
-  } catch {
+  } catch (infoError) {
     try {
       await client.call('CLUSTER', 'INFO');
       clusterEnabled = true;
-    } catch {
-      clusterEnabled = false;
+    } catch (clusterError) {
+      if (/cluster support disabled/i.test((clusterError as Error).message)) {
+        clusterEnabled = false;
+      } else {
+        throw new Error(`cluster probe failed: ${(infoError as Error).message}; ${(clusterError as Error).message}`);
+      }
     }
   }
   if (!clusterEnabled) {

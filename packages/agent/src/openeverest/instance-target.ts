@@ -242,7 +242,7 @@ export class InstanceTarget {
     }
     if (!settings) {
       await this.stopNodes(Array.from(this.nodes.keys()));
-      this.setState('error', 'BetterDB is not configured: set the URL and agent token in Settings');
+      this.setState('error', 'BetterDB is not configured: set betterdb.url and betterdb.token (or betterdb.existingSecret) on the Helm release');
       return;
     }
     if (generation !== this.generation) return;
@@ -253,7 +253,19 @@ export class InstanceTarget {
     }
     this.nodesGeneration = generation;
 
-    const discovered = await this.discover(credentials);
+    let discovered: DiscoveredNode[];
+    try {
+      discovered = await this.discover(credentials);
+    } catch (err) {
+      if (generation !== this.generation || this.stopped) return;
+      // Nodes already streaming keep streaming through a discovery hiccup;
+      // the status carries it as a warning and the next interval retries.
+      if (this.nodes.size > 0) {
+        this.setState('monitoring', `node discovery failed: ${(err as Error).message}`);
+        return;
+      }
+      throw err;
+    }
     if (generation !== this.generation || this.stopped) return;
 
     const wanted = new Map(discovered.map((n) => [n.id, n]));
@@ -262,13 +274,14 @@ export class InstanceTarget {
     const toStart: DiscoveredNode[] = [];
     for (const node of discovered) {
       const existing = this.nodes.get(node.id);
-      if (existing && existing.agent && sameAddress(existing.node, node)) {
-        // Same connection, possibly a new role after a failover: keep the
-        // agent, refresh what the status reports.
+      if (existing && existing.agent && sameAddress(existing.node, node) && existing.node.role === node.role) {
+        // Same connection and role: keep the agent, refresh the hostname.
         existing.node = node;
         existing.name = displayName(node);
         continue;
       }
+      // A new role at the same address (failover) needs a new agent: READONLY
+      // is decided when the connection is built.
       if (existing) await this.stopNodes([node.id]);
       toStart.push(node);
     }
