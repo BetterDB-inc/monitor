@@ -53,6 +53,11 @@ export interface KubeClientOptions {
   namespace: string;
 }
 
+/** A host for use in a URL: an IPv6 literal gets its brackets. */
+export function hostForUrl(host: string): string {
+  return host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
+}
+
 export class KubeClient {
   private readonly agent: https.Agent | http.Agent;
   private readonly base: URL;
@@ -71,7 +76,7 @@ export class KubeClient {
     if (!host) {
       throw new Error('KUBERNETES_SERVICE_HOST is not set: the OpenEverest mode must run inside a pod');
     }
-    const server = `https://${host.includes(':') ? `[${host}]` : host}:${port}`;
+    const server = `https://${hostForUrl(host)}:${port}`;
     return new KubeClient({
       server,
       token: () => readFileSync(`${SA_DIR}/token`, 'utf8').trim(),

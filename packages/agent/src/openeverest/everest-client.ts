@@ -10,6 +10,8 @@ export interface InstanceRef {
   instance: string;
 }
 
+import { hostForUrl } from './kube-client';
+
 export class EverestApiError extends Error {
   constructor(
     readonly status: number,
@@ -34,7 +36,7 @@ const DEFAULT_TIMEOUT_MS = 10_000;
 /** Where the OpenEverest API is, following the generic-plugin-template lookup order. */
 export function everestApiUrl(env: NodeJS.ProcessEnv = process.env): string {
   if (env.EVEREST_API_URL) return env.EVEREST_API_URL.replace(/\/+$/, '');
-  if (env.EVEREST_SERVICE_HOST) return `http://${env.EVEREST_SERVICE_HOST}:${env.EVEREST_SERVICE_PORT || '8080'}`;
+  if (env.EVEREST_SERVICE_HOST) return `http://${hostForUrl(env.EVEREST_SERVICE_HOST)}:${env.EVEREST_SERVICE_PORT || '8080'}`;
   // The alpha.1 chart names the API Service `everest` (the Deployment is everest-server).
   return 'http://everest.everest-system.svc.cluster.local:8080';
 }
