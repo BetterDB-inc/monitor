@@ -9,6 +9,7 @@ import { useOpenHotShards } from '../../hooks/useOpenHotShards';
 import { copyToClipboard } from '../../lib/clipboard';
 import { REBALANCE_BLOCKED, formatRatio, slotRangeLabels, shortShardId } from './anomaly-display';
 import type {
+  HashTagAdvice,
   HotShardDetail,
   RebalanceCommand,
   RebalanceExecutionBlocker,
@@ -153,6 +154,49 @@ function describeIsolate(slots: RebalancePinnedSlot[]): string {
   if (slots.length === 1) return `Moving slot ${slots[0].slot} to a shard of its own (Isolate). ${advice}`;
   const numbers = listed(slots.map((slot) => `${slot.slot}`));
   return `Moving slots ${numbers} each to a shard of its own (Isolate). ${advice}`;
+}
+
+const ADVICE_ITEMS = 3;
+
+function describeHashTags(advice: HashTagAdvice): string {
+  const tags = advice.tags.slice(0, ADVICE_ITEMS);
+  if (tags.length === 0) return '';
+  const shared = tags.map(
+    (each) =>
+      `${percent(each.share)} of the sampled keys in slot ${each.slot} ` +
+      `share the hash tag {${displayKeyName(each.tag)}}.`,
+  );
+  const split = tags.length === 1 ? 'that tag' : 'those tags';
+  return `${shared.join(' ')} Splitting ${split} in the application spreads them across slots.`;
+}
+
+function describeKeyCountOutliers(advice: HashTagAdvice): string {
+  const outliers = advice.keyCountOutliers.slice(0, ADVICE_ITEMS);
+  if (outliers.length === 0) return '';
+  const times = (ratio: number) => `${Math.round(ratio)}x`;
+  if (outliers.length === 1) {
+    const [only] = outliers;
+    return `Slot ${only.slot} holds ${only.keyCount} keys, ${times(only.ratio)} the median slot.`;
+  }
+  const slots = listed(
+    outliers.map((each) => `${each.slot} (${each.keyCount} keys, ${times(each.ratio)})`),
+  );
+  return `Slots ${slots} each hold at least 20x the median slot.`;
+}
+
+function HashTagNotes({ advice }: { advice?: HashTagAdvice }) {
+  if (!advice) return null;
+  const sentences = [describeHashTags(advice), describeKeyCountOutliers(advice)].filter(Boolean);
+  if (sentences.length === 0) return null;
+  return (
+    <div className="mt-2 space-y-1">
+      {sentences.map((sentence) => (
+        <p key={sentence} className="break-words">
+          {sentence}
+        </p>
+      ))}
+    </div>
+  );
 }
 
 function CommandLine({ command, label }: { command: RebalanceCommand; label?: string }) {
@@ -502,6 +546,7 @@ export function RebalanceSuggestion({ connectionId, mode, runnable = true }: Pro
               ) : (
                 <NoPlan verdict={verdict} shard={shard} />
               )}
+              <HashTagNotes advice={shard.advice?.hashTags} />
             </CardContent>
           </Card>
         );

@@ -656,6 +656,71 @@ describe('RebalanceSuggestion', () => {
     expect(await panel()).not.toHaveTextContent('Isolate');
   });
 
+  function hashTags(
+    overrides: Partial<NonNullable<HotShardDetail['advice']>['hashTags']> = {},
+  ): HotShardDetail['advice'] {
+    return {
+      hashTags: { tags: [], slotsSampled: 1, keyCountOutliers: [], medianKeyCount: 30, ...overrides },
+    };
+  }
+
+  it('names the hash tag behind a hot slot and how to split it', async () => {
+    await show([
+      hotShard(noPlan('key_level', [{ slot: 9189, shareOfShard: 0.81 }]), {
+        advice: hashTags({
+          tags: [{ slot: 9189, tag: 'cart', share: 0.92, keysSampled: 500, keysWithTag: 460 }],
+        }),
+      }),
+    ]);
+
+    const advice = within(await panel()).getByText(/share the hash tag/);
+    expect(advice).toHaveTextContent(
+      '92% of the sampled keys in slot 9189 share the hash tag {cart}. ' +
+        'Splitting that tag in the application spreads them across slots.',
+    );
+    expect(advice).toHaveClass('break-words');
+  });
+
+  it('shows an unsafe hash tag escaped and cut, and at most three tags', async () => {
+    const tags = ['say "hi"\n', 'k'.repeat(80), 'c', 'd'].map((tag, i) => ({
+      slot: i,
+      tag,
+      share: 1,
+      keysSampled: 10,
+      keysWithTag: 10,
+    }));
+    await show([hotShard(noPlan('key_level'), { advice: hashTags({ tags }) })]);
+
+    const advice = within(await panel()).getByText(/share the hash tag/);
+    expect(advice).toHaveTextContent('{say \\"hi\\"\\x0a}');
+    expect(advice).toHaveTextContent(`{${'k'.repeat(64)}…}`);
+    expect(advice).toHaveTextContent('{c}');
+    expect(advice).not.toHaveTextContent('{d}');
+    expect(advice).toHaveTextContent('Splitting those tags');
+  });
+
+  it('names a slot holding far more keys than the median slot', async () => {
+    await show([
+      hotShard(plan(), {
+        advice: hashTags({ keyCountOutliers: [{ slot: 4, keyCount: 1200, ratio: 40 }] }),
+      }),
+    ]);
+
+    expect(await panel()).toHaveTextContent('Slot 4 holds 1200 keys, 40x the median slot.');
+  });
+
+  it('says nothing about hash tags without a finding', async () => {
+    await show([
+      hotShard(noPlan('key_level'), {
+        advice: hashTags({ note: 'the monitoring user may not run CLUSTER GETKEYSINSLOT' }),
+      }),
+    ]);
+
+    const region = await panel();
+    expect(region).not.toHaveTextContent('hash tag');
+    expect(region).not.toHaveTextContent('GETKEYSINSLOT');
+  });
+
   it('hides plans in Observe mode', async () => {
     await show([hotShard(plan({ execution: { available: true } }))], { mode: 'observe' });
 
