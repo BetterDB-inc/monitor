@@ -52,3 +52,9 @@ const aclReset = await call('/api/metrics/acl/log', { method: 'DELETE', headers 
 const aclBody = await aclReset.text();
 if (aclReset.status !== 403 || !/read-only/i.test(aclBody)) throw new Error(`ACL LOG RESET was not refused with 403: ${aclReset.status} ${aclBody}`);
 console.log(`ACL LOG RESET refused as expected: ${aclReset.status}`);
+
+// CLIENT KILL goes through its own adapter method; it must be a 403 too.
+const kill = await call('/api/metrics/clients?id=1', { method: 'DELETE', headers });
+const killBody = await kill.text();
+if (kill.status !== 403 || !/read-only/i.test(killBody)) throw new Error(`CLIENT KILL was not refused with 403: ${kill.status} ${killBody}`);
+console.log(`CLIENT KILL refused as expected: ${kill.status}`);

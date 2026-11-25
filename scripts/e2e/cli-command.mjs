@@ -33,4 +33,6 @@ const reply = await new Promise((resolve, reject) => {
 });
 ws.close();
 console.log(JSON.stringify(reply));
-if (reply.type === 'error') process.exitCode = 2;
+// The CLI reports a server-side error either way: as an error message, or as
+// a result whose type is error.
+if (reply.type === 'error' || reply.resultType === 'error') process.exitCode = 2;

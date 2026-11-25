@@ -124,6 +124,10 @@ helm upgrade --install betterdb-monitor charts/betterdb-monitor \
   --namespace "$MONITOR_NAMESPACE" --create-namespace --wait --timeout "$TIMEOUT" \
   --set image.repository="${MONITOR_IMAGE%%:*}" --set image.tag="${MONITOR_IMAGE##*:}" \
   --set image.pullPolicy=Never --set storage.type=memory
+# The image tag never changes between runs, so on a kept cluster the pod
+# template does not either: roll it so the freshly loaded image is the one tested.
+kubectl -n "$MONITOR_NAMESPACE" rollout restart deploy/betterdb-monitor >/dev/null
+kubectl -n "$MONITOR_NAMESPACE" rollout status deploy/betterdb-monitor --timeout="$TIMEOUT" >/dev/null
 
 log "Minting an agent token in the Monitor"
 forward "$MONITOR_NAMESPACE" betterdb-monitor "$MONITOR_PORT" 3001
@@ -137,6 +141,8 @@ helm upgrade --install betterdb-openeverest charts/betterdb-openeverest \
   --set image.pullPolicy=Never \
   --set betterdb.url="ws://betterdb-monitor.$MONITOR_NAMESPACE.svc:3001/api/agent/ws" \
   --set betterdb.token="$AGENT_TOKEN"
+kubectl -n "$OE_NAMESPACE" rollout restart deploy/betterdb-openeverest >/dev/null
+kubectl -n "$OE_NAMESPACE" rollout status deploy/betterdb-openeverest --timeout="$TIMEOUT" >/dev/null
 
 log "Creating Valkey instance $DB_NAMESPACE/$INSTANCE (TLS on, cluster, $NUM_SHARDS shards x $((REPLICAS_PER_SHARD + 1)))"
 kubectl create namespace "$DB_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
@@ -212,10 +218,15 @@ list_connections() {
 count_in() { grep -c -- "$1" "$connections_file" || true; }
 list_connections
 cat "$connections_file"
-agent_count="$(count_in '"connectionType":"agent"')"
-readonly_count="$(count_in '"readOnly":true')"
-[ "$agent_count" -ge "$expected_nodes" ] || die "expected $expected_nodes agent connections, found $agent_count"
-[ "$readonly_count" -ge "$expected_nodes" ] || die "expected every agent connection read-only, found $readonly_count"
+# Every agent connection must be read-only, checked record by record.
+node -e '
+  const lines = require("fs").readFileSync(process.argv[1], "utf8").split("\n").filter(Boolean);
+  const agents = lines.map((l) => JSON.parse(l)).filter((c) => c.connectionType === "agent");
+  const expected = Number(process.argv[2]);
+  if (agents.length < expected) { console.error(`expected ${expected} agent connections, found ${agents.length}`); process.exit(1); }
+  const writable = agents.filter((c) => c.readOnly !== true);
+  if (writable.length) { console.error("writable agent connections: " + writable.map((c) => c.id).join(", ")); process.exit(1); }
+' "$connections_file" "$expected_nodes" || die "agent connections are missing or not all read-only"
 grep -q '"host":"agent"' "$connections_file" || die "agent connections missing"
 
 log "Checking a mutation is refused and a read works on an agent connection"
@@ -251,19 +262,52 @@ kubectl -n "$DB_NAMESPACE" run seed --rm -i --restart=Never --image=valkey/valke
   | grep -q seeded || die "seeding keys failed"
 replica_pod="$(plugin status | tail -n +2 | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const n=JSON.parse(s).status.nodes.find(n=>n.role==="replica");process.stdout.write(n?n.name:"")})')"
 [ -n "$replica_pod" ] || die "no replica node in the plugin status"
-replica_id="$(grep "\"name\":\"$DB_NAMESPACE/$INSTANCE/$replica_pod\"" "$connections_file" | head -n1 | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).id))')"
-[ -n "$replica_id" ] || die "no Monitor connection for replica $replica_pod"
-# The CLI parser keeps the content of a single-quoted token, so the JSON option survives.
-analytics="$(node scripts/e2e/cli-command.mjs "http://localhost:$MONITOR_PORT" "$replica_id" "COLLECT_KEY_ANALYTICS '{\"sampleSize\":200,\"scanBatchSize\":100}'")"
-printf '%s' "$analytics" | node -e '
-  let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
-    const reply = JSON.parse(s);
-    if (reply.type !== "result") { console.error("key analytics on the replica failed: " + JSON.stringify(reply)); process.exit(1); }
-    const r = JSON.parse(reply.result);
-    const measured = (r.keyDetails || []).filter(k => k.memoryBytes !== null).length;
-    console.log(`replica ${process.argv[1]}: scanned ${r.scanned} keys, ${measured} with MEMORY USAGE served`);
-    if (r.scanned === 0 || measured === 0) { console.error("keyed reads on the replica were not served (MOVED?)"); process.exit(1); }
-  })' "$replica_pod" || die "replica keyed read check failed"
+# Runs key analytics on a node's Monitor connection; dies unless the keyed
+# reads (MEMORY USAGE) were served. The CLI parser keeps the content of a
+# single-quoted token, so the JSON option survives.
+check_keyed_reads() {
+  local pod="$1" id
+  list_connections
+  id="$(grep "\"name\":\"$DB_NAMESPACE/$INSTANCE/$pod\"" "$connections_file" | head -n1 | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(s?JSON.parse(s).id:""))')"
+  [ -n "$id" ] || die "no Monitor connection for $pod"
+  node scripts/e2e/cli-command.mjs "http://localhost:$MONITOR_PORT" "$id" "COLLECT_KEY_ANALYTICS '{\"sampleSize\":200,\"scanBatchSize\":100}'" | node -e '
+    let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
+      const reply = JSON.parse(s);
+      if (reply.type !== "result") { console.error("key analytics failed: " + JSON.stringify(reply)); process.exit(1); }
+      const r = JSON.parse(reply.result);
+      const measured = (r.keyDetails || []).filter(k => k.memoryBytes !== null).length;
+      console.log(`${process.argv[1]}: scanned ${r.scanned} keys, ${measured} with MEMORY USAGE served`);
+      if (r.scanned === 0 || measured === 0) { console.error("keyed reads were not served (MOVED?)"); process.exit(1); }
+    })' "$pod" || die "keyed read check failed on $pod"
+}
+check_keyed_reads "$replica_pod"
+
+node_role() {
+  plugin status | tail -n +2 | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const n=JSON.parse(s).status.nodes.find(n=>n.name===process.argv[1]);process.stdout.write(n?n.role:"")})' "$1"
+}
+
+log "Failing over $replica_pod and checking the demoted primary serves keyed reads"
+# Pods are valkey-<instance>-<shard>-<index>-0: the shard's other pod is its primary.
+shard_prefix="${replica_pod%-*-*}"
+old_primary="$(kubectl -n "$DB_NAMESPACE" get pods --no-headers -o custom-columns=:metadata.name | grep "^$shard_prefix-" | grep -vx "$replica_pod" | head -n1)"
+[ -n "$old_primary" ] || die "no primary pod found next to $replica_pod"
+replica_ip="$(kubectl -n "$DB_NAMESPACE" get pod "$replica_pod" -o jsonpath='{.status.podIP}')"
+kubectl -n "$DB_NAMESPACE" delete pod failover --ignore-not-found >/dev/null 2>&1 || true
+kubectl -n "$DB_NAMESPACE" run failover --rm -i --restart=Never --image=valkey/valkey:9.0 --quiet \
+  --overrides="{\"spec\":{\"containers\":[{\"name\":\"failover\",\"image\":\"valkey/valkey:9.0\",\"command\":[\"sh\",\"-c\",\"valkey-cli --tls --insecure --cert /conn/tls.crt --key /conn/tls.key -h $replica_ip -p 6379 -a \$PASSWORD --no-auth-warning CLUSTER FAILOVER\"],\"env\":[{\"name\":\"PASSWORD\",\"valueFrom\":{\"secretKeyRef\":{\"name\":\"$INSTANCE-conn\",\"key\":\"password\"}}}],\"volumeMounts\":[{\"name\":\"conn\",\"mountPath\":\"/conn\"}]}],\"volumes\":[{\"name\":\"conn\",\"secret\":{\"secretName\":\"$INSTANCE-conn\"}}]}}" \
+  | grep -q OK || die "CLUSTER FAILOVER on $replica_pod failed"
+# Rediscovery picks the new roles up on its next interval.
+for _ in $(seq 1 48); do
+  [ "$(node_role "$replica_pod")" = "primary" ] && [ "$(node_role "$old_primary")" = "replica" ] && break
+  sleep 5
+done
+[ "$(node_role "$old_primary")" = "replica" ] || die "the plugin never saw $old_primary demoted"
+for _ in $(seq 1 24); do
+  plugin status | tail -n +2 | grep -q '"state":"monitoring"' && break
+  sleep 5
+done
+wait_for_agents "$expected_nodes"
+check_keyed_reads "$old_primary"
 
 log "Checking the NetworkPolicy's from-selector matches a running everest-server pod"
 selector="$(kubectl -n "$OE_NAMESPACE" get networkpolicy betterdb-openeverest -o json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const m=JSON.parse(s).spec.ingress[0].from[0].podSelector.matchLabels;process.stdout.write(Object.entries(m).map(([k,v])=>k+"="+v).join(","))})')"
@@ -295,7 +339,8 @@ for _ in $(seq 1 36); do
 done
 [ "${enabled:-}" = "false" ] || die "the opt-in outlived the Instance"
 wait_for_agents 0
-kubectl -n "$OE_NAMESPACE" get configmap betterdb-openeverest-targets -o jsonpath='{.data}' | grep -q "$INSTANCE" && die "the ConfigMap still lists $INSTANCE"
+targets_data="$(kubectl -n "$OE_NAMESPACE" get configmap betterdb-openeverest-targets -o jsonpath='{.data}')" || die "could not read the targets ConfigMap"
+case "$targets_data" in *"$INSTANCE"*) die "the ConfigMap still lists $INSTANCE" ;; esac
 
 log "PASS: $expected_nodes nodes of $DB_NAMESPACE/$INSTANCE streamed read-only and were removed on disable"
 if [ -z "${KEEP:-}" ]; then teardown; fi

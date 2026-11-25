@@ -7,7 +7,7 @@
 //
 // usage: import { monitorSession } from './monitor-session.mjs'
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -22,9 +22,12 @@ export async function monitorSession(baseUrl) {
   // separate session-data cookie on later responses, so each Set-Cookie must
   // merge into the jar rather than replace it.
   const jar = new Map(existsSync(jarFile) ? Object.entries(JSON.parse(readFileSync(jarFile, 'utf8'))) : []);
+  // The jar holds session cookies: private directory, owner-only file (the
+  // mode on writeFileSync applies to new files only, hence the chmod).
   const save = () => {
-    mkdirSync(join(jarFile, '..'), { recursive: true });
-    writeFileSync(jarFile, JSON.stringify(Object.fromEntries(jar)));
+    mkdirSync(join(jarFile, '..'), { recursive: true, mode: 0o700 });
+    writeFileSync(jarFile, JSON.stringify(Object.fromEntries(jar)), { mode: 0o600 });
+    chmodSync(jarFile, 0o600);
   };
 
   const call = async (path, init = {}) => {
