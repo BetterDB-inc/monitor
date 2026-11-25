@@ -26189,6 +26189,19 @@ describe('AnomalyService', () => {
             expect((service as any).reshardNodeSelves.get(firstKey).readAt).toBe(T0);
           });
 
+          it('reads the output buffer limit of a waiting primary again after 60 polls, not 60 reads', async () => {
+            const clients = ownClients(targets);
+            const ownLine = clients.get(first.nodeId!)!.call;
+            clients.get(first.nodeId!)!.call = jest.fn().mockImplementation(async (...args: string[]) => {
+              if (args[0] !== 'CONFIG') return ownLine(...args);
+              return ['client-output-buffer-limit', 'normal 0 0 0 replica 268435456 67108864 60 pubsub 0 0 0'];
+            });
+
+            await poll(targets, 1, T0);
+
+            expect((service as any).cobLimitRecheck.get(firstKey)).toBe(60 / SWEEP_POLLS);
+          });
+
           it('keeps the reshard view of a primary fresh for the whole sweep', async () => {
             const many = primaries(6 * TOPOLOGY_TARGET_LIMIT + 16);
             ownClients(many);

@@ -5539,6 +5539,12 @@ export class AnomalyService
 
   private static readonly COB_LIMIT_RECHECK_POLLS = 60;
 
+  private cobLimitRecheckReads(key: string): number {
+    const connectionId = connectionOfStateKey(key);
+    const readPolls = key === connectionId ? 1 : this.nodeReadPolls(connectionId, key);
+    return Math.ceil(AnomalyService.COB_LIMIT_RECHECK_POLLS / readPolls);
+  }
+
   /**
    * Replication output-buffer pressure (valkey-io/valkey#3963). Standalone
    * primaries and primaries with zero replicas (and no pending state) add no
@@ -5602,7 +5608,7 @@ export class AnomalyService
         if (parsed !== null) {
           limit = parsed;
           this.cobLimitCache.set(key, parsed);
-          this.cobLimitRecheck.set(key, AnomalyService.COB_LIMIT_RECHECK_POLLS);
+          this.cobLimitRecheck.set(key, this.cobLimitRecheckReads(key));
         }
       } catch (cobErr) {
         this.logger.debug(
