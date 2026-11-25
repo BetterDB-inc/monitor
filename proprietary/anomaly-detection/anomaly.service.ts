@@ -13147,6 +13147,7 @@ export class AnomalyService
       (t) => t.addr,
       TOPOLOGY_TARGET_LIMIT,
       (t) =>
+        takeovers.has(t.addr) ||
         this.needsEveryPoll(ctx.connectionId, t.addr) ||
         alone.has(t.nodeId ?? '') ||
         alone.has(this.primaryReplicaPaths.get(`node:${t.addr}`) ?? ''),

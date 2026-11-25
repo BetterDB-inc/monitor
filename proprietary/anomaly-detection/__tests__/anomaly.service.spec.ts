@@ -25608,17 +25608,26 @@ describe('AnomalyService', () => {
         it('does not count a primary another connection holds as down before reading it', async () => {
           discovery();
           jest.spyOn(Date, 'now').mockReturnValue(T0);
-          (service as any).topologyTargetClaims.claim('conn-2', [], T0, 30_000, [other.addr]);
-          const targets = Array.from({ length: TOPOLOGY_TARGET_LIMIT }, (_, i) => ({
-            addr: `10.0.0.${i}:6379`,
-            host: `10.0.0.${i}`,
+          const lane = TOPOLOGY_TARGET_LIMIT / 4;
+          const target = (subnet: number) => (_: unknown, i: number) => ({
+            addr: `10.0.${subnet}.${i}:6379`,
+            host: `10.0.${subnet}.${i}`,
             port: 6379,
-            nodeId: `node-${i}`,
-          }));
+            nodeId: `node-${subnet}-${i}`,
+          });
+          const targets = Array.from({ length: TOPOLOGY_TARGET_LIMIT }, target(0));
+          const heldDown = Array.from({ length: lane + 1 }, target(3));
+          (service as any).topologyTargetClaims.claim(
+            'conn-2',
+            [],
+            T0,
+            30_000,
+            heldDown.map((t) => t.addr),
+          );
 
-          await poll([...targets, other], 1, T0);
+          await poll([...targets, ...heldDown], 1, T0);
 
-          expect(latest()).toMatchObject({ checked: TOPOLOGY_TARGET_LIMIT, skipped: 0 });
+          expect(latest()).toMatchObject({ checked: TOPOLOGY_TARGET_LIMIT, skipped: lane });
         });
 
         it('neither counts nor checks a takeover whose holder reclaimed the primary mid-read', async () => {
@@ -25824,6 +25833,10 @@ describe('AnomalyService', () => {
                 }),
             ],
             ['a backoff that just ended', (state) => state.topologyBackoff.set(key, { failures: 1, until: T0 })],
+            [
+              'a holder that has it as down',
+              (state) => state.topologyTargetClaims.claim('conn-2', [], T0, 30_000, [last.addr]),
+            ],
             [
               'a reshard skew being judged',
               (state) => {
