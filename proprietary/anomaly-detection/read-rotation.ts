@@ -1,5 +1,6 @@
 export interface RotationPick<T> {
   due: T[];
+  everyPoll: T[];
   sweepPolls: number;
 }
 
@@ -17,7 +18,7 @@ export class ReadRotation {
   ): RotationPick<T> {
     if (items.length <= budget) {
       this.lastRead.delete(scope);
-      return { due: [...items], sweepPolls: 1 };
+      return { due: [...items], everyPoll: [...items], sweepPolls: 1 };
     }
     const sorted = [...items].sort((a, b) => (idOf(a) < idOf(b) ? -1 : idOf(a) > idOf(b) ? 1 : 0));
     const priority = sorted.filter(isPriority).slice(0, Math.floor(budget / PRIORITY_SHARE));
@@ -28,7 +29,7 @@ export class ReadRotation {
     const start = next < 0 ? 0 : next;
     const turn = Array.from({ length: slots }, (_, i) => rotating[(start + i) % rotating.length]);
     this.lastRead.set(scope, idOf(turn[turn.length - 1]));
-    return { due: [...priority, ...turn], sweepPolls: Math.ceil(rotating.length / slots) };
+    return { due: [...priority, ...turn], everyPoll: priority, sweepPolls: Math.ceil(rotating.length / slots) };
   }
 
   forget(scope: string): void {

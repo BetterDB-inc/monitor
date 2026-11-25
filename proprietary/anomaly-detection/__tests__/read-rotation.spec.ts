@@ -9,8 +9,8 @@ describe('ReadRotation', () => {
     const rotation = new ReadRotation();
     const items = ids(4);
 
-    expect(rotation.pick('c', items, self, 4)).toEqual({ due: items, sweepPolls: 1 });
-    expect(rotation.pick('c', items, self, 4)).toEqual({ due: items, sweepPolls: 1 });
+    expect(rotation.pick('c', items, self, 4)).toEqual({ due: items, everyPoll: items, sweepPolls: 1 });
+    expect(rotation.pick('c', items, self, 4)).toEqual({ due: items, everyPoll: items, sweepPolls: 1 });
   });
 
   it('reads a budget of items per poll and each item once per sweep', () => {
@@ -54,6 +54,14 @@ describe('ReadRotation', () => {
       ['n007', 'n006', 'n008', 'n009'],
     ]);
     expect(polls[0].sweepPolls).toBe(3);
+  });
+
+  it('names the priority items as read on every poll', () => {
+    const rotation = new ReadRotation();
+
+    const pick = rotation.pick('c', ids(10), self, 4, (id) => id === 'n007');
+
+    expect(pick.everyPoll).toEqual(['n007']);
   });
 
   it('gives priority at most a quarter of the budget and rotates the others', () => {

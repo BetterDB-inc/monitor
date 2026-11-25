@@ -26208,6 +26208,101 @@ describe('AnomalyService', () => {
               retryAmplificationMaxPollGap(SWEEP_POLLS * INTERVAL),
             );
           });
+
+          describe('for a primary read on every poll', () => {
+            const many = primaries(6 * TOPOLOGY_TARGET_LIMIT + 16);
+            let urgent = true;
+
+            beforeEach(() => {
+              urgent = true;
+              jest
+                .spyOn(service as any, 'needsEveryPoll')
+                .mockImplementation((_id: unknown, addr: unknown) => urgent && addr === first.addr);
+            });
+
+            it('closes its divergence window after three polls, not three sweeps', async () => {
+              ownClients(targets);
+
+              await poll(targets, 5, T0);
+
+              expect((service as any).divergenceState.get(firstKey).closedWindowCount).toBe(1);
+            });
+
+            it('allows a retry amplification gap of its own reads from its second read on', async () => {
+              ownClients(targets);
+
+              await poll(targets, 1, T0);
+              const onEntry = (service as any).retryAmplificationState.get(firstKey).maxPollGapMs;
+              await poll(targets, 1, T0 + INTERVAL);
+
+              expect(onEntry).toBe(retryAmplificationMaxPollGap(SWEEP_POLLS * INTERVAL));
+              expect((service as any).retryAmplificationState.get(firstKey).maxPollGapMs).toBe(
+                retryAmplificationMaxPollGap(INTERVAL),
+              );
+            });
+
+            it('reads its own line again after two polls', async () => {
+              ownClients(targets);
+
+              await poll(targets, 4, T0);
+
+              expect((service as any).reshardNodeSelves.get(firstKey).readAt).toBe(T0 + 2 * INTERVAL);
+            });
+
+            it('lets its reshard view go stale five polls after its last read', async () => {
+              ownClients(targets);
+
+              const end = (await poll(targets, 4, T0)) - INTERVAL;
+
+              const { fresh } = (service as any).reshardNodeSnapshots('conn-1', 'cluster-1', end + 6 * INTERVAL, INTERVAL);
+              expect(fresh.map(([addr]: [string]) => addr)).not.toContain(first.addr);
+              expect(fresh).toHaveLength(targets.length - 1);
+            });
+
+            it('stops reporting its replica as observed three polls after its last read', async () => {
+              const clients = ownClients(targets);
+              let reads = 0;
+              clients.get(first.nodeId!)!.info = jest.fn().mockImplementation(async (section?: string) => {
+                const offset = 1_000 * MiB + reads * 10 * MiB;
+                if (section === 'replication') reads++;
+                const lines = ['# Replication', 'role:master', `master_replid:${'b'.repeat(40)}`];
+                lines.push(`master_repl_offset:${offset}`, 'connected_slaves:1');
+                lines.push(`slave0:ip=10.0.1.9,port=6379,state=online,offset=${offset - 2 * MiB},lag=0`);
+                return lines.join('\r\n');
+              });
+              const end = (await poll(targets, 11, T0)) - INTERVAL;
+              jest.spyOn(Date, 'now').mockReturnValue(end + 4 * INTERVAL);
+
+              const history = await service.getReplicationDivergenceHistory('conn-1', T0, end + 4 * INTERVAL);
+
+              expect(history.find((h) => h.replica === '10.0.1.9:6379')?.level).toBe('unobserved');
+            });
+
+            it('does not take the wait before its first such read for an outage', async () => {
+              ownClients(many);
+              urgent = false;
+              await poll(many, 5, T0);
+              urgent = true;
+
+              await poll(many, 1, T0 + 5 * INTERVAL);
+
+              const state = (service as any).divergenceState.get(firstKey);
+              expect(state.lastSampleAt).toBe(T0 + 5 * INTERVAL);
+              expect(state.windowStart).toBe(T0);
+            });
+
+            it('does not take the wait after its last such read for an outage', async () => {
+              ownClients(many);
+              await poll(many, 2, T0);
+              urgent = false;
+
+              await poll(many, 7, T0 + 2 * INTERVAL);
+
+              const state = (service as any).divergenceState.get(firstKey);
+              expect(state.lastSampleAt).toBe(T0 + 6 * INTERVAL);
+              expect(state.windowStart).toBe(T0);
+            });
+          });
         });
 
         it('leaves a primary another connection checks out of every count', async () => {
