@@ -6648,9 +6648,10 @@ export class AnomalyService
       const findings: ReshardSkewFinding[] = [];
       const readAt = new Map<string, number>();
       const nodeAddrs = new Map<string, string>();
-      const shards = this.freshReshardShards(clusterKey, timestamp, intervalMs);
+      const entries = this.freshReshardEntries(clusterKey, timestamp, intervalMs);
+      const shards = entries.map(([, shard]) => shard);
       const judged = seed !== null || nodeSnapshots.length > 0;
-      const windowOpen = judged && isReshardActive(shards, timestamp, RESHARD_QUIET_POLLS * intervalMs);
+      const windowOpen = judged && this.isReshardActiveAmong(entries, timestamp, intervalMs);
       if (windowOpen) {
         if (shards.length < RESHARD_MIN_PRIMARIES) {
           if (!this.reshardThinViewLogged.has(ctx.connectionId)) {
@@ -6844,10 +6845,10 @@ export class AnomalyService
     const clusterKey = this.connectionClusterKeys.get(connectionId);
     if (clusterKey === undefined) return false;
     const intervalMs = this.getIntervalMs();
-    return isReshardActive(
-      this.freshReshardShards(clusterKey, timestamp, intervalMs),
+    return this.isReshardActiveAmong(
+      this.freshReshardEntries(clusterKey, timestamp, intervalMs),
       timestamp,
-      RESHARD_QUIET_POLLS * intervalMs,
+      intervalMs,
     );
   }
 
@@ -8148,8 +8149,8 @@ export class AnomalyService
     const intervalMs = this.getIntervalMs();
     if (timestamp - cached.readAt >= RESHARD_QUIET_POLLS * this.nodeReadIntervalMs(connectionId, key)) return null;
     const clusterKey = this.connectionClusterKeys.get(connectionId);
-    const shards = clusterKey ? this.freshReshardShards(clusterKey, timestamp, intervalMs) : [];
-    return isReshardActive(shards, timestamp, RESHARD_QUIET_POLLS * intervalMs) ? null : cached.self;
+    const entries = clusterKey ? this.freshReshardEntries(clusterKey, timestamp, intervalMs) : [];
+    return this.isReshardActiveAmong(entries, timestamp, intervalMs) ? null : cached.self;
   }
 
   private sampledNodeSelf(
@@ -8193,19 +8194,29 @@ export class AnomalyService
     return key === connectionId ? intervalMs : intervalMs * this.nodeReadPolls(connectionId, key);
   }
 
-  private freshReshardShards(
+  private freshReshardEntries(
     clusterKey: string,
     timestamp: number,
     intervalMs: number,
-  ): ReshardShardSnapshot[] {
-    const shards = new Map<string, ReshardShardSnapshot>();
+  ): [string, ReshardShardSnapshot][] {
+    const shards = new Map<string, [string, ReshardShardSnapshot]>();
     for (const [key, snapshot] of this.reshardSnapshot) {
       if (snapshot.clusterKey !== clusterKey) continue;
       const readEveryMs = this.reshardReadIntervalMs(key, intervalMs);
       if (timestamp - snapshot.timestamp > RESHARD_STALE_POLLS * readEveryMs) continue;
-      shards.set(snapshot.shardId, snapshot);
+      shards.set(snapshot.shardId, [key, snapshot]);
     }
     return [...shards.values()];
+  }
+
+  private isReshardActiveAmong(
+    entries: [string, ReshardShardSnapshot][],
+    timestamp: number,
+    intervalMs: number,
+  ): boolean {
+    return entries.some(([key, shard]) =>
+      isReshardActive([shard], timestamp, RESHARD_QUIET_POLLS * this.reshardReadIntervalMs(key, intervalMs)),
+    );
   }
 
   private async readNodeWriteP99(

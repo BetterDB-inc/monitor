@@ -6459,6 +6459,7 @@ describe('AnomalyService', () => {
       const addrOf = (i: number) => `10.${1 + Math.floor(i / 100)}.0.${100 + (i % 100)}:6379`;
       let hotOps: number;
       let hotReads: Set<number>;
+      let migrating: (i: number) => boolean;
 
       function clusterCtx() {
         const info = {
@@ -6498,7 +6499,6 @@ describe('AnomalyService', () => {
       }
 
       function fanoutNode(i: number) {
-        const marker = i < LANE ? '[1->-a0000000]' : '';
         return {
           info: jest.fn(async (section?: string) => {
             if (i === HOT) hotReads.add(clock);
@@ -6513,7 +6513,10 @@ describe('AnomalyService', () => {
               `instantaneous_ops_per_sec:${i === HOT ? hotOps : 6000}`,
             ].join('\r\n');
           }),
-          call: jest.fn().mockResolvedValue(`${idOf(i)} ${addrOf(i)}@16379 myself,master - 0 0 1 connected ${marker}`),
+          call: jest.fn(
+            async () =>
+              `${idOf(i)} ${addrOf(i)}@16379 myself,master - 0 0 1 connected ${migrating(i) ? '[1->-a0000000]' : ''}`,
+          ),
         };
       }
 
@@ -6522,11 +6525,20 @@ describe('AnomalyService', () => {
         await poll(clusterCtx());
       }
 
+      function fillLaneWithOthers(): void {
+        const crowd = new Set(Array.from({ length: LANE }, (_, i) => addrOf(i)));
+        const real = (service as any).needsEveryPoll.bind(service);
+        jest
+          .spyOn(service as any, 'needsEveryPoll')
+          .mockImplementation((id: unknown, addr: unknown) => crowd.has(addr as string) || real(id, addr));
+      }
+
       const hotSkews = () => skewEvents().filter((e) => e.nodeAddr === addrOf(HOT));
 
       beforeEach(() => {
         hotOps = 18_000;
         hotReads = new Set();
+        migrating = (i) => i < LANE;
         const clients = new Map(Array.from({ length: COUNT }, (_, i) => [idOf(i), fanoutNode(i)]));
         (service as any).clusterDiscovery = {
           retainAddressConnections: jest.fn().mockResolvedValue(undefined),
@@ -6555,6 +6567,43 @@ describe('AnomalyService', () => {
         }
 
         expect(readsWhenRaised).toBe(RESHARD_PERSIST_POLLS);
+      });
+
+      it('keeps the window open between two reads of a migrating primary that waits its turn', async () => {
+        migrating = (i) => i === HOT;
+        fillLaneWithOthers();
+        const open: boolean[] = [];
+
+        for (let i = 0; i < 12; i += 1) {
+          await pollOnce();
+          open.push((service as any).isReshardWindowOpen('conn-a', clock));
+        }
+
+        expect(hotReads.size).toBe(3);
+        expect(open).toEqual(Array(12).fill(true));
+      });
+
+      it('raises a skew on a hot migrating primary that waits its turn', async () => {
+        migrating = (i) => i === HOT;
+        fillLaneWithOthers();
+        let readsWhenRaised: number | null = null;
+
+        for (let i = 0; i < 40 && readsWhenRaised === null; i += 1) {
+          await pollOnce();
+          if (hotSkews().length > 0) readsWhenRaised = hotReads.size;
+        }
+
+        expect(readsWhenRaised).toBe(RESHARD_PERSIST_POLLS);
+      });
+
+      it('keeps an open skew of a migrating primary that waits its turn', async () => {
+        migrating = (i) => i === HOT;
+        fillLaneWithOthers();
+        for (let i = 0; i < 12 && hotSkews().length === 0; i += 1) await pollOnce();
+
+        for (let i = 0; i < 8; i += 1) await pollOnce();
+
+        expect(hotSkews().map((e) => e.resolved)).toEqual([false]);
       });
     });
 
@@ -26098,7 +26147,7 @@ describe('AnomalyService', () => {
 
             const end = (await poll(many, 7, T0)) - INTERVAL;
 
-            expect((service as any).freshReshardShards('cluster-1', end, INTERVAL)).toHaveLength(many.length);
+            expect((service as any).freshReshardEntries('cluster-1', end, INTERVAL)).toHaveLength(many.length);
             expect((service as any).reshardNodeSnapshots('conn-1', 'cluster-1', end, INTERVAL).fresh).toHaveLength(
               many.length,
             );
