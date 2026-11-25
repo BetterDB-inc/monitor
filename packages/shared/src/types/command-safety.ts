@@ -248,6 +248,16 @@ export function redactSensitiveReply(command: string, args: readonly string[] | 
 }
 
 /**
+ * An argument as Valkey compares it: it matches keywords with strcasecmp,
+ * which stops at the first NUL byte, so "RESET\0" is RESET to the server.
+ */
+function serverToken(arg: string | undefined): string | undefined {
+  if (arg === undefined) return undefined;
+  const nul = arg.indexOf('\0');
+  return (nul === -1 ? arg : arg.slice(0, nul)).toUpperCase();
+}
+
+/**
  * Check if a command may run on a read-only agent connection, one where the
  * agent holds admin credentials it is not meant to change state with (the
  * OpenEverest plugin). Read-only is the safe-mode allowlist minus everything
@@ -256,12 +266,12 @@ export function redactSensitiveReply(command: string, args: readonly string[] | 
  * Returns an error message string, or null if allowed.
  */
 export function checkAgentReadOnly(command: string, args?: readonly string[]): string | null {
-  const subCommand = args?.[0]?.toUpperCase();
+  const subCommand = serverToken(args?.[0]);
   // The same RESET sub-commands a read-only member may not run.
   if (subCommand !== undefined && MEMBER_DENIED_SUBCOMMANDS[command]?.has(subCommand)) {
     return AGENT_READ_ONLY_MESSAGE;
   }
-  if (command === 'ACL' && subCommand === 'LOG' && args?.[1]?.toUpperCase() === 'RESET') {
+  if (command === 'ACL' && subCommand === 'LOG' && serverToken(args?.[1]) === 'RESET') {
     return AGENT_READ_ONLY_MESSAGE;
   }
   return checkSafeMode(command, subCommand) === null ? null : AGENT_READ_ONLY_MESSAGE;

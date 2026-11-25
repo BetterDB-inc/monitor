@@ -72,6 +72,14 @@ describe('checkAgentReadOnly', () => {
     expect(checkAgentReadOnly(command, args)).toBe(AGENT_READ_ONLY_MESSAGE);
   });
 
+  it.each([
+    ['ACL', ['LOG', 'RESET\0']],
+    ['ACL', ['LOG', 'reset\0anything']],
+    ['SLOWLOG', ['RESET\0']],
+  ])('denies %s %j: Valkey compares keywords up to the first NUL', (command, args) => {
+    expect(checkAgentReadOnly(command, args)).toBe(AGENT_READ_ONLY_MESSAGE);
+  });
+
   it('allows the read path the monitor polls', () => {
     expect(checkAgentReadOnly('INFO')).toBeNull();
     expect(checkAgentReadOnly('PING', [])).toBeNull();

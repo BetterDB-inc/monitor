@@ -203,6 +203,17 @@ describe('CommandExecutor read-only', () => {
     expect(call).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['a binary operand', ['LOG', 'placeholder'], { placeholder: Buffer.from('RESET\0') }],
+    ['a plain argument', ['LOG', 'RESET\0'], undefined],
+    ['a lower-case argument with trailing bytes after the NUL', ['LOG', 'reset\0junk'], undefined],
+  ])('refuses ACL LOG RESET followed by a NUL as %s, as Valkey reads it as RESET', async (_how, args, binaryArgs) => {
+    const { executor, call } = executorWith({ readOnly: true });
+
+    await expect(executor.execute('ACL', args as string[], binaryArgs as Record<string, Buffer> | undefined)).rejects.toThrow('Command not allowed');
+    expect(call).not.toHaveBeenCalled();
+  });
+
   it('only substitutes own placeholders, never inherited names like constructor', async () => {
     const { executor, call } = executorWith({ readOnly: true });
 
