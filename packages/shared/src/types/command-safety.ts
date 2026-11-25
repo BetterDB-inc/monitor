@@ -33,7 +33,7 @@ export const ALLOWED_SUBCOMMANDS: Readonly<Record<string, ReadonlySet<string>>> 
   SLOWLOG: new Set(['GET', 'LEN', 'RESET']),
   COMMANDLOG: new Set(['GET', 'LEN', 'RESET']),
   LATENCY: new Set(['LATEST', 'HISTORY', 'HISTOGRAM', 'RESET', 'DOCTOR']),
-  CLUSTER: new Set(['INFO', 'SLOTS', 'SLOT-STATS', 'NODES']),
+  CLUSTER: new Set(['INFO', 'SLOTS', 'SLOT-STATS', 'NODES', 'SHARDS']),
   // Read-only topology views used by the Sentinel drift detector.
   SENTINEL: new Set(['MASTERS', 'REPLICAS', 'SENTINELS']),
   MEMORY: new Set(['DOCTOR', 'STATS']),

@@ -373,6 +373,7 @@ export class AgentDatabaseAdapter implements DatabasePort {
   }
 
   async killClient(_filters: ClientFilters): Promise<number> {
+    if (this.readOnly) throw new AgentReadOnlyError();
     throw new Error('killClient is not supported through agent connections');
   }
 

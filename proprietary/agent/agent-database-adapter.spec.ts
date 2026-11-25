@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events';
 import type { WebSocket } from 'ws';
 import { AgentDatabaseAdapter } from './agent-database-adapter';
+import { AgentReadOnlyError } from '../../apps/api/src/common/errors/agent-read-only.error';
 
 class FakeSocket extends EventEmitter {
   readyState = 1;
@@ -74,6 +75,20 @@ describe('AgentDatabaseAdapter read-only', () => {
     await expect(adapter.killClient({})).rejects.toThrow();
 
     expect(socket.commands).toHaveLength(0);
+  });
+
+  it('refuses CLIENT KILL with the typed read-only error, so the API answers 403', async () => {
+    const { adapter } = buildAdapter(true);
+
+    await expect(adapter.killClient({})).rejects.toBeInstanceOf(AgentReadOnlyError);
+  });
+
+  it('keeps the unsupported error for CLIENT KILL on writable agent connections', async () => {
+    const { adapter } = buildAdapter(false);
+
+    const err = await adapter.killClient({}).catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(AgentReadOnlyError);
+    expect((err as Error).message).toMatch(/not supported/);
   });
 
   it('redacts credential values in CONFIG GET replies, whatever pattern was asked for', async () => {

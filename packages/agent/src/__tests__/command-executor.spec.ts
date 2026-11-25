@@ -181,6 +181,19 @@ describe('CommandExecutor read-only', () => {
     expect(call).not.toHaveBeenCalled();
   });
 
+  it('judges the arguments that reach the server, so a binary operand cannot swap in another sub-command', async () => {
+    const { executor, call } = executorWith({ readOnly: true });
+
+    // CLIENT LIST passes the check; substituting LIST with KILL would send
+    // CLIENT KILL ID 7. The sub-command slot is never substituted.
+    await executor.execute('CLIENT', ['LIST', 'ID', '7'], { LIST: Buffer.from('KILL') });
+    expect(call.mock.calls[0]).toEqual(['CLIENT', 'LIST', 'ID', '7']);
+
+    // A placeholder in a data slot is substituted.
+    await executor.execute('CLIENT', ['LIST', 'ID', 'placeholder'], { placeholder: Buffer.from('9') });
+    expect(call.mock.calls[1]).toEqual(['CLIENT', 'LIST', 'ID', Buffer.from('9')]);
+  });
+
   it('still runs reads', async () => {
     const { executor, call } = executorWith({ readOnly: true });
 

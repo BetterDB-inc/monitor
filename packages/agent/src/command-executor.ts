@@ -8,6 +8,22 @@ function isLfuPolicyMismatch(error: Error | null | undefined): boolean {
   return !!error && /LFU maxmemory policy/i.test(error.message);
 }
 
+// Stands in for binary operands when the safety checks and redaction look
+// at the arguments; it can never equal a sub-command name.
+const BINARY_OPERAND = '<binary>';
+
+/**
+ * Replaces placeholder arguments with their binary payloads. The first
+ * argument is the sub-command for every command that has one, so it is never
+ * substituted: a placeholder there is passed through as the literal string
+ * and judged by the safety checks as such.
+ */
+export function substituteBinaryArgs(args?: string[], binaryArgs?: Record<string, Buffer>): (string | Buffer)[] | undefined {
+  if (!args) return undefined;
+  if (!binaryArgs) return [...args];
+  return args.map((arg, index) => (index > 0 && arg in binaryArgs ? binaryArgs[arg] : arg));
+}
+
 const SIZE_COMMAND_BY_TYPE = new Map<string, string>([
   ['string', 'STRLEN'],
   ['list', 'LLEN'],
@@ -61,17 +77,26 @@ export class CommandExecutor {
   ): Promise<unknown> {
     const upperCmd = cmd.toUpperCase();
 
-    if (!this.isAllowed(upperCmd, args)) {
-      const full = args ? `${upperCmd} ${args.join(' ')}` : upperCmd;
+    // Binary placeholders are resolved first and the checks run on what will
+    // actually reach the server: a placeholder named after an allowed
+    // sub-command must not smuggle another one in. Binary data only ever
+    // stands for a data operand, never the sub-command slot.
+    const effective = substituteBinaryArgs(args, binaryArgs);
+    const checked = effective?.map((arg) => (typeof arg === 'string' ? arg : BINARY_OPERAND));
+    if (!this.isAllowed(upperCmd, checked)) {
+      const full = checked ? `${upperCmd} ${checked.join(' ')}` : upperCmd;
       throw new Error(`Command not allowed: ${full}`);
     }
 
-    const reply = await this.run(upperCmd, args, binaryArgs);
+    const reply = await this.run(upperCmd, effective);
     // Read-only holds the admin user: never ship its password or hashes out.
-    return this.readOnly ? redactSensitiveReply(upperCmd, args, reply) : reply;
+    return this.readOnly ? redactSensitiveReply(upperCmd, checked, reply) : reply;
   }
 
-  private async run(upperCmd: string, args?: string[], binaryArgs?: Record<string, Buffer>): Promise<unknown> {
+  private async run(upperCmd: string, effective?: (string | Buffer)[]): Promise<unknown> {
+    // The handlers below want plain strings; a Buffer only occurs where the
+    // command takes binary data (FT, and the generic path).
+    const args = effective?.map((arg) => (typeof arg === 'string' ? arg : arg.toString('binary')));
     if (upperCmd === 'PING') {
       return this.client.ping();
     }
@@ -101,30 +126,14 @@ export class CommandExecutor {
     }
 
     // For FT commands, join command with subcommand using dot notation
-    if (upperCmd === 'FT' && args && args.length > 0) {
-      const ftCmd = `FT.${args[0].toUpperCase()}`;
-      const ftArgs: (string | Buffer)[] = [...args.slice(1)];
-      if (binaryArgs) {
-        for (let i = 0; i < ftArgs.length; i++) {
-          const key = ftArgs[i];
-          if (typeof key === 'string' && key in binaryArgs) {
-            ftArgs[i] = binaryArgs[key];
-          }
-        }
-      }
+    if (upperCmd === 'FT' && effective && effective.length > 0) {
+      const ftCmd = `FT.${String(effective[0]).toUpperCase()}`;
+      const ftArgs = effective.slice(1);
       return this.client.call(ftCmd, ...(ftArgs as [string, ...(string | Buffer)[]]));
     }
 
     // For all other commands, use call()
-    const callArgs: (string | Buffer)[] = args ? [upperCmd, ...args] : [upperCmd];
-    if (binaryArgs) {
-      for (let i = 1; i < callArgs.length; i++) {
-        const key = callArgs[i];
-        if (typeof key === 'string' && key in binaryArgs) {
-          callArgs[i] = binaryArgs[key];
-        }
-      }
-    }
+    const callArgs: (string | Buffer)[] = effective ? [upperCmd, ...effective] : [upperCmd];
     return this.client.call(...(callArgs as [string, ...(string | Buffer)[]]));
   }
 

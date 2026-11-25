@@ -82,6 +82,7 @@ describe('checkAgentReadOnly', () => {
     expect(checkAgentReadOnly('CLIENT', ['LIST'])).toBeNull();
     expect(checkAgentReadOnly('CONFIG', ['GET', 'maxmemory'])).toBeNull();
     expect(checkAgentReadOnly('CLUSTER', ['NODES'])).toBeNull();
+    expect(checkAgentReadOnly('CLUSTER', ['SHARDS'])).toBeNull();
     expect(checkAgentReadOnly('COLLECT_KEY_ANALYTICS', ['{}'])).toBeNull();
   });
 });
