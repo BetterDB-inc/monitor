@@ -44,13 +44,17 @@ export function hashTagsUnavailable(note: string): HashTagRead {
   return { tags: [], slotsSampled: 0, note };
 }
 
-export function hashTagOf(name: Buffer | string): string | null {
+function hashTagBytes(name: Buffer | string): Buffer | null {
   const bytes = typeof name === 'string' ? Buffer.from(name) : name;
   const open = bytes.indexOf(OPEN_BRACE);
   if (open < 0) return null;
   const close = bytes.indexOf(CLOSE_BRACE, open + 1);
   if (close <= open + 1) return null;
-  return bytes.subarray(open + 1, close).toString('utf8');
+  return bytes.subarray(open + 1, close);
+}
+
+export function hashTagOf(name: Buffer | string): string | null {
+  return hashTagBytes(name)?.toString('utf8') ?? null;
 }
 
 export function judgeSlotTag(
@@ -60,8 +64,8 @@ export function judgeSlotTag(
   if (names.length === 0) return null;
   const counts = new Map<string, number>();
   for (const name of names) {
-    const tag = hashTagOf(name);
-    if (tag !== null) counts.set(tag, (counts.get(tag) ?? 0) + 1);
+    const tag = hashTagBytes(name)?.toString('hex');
+    if (tag !== undefined) counts.set(tag, (counts.get(tag) ?? 0) + 1);
   }
   let best: [string, number] | undefined;
   for (const entry of [...counts].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
@@ -72,7 +76,7 @@ export function judgeSlotTag(
   }
   return {
     slot,
-    tag: best[0],
+    tag: Buffer.from(best[0], 'hex').toString('utf8'),
     share: best[1] / names.length,
     keysSampled: names.length,
     keysWithTag: best[1],
@@ -92,7 +96,7 @@ export function keyCountOutliers(
   slots: readonly SlotKeyCount[],
   medianKeyCount: number,
 ): KeyCountOutlier[] {
-  const floor = Math.max(medianKeyCount, 1);
+  const floor = medianKeyCount > 0 ? medianKeyCount : 1;
   return slots
     .filter((slot) => slot.keyCount >= floor * KEY_COUNT_OUTLIER_FACTOR)
     .sort((a, b) => b.keyCount - a.keyCount || a.slot - b.slot)

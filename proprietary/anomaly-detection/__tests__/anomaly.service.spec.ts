@@ -2996,6 +2996,69 @@ describe('AnomalyService', () => {
         );
       });
 
+      it('keeps the hash tag when the frequency read fails', async () => {
+        keys = {
+          0: [
+            ['{cart}:1', 255],
+            ['{cart}:2', 201],
+          ],
+          1: [['user:1', 40]],
+        };
+        const client = hotNode();
+        client.pipeline.mockReturnValue({
+          call() {
+            return this;
+          },
+          exec: async () => {
+            throw new Error('CLUSTERDOWN The cluster is down');
+          },
+        });
+        dial(client);
+
+        await step(HOT, 6);
+
+        expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          keySource: 'unavailable',
+          keyNote: 'reading the keys from the hot primary failed: CLUSTERDOWN The cluster is down',
+          advice: {
+            hashTags: { tags: [{ slot: 0, tag: 'cart', keysWithTag: 2 }], slotsSampled: 2 },
+          },
+        });
+      });
+
+      it('keeps the hash tag when the frequency read does not answer', async () => {
+        const budget = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+        (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;
+        try {
+          keys = {
+            0: [
+              ['{cart}:1', 255],
+              ['{cart}:2', 201],
+            ],
+            1: [['user:1', 40]],
+          };
+          const client = hotNode();
+          client.pipeline.mockReturnValue({
+            call() {
+              return this;
+            },
+            exec: () => new Promise(() => undefined),
+          });
+          dial(client);
+
+          await step(HOT, 6);
+
+          expect(service.getHotShards('conn-a')[0]).toMatchObject({
+            keySource: 'unavailable',
+            keyNote: 'reading the keys from the hot primary timed out',
+            advice: { hashTags: { tags: [{ slot: 0, tag: 'cart' }] } },
+          });
+          expect(hotEvents()[0].message).toContain('share the hash tag {cart}');
+        } finally {
+          (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = budget;
+        }
+      });
+
       it('ends the tag read with a note when the user may not list keys', async () => {
         const client = hotNode();
         client.callBuffer.mockRejectedValue(new Error('NOPERM User monitor has no permissions'));

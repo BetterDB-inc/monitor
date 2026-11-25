@@ -7281,20 +7281,20 @@ export class AnomalyService
     }
     const slots = topSlots.slice(0, HOT_KEY_SLOTS).map((slot) => slot.slot);
     const timedOut = 'reading the keys from the hot primary timed out';
+    let hashTags: HashTagRead | undefined;
     try {
       return await this.readShard(connectionId, shardId, timedOut, async (client) => {
         const read = await readSlotNames(client, slots);
         if (read.note !== undefined) return unavailable(read.note);
-        return {
-          keys: await sampleHotKeys(client, slots, read.names),
-          hashTags: hashTagsOfNames(read.names),
-        };
+        hashTags = hashTagsOfNames(read.names);
+        return { keys: await sampleHotKeys(client, slots, read.names), hashTags };
       });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
-      return unavailable(
+      const read = unavailable(
         reason === timedOut ? timedOut : `reading the keys from the hot primary failed: ${reason}`,
       );
+      return hashTags ? { ...read, hashTags } : read;
     }
   }
 

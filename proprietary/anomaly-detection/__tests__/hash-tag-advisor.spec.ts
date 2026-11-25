@@ -90,6 +90,18 @@ describe('judgeSlotTag', () => {
     expect(judgeSlotTag(1, ['{9}:a', '{9}:b'])?.tag).toBe('9');
   });
 
+  it('keeps binary tags apart that decode to the same text', () => {
+    const tagged = (tag: number[], rest: string) =>
+      Buffer.concat([Buffer.from([0x7b, ...tag, 0x7d]), Buffer.from(rest)]);
+
+    expect(
+      judgeSlotTag(1, [tagged([0x80, 0x80, 0x80], 'a'), tagged([0x81, 0x90, 0xa1], 'b')]),
+    ).toBeNull();
+    expect(
+      judgeSlotTag(1, [tagged([0x80, 0x80, 0x80], 'a'), tagged([0x80, 0x80, 0x80], 'b')]),
+    ).toMatchObject({ tag: '\ufffd\ufffd\ufffd', keysWithTag: 2 });
+  });
+
   it('picks the first tag in name order when two tie at half', () => {
     const sampled = [...names(5, (i) => `{b}:${i}`), ...names(5, (i) => `{a}:${i}`)];
 
@@ -147,6 +159,12 @@ describe('keyCountOutliers', () => {
   it('counts an empty median as one key', () => {
     expect(keyCountOutliers([{ slot: 7, keyCount: 25 }], 0)).toEqual([
       { slot: 7, keyCount: 25, ratio: 25 },
+    ]);
+  });
+
+  it('keeps a median under one key as it is', () => {
+    expect(keyCountOutliers([{ slot: 7, keyCount: 10 }], 0.5)).toEqual([
+      { slot: 7, keyCount: 10, ratio: 20 },
     ]);
   });
 
