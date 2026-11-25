@@ -338,7 +338,10 @@ export function AnomalyDashboard() {
       <ReplicaSlotStateBanner events={replicaSlotStateEvents ?? undefined} />
       <HotShardCaptureNotice connectionId={currentConnection?.id} />
       <RebalanceRuns connectionId={currentConnection?.id} />
-      <RebalanceSuggestion connectionId={currentConnection?.id} mode={placement?.effectiveMode} />
+      <RebalanceSuggestion
+        connectionId={currentConnection?.id}
+        mode={placement?.effectiveMode ?? 'observe'}
+      />
       <FanoutCoverageNotice
         coverage={fanoutCoverage?.find((c) => c.connectionId === currentConnection?.id)}
         error={fanoutCoverageError}
