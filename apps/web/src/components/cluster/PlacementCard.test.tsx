@@ -178,6 +178,45 @@ describe('PlacementCard', () => {
     expect(screen.getByText('Suggestions in observe mode')).toBeInTheDocument();
   });
 
+  it('keeps the saved mode when a read started before the save ends after it', async () => {
+    get.mockResolvedValueOnce(status());
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <PlacementCard connectionId="conn-1" />
+      </QueryClientProvider>,
+    );
+    const region = await card();
+    await waitFor(() =>
+      expect(modeButton(region, 'Recommend')).toHaveAttribute('aria-pressed', 'true'),
+    );
+
+    let finishRead: (value: PlacementStatus) => void = () => undefined;
+    get.mockReturnValueOnce(
+      new Promise<PlacementStatus>((resolve) => {
+        finishRead = resolve;
+      }),
+    );
+    void client.invalidateQueries();
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(2));
+
+    setMode.mockResolvedValue(status({ mode: 'observe', effectiveMode: 'observe' }));
+    fireEvent.click(modeButton(region, 'Observe'));
+    await waitFor(() =>
+      expect(modeButton(region, 'Observe')).toHaveAttribute('aria-pressed', 'true'),
+    );
+
+    await act(async () => {
+      finishRead(status());
+    });
+    await waitFor(() =>
+      expect(client.getQueryState(['placement', 'conn-1'])?.fetchStatus).toBe('idle'),
+    );
+
+    expect(client.getQueryData<PlacementStatus>(['placement', 'conn-1'])?.mode).toBe('observe');
+    expect(modeButton(region, 'Observe')).toHaveAttribute('aria-pressed', 'true');
+  });
+
   it('shows why a mode was refused', async () => {
     setMode.mockRejectedValue(
       new ApiError('Per-slot load is not collected.', 400, { blockedBy: 'slot_stats_off' }),
@@ -285,6 +324,18 @@ describe('PlacementCard', () => {
     await show(status());
     expect(screen.queryByRole('region', { name: 'Slot placement' })).not.toBeInTheDocument();
     expect(get).not.toHaveBeenCalled();
+  });
+
+  it('says it is reading the placement until the first read ends', async () => {
+    get.mockReturnValue(new Promise(() => undefined));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <PlacementCard connectionId="conn-1" />
+      </QueryClientProvider>,
+    );
+
+    expect(await card()).toHaveTextContent('Reading the placement status');
   });
 
   it('says when the placement could not be read', async () => {

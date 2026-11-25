@@ -26,7 +26,10 @@ export function usePlacement(connectionId: string | undefined, enabled = true) {
     error: modeError,
   } = useMutation<PlacementStatus, Error, PlacementMode>({
     mutationFn: (mode) => placementApi.setMode(connectionId as string, mode),
-    onSuccess: (status) => queryClient.setQueryData(placementQueryKey(connectionId), status),
+    onSuccess: async (status) => {
+      await queryClient.cancelQueries({ queryKey: placementQueryKey(connectionId) });
+      queryClient.setQueryData(placementQueryKey(connectionId), status);
+    },
   });
 
   useEffect(() => reset, [connectionId, reset]);

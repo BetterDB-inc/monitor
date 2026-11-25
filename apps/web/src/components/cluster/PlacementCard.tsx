@@ -155,6 +155,9 @@ export function PlacementCard({ connectionId }: { connectionId: string | undefin
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4 text-sm">
+          {!status && !error && (
+            <p className="text-muted-foreground">Reading the placement status…</p>
+          )}
           {!status && error && (
             <p className="text-muted-foreground">Could not read the placement status.</p>
           )}
