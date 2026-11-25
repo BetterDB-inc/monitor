@@ -45,6 +45,7 @@ import {
   DIVERGENCE_HISTORY_QUERY_WINDOWS,
   DIVERGENCE_PERSIST_BACKLOG,
   OPEN_EVENT_PAGE_SIZE,
+  createDivergenceState,
 } from '../replication-divergence-detector';
 import {
   MetricType,
@@ -25482,6 +25483,97 @@ describe('AnomalyService', () => {
           await poll(targets, 1, T0);
 
           expect((service as any).reshardMissedReads.size).toBe(TOPOLOGY_TARGET_LIMIT);
+        });
+
+        describe('ahead of the rotation', () => {
+          const targets = primaries(2 * TOPOLOGY_TARGET_LIMIT + 2);
+          const byAddr = [...targets].sort((a, b) => (a.addr < b.addr ? -1 : 1));
+          const last = byAddr[byAddr.length - 1];
+          const key = `conn-1@${last.addr}`;
+
+          async function readsOnFirstPoll(seed: (state: any) => void): Promise<Set<string>> {
+            const client = nodeClient([2]);
+            const getNodeConnection = discovery().mockImplementation(async (nodeId: string) => {
+              if (nodeId === last.nodeId) throw new Error('ECONNREFUSED');
+              return client;
+            });
+            seed(service as any);
+            await poll(targets, 1, T0);
+            return new Set(getNodeConnection.mock.calls.map(([nodeId]) => nodeId));
+          }
+
+          it('leaves a quiet primary to wait its turn', async () => {
+            expect((await readsOnFirstPoll(() => undefined)).has(last.nodeId!)).toBe(false);
+          });
+
+          it.each<[string, (state: any) => void]>([
+            ['an open event', (state) => state.fanoutNodeEventIds.set(key, new Map([['evt-1', 'latch']]))],
+            ['an open backlog event', (state) => state.backlogCoverageEventIds.set(key, 'evt-1')],
+            [
+              'an open event still to adopt',
+              (state) =>
+                state.pendingNodeOpenEvents.set(
+                  'conn-1',
+                  new Map([[last.addr, { backlog: [], resync: [], fork: [], cob: [] }]]),
+                ),
+            ],
+            [
+              'an open reshard event still to adopt',
+              (state) => state.adoptedNodeReshardEventIds.set('conn-1', new Map([[last.addr, 'evt-1']])),
+            ],
+            ['slots on the move', (state) => state.reshardSnapshot.set(key, { migratingSlots: 1, importingSlots: 0 })],
+            [
+              'a diverging replica',
+              (state) => {
+                const divergence = createDivergenceState();
+                divergence.replicas.set(NODE_REPLICA, { level: 'warning', eventId: null, disagreeEventId: null } as any);
+                state.divergenceState.set(key, divergence);
+              },
+            ],
+            [
+              'a retry amplification episode',
+              (state) =>
+                state.retryAmplificationState.set(key, { episodeLevel: 'warning', ackedLevel: 'none', pending: null }),
+            ],
+            [
+              'a backlog shortfall building up',
+              (state) =>
+                state.backlogCoverage.set(key, { level: 'none', belowWarning: 1, belowCritical: 0, noReplicasSince: null }),
+            ],
+            [
+              'a replica disconnect being judged',
+              (state) => state.resyncEscalation.set(key, { pending: new Map([[NODE_REPLICA, {}]]) }),
+            ],
+            [
+              'an acknowledged fork risk',
+              (state) => state.forkMemoryState.set(key, { ackedLevel: 'warning', ackedKind: 'live-cow-oom' }),
+            ],
+            [
+              'an output buffer over its soft limit',
+              (state) =>
+                state.cobState.set(key, {
+                  replicas: new Map([[NODE_REPLICA, { ackedLevel: 'none', softBreachSince: T0 }]]),
+                  aggregateAlert: null,
+                  inheritedAggregateAlert: null,
+                }),
+            ],
+            ['a backoff that just ended', (state) => state.topologyBackoff.set(key, { failures: 1, until: T0 })],
+          ])('reads a primary with %s without waiting for its turn', async (_name, seed) => {
+            expect((await readsOnFirstPoll(seed)).has(last.nodeId!)).toBe(true);
+          });
+
+          it('gives at most a quarter of the budget to them', async () => {
+            const busy = byAddr.slice(-20);
+
+            const read = await readsOnFirstPoll((state) => {
+              for (const t of busy) {
+                state.reshardSnapshot.set(`conn-1@${t.addr}`, { migratingSlots: 1, importingSlots: 0 });
+              }
+            });
+
+            expect(busy.filter((t) => read.has(t.nodeId!))).toHaveLength(TOPOLOGY_TARGET_LIMIT / 4);
+            expect(read.size).toBe(TOPOLOGY_TARGET_LIMIT);
+          });
         });
 
         it('leaves a primary another connection checks out of every count', async () => {

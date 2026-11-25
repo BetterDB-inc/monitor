@@ -13024,6 +13024,7 @@ export class AnomalyService
       readable,
       (t) => t.addr,
       TOPOLOGY_TARGET_LIMIT,
+      (t) => this.needsEveryPoll(ctx.connectionId, t.addr),
     );
     // Primaries waiting their turn count as their last read left them: checked,
     // failed, or not read yet. A takeover is counted by its holder until a read
@@ -13165,6 +13166,36 @@ export class AnomalyService
       }
       this.topologyFanoutUnreachable.set(ctx.connectionId, unreachable);
     }
+  }
+
+  private needsEveryPoll(connectionId: string, addr: string): boolean {
+    const key = topologyStateKey(connectionId, addr);
+    const reshard = this.reshardSnapshot.get(key);
+    const retry = this.retryAmplificationState.get(key);
+    const backlog = this.backlogCoverage.get(key);
+    const cob = this.cobState.get(key);
+    return (
+      this.topologyBackoff.has(key) ||
+      this.nodeDetectorEventIds(key).length > 0 ||
+      !!this.pendingNodeOpenEvents.get(connectionId)?.has(addr) ||
+      !!this.adoptedNodeReshardEventIds.get(connectionId)?.has(addr) ||
+      this.restoredCobLevel.has(key) ||
+      (!!reshard && reshard.migratingSlots + reshard.importingSlots > 0) ||
+      [...(this.divergenceState.get(key)?.replicas.values() ?? [])].some(
+        (replica) => replica.level !== 'none' || !!replica.eventId || !!replica.disagreeEventId,
+      ) ||
+      this.divergenceOrphans.has(key) ||
+      (!!retry && (retry.episodeLevel !== 'none' || retry.ackedLevel !== 'none' || !!retry.pending)) ||
+      (!!backlog && (backlog.level !== 'none' || backlog.belowWarning > 0 || backlog.belowCritical > 0)) ||
+      (this.resyncEscalation.get(key)?.pending.size ?? 0) > 0 ||
+      (this.forkMemoryState.get(key)?.ackedLevel ?? 'none') !== 'none' ||
+      (!!cob &&
+        (!!cob.aggregateAlert ||
+          !!cob.inheritedAggregateAlert ||
+          [...cob.replicas.values()].some(
+            (replica) => replica.ackedLevel !== 'none' || replica.softBreachSince !== null,
+          )))
+    );
   }
 
   private async readTargetReplicationInfo(
