@@ -107,7 +107,8 @@ plugin for every POST/PUT reaching the backend.
 | cluster-wide or `watchNamespaces` | `instances.core.openeverest.io` | get, list, watch | Follow `status.connectionSecretRef`; drop instances that are deleted. |
 | cluster-wide or `watchNamespaces` | `secrets` | get, list, watch | Read each enabled instance's connection Secret and re-read it on rotation. |
 | cluster-wide | `namespaces` (`kube-system` only) | get | Take the namespace UID as a stable cluster id. |
-| plugin namespace | its targets ConfigMap, its settings Secret | get, list, watch, update, patch (+ create) | Remember which instances are enabled; store the BetterDB URL and token. |
+| plugin namespace | its targets ConfigMap | get, list, watch, update, patch (+ create, which cannot be scoped by name) | Remember which instances are enabled. |
+| plugin namespace | its settings Secret | get, list, watch | Read the BetterDB URL and token. Helm writes this Secret (`betterdb.url`/`betterdb.token`, or your own `betterdb.existingSecret`); the plugin never does. |
 
 It has **no write access to any database CR**. Instances are never modified and no pod is
 restarted.

@@ -23,7 +23,7 @@ BetterDB configured on the Helm release (`betterdb.url` and `betterdb.token`, or
   session token; a 403 refuses the request.
 - **The plugin's ServiceAccount** reads `instances.core.openeverest.io` and the connection
   Secrets they point at (`get`, `list`, `watch`), cluster-wide by default or limited by the
-  `watchNamespaces` value. It writes only its own ConfigMap and Secret in its namespace, and
+  `watchNamespaces` value. It writes only its own ConfigMap in its namespace, and
   never modifies a database CR.
 
 ## Credentials and read-only mode
