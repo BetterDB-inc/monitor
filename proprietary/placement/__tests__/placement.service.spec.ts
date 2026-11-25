@@ -236,6 +236,39 @@ describe('PlacementService', () => {
       ).not.toContain('acl');
     });
 
+    it.each(Array.from({ length: 12 }, (_, ticks) => ticks))(
+      'keeps acl from a refusal that lands %i ticks after the primaries of a status read',
+      async (ticks) => {
+        const { service, storage, anomaly } = await setup();
+        await storage.savePlacementPolicy({
+          connectionId: 'seed',
+          mode: 'recommend',
+          updatedAt: 1,
+        });
+        let answerPrimaries: (value: PlacementPrimaryRead[]) => void = () => {};
+        anomaly.readPlacementPrimaries.mockReturnValueOnce(
+          new Promise<PlacementPrimaryRead[]>((resolve) => {
+            answerPrimaries = resolve;
+          }),
+        );
+        let refuse: (value: unknown) => void = () => {};
+        anomaly.runRebalance.mockReturnValueOnce(
+          new Promise((resolve) => {
+            refuse = resolve;
+          }),
+        );
+        const run = service.runRebalance('seed', 'a', moves, actor);
+        await new Promise((resolve) => setImmediate(resolve));
+        const read = service.getStatus('seed');
+        await new Promise((resolve) => setImmediate(resolve));
+        answerPrimaries(primaries());
+        for (let tick = 0; tick < ticks; tick += 1) await Promise.resolve();
+        refuse({ status: 'refused', message: noperm, serverReply: true });
+        await Promise.all([run, read]);
+        expect((await service.getStatus('seed')).support.modes.approve.blockedBy).toBe('acl');
+      },
+    );
+
     it('keeps acl until the primaries of the cluster change', async () => {
       const { service, storage, anomaly } = await setup();
       await storage.savePlacementPolicy({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
@@ -381,19 +414,24 @@ describe('PlacementService', () => {
     const plan = (execution: RebalancePlan['execution']) =>
       ({ kind: 'plan', sourceShardId: 'a', moves: [], execution }) as unknown as RebalancePlan;
 
-    it('leaves every plan out in Observe and keeps verdicts without a plan', async () => {
+    it('leaves every plan out in Observe and keeps verdicts that name no plan', async () => {
       const { service, anomaly } = await setup();
       const none: RebalanceNoPlan = { kind: 'no_plan', action: 'spread', reason: 'key_level', pinnedSlots: [] };
+      const other = [{ shardId: 'a', nodeAddr: 'a:7000' }];
       const marked = await service.withPlacementBlocker('seed', [
         shard(plan({ available: true })),
         shard(plan({ available: false, blockedBy: 'flag_off' })),
         shard(none),
+        shard({ ...none, reason: 'covered_by_other_plan', coveredBy: other }),
+        shard({ ...none, reason: 'conflicts_with_other_plan', conflictsWith: other }),
         shard(undefined),
       ]);
       expect(marked.map((each: ServedHotShardDetail) => each.rebalance)).toEqual([
         undefined,
         undefined,
         none,
+        undefined,
+        undefined,
         undefined,
       ]);
       expect(marked[0]).toMatchObject({ eventId: 'evt', shardId: 'a', nodeAddr: 'a:7000' });

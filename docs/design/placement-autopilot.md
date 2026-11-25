@@ -24,7 +24,7 @@ Hot shard detection (#694), the rebalance planner and running a plan from the An
 | Auto | Yes | As Approve | Without approval, only when every policy rule allows it |
 
 - **Default.** A new connection starts in Observe (acceptance criterion 2). Existing cluster connections move to Recommend in the phase 1 migration, keeping today's plans and #695 run button. Recommend writes nothing. **Agreed in review.**
-- **MCP.** `get_hot_shards` keeps its shape and keeps returning `rebalance` in every mode: it is a read the caller asked for, and Observe only changes what the UI pushes. **Agreed in review.**
+- **MCP.** `get_hot_shards` keeps its shape. In Observe it leaves the plans out as the UI and the REST route do, with the `covered_by_other_plan` and `conflicts_with_other_plan` verdicts that point at them, and keeps the verdicts that say why moving slots will not help. **Changed in the PR review.**
 - **Tier.** Observe and Recommend stay on Pro (the anomaly module), Approve is Pro (the run button is already there), Auto is Enterprise. **Agreed in review.**
 - **Durable storage.** Approve and Auto need `sqlite`, `turso` or `postgres`. With `STORAGE_TYPE=memory` a restart loses actions, budget, cooldown history and lock, so the mode selector stops at Recommend with the support reason `memory_storage` (2.8).
 - **One owner per cluster.** The mode belongs to the connection that reads the whole cluster (the seed). Member connections created by auto-registration show the seed's mode. When a cluster is added twice (two seeds with overlapping node ids), only one can be in Approve or Auto; the other is limited to Observe and Recommend and shows "Placement is managed by connection <name>". **My call.**
@@ -392,7 +392,7 @@ MCP, under `/mcp/instance/:id/placement/...`. Write tools need an admin's person
 | `approve_placement_action` (takes the moves it read, like the UI) | 3 |
 | `reject_placement_action`, `rollback_placement_action`, `cancel_placement_action` | 3 |
 
-No MCP tool sets Auto or edits the policy: opting in to autonomy stays a human action in the UI. **My call.** `get_hot_shards` keeps its shape, keeps `rebalance` in every mode (2.1), and gains `advice.hashTags`.
+No MCP tool sets Auto or edits the policy: opting in to autonomy stays a human action in the UI. **My call.** `get_hot_shards` keeps its shape, leaves the plans out in Observe (2.1), and gains `advice.hashTags`.
 
 Webhooks (Pro tier, `node` block as on other cluster alerts):
 

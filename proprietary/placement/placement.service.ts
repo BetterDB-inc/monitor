@@ -110,6 +110,7 @@ export class PlacementService {
       const seedId = this.seedOf(connectionId);
       this.aclDenied.set(seedId, null);
       this.supportCache.delete(seedId);
+      this.supportReads.delete(seedId);
     }
     return result;
   }
@@ -118,11 +119,11 @@ export class PlacementService {
     connectionId: string,
     shards: ServedHotShardDetail[],
   ): Promise<ServedHotShardDetail[]> {
-    if (!shards.some((shard) => shard.rebalance?.kind === 'plan')) return shards;
+    if (!shards.some((shard) => namesAPlan(shard.rebalance))) return shards;
     const mode = await this.readableMode(connectionId);
     if (mode === 'observe') {
       return shards.map((shard) =>
-        shard.rebalance?.kind === 'plan' ? { ...shard, rebalance: undefined } : shard,
+        namesAPlan(shard.rebalance) ? { ...shard, rebalance: undefined } : shard,
       );
     }
     if (mode !== null) return shards;
@@ -193,14 +194,9 @@ export class PlacementService {
     if (cached && Date.now() - cached.at < SUPPORT_CACHE_MS) return cached.support;
     const inFlight = this.supportReads.get(seedId);
     if (inFlight) return inFlight;
-    const read = this.judge(seedId, true)
-      .then((support) => {
-        if (!support.issues.some((issue) => issue.reason === 'not_connected')) {
-          this.supportCache.set(seedId, { at: Date.now(), support });
-        }
-        return support;
-      })
-      .finally(() => this.supportReads.delete(seedId));
+    const read = this.judge(seedId, true).finally(() => {
+      if (this.supportReads.get(seedId) === read) this.supportReads.delete(seedId);
+    });
     this.supportReads.set(seedId, read);
     return read;
   }
@@ -249,7 +245,7 @@ export class PlacementService {
         ])
       : [true, null];
     const managedBuild = primaries?.find((primary) => isManagedProviderBuild(primary.serverInfo));
-    return judgePlacementSupport({
+    const support = judgePlacementSupport({
       clusterEnabled,
       managedProvider: managedPlacementProvider(config?.host, managedBuild?.serverInfo),
       clusterWideView: clusterWide !== false,
@@ -263,7 +259,20 @@ export class PlacementService {
       memoryStorage: this.memoryStorage(),
       signIn: this.workspace?.enabled === true,
     });
+    if (readPrimaries && !support.issues.some((issue) => issue.reason === 'not_connected')) {
+      this.supportCache.set(seedId, { at: Date.now(), support });
+    }
+    return support;
   }
+}
+
+function namesAPlan(rebalance: ServedHotShardDetail['rebalance']): boolean {
+  if (rebalance?.kind === 'plan') return true;
+  return (
+    rebalance?.kind === 'no_plan' &&
+    (rebalance.reason === 'covered_by_other_plan' ||
+      rebalance.reason === 'conflicts_with_other_plan')
+  );
 }
 
 function effectiveModeOf(mode: PlacementMode, support: PlacementSupport): PlacementMode {
