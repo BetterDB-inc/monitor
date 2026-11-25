@@ -58,3 +58,7 @@ pin that commit:
 ```bash
 pnpm bench pin <commit>
 ```
+
+While the placement work is on its branch, the pin names a branch commit,
+which a squash-merge does not keep. After the merge, pin the merge commit on
+master the same way.
