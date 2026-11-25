@@ -176,7 +176,13 @@ export function PlacementCard({ connectionId }: { connectionId: string | undefin
           )}
         </CardContent>
       </Card>
-      {status && <RebalanceSuggestion connectionId={connectionId} mode={status.effectiveMode} />}
+      {status && (
+        <RebalanceSuggestion
+          connectionId={connectionId}
+          mode={status.effectiveMode}
+          runnable={!error}
+        />
+      )}
     </>
   );
 }

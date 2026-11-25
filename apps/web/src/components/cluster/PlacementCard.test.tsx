@@ -22,8 +22,10 @@ vi.mock('../../hooks/useLicense', () => ({
   useLicense: () => ({ license: null, hasFeature: () => license.licensed }),
 }));
 vi.mock('../anomalies/RebalanceSuggestion', () => ({
-  RebalanceSuggestion: ({ mode }: { mode?: PlacementMode }) => (
-    <p>Suggestions in {mode ?? 'no'} mode</p>
+  RebalanceSuggestion: ({ mode, runnable }: { mode?: PlacementMode; runnable?: boolean }) => (
+    <p>
+      Suggestions in {mode ?? 'no'} mode{runnable === false ? ', not runnable' : ''}
+    </p>
   ),
 }));
 
@@ -137,6 +139,7 @@ async function show(
   await act(async () => {
     await client.invalidateQueries();
   });
+  return client;
 }
 
 const card = () => screen.findByRole('region', { name: 'Slot placement' });
@@ -317,6 +320,23 @@ describe('PlacementCard', () => {
 
     await card();
     expect(screen.getByText('Suggestions in recommend mode')).toBeInTheDocument();
+  });
+
+  it('keeps the suggestions but not the run button after a refresh fails', async () => {
+    const client = await show(status());
+    await card();
+    expect(screen.getByText('Suggestions in recommend mode')).toBeInTheDocument();
+
+    get.mockRejectedValue(new ApiError('boom', 500));
+    await act(async () => {
+      await client.invalidateQueries();
+    });
+
+    expect(
+      await screen.findByText('Suggestions in recommend mode, not runnable', undefined, {
+        timeout: 3000,
+      }),
+    ).toBeInTheDocument();
   });
 
   it('renders nothing without the license or a connection', async () => {
