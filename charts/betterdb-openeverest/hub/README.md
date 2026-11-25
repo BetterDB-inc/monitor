@@ -12,8 +12,8 @@ dials out over `wss`.
 ## What you need
 
 - OpenEverest 2.0.0-alpha.1 or later with `provider-valkey`.
-- A BetterDB Cloud workspace, or a self-hosted BetterDB Monitor (Docker, or the
-  `betterdb-monitor` Helm chart) reachable from the cluster over `wss://`.
+- A BetterDB Cloud workspace, or a self-hosted BetterDB Monitor **0.57.0 or later** (Docker, or
+  the `betterdb-monitor` Helm chart) reachable from the cluster over `wss://`.
 - An agent token from BetterDB (Connections → Via Agent).
 
 ## Permissions

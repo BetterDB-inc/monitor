@@ -22,6 +22,8 @@ export interface NodeStatus {
   role: 'primary' | 'replica';
   valkeyConnected: boolean;
   cloudConnected: boolean;
+  /** Why this node is not streaming, when it is not. */
+  error?: string;
 }
 
 export interface TargetStatus {
@@ -74,6 +76,9 @@ export class InstanceTarget {
   private state: TargetState = 'off';
   private error: string | undefined;
   private stopped = false;
+  // False until setConnectionSecret() was called once, so the first call
+  // always reports a state (even "no secret yet").
+  private secretKnown = false;
   private generation = 0;
   private loop: Promise<void> | null = null;
   private wake: (() => void) | null = null;
@@ -96,7 +101,9 @@ export class InstanceTarget {
    * Null (the instance is not ready, or was deleted) tears the connections down.
    */
   setConnectionSecret(name: string | null): void {
-    if (this.stopped || name === this.secretName) return;
+    if (this.stopped) return;
+    if (this.secretKnown && name === this.secretName) return;
+    this.secretKnown = true;
     this.secretName = name;
     void this.informer?.stop();
     this.informer = null;
@@ -125,8 +132,9 @@ export class InstanceTarget {
   }
 
   status(): TargetStatus {
-    const nodes = Array.from(this.nodes.values()).map((run) => {
+    const nodes: NodeStatus[] = Array.from(this.nodes.values()).map((run) => {
       const live = run.agent?.getStatus();
+      const error = run.error ?? live?.cloudError;
       return {
         id: run.node.id,
         name: run.name,
@@ -134,9 +142,20 @@ export class InstanceTarget {
         role: run.node.role,
         valkeyConnected: live?.valkeyConnected ?? false,
         cloudConnected: live?.cloudConnected ?? false,
+        ...(error !== undefined ? { error } : {}),
       };
     });
-    return { state: this.state, error: this.error, secretName: this.secretName, tls: this.credentials?.tls !== null && this.credentials !== null, nodes };
+    // The BetterDB side can fail after the agents came up (a server too old
+    // for identities, a second agent on the node); that shows here, not in
+    // the reconcile loop's state.
+    const failing = nodes.filter((node) => node.error !== undefined);
+    let state = this.state;
+    let error = this.error;
+    if (failing.length > 0 && state === 'monitoring') {
+      state = failing.length === nodes.length ? 'error' : 'monitoring';
+      error = failing.length === nodes.length ? failing[0].error : `${failing.length} of ${nodes.length} nodes not streaming: ${failing[0].error}`;
+    }
+    return { state, error, secretName: this.secretName, tls: this.credentials?.tls !== null && this.credentials !== null, nodes };
   }
 
   async stop(): Promise<void> {
@@ -320,6 +339,7 @@ export class InstanceTarget {
       authMode: 'password',
       identity,
       readOnly: true,
+      clusterReplica: node.role === 'replica',
       cloudCa: this.options.cloudCa,
       logPrefix: `${this.tag.slice(0, -1)}/${name}]`,
     });

@@ -19,6 +19,7 @@ const agentState = {
 
 class FakeAgent {
   stopped = false;
+  cloudError: string | undefined;
   constructor(readonly config: { valkeyHost: string; valkeyPort: number; identity: { node: string; nodeName?: string } }) {}
   async start(): Promise<void> {
     agentState.starts.push(this);
@@ -31,7 +32,13 @@ class FakeAgent {
     this.stopped = true;
   }
   getStatus() {
-    return { valkeyConnected: !this.stopped, cloudConnected: !this.stopped, valkeyVersion: '9.0.6', cluster: true };
+    return {
+      valkeyConnected: !this.stopped,
+      cloudConnected: !this.stopped && this.cloudError === undefined,
+      valkeyVersion: '9.0.6',
+      cluster: true,
+      ...(this.cloudError !== undefined ? { cloudError: this.cloudError } : {}),
+    };
   }
 }
 
@@ -104,6 +111,37 @@ beforeEach(() => {
 
 afterEach(() => {
   jest.useRealTimers();
+});
+
+describe('InstanceTarget status', () => {
+  it('reports that it is waiting when the instance has no connection Secret yet', () => {
+    const { target } = build();
+    expect(target.status().state).toBe('off');
+
+    target.setConnectionSecret(null);
+
+    expect(target.status()).toMatchObject({ state: 'connecting', error: expect.stringContaining('waiting for the instance') });
+  });
+
+  it('surfaces a cloud-side error from the agents, as a whole when every node has it', async () => {
+    valkeyState.shards = [shard('aaa', 'master', 0), shard('bbb', 'master', 1)];
+    const { target } = build();
+    target.setConnectionSecret('orders-conn');
+    await settle();
+    expect(target.status().state).toBe('monitoring');
+
+    (agentState.starts[0] as FakeAgent & { cloudError?: string }).cloudError = 'BetterDB server too old: identified agents need Monitor 0.57.0';
+    let status = target.status();
+    expect(status.state).toBe('monitoring');
+    expect(status.error).toMatch(/1 of 2 nodes not streaming: BetterDB server too old/);
+    expect(status.nodes.filter((n) => n.error).map((n) => n.cloudConnected)).toEqual([false]);
+
+    (agentState.starts[1] as FakeAgent & { cloudError?: string }).cloudError = 'BetterDB server too old: identified agents need Monitor 0.57.0';
+    status = target.status();
+    expect(status.state).toBe('error');
+    expect(status.error).toMatch(/too old/);
+    await target.stop();
+  });
 });
 
 describe('InstanceTarget reconcile loop', () => {

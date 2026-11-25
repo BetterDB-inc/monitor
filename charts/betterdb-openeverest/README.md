@@ -13,7 +13,8 @@ The chart installs:
 - a Service, a ServiceAccount, a ClusterRole/Role set that reads Instances and connection Secrets
   (never writes a database CR), and optionally a settings Secret.
 
-Full guide: [docs.betterdb.com/install/openeverest](https://docs.betterdb.com/install/openeverest).
+Needs BetterDB Cloud or a self-hosted Monitor 0.57.0 or later. Full guide:
+[docs.betterdb.com/install/openeverest](https://docs.betterdb.com/install/openeverest).
 
 ## Install
 

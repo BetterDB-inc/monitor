@@ -4,7 +4,7 @@ import type { AgentIdentity } from '@betterdb/shared';
 import { WsClient } from './ws-client';
 import { CommandExecutor } from './command-executor';
 import { valkeyTlsOptions, ValkeyTlsMaterial } from './valkey-tls';
-import type { AgentCommandMessage, AgentHelloMessage } from './protocol';
+import type { AgentCommandMessage, AgentHelloMessage, AgentWelcomeMessage } from './protocol';
 import type { AuthProvider } from './auth';
 import { PasswordProvider, ElastiCacheIamProvider } from './auth';
 
@@ -35,7 +35,20 @@ export interface AgentConfig {
   cloudCa?: string;
   /** Prefix for log lines, so the targets of a multi-target process can be told apart. */
   logPrefix?: string;
+  /**
+   * The target is a cluster replica: send READONLY on every (re)connect so
+   * keyed reads (key sampling, MEMORY USAGE) are served instead of answered
+   * with MOVED.
+   */
+  clusterReplica?: boolean;
 }
+
+/** The first Monitor release that understands identified (multi-target) agents. */
+export const MIN_MONITOR_VERSION = '0.57.0';
+export const LEGACY_SERVER_MESSAGE =
+  `BetterDB server too old: identified agents need Monitor ${MIN_MONITOR_VERSION} or later, or BetterDB Cloud`;
+// How long after the hello a server that understands identities has to say so.
+const WELCOME_TIMEOUT_MS = 15_000;
 
 export class Agent {
   private client: Valkey | null = null;
@@ -59,6 +72,10 @@ export class Agent {
   private isCluster = false;
   private capabilities: string[] = [];
   private readonly tag: string;
+  // Set when the cloud side cannot carry this target: a server too old to
+  // understand identities, or another agent already streaming this node.
+  private cloudError: string | undefined;
+  private welcomeTimer: ReturnType<typeof setTimeout> | null = null;
 
   private executorOptions(): { unsafeMode: boolean; readOnly: boolean } {
     return { unsafeMode: this.config.unsafeMode, readOnly: this.config.readOnly === true };
@@ -88,6 +105,8 @@ export class Agent {
       db: this.config.valkeyDb,
       lazyConnect: true,
       connectionName,
+      // iovalkey sends READONLY on every connect, including its reconnects.
+      readOnly: this.config.clusterReplica === true,
       retryStrategy,
     });
   }
@@ -216,18 +235,19 @@ export class Agent {
       logPrefix: this.tag,
       onOpen: () => this.onWsOpen(),
       onMessage: (data) => this.onWsMessage(data),
-      onClose: (code, reason) => console.log(`${this.tag} WS closed: ${code} ${reason}`),
+      onClose: (code, reason) => this.onWsClose(code, reason),
       onError: (err) => console.error(`${this.tag} WS error: ${err.message}`),
     });
   }
 
   /** Live state for status pages: whether both ends of the relay are up. */
-  getStatus(): { valkeyConnected: boolean; cloudConnected: boolean; valkeyVersion: string; cluster: boolean } {
+  getStatus(): { valkeyConnected: boolean; cloudConnected: boolean; valkeyVersion: string; cluster: boolean; cloudError?: string } {
     return {
       valkeyConnected: this.valkeyConnected,
-      cloudConnected: this.wsClient.isOpen(),
+      cloudConnected: this.wsClient.isOpen() && this.cloudError === undefined,
       valkeyVersion: this.valkeyVersion,
       cluster: this.isCluster,
+      ...(this.cloudError !== undefined ? { cloudError: this.cloudError } : {}),
     };
   }
 
@@ -262,6 +282,7 @@ export class Agent {
     this.resolveShutdown();
     console.log(`${this.tag} Shutting down...`);
     this.wsClient.close();
+    this.clearWelcomeTimer();
     // If the reconnect loop is sleeping in its backoff delay, wake it immediately
     // so it can observe shuttingDown and exit rather than blocking stop() for up to 30s.
     if (this.resolveReconnectDelay) {
@@ -373,6 +394,47 @@ export class Agent {
     if (this.config.identity) hello.identity = this.config.identity;
     if (this.config.readOnly) hello.readOnly = true;
     this.wsClient.send(JSON.stringify(hello));
+    // An identified hello needs the server to say it understood the identity.
+    // A server from before AgentWelcomeMessage never does; it would register
+    // every node of this process under the token's id, with only one of them
+    // streaming, so give up on it instead of reconnecting forever.
+    if (this.config.identity) {
+      this.clearWelcomeTimer();
+      this.welcomeTimer = setTimeout(() => this.giveUpOnCloud(LEGACY_SERVER_MESSAGE), WELCOME_TIMEOUT_MS);
+    }
+  }
+
+  private onWelcome(msg: AgentWelcomeMessage): void {
+    this.clearWelcomeTimer();
+    if (this.config.identity && msg.identity !== true) {
+      this.giveUpOnCloud(LEGACY_SERVER_MESSAGE);
+      return;
+    }
+    this.cloudError = undefined;
+  }
+
+  private onWsClose(code: number, reason: string): void {
+    console.log(`${this.tag} WS closed: ${code} ${reason}`);
+    this.clearWelcomeTimer();
+    // 4003: the server kept another connection for this id. For an identified
+    // node that is a second agent on the same instance; the reconnect loop
+    // keeps trying at its slowest pace, and the status says why.
+    if (code === 4003 && this.config.identity) {
+      this.cloudError = `another agent already streams this node (BetterDB closed the connection with ${code})`;
+    }
+  }
+
+  private giveUpOnCloud(message: string): void {
+    this.cloudError = message;
+    console.error(`${this.tag} ${message}`);
+    this.wsClient.close();
+  }
+
+  private clearWelcomeTimer(): void {
+    if (this.welcomeTimer) {
+      clearTimeout(this.welcomeTimer);
+      this.welcomeTimer = null;
+    }
   }
 
   private async onWsMessage(data: string): Promise<void> {
@@ -386,6 +448,11 @@ export class Agent {
 
     if (msg.type === 'ping') {
       this.wsClient.send(JSON.stringify({ type: 'pong', ts: msg.ts }));
+      return;
+    }
+
+    if (msg.type === 'welcome') {
+      this.onWelcome(msg as AgentWelcomeMessage);
       return;
     }
 
@@ -407,8 +474,15 @@ export class Agent {
       const client = await this.createValkeyClient('BetterDB-Agent-CLI');
       this.cliClient = client;
       client.on('close', () => {
-        this.cliClient = null;
-        this.cliExecutor = null;
+        // With a static password iovalkey reconnects this client itself, so
+        // the reference stays (and stop() can disconnect it). An IAM client
+        // cannot reconnect without a fresh token: drop it, the next CLI
+        // command builds a new one.
+        if (this.cliClient === client && this.authProvider.requiresFreshTokenPerConnection) {
+          try { client.disconnect(); } catch { /* ignore */ }
+          this.cliClient = null;
+          this.cliExecutor = null;
+        }
       });
       await client.connect();
       // If reconnectWithFreshToken ran while we were connecting, it will have

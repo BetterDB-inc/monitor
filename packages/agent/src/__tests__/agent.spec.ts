@@ -17,7 +17,7 @@ jest.mock('iovalkey', () => ({
 }));
 
 jest.mock('../ws-client', () => ({
-  WsClient: jest.fn(() => ({ connect: jest.fn(), close: jest.fn(), send: jest.fn() })),
+  WsClient: jest.fn(() => ({ connect: jest.fn(), close: jest.fn(), send: jest.fn(), isOpen: jest.fn(() => true) })),
 }));
 
 jest.mock('../command-executor', () => ({
@@ -181,6 +181,129 @@ describe('Agent.stop', () => {
     await agent.stop();
 
     expect(mockQuit).toHaveBeenCalledTimes(1);
+    expect(mockDisconnect).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Agent on the cloud side', () => {
+  const PASSWORD_CONFIG: AgentConfig = { ...IAM_CONFIG, authMode: 'password', valkeyPassword: 'p', valkeyTls: false };
+  const identity = { platform: 'openeverest' as const, cluster: 'main', namespace: 'db', instance: 'vk', node: 'n1' };
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.clearAllMocks();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  function wsOf(agent: Agent) {
+    return (agent as any).wsClient as { close: jest.Mock; send: jest.Mock; isOpen?: jest.Mock };
+  }
+
+  it('gives up on a server that never acknowledges an identified hello, and says so in its status', async () => {
+    const agent = new Agent({ ...PASSWORD_CONFIG, identity }) as any;
+    agent.onWsOpen();
+
+    await jest.advanceTimersByTimeAsync(14_999);
+    expect(agent.getStatus().cloudError).toBeUndefined();
+    await jest.advanceTimersByTimeAsync(1);
+
+    expect(agent.getStatus().cloudError).toMatch(/too old.*0\.57\.0/);
+    expect(wsOf(agent).close).toHaveBeenCalledTimes(1);
+  });
+
+  it('is content once the server welcomes the identity', async () => {
+    const agent = new Agent({ ...PASSWORD_CONFIG, identity }) as any;
+    agent.onWsOpen();
+    await agent.onWsMessage(JSON.stringify({ type: 'welcome', serverVersion: '0.57.0', identity: true, readOnly: true }));
+
+    await jest.advanceTimersByTimeAsync(60_000);
+    expect(agent.getStatus().cloudError).toBeUndefined();
+    expect(wsOf(agent).close).not.toHaveBeenCalled();
+  });
+
+  it('treats a welcome that disowns the identity like an old server', async () => {
+    const agent = new Agent({ ...PASSWORD_CONFIG, identity }) as any;
+    agent.onWsOpen();
+    await agent.onWsMessage(JSON.stringify({ type: 'welcome', serverVersion: '0.57.0', identity: false, readOnly: false }));
+
+    expect(agent.getStatus().cloudError).toMatch(/too old/);
+    expect(wsOf(agent).close).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not wait for a welcome without an identity (classic single-target agents)', async () => {
+    const agent = new Agent(PASSWORD_CONFIG) as any;
+    agent.onWsOpen();
+    await jest.advanceTimersByTimeAsync(60_000);
+    expect(agent.getStatus().cloudError).toBeUndefined();
+    expect(wsOf(agent).close).not.toHaveBeenCalled();
+  });
+
+  it('reports a 4003 close on an identified node as another agent holding it', () => {
+    const agent = new Agent({ ...PASSWORD_CONFIG, identity }) as any;
+    agent.onWsClose(4003, 'Another agent is connected with this token');
+    expect(agent.getStatus().cloudError).toMatch(/another agent already streams this node/);
+
+    const plain = new Agent(PASSWORD_CONFIG) as any;
+    plain.onWsClose(4003, 'Another agent is connected with this token');
+    expect(plain.getStatus().cloudError).toBeUndefined();
+  });
+});
+
+describe('Agent Valkey client options', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockConnect.mockResolvedValue(undefined);
+  });
+
+  it('asks iovalkey for READONLY on a cluster replica, for the polling and the CLI client alike', async () => {
+    const agent = new Agent({ ...IAM_CONFIG, authMode: 'password', valkeyPassword: 'p', valkeyTls: false, clusterReplica: true }) as any;
+    await agent.createValkeyClient('BetterDB-Agent');
+    await agent.createValkeyClient('BetterDB-Agent-CLI');
+
+    expect(MockValkey).toHaveBeenCalledTimes(2);
+    expect(MockValkey.mock.calls[0][0]).toMatchObject({ readOnly: true, connectionName: 'BetterDB-Agent' });
+    expect(MockValkey.mock.calls[1][0]).toMatchObject({ readOnly: true, connectionName: 'BetterDB-Agent-CLI' });
+  });
+
+  it('leaves READONLY off for primaries and standalone servers', async () => {
+    const agent = new Agent({ ...IAM_CONFIG, authMode: 'password', valkeyPassword: 'p', valkeyTls: false }) as any;
+    await agent.createValkeyClient('BetterDB-Agent');
+    expect(MockValkey.mock.calls[0][0]).toMatchObject({ readOnly: false });
+  });
+});
+
+describe('Agent CLI client lifecycle', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockConnect.mockResolvedValue(undefined);
+    mockQuit.mockResolvedValue(undefined);
+  });
+
+  it('keeps a password-mode CLI client through a close (iovalkey reconnects it) and disconnects it on stop', async () => {
+    const agent = new Agent({ ...IAM_CONFIG, authMode: 'password', valkeyPassword: 'p', valkeyTls: false }) as any;
+    agent.valkeyConnected = true;
+    await agent.getCliExecutor();
+    const closeHandler = mockOn.mock.calls.find(([event]) => event === 'close')?.[1] as () => void;
+
+    closeHandler();
+    expect(agent.cliClient).not.toBeNull();
+    expect(agent.cliExecutor).not.toBeNull();
+
+    await agent.stop();
+    expect(mockDisconnect).toHaveBeenCalled();
+  });
+
+  it('drops an IAM-mode CLI client on close, since it cannot reconnect without a fresh token', async () => {
+    const agent = new Agent(IAM_CONFIG) as any;
+    await agent.getCliExecutor();
+    const closeHandler = mockOn.mock.calls.find(([event]) => event === 'close')?.[1] as () => void;
+
+    closeHandler();
+
+    expect(agent.cliClient).toBeNull();
     expect(mockDisconnect).toHaveBeenCalledTimes(1);
   });
 });
