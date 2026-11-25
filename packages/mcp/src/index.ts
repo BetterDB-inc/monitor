@@ -785,6 +785,33 @@ server.tool(
 );
 
 server.tool(
+  'get_placement_status',
+  'Get the slot placement state of a cluster: `mode` is the stored placement mode (`observe` shows load only, `recommend` also shows the suggested slot moves of `get_hot_shards`), `effectiveMode` is the mode in force once the support verdict is applied, and `selectableModes` lists the modes an admin can pick now. `support.issues` lists every reason the cluster cannot take slot moves, in order, each with a `reason` (`not_cluster`, `provider_managed` with `provider`, `per_node_connections`, `slot_stats_off`, `not_dialed`, `server_version`, `copy_only`, `command_unavailable`, `acl`, `flag_off`, `memory_storage`, `no_sign_in`) and a `detail` in words; `support.modes` says per mode whether it is available and which reason blocks it. `balance` has the CPU per second of each shard, its `ratio` to the median shard, and `overTrigger` when it is at or over `triggerRatio` (2), with `resolveRatio` (1.25) as the line a move aims under; it is null until the per-slot load has been sampled, and nothing is flagged while slots settle. `connectionId` is the connection that owns the mode: a node registered under a cluster answers with its seed. Read-only: this tool never changes the mode or moves slots. Use to tell why no rebalance is suggested or offered, or how even the load is across shards.',
+  {
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ instanceId }) =>
+    withTelemetry('get_placement_status', async () => {
+      const id = resolveInstanceId(instanceId);
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/placement`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return unavailableOrNotFoundResult(id, 'Anomaly detection');
+        }
+        throw err;
+      }
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
+);
+
+server.tool(
   'get_topology_disagreements',
   'Get where the nodes of a cluster disagree about the cluster, summarised for large clusters. `disagreements` has one line per disagreement with the number of views on each side, for example "Slots 0-5460: owned by A in 9 views, by B in 3 views" or "node X: fail? in 2 views, ok in 9 views" (a round asks at most 12 nodes, so the counts never go above 12, whatever the size of the cluster): `kind` is `slot_owner`, `config_epoch`, `failure_flags` or `membership`, `positions` lists each side with its `count` and the nodes that hold it, `subjects` the nodes it is about, `confirmed` and `eventId` tell whether an anomaly event is open for it (`eventType` says which: `topology_divergence`, or `partial_membership` for a line about a node that has only partly joined), `resolvedByHand` is true when its event was resolved by hand and it has not been raised again (it then has no `eventId`), and `text` is the same line in words. Lines that differ only in the node they are about are merged into one. A line with `stale: true` was not seen in the last round because the nodes that hold one of its sides did not answer: it has no `positions` and no counts and `lastSeenAt` says when it was last seen. A stale line whose event is still open keeps `confirmed: true` and its `eventId`; one without an open event was neither confirmed nor cleared. `open` is true for every line of the last round and for a stale line with an open event; read `open` to tell what is in dispute now. On a merged line `count` is the views per node, and a side lists every node that holds it for at least one node of the line, with their number in `observerCount`. `shards` lists the disputed shards, those an open line touches, with their `disagreementIds` (lines that are not open are in `staleDisagreementIds`), and `shardTotals` counts all of them by state (`disputed`, `undisputed`, `notCompared`); pass `shards: "all"` for one line per shard, which is large on a big cluster. Node lists are capped at 25, the counts are exact. The counts are over the views that answered in the last round, not over every node: read `coverage` (`nodes` in the cluster, `asked`, `answered`, `complete`, `unanswered`) before concluding anything. An empty `disagreements` list means only that the views that answered agree with each other, not that the nodes that did not answer or were not asked do; it covers the whole cluster only when `complete` is true. `status` is `not_sampled` before the first round or on a cluster that is not sampled, and `insufficient_views` when fewer than two nodes answered. `fullCheck` is the last check that set out to ask every node once, which a user starts from the Cluster page: `state` is `none`, `running` (`asked` of `total` nodes so far) or `done`, and when done `summary` has the same shape as above with counts over every node that answered ("497 vs 3"). A check that is `done` may still have asked fewer than `total` nodes, when it ran out of time, or have nodes that did not answer: read `summary.coverage.complete` here too. Its lines have `tracked: false` and no `since` or `rounds`: it is a one-off snapshot taken at `finishedAt`, kept for 10 minutes, so prefer it over the sampled counts only while it is recent (`now` is the clock of the server to measure `finishedAt` against). `lastFailure` is set when the last check broke before it finished; `summary` is then from the check before it. This tool cannot start a full check. Read-only. Use when a cluster looks split, a topology_divergence or partial_membership anomaly is open, or to check which nodes see a node as failing.',
   {
