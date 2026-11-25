@@ -25658,6 +25658,32 @@ describe('AnomalyService', () => {
             nodeId: `node-${i}`,
           }));
 
+        it('leaves every primary to the first connection until a read there fails', async () => {
+          const targets = primaries(TOPOLOGY_TARGET_LIMIT + 3);
+          const members = new Set(targets.map((t) => t.addr));
+          const client = nodeClient([2]);
+          let failing = false;
+          discovery().mockImplementation(async (nodeId: string, connectionId: string) => {
+            if (failing && nodeId === 'node-0' && connectionId === 'conn-1') throw new Error('ECONNREFUSED');
+            return client;
+          });
+          const second = async () => {
+            await (service as any).detectTopologyAnomalies(
+              { ...mockCtx, connectionId: 'conn-2', connectionName: 'Other' },
+              { targets, members },
+            );
+            return service.getFanoutCoverage('conn-2')[0];
+          };
+
+          await poll(targets, 1, T0);
+          expect(await second()).toMatchObject({ checked: 0, skipped: 0, reason: 'covered_elsewhere' });
+
+          failing = true;
+          await poll(targets, 1, T0 + 10_000);
+          expect(latest()).toMatchObject({ unreachable: 1 });
+          expect(await second()).toMatchObject({ checked: 1, unreachable: 0, reason: null });
+        });
+
         it('reads a budget of primaries each poll and every primary within a sweep', async () => {
           const getNodeConnection = discovery();
           const targets = primaries(TOPOLOGY_TARGET_LIMIT + 3);
