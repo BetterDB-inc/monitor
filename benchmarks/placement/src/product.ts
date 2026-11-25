@@ -15,12 +15,12 @@ export {
   type RebalanceShard,
   type RebalanceVerdict,
   planRebalances,
-  shardServerFromInfo,
 } from '../../../proprietary/anomaly-detection/rebalance-planner';
 export { placementBalance } from '../../../proprietary/placement/placement-balance';
+export { placementPrimaryFacts } from '../../../proprietary/placement/placement-primaries';
 export {
-  type PlacementPrimaryFacts,
   type PlacementSupportFacts,
+  isAclRefusal,
   judgePlacementSupport,
   managedPlacementProvider,
   migrateSlotsListed,
@@ -34,8 +34,8 @@ export const PINNED_FILES = [
   'apps/api/src/monitor/provider-detector.ts',
   'proprietary/anomaly-detection/hot-shard-detector.ts',
   'proprietary/anomaly-detection/rebalance-planner.ts',
-  'proprietary/anomaly-detection/anomaly.service.ts',
   'proprietary/placement/placement-balance.ts',
+  'proprietary/placement/placement-primaries.ts',
   'proprietary/placement/placement-support.ts',
   'proprietary/placement/placement.service.ts',
 ];

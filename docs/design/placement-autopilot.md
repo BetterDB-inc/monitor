@@ -226,6 +226,7 @@ A per-connection `PlacementSupport`, computed at connect and on every topology c
 
 | Reason | Detection |
 | --- | --- |
+| `not_connected` | The monitor hasn't connected to the cluster yet (no capabilities detected). Not cached, so the next read checks again |
 | `not_cluster` | Not cluster mode |
 | `provider_managed` (with `provider`) | Rebalance's narrow check: `isManagedProviderHost` (host suffix) or `isManagedProviderBuild` (`redislabs`), plus `MONITOR_PROVIDER_OVERRIDE` naming a managed provider (the operator's own statement). **Not** the "Amazon Linux" OS signal: it false-positives on self-hosted EC2, this feature's audience. Add Azure Cache (`.redis.cache.windows.net`) and Aiven (`.aivencloud.com`) suffixes, others as verified. Text: "Managed by <provider>: slot moves go through the provider's resharding." A managed host given by IP or a custom DNS name is caught by `command_unavailable` or `acl` below. **Agreed in review** |
 | `per_node_connections` | Cluster nodes registered one by one as separate connections (no cluster-wide view, so `hot_shard` doesn't run either) |
@@ -237,7 +238,7 @@ A per-connection `PlacementSupport`, computed at connect and on every topology c
 | `memory_storage` | `STORAGE_TYPE=memory` (2.1). Limits the mode to Recommend |
 | `no_sign_in` | `WORKSPACE_DISABLED=true` (2.1). Limits the mode to Approve, with an anonymous actor (2.1) |
 
-- Observe and Recommend work on every reason except `not_cluster`, `per_node_connections`, `slot_stats_off` and `not_dialed`: the plan is advice. Approve and Auto can't be selected (except per the `no_sign_in` row). The verdict text is the "with the reason" of acceptance criterion 7.
+- Observe and Recommend work on every reason except `not_connected`, `not_cluster`, `per_node_connections`, `slot_stats_off` and `not_dialed`: the plan is advice. Approve and Auto can't be selected (except per the `no_sign_in` row). The verdict text is the "with the reason" of acceptance criterion 7.
 - **Stale load.** The shard load is fed only when every node answered the poll. Older than 3 poll intervals, the gate reads `unknown` and the card names the node that didn't answer: a gate state, not a support reason.
 - **No per-provider verification.** The feature is for self-hosted clusters. The host suffix, build id and override check, plus `command_unavailable` and `acl`, is all the support verdict needs. **Agreed in review.**
 

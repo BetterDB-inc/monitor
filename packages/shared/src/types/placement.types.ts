@@ -11,6 +11,7 @@ export interface PlacementPolicy {
 }
 
 export type PlacementSupportReason =
+  | 'not_connected'
   | 'not_cluster'
   | 'provider_managed'
   | 'per_node_connections'

@@ -136,7 +136,7 @@ export type RebalanceRunResult =
       reason: 'no_plan' | 'plan_changed' | RebalanceRecheckFailure;
       rebalance?: RebalanceVerdict;
     }
-  | { status: 'refused'; message: string };
+  | { status: 'refused'; message: string; serverReply?: true };
 
 export type RebalanceCancelResult =
   | { status: 'cancelling'; run: RebalanceRunView }

@@ -4345,6 +4345,53 @@ describe('AnomalyService', () => {
             expect(plan()).toMatchObject({ support: 'provider_managed', commands: [] });
           });
 
+          describe('with MONITOR_PROVIDER_OVERRIDE', () => {
+            const before = process.env.MONITOR_PROVIDER_OVERRIDE;
+            afterEach(() => {
+              if (before === undefined) delete process.env.MONITOR_PROVIDER_OVERRIDE;
+              else process.env.MONITOR_PROVIDER_OVERRIDE = before;
+            });
+            const dialBoth = () =>
+              dialMemory({
+                a0000000: VALKEY_9 + info(4 * GB, 8 * GB, 200),
+                b0000000: VALKEY_9 + info(GB, 8 * GB, 50),
+              });
+
+            it('gives no command when the override names a managed provider', async () => {
+              process.env.MONITOR_PROVIDER_OVERRIDE = 'aws-elasticache';
+              spreadLoad();
+              dialBoth();
+
+              await step(HOT, 6);
+
+              expect(plan()).toMatchObject({ support: 'provider_managed', commands: [] });
+            });
+
+            it('keeps the command when the override says self-hosted on a managed host name', async () => {
+              process.env.MONITOR_PROVIDER_OVERRIDE = 'self-hosted';
+              ctx.host = 'my-cluster.abc123.clustercfg.use1.cache.amazonaws.com';
+              spreadLoad();
+              dialBoth();
+
+              await step(HOT, 6);
+
+              expect(plan()).toMatchObject({ support: 'valkey_atomic' });
+            });
+          });
+
+          it('gives no command on an Azure Cache host', async () => {
+            spreadLoad();
+            ctx.host = 'mycache.redis.cache.windows.net';
+            dialMemory({
+              a0000000: VALKEY_9 + info(4 * GB, 8 * GB, 200),
+              b0000000: VALKEY_9 + info(GB, 8 * GB, 50),
+            });
+
+            await step(HOT, 6);
+
+            expect(plan()).toMatchObject({ support: 'provider_managed', commands: [] });
+          });
+
           it.each([
             ['the hot shard', 'a0000000'],
             ['a target', 'b0000000'],
@@ -4384,25 +4431,6 @@ describe('AnomalyService', () => {
               expect(plan()).toMatchObject({ support: 'valkey_atomic', commands: [{}] });
             },
           );
-
-          it('keeps the command when the MONITOR provider override names a managed service', async () => {
-            const original = process.env.MONITOR_PROVIDER_OVERRIDE;
-            process.env.MONITOR_PROVIDER_OVERRIDE = 'elasticache';
-            try {
-              spreadLoad();
-              dialMemory({
-                a0000000: VALKEY_9 + info(4 * GB, 8 * GB, 200),
-                b0000000: VALKEY_9 + info(GB, 8 * GB, 50),
-              });
-
-              await step(HOT, 6);
-
-              expect(plan()).toMatchObject({ support: 'valkey_atomic', commands: [{}] });
-            } finally {
-              if (original === undefined) delete process.env.MONITOR_PROVIDER_OVERRIDE;
-              else process.env.MONITOR_PROVIDER_OVERRIDE = original;
-            }
-          });
         });
 
         describe('execution', () => {
@@ -4681,6 +4709,7 @@ describe('AnomalyService', () => {
             expect(await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN)).toEqual({
               status: 'refused',
               message: "ERR I don't know about node b0000000",
+              serverReply: true,
             });
             expect(await service.followRebalanceRuns('conn-a')).toEqual([]);
             expect(execution()).toEqual({ available: false, blockedBy: 'server_refused' });

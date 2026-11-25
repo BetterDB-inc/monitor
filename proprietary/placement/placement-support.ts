@@ -33,6 +33,7 @@ export interface PlacementSupportFacts {
 }
 
 const READ_ONLY: readonly PlacementSupportReason[] = [
+  'not_connected',
   'not_cluster',
   'per_node_connections',
   'slot_stats_off',
@@ -107,7 +108,6 @@ function serverIssue(primaries: readonly PlacementPrimaryFacts[] | null): Placem
   }
   const servers = primaries.map((primary) => primary.server as ShardServer);
   const atomic = servers.map((server) => atomicMigration(server));
-  const allValkey = servers.every((server) => server.dbType === 'valkey');
   const allRedis = servers.every((server) => server.dbType === 'redis');
   if (allRedis && atomic.every((able) => able === true)) {
     return {
@@ -116,7 +116,7 @@ function serverIssue(primaries: readonly PlacementPrimaryFacts[] | null): Placem
     };
   }
   const behind = primaries.filter(
-    (primary, index) => !allValkey || primary.server?.dbType !== 'valkey' || atomic[index] !== true,
+    (primary, index) => primary.server?.dbType !== 'valkey' || atomic[index] !== true,
   );
   if (behind.length > 0) {
     return {
@@ -201,8 +201,21 @@ function issuesOf(facts: PlacementSupportFacts): PlacementSupportIssue[] {
   return issues;
 }
 
+export function isAclRefusal(message: string): boolean {
+  return /\bNOPERM\b/i.test(message);
+}
+
+export function judgeUnconnectedPlacement(): PlacementSupport {
+  return verdictOf([
+    { reason: 'not_connected', detail: 'The monitor has not connected to this cluster yet.' },
+  ]);
+}
+
 export function judgePlacementSupport(facts: PlacementSupportFacts): PlacementSupport {
-  const issues = issuesOf(facts);
+  return verdictOf(issuesOf(facts));
+}
+
+function verdictOf(issues: PlacementSupportIssue[]): PlacementSupport {
   const modeSupport = (mode: PlacementMode): PlacementModeSupport => {
     const blocking = issues.find((issue) => BLOCKERS[mode].includes(issue.reason));
     return { available: !blocking, blockedBy: blocking?.reason ?? null };

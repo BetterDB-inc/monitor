@@ -21,7 +21,18 @@ import { isManagedProviderBuild } from '@app/monitor/provider-detector';
 import { AnomalyService } from '../anomaly-detection/anomaly.service';
 import type { ServedHotShardDetail } from '../anomaly-detection/hot-shard-detector';
 import type { RebalanceExecution } from '../anomaly-detection/rebalance-planner';
-import { judgePlacementSupport, managedPlacementProvider } from './placement-support';
+import type {
+  ConfirmedMove,
+  RebalanceRunActor,
+  RebalanceRunResult,
+} from '../anomaly-detection/slot-rebalance-run';
+import {
+  isAclRefusal,
+  judgePlacementSupport,
+  judgeUnconnectedPlacement,
+  managedPlacementProvider,
+  type PlacementPrimaryRead,
+} from './placement-support';
 import { placementBalance } from './placement-balance';
 
 const SUPPORT_CACHE_MS = 30_000;
@@ -39,7 +50,7 @@ export class PlacementModeError extends Error {
 export class PlacementService {
   private readonly supportCache = new Map<string, { at: number; support: PlacementSupport }>();
   private readonly supportReads = new Map<string, Promise<PlacementSupport>>();
-  private readonly aclDenied = new Set<string>();
+  private readonly aclDenied = new Map<string, string | null>();
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -85,29 +96,42 @@ export class PlacementService {
     return (await this.runningMode(this.seedOf(connectionId))) !== 'observe';
   }
 
+  async runRebalance(
+    connectionId: string,
+    shardId: string,
+    confirmed: readonly ConfirmedMove[],
+    startedBy: RebalanceRunActor,
+  ): Promise<RebalanceRunResult> {
+    if (!(await this.allowsRun(connectionId))) {
+      return { status: 'blocked', blockedBy: 'observe_mode' };
+    }
+    const result = await this.anomaly.runRebalance(connectionId, shardId, confirmed, startedBy);
+    if (result.status === 'refused' && result.serverReply && isAclRefusal(result.message)) {
+      const seedId = this.seedOf(connectionId);
+      this.aclDenied.set(seedId, null);
+      this.supportCache.delete(seedId);
+    }
+    return result;
+  }
+
   async withPlacementBlocker(
     connectionId: string,
     shards: ServedHotShardDetail[],
   ): Promise<ServedHotShardDetail[]> {
-    const runnable = (shard: ServedHotShardDetail) =>
-      shard.rebalance?.kind === 'plan' && shard.rebalance.execution?.available === true;
-    if (!shards.some(runnable)) return shards;
+    if (!shards.some((shard) => shard.rebalance?.kind === 'plan')) return shards;
     const mode = await this.readableMode(connectionId);
-    if (mode !== null && mode !== 'observe') return shards;
-    const execution: RebalanceExecution =
-      mode === 'observe' ? { available: false, blockedBy: 'observe_mode' } : { available: false };
+    if (mode === 'observe') {
+      return shards.map((shard) =>
+        shard.rebalance?.kind === 'plan' ? { ...shard, rebalance: undefined } : shard,
+      );
+    }
+    if (mode !== null) return shards;
+    const execution: RebalanceExecution = { available: false };
     return shards.map((shard) =>
-      runnable(shard) && shard.rebalance?.kind === 'plan'
+      shard.rebalance?.kind === 'plan' && shard.rebalance.execution?.available === true
         ? { ...shard, rebalance: { ...shard.rebalance, execution } }
         : shard,
     );
-  }
-
-  noteRebalanceRefusal(connectionId: string, message: string): void {
-    if (!/\bNOPERM\b/i.test(message)) return;
-    const seedId = this.seedOf(connectionId);
-    this.aclDenied.add(seedId);
-    this.supportCache.delete(seedId);
   }
 
   private seedOf(connectionId: string): string {
@@ -131,8 +155,17 @@ export class PlacementService {
   }
 
   private async runningMode(seedId: string): Promise<PlacementMode> {
-    const [mode, support] = await Promise.all([this.storedMode(seedId), this.support(seedId)]);
+    const mode = await this.storedMode(seedId);
+    if (mode === 'observe') return 'observe';
+    const support =
+      mode === 'recommend' ? await this.readOnlySupport(seedId) : await this.support(seedId);
     return effectiveModeOf(mode, support);
+  }
+
+  private async readOnlySupport(seedId: string): Promise<PlacementSupport> {
+    const cached = this.supportCache.get(seedId);
+    if (cached && Date.now() - cached.at < SUPPORT_CACHE_MS) return cached.support;
+    return this.judge(seedId, false);
   }
 
   private async storedMode(seedId: string): Promise<PlacementMode> {
@@ -155,13 +188,16 @@ export class PlacementService {
   }
 
   private async support(seedId: string): Promise<PlacementSupport> {
+    this.forgetRemovedConnections();
     const cached = this.supportCache.get(seedId);
     if (cached && Date.now() - cached.at < SUPPORT_CACHE_MS) return cached.support;
     const inFlight = this.supportReads.get(seedId);
     if (inFlight) return inFlight;
-    const read = this.judge(seedId)
+    const read = this.judge(seedId, true)
       .then((support) => {
-        this.supportCache.set(seedId, { at: Date.now(), support });
+        if (!support.issues.some((issue) => issue.reason === 'not_connected')) {
+          this.supportCache.set(seedId, { at: Date.now(), support });
+        }
         return support;
       })
       .finally(() => this.supportReads.delete(seedId));
@@ -169,15 +205,47 @@ export class PlacementService {
     return read;
   }
 
-  private async judge(seedId: string): Promise<PlacementSupport> {
+  private forgetRemovedConnections(): void {
+    for (const cache of [this.supportCache, this.supportReads, this.aclDenied]) {
+      for (const seedId of cache.keys()) {
+        if (!this.registry.getConfig(seedId)) cache.delete(seedId);
+      }
+    }
+  }
+
+  private noteTopology(seedId: string, primaries: PlacementPrimaryRead[] | null): boolean {
+    if (!this.aclDenied.has(seedId)) return false;
+    if (!primaries || primaries.length === 0) return true;
+    const topology = primaries
+      .map((primary) => primary.address)
+      .sort()
+      .join(',');
+    const deniedAt = this.aclDenied.get(seedId);
+    if (deniedAt === null) {
+      this.aclDenied.set(seedId, topology);
+      return true;
+    }
+    if (deniedAt === topology) return true;
+    this.aclDenied.delete(seedId);
+    return false;
+  }
+
+  private async judge(seedId: string, readPrimaries: boolean): Promise<PlacementSupport> {
     const config = this.registry.getConfig(seedId);
     const client = this.registry.get(seedId);
-    const clusterEnabled = client.getCapabilities().clusterEnabled === true;
+    let clusterEnabled: boolean;
+    try {
+      clusterEnabled = client.getCapabilities().clusterEnabled === true;
+    } catch {
+      return judgeUnconnectedPlacement();
+    }
     const dialed = dialsDataNodes(config);
     const [clusterWide, primaries] = clusterEnabled
       ? await Promise.all([
           this.clusterMetrics?.usesClusterWideSlotStats(seedId) ?? Promise.resolve(true),
-          dialed ? this.anomaly.readPlacementPrimaries(seedId) : Promise.resolve(null),
+          dialed && readPrimaries
+            ? this.anomaly.readPlacementPrimaries(seedId)
+            : Promise.resolve(null),
         ])
       : [true, null];
     const managedBuild = primaries?.find((primary) => isManagedProviderBuild(primary.serverInfo));
@@ -190,7 +258,7 @@ export class PlacementService {
         this.shardLoad?.reportsUsage(seedId) !== false,
       dialsDataNodes: dialed,
       primaries,
-      aclDenied: this.aclDenied.has(seedId),
+      aclDenied: readPrimaries ? this.noteTopology(seedId, primaries) : this.aclDenied.has(seedId),
       slotMigrationFlag: String(this.config.get('BETTERDB_SLOT_MIGRATION')) === 'true',
       memoryStorage: this.memoryStorage(),
       signIn: this.workspace?.enabled === true,

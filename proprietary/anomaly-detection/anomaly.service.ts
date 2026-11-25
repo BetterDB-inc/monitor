@@ -44,7 +44,6 @@ import {
 import { AnomalySavedBus, SavedAnomaly } from '@app/common/services/anomaly-saved-bus';
 import { ClientListCache } from '@app/common/services/client-list-cache';
 import { rearmLevel } from './rearm-level';
-import { mapWithLimit } from './bounded-map';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { MetricBuffer } from './metric-buffer';
 import { SpikeDetector } from './spike-detector';
@@ -132,7 +131,11 @@ import {
   shardServerFromInfo,
   withCommands,
 } from './rebalance-planner';
-import { migrateSlotsListed, type PlacementPrimaryRead } from '../placement/placement-support';
+import {
+  managedPlacementProvider,
+  type PlacementPrimaryRead,
+} from '../placement/placement-support';
+import { readPlacementPrimaryFacts } from '../placement/placement-primaries';
 import {
   type ConfirmedMove,
   type RebalanceCancelResult,
@@ -154,7 +157,7 @@ import {
   startRun,
   withOutcome,
 } from './slot-rebalance-run';
-import { isManagedProviderBuild, isManagedProviderHost } from '@app/monitor/provider-detector';
+import { isManagedProviderBuild } from '@app/monitor/provider-detector';
 import {
   BACKLOG_COVERAGE_CRITICAL_SEC,
   BACKLOG_COVERAGE_WARNING_SEC,
@@ -772,7 +775,6 @@ const MAX_SCANNED_CALLER_EVENTS = 50_000;
 const NEXT_FIRING_CONCURRENCY = 5;
 const NEXT_FIRING_TTL_MS = 5 * 60_000;
 const NEXT_FIRING_CACHE_SIZE = 2_000;
-const PLACEMENT_READ_CONCURRENCY = 4;
 const NEXT_FIRING_BUDGET_MS = 10_000;
 const NEXT_FIRING_BUDGET_EXHAUSTED = 'lookup budget exhausted';
 const NEXT_FIRING_MIN_REMAINING_MS = 250;
@@ -7056,9 +7058,8 @@ export class AnomalyService
       if (reading) memory.set(shardIds[index], reading);
       if (server) servers.set(shardIds[index], server);
     }
-    const providerManaged =
-      isManagedProviderHost(ctx.host) ||
-      readings.some((info) => isManagedProviderBuild(info?.server));
+    const managedBuild = readings.find((info) => isManagedProviderBuild(info?.server));
+    const providerManaged = managedPlacementProvider(ctx.host, managedBuild?.server) !== null;
     return verdicts.map((verdict) =>
       verdict.kind === 'plan'
         ? withCommands(
@@ -7085,21 +7086,15 @@ export class AnomalyService
     } catch {
       return null;
     }
-    const primaries = nodes.filter((node) => node.role === 'master' && node.slots.length > 0);
-    return mapWithLimit(primaries, PLACEMENT_READ_CONCURRENCY, async (node) => {
-      const info = await this.readShardInfo(connectionId, node.id);
-      const migrateSlotsCommand = await this.readShard(
-        connectionId,
-        node.id,
-        'reading COMMAND INFO on the shard timed out',
-        (client) => client.call('COMMAND', 'INFO', 'CLUSTER|MIGRATESLOTS'),
-      ).then(migrateSlotsListed, () => null);
-      return {
-        address: node.address,
-        server: (info && shardServerFromInfo(info)) ?? null,
-        migrateSlotsCommand,
-        serverInfo: info?.server,
-      };
+    return readPlacementPrimaryFacts(nodes, {
+      info: (nodeId) => this.readShardInfo(connectionId, nodeId),
+      migrateSlotsInfo: (nodeId) =>
+        this.readShard(
+          connectionId,
+          nodeId,
+          'reading COMMAND INFO on the shard timed out',
+          (client) => client.call('COMMAND', 'INFO', 'CLUSTER|MIGRATESLOTS'),
+        ),
     });
   }
 
@@ -11266,9 +11261,10 @@ export class AnomalyService
         }
         this.refusedRebalancePlans.set(plan, 'server_refused');
         if (late) record();
-        if (late || (err instanceof Error && err.name === 'ReplyError')) {
-          return { status: 'refused', message: errorText(err) };
+        if (err instanceof Error && err.name === 'ReplyError') {
+          return { status: 'refused', message: errorText(err), serverReply: true };
         }
+        if (late) return { status: 'refused', message: errorText(err) };
         record();
         return {
           status: 'refused',

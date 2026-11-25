@@ -29,6 +29,7 @@ export function usePlacement(connectionId: string | undefined, enabled = true) {
     onSuccess: async (status) => {
       await queryClient.cancelQueries({ queryKey: placementQueryKey(connectionId) });
       queryClient.setQueryData(placementQueryKey(connectionId), status);
+      await queryClient.invalidateQueries({ queryKey: ['open-hot-shards', connectionId] });
     },
   });
 

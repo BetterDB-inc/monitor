@@ -5,10 +5,11 @@ import {
   HOT_SHARD_RAISE_FACTOR,
   hotShardRatio,
 } from '../anomaly-detection/hot-shard-detector';
+import { DEFAULT_REBALANCE_POLICY } from '../anomaly-detection/rebalance-planner';
 import { median } from '../latency-regression/regression-detector';
 
 export const PLACEMENT_TRIGGER_RATIO = HOT_SHARD_RAISE_FACTOR;
-export const PLACEMENT_RESOLVE_RATIO = 1.25;
+export const PLACEMENT_RESOLVE_RATIO = DEFAULT_REBALANCE_POLICY.resolveRatio;
 
 export function placementBalance(sample: ShardLoadSample | null): PlacementBalance | null {
   if (!sample) return null;

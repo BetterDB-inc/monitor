@@ -1,5 +1,7 @@
 import {
+  isAclRefusal,
   judgePlacementSupport,
+  judgeUnconnectedPlacement,
   managedPlacementProvider,
   migrateSlotsListed,
   type PlacementSupportFacts,
@@ -116,6 +118,31 @@ describe('judgePlacementSupport', () => {
       facts({ primaries: [{ address: 'a:1', server: redis, migrateSlotsCommand: false }] }),
     );
     expect(verdict.issues.map((issue) => issue.reason)).toEqual(['server_version']);
+  });
+
+  it('names only the primaries that block in a mixed Valkey and Redis cluster', () => {
+    const verdict = judgePlacementSupport(
+      facts({
+        primaries: [
+          { address: 'a:1', server: valkey9, migrateSlotsCommand: true },
+          {
+            address: 'b:1',
+            server: { dbType: 'redis', version: '7.4.0' },
+            migrateSlotsCommand: false,
+          },
+          {
+            address: 'c:1',
+            server: { dbType: 'redis', version: '8.4.0' },
+            migrateSlotsCommand: true,
+          },
+        ],
+      }),
+    );
+    expect(verdict.issues[0]).toEqual({
+      reason: 'server_version',
+      detail:
+        'Slot moves need Valkey 9.0 or later on every primary: b:1 runs redis 7.4.0, c:1 runs redis 8.4.0.',
+    });
   });
 
   it('treats a primary whose version could not be read as blocked', () => {
@@ -265,5 +292,27 @@ describe('migrateSlotsListed', () => {
 
   it.each([[[null]], [[]], [null], ['ERR unknown']])('treats %j as missing', (reply) => {
     expect(migrateSlotsListed(reply)).toBe(false);
+  });
+});
+
+describe('isAclRefusal', () => {
+  it('takes a NOPERM reply as an acl refusal', () => {
+    expect(
+      isAclRefusal(
+        'NOPERM User monitor has no permissions to run the cluster|migrateslots command',
+      ),
+    ).toBe(true);
+    expect(isAclRefusal("ERR I don't know about node b0000000")).toBe(false);
+  });
+});
+
+describe('judgeUnconnectedPlacement', () => {
+  it('keeps a cluster the monitor has not connected to on Observe', () => {
+    const verdict = judgeUnconnectedPlacement();
+    expect(verdict.issues).toEqual([
+      { reason: 'not_connected', detail: 'The monitor has not connected to this cluster yet.' },
+    ]);
+    expect(verdict.modes.observe).toEqual({ available: true, blockedBy: null });
+    expect(verdict.modes.recommend).toEqual({ available: false, blockedBy: 'not_connected' });
   });
 });
