@@ -12169,10 +12169,12 @@ export class AnomalyService
     endTime: number,
   ): Promise<ReplicaDivergenceHistory[]> {
     const keys = this.divergenceKeysOf(connectionId);
-    const states = keys.flatMap((key) => {
+    const captured = keys.flatMap((key) => {
       const state = this.divergenceState.get(key);
-      return state ? [state] : [];
+      return state ? [{ key, state }] : [];
     });
+    const states = captured.map(({ state }) => state);
+    const nodeStates = new Set(captured.filter(({ key }) => key !== connectionId).map(({ state }) => state));
     const stateOf = (replica: string) =>
       states.find((s) => s.replicas.has(replica) || s.observed.has(replica)) ?? states[0];
     const series = new Map<string, DivergenceWindow[]>();
@@ -12230,24 +12232,20 @@ export class AnomalyService
     }
     for (const windows of series.values()) windows.sort((a, b) => a.end - b.end);
     const now = Date.now();
-    const nodeStates = new Set(
-      keys.filter((key) => key !== connectionId).flatMap((key) => this.divergenceState.get(key) ?? []),
-    );
     const staleAfterOf = (state: DivergenceConnectionState | undefined) =>
       divergenceWindowMs(state && nodeStates.has(state) ? this.nodeReadIntervalMs(connectionId) : this.getIntervalMs());
-    const staleAfterMs = Math.max(...[undefined, ...states].map(staleAfterOf));
     const orphaned = new Set(keys.flatMap((key) => [...(this.divergenceOrphans.get(key)?.keys() ?? [])]));
-    const reachesNow = endTime >= now - staleAfterMs;
     return [...series.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([replica, windows]) => {
         const state = stateOf(replica);
+        const staleAfterMs = staleAfterOf(state);
         const observed = replicaObservedLevel(
           state,
           replica,
           now,
-          staleAfterOf(state),
-          reachesNow ? windows[windows.length - 1] : undefined,
+          staleAfterMs,
+          endTime >= now - staleAfterMs ? windows[windows.length - 1] : undefined,
         );
         const level = observed === 'none' && orphaned.has(replica) ? 'behind' : observed;
         const latest =

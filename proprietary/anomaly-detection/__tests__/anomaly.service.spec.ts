@@ -26094,6 +26094,55 @@ describe('AnomalyService', () => {
             expect(history.map((h) => h.level)).toEqual(['none']);
           });
 
+          it('judges a replica by the states it held when the stored windows were asked for', async () => {
+            ownClients(targets);
+            const end = (await poll(targets, 13, T0)) - INTERVAL;
+            jest.spyOn(Date, 'now').mockReturnValue(end + 4 * INTERVAL);
+            storage.getReplicationDivergenceWindows.mockImplementationOnce(async () => {
+              (service as any).divergenceState.clear();
+              return [];
+            });
+
+            const history = await service.getReplicationDivergenceHistory(
+              'conn-1',
+              T0 - 3_600_000,
+              end + 4 * INTERVAL,
+            );
+
+            expect(history.map((h) => h.level)).toEqual(['none']);
+          });
+
+          it('does not judge a replica of the seed by a stored window older than its own freshness', async () => {
+            const SEED_REPLICA = '10.0.0.9:6379';
+            ownClients(targets);
+            const now = await poll(targets, 4, T0);
+            jest.spyOn(Date, 'now').mockReturnValue(now);
+            const seed = createDivergenceState();
+            seed.observed.add(SEED_REPLICA);
+            seed.lastSampleAt = now;
+            (service as any).divergenceState.set('conn-1', seed);
+            storage.getReplicationDivergenceWindows.mockResolvedValueOnce([
+              {
+                id: 'w1',
+                connectionId: 'conn-1',
+                replicaAddr: SEED_REPLICA,
+                windowStart: now - 10 * INTERVAL,
+                windowEnd: now - 7 * INTERVAL,
+                gapBytes: 1024 * 1024 * 1024,
+                bytesPerSec: 1024 * 1024,
+                secondsBehind: null,
+              },
+            ]);
+
+            const history = await service.getReplicationDivergenceHistory(
+              'conn-1',
+              T0 - 3_600_000,
+              now - 7 * INTERVAL,
+            );
+
+            expect(history.find((h) => h.replica === SEED_REPLICA)?.level).toBe('none');
+          });
+
           it('reads a primary that lost its replicas on every poll while that lasts', async () => {
             const clients = ownClients(targets);
             const readAt: number[] = [];
