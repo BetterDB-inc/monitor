@@ -510,7 +510,7 @@ export function RebalanceSuggestion({ connectionId, mode, runnable = true }: Pro
         <RunDialog
           key={movesKey(confirmed)}
           shown={confirmed}
-          current={current}
+          current={current && (runnable ? current : heldBack(current))}
           connectionId={connectionId}
           onReview={setConfirmed}
           onClose={() => setConfirmed(null)}

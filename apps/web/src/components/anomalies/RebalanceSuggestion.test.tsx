@@ -154,6 +154,28 @@ describe('RebalanceSuggestion', () => {
   describe('running the plan', () => {
     const runnable = () => plan({ execution: { available: true } });
 
+    it('stops an open confirmation from starting once the plan is not runnable', async () => {
+      getAnomalyEvents.mockResolvedValue([EVENT]);
+      getHotShards.mockResolvedValue([hotShard(runnable())]);
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      const view = (runnable: boolean) => (
+        <QueryClientProvider client={client}>
+          <RebalanceSuggestion connectionId="conn-1" runnable={runnable} />
+        </QueryClientProvider>
+      );
+      const { rerender } = render(view(true));
+      await act(async () => {
+        await client.invalidateQueries();
+      });
+      fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+      expect(within(dialog).getByRole('button', { name: 'Start the migration' })).toBeEnabled();
+
+      rerender(view(false));
+
+      expect(within(dialog).getByRole('button', { name: 'Start the migration' })).toBeDisabled();
+    });
+
     it('starts the confirmed moves after the admin confirms', async () => {
       runRebalance.mockResolvedValue({});
       await show([hotShard(runnable())]);

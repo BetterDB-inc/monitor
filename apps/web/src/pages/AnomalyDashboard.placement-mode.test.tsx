@@ -82,6 +82,15 @@ describe('AnomalyDashboard placement mode', () => {
     expect(await screen.findByText('Suggestions in no mode, not runnable')).toBeInTheDocument();
   });
 
+  it('keeps the last mode but drops the run button when a later read fails', async () => {
+    placement.current = {
+      status: { mode: 'recommend', effectiveMode: 'recommend' },
+      error: new Error('boom'),
+    };
+    renderDashboard();
+    expect(await screen.findByText('Suggestions in recommend mode, not runnable')).toBeInTheDocument();
+  });
+
   it('shows the suggestions in the mode the cluster runs in', async () => {
     placement.current = { status: { mode: 'recommend', effectiveMode: 'recommend' } };
     renderDashboard();

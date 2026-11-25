@@ -341,7 +341,7 @@ export function AnomalyDashboard() {
       <RebalanceSuggestion
         connectionId={currentConnection?.id}
         mode={placement ? placement.effectiveMode : placementError ? undefined : 'observe'}
-        runnable={placement !== undefined}
+        runnable={placement !== undefined && !placementError}
       />
       <FanoutCoverageNotice
         coverage={fanoutCoverage?.find((c) => c.connectionId === currentConnection?.id)}
