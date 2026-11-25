@@ -448,6 +448,16 @@ Alerts from these primaries carry the primary's address as `nodeAddr` and the ad
 
 **Example scenario**: `fragmentation_ratio` spikes to 2.5 with no other metrics affected.
 
+### COMMAND_P99 (latency regression)
+
+**Triggers**: A command's P99 latency stays at least 2x its rolling 24 h median (sustained degradation), or at least 1.5x its pre-upgrade median after a major version upgrade (upgrade regression), for 5 consecutive samples and at least 1 ms above the baseline.
+
+**How P99 is measured**: Per interval, not since server start. `INFO latencystats` percentiles are cumulative since the server started (or the last `CONFIG RESETSTAT`), so on a node that has been up for weeks a recent regression barely moves them. When the connection has `LATENCY HISTOGRAM` rows (collected every minute by latency analytics), BetterDB subtracts consecutive snapshots to get the real distribution of the last minute and takes its P99. Commands with fewer than 20 calls in the minute are skipped, and a counter reset (restart, `CONFIG RESETSTAT`) drops that interval. Findings and the `latency.regression.detected` webhook carry `basis: "interval"` in this mode.
+
+If the connection has no histogram rows (the ACL denies `+latency|histogram`, or histogram polling was disabled after repeated failures), BetterDB falls back to the cumulative `INFO latencystats` values and reports `basis: "cumulative"`. Grant `+latency|histogram` (already in the read-only ACL line in [minimum-acl.md](minimum-acl.md)) to get the interval basis.
+
+**Resolution caveat**: Histogram buckets are powers of two wide. The interval P99 is interpolated inside its bucket assuming an even spread in log space, so it is an estimate. The 1 ms minimum degradation and the 5-consecutive-samples rule remain the noise guard.
+
 ## Incident Sequence Rules
 
 Anomalies on one connection, or one cluster, are grouped into incidents. An incident stays open while events keep arriving within two minutes of each other, for at most 30 minutes. A sequence rule recognises a known chain of failures inside an incident, adds its diagnosis and recommendations, and keeps a later step in the same incident across a quiet gap, as long as the rule's span and the incident's 30-minute limit allow it.

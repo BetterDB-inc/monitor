@@ -808,3 +808,36 @@ describe('RegressionDetector — ignored admin commands', () => {
     }
   });
 });
+
+describe('finding basis', () => {
+  const fireSustained = (basis?: 'interval' | 'cumulative') => {
+    const sim = new Sim();
+    for (let i = 0; i < 40; i++) {
+      sim.now += MINUTE;
+      sim.addSample(1000, '8.1.0');
+    }
+    let findings: RegressionFinding[] = [];
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) {
+      sim.now += MINUTE;
+      sim.addSample(5000, '8.1.0');
+      findings = sim.detector.evaluate({
+        nowMs: sim.now,
+        samples: sim.samples,
+        callsPerMin: sim.callsPerMin,
+        clusterRefreshDeltas: [],
+        basis,
+      });
+    }
+    return findings;
+  };
+
+  it('copies the input basis onto the finding', () => {
+    expect(fireSustained('interval')).toHaveLength(1);
+    expect(fireSustained('interval')[0].basis).toBe('interval');
+    expect(fireSustained('cumulative')[0].basis).toBe('cumulative');
+  });
+
+  it('defaults to cumulative when the input has no basis', () => {
+    expect(fireSustained()[0].basis).toBe('cumulative');
+  });
+});

@@ -2,11 +2,15 @@ import type { AnomalyKind } from '@app/common/interfaces/storage-port.interface'
 
 /**
  * Types for the P99 latency regression guard (valkey/valkey#3527).
- * All latency values are microseconds, sourced from INFO latencystats
- * cumulative t-digests collected by LatencystatsPollerService.
+ * All latency values are microseconds. P99s are per interval (derived from consecutive
+ * LATENCY HISTOGRAM snapshots) when a connection has histogram rows, and the cumulative
+ * INFO latencystats t-digest values otherwise.
  */
 
 export type RegressionKind = AnomalyKind;
+
+/** Where the P99 samples came from. */
+export type RegressionBasis = 'interval' | 'cumulative';
 
 /** One stored latencystats point, as read back from storage. */
 export interface CommandP99Point {
@@ -40,6 +44,8 @@ export interface DetectorInput {
   callsPerMin: Map<string, number>;
   /** cluster|slots + cluster|shards callsDelta samples over the last hour. */
   clusterRefreshDeltas: ClusterRefreshPoint[];
+  /** How `samples` were derived; copied onto every finding. Defaults to 'cumulative'. */
+  basis?: RegressionBasis;
 }
 
 export interface RegressionFinding {
@@ -49,6 +55,7 @@ export interface RegressionFinding {
   severity: 'warning' | 'critical';
   commands: CommandRegression[];
   topologyRefreshCorrelated: boolean;
+  basis: RegressionBasis;
   message: string;
   timestamp: number;
 }

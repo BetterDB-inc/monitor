@@ -687,6 +687,27 @@ Fires once per connection and reason when a footprint collection finds LMCache a
 }
 ```
 
+#### latency.regression.detected (Pro)
+
+Fires when a command's P99 latency regresses after an upgrade or degrades for a sustained period. `basis` says how the P99s were measured: `interval` (per-minute `LATENCY HISTOGRAM` deltas, estimated inside factor-2 buckets) or `cumulative` (`INFO latencystats` since server start, used when the connection has no histogram rows; `+latency|histogram` enables `interval`).
+
+```json
+{
+  "kind": "sustained_degradation",
+  "currentVersion": "8.1.0",
+  "commands": [
+    { "command": "hmget", "baselineP99Us": 2000, "currentP99Us": 6000, "degradationFactor": 3, "callsPerMin": 120 }
+  ],
+  "topologyRefreshCorrelated": false,
+  "basis": "interval",
+  "prefetchBatchMaxSize": null,
+  "runbook": ["Compare per-command P99 before/after the change via GET /metrics/latencystats/history."],
+  "message": "Sustained P99 latency degradation: hmget p99 6.0ms (baseline 2.0ms, 3.0x).",
+  "timestamp": 1735689600000,
+  "instance": { "host": "valkey.example.com", "port": 6379 }
+}
+```
+
 #### retry_amplification.detected (Pro)
 
 Fires when the anomaly detector sees a self-sustaining retry loop rather than a transient blip. Polls are grouped into 60-second windows and compared with the median of the last 30 normal windows (detection starts after 10). A window is hot when commands per client are at least 1.3× baseline, ops/s at least 1.2× baseline and the client count within ±15% of baseline, while a P99 latency regression, an error-reply burst or connection churn is present. A burst shorter than 3 hot windows is treated as transient and never alerts. After 3 hot windows the event fires in one of two shapes, given in `pattern`:

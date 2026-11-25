@@ -5,6 +5,11 @@
  * samples via evaluate() and returns findings — no NestJS, storage, or network
  * dependencies, so the full rule set is unit-testable.
  *
+ * Input samples are per-command P99s. They are per-interval values (from LATENCY HISTOGRAM
+ * deltas) when `input.basis` is 'interval', or cumulative-since-start latencystats values when
+ * 'cumulative' (the default). The rules below are identical for both; the basis is only
+ * copied onto each finding.
+ *
  * Rules:
  * 1. Upgrade regression: a server version change opens a 24h window. Baseline is the
  *    per-command median p99 over the last 6h of old-version samples. Fires ONE
@@ -433,6 +438,7 @@ export class RegressionDetector {
       severity: critical ? 'critical' : 'warning',
       commands: regressed,
       topologyRefreshCorrelated: correlated,
+      basis: input.basis ?? 'cumulative',
       message,
       timestamp: nowMs,
     };
@@ -539,6 +545,7 @@ export class RegressionDetector {
         severity: factor >= CRITICAL_SUSTAINED_FACTOR ? 'critical' : 'warning',
         commands: [regression],
         topologyRefreshCorrelated: correlated,
+        basis: input.basis ?? 'cumulative',
         message,
         timestamp: nowMs,
       });

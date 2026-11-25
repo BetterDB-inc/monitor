@@ -1,6 +1,9 @@
 import { randomUUID } from 'crypto';
 import { Injectable, Logger, OnModuleInit, Inject, Optional } from '@nestjs/common';
-import { StoragePort } from '@app/common/interfaces/storage-port.interface';
+import {
+  StoragePort,
+  StoredLatencyHistogram,
+} from '@app/common/interfaces/storage-port.interface';
 import {
   MultiConnectionPoller,
   ConnectionContext,
@@ -21,9 +24,29 @@ import {
   parseMajorVersion,
   STALE_SAMPLE_MS,
 } from './regression-detector';
-import { ClusterRefreshPoint, DetectorInput, RegressionFinding } from './types';
+import {
+  ClusterRefreshPoint,
+  CommandP99Point,
+  DetectorInput,
+  RegressionBasis,
+  RegressionFinding,
+} from './types';
+import {
+  IntervalPoint,
+  callsPerMinute,
+  intervalPoints,
+  versionAt,
+} from './interval-percentiles';
 
 const POLL_INTERVAL_MS = 60_000;
+/** Histogram snapshots read per page when backfilling, to bound memory on the first poll. */
+const HISTOGRAM_PAGE = 240;
+
+interface IntervalState {
+  last: StoredLatencyHistogram;
+  /** Ascending capturedAt, trimmed to SAMPLE_LOOKBACK_MS. */
+  points: IntervalPoint[];
+}
 /** How much latencystats history the detector needs (sustained baseline window). */
 const SAMPLE_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 /** Window used to derive per-command call volume from commandstats deltas. */
@@ -56,6 +79,9 @@ export class LatencyRegressionService extends MultiConnectionPoller implements O
   protected readonly logger = new Logger(LatencyRegressionService.name);
 
   private detectors = new Map<string, RegressionDetector>();
+  private intervals = new Map<string, IntervalState>();
+  /** Last basis logged per connection, so the choice is logged once per change. */
+  private basisLogged = new Map<string, RegressionBasis>();
   // Read once at startup, like the slowlog ignore lists.
   private readonly ignoreCommands = latencyRegressionIgnoreCommands();
 
@@ -84,26 +110,77 @@ export class LatencyRegressionService extends MultiConnectionPoller implements O
 
   protected onConnectionRemoved(connectionId: string): void {
     this.detectors.delete(connectionId);
+    this.intervals.delete(connectionId);
+    this.basisLogged.delete(connectionId);
   }
 
-  protected async pollConnection(ctx: ConnectionContext): Promise<void> {
-    const nowMs = Date.now();
+  /** First poll: page backwards through 24h of snapshots, then process oldest-first. */
+  private async backfillIntervals(
+    connectionId: string,
+    nowMs: number,
+  ): Promise<IntervalState | null> {
+    const pages: StoredLatencyHistogram[][] = [];
+    let endTime = nowMs;
+    const startTime = nowMs - SAMPLE_LOOKBACK_MS;
+    for (;;) {
+      const page = await this.storage.getLatencyHistograms({
+        connectionId,
+        startTime,
+        endTime,
+        limit: HISTOGRAM_PAGE,
+      });
+      if (page.length === 0) break;
+      pages.push(page); // each page is newest-first
+      const oldest = page[page.length - 1].timestamp;
+      if (page.length < HISTOGRAM_PAGE || oldest <= startTime) break;
+      endTime = oldest - 1;
+    }
+    const snapshots = pages.flat().reverse(); // oldest-first
+    if (snapshots.length === 0) return null;
+    const points: IntervalPoint[] = [];
+    for (let i = 1; i < snapshots.length; i += 1) {
+      points.push(...intervalPoints(snapshots[i - 1], snapshots[i]));
+    }
+    return { last: snapshots[snapshots.length - 1], points };
+  }
 
-    const stored = await this.storage.getLatencyStatsHistory({
-      connectionId: ctx.connectionId,
-      startTime: nowMs - SAMPLE_LOOKBACK_MS,
-      endTime: nowMs,
-    });
-    if (stored.length === 0) return;
+  /** Rolling per-connection window of interval points; null when no histogram rows exist. */
+  private async advanceIntervals(
+    connectionId: string,
+    nowMs: number,
+  ): Promise<IntervalState | null> {
+    let state = this.intervals.get(connectionId);
+    if (!state) {
+      const filled = await this.backfillIntervals(connectionId, nowMs);
+      if (!filled) return null;
+      state = filled;
+    } else {
+      const fresh = (
+        await this.storage.getLatencyHistograms({
+          connectionId,
+          startTime: state.last.timestamp + 1,
+          endTime: nowMs,
+          limit: 10,
+        })
+      ).reverse();
+      for (const snapshot of fresh) {
+        state.points.push(...intervalPoints(state.last, snapshot));
+        state.last = snapshot;
+      }
+    }
+    const cutoff = nowMs - SAMPLE_LOOKBACK_MS;
+    const firstKept = state.points.findIndex((p) => p.capturedAt >= cutoff);
+    state.points = firstKept === -1 ? [] : state.points.slice(firstKept);
+    this.intervals.set(connectionId, state);
+    return state;
+  }
 
-    const samples = stored.map((s) => ({
-      command: s.command,
-      p99Us: s.p99Us,
-      serverVersion: s.serverVersion,
-      capturedAt: s.capturedAt,
-    }));
-
-    // Volume gating input: commandstats call deltas for commands seen recently.
+  /** Cumulative-path volume gating input: commandstats call deltas for commands seen recently. */
+  private async cumulativeCallsPerMin(
+    connectionId: string,
+    samples: CommandP99Point[],
+    nowMs: number,
+  ): Promise<Map<string, number>> {
     const recentCommands = new Set<string>();
     for (const s of samples) {
       if (s.capturedAt >= nowMs - STALE_SAMPLE_MS) recentCommands.add(s.command);
@@ -111,7 +188,7 @@ export class LatencyRegressionService extends MultiConnectionPoller implements O
     const callsPerMin = new Map<string, number>();
     for (const command of recentCommands) {
       const history = await this.storage.getCommandStatsHistory({
-        connectionId: ctx.connectionId,
+        connectionId,
         command,
         startTime: nowMs - VOLUME_WINDOW_MS,
         endTime: nowMs,
@@ -124,6 +201,58 @@ export class LatencyRegressionService extends MultiConnectionPoller implements O
       // under-reports the rate — 5 samples at 100 calls/min would read as 50 and be wrongly
       // excluded by the >=MIN_CALLS_PER_MIN gate, so their P99 regression is never evaluated.
       callsPerMin.set(command, totalCalls / history.length);
+    }
+    return callsPerMin;
+  }
+
+  protected async pollConnection(ctx: ConnectionContext): Promise<void> {
+    const nowMs = Date.now();
+
+    const stored = await this.storage.getLatencyStatsHistory({
+      connectionId: ctx.connectionId,
+      startTime: nowMs - SAMPLE_LOOKBACK_MS,
+      endTime: nowMs,
+    });
+    if (stored.length === 0) return;
+
+    // Prefer per-interval P99s derived from LATENCY HISTOGRAM deltas: INFO latencystats is
+    // cumulative since server start, so a recent regression barely moves it on a long-lived node.
+    let state: IntervalState | null = null;
+    try {
+      state = await this.advanceIntervals(ctx.connectionId, nowMs);
+    } catch (err) {
+      this.logger.warn(
+        `Failed to read latency histograms for ${ctx.connectionName}, using cumulative latencystats: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    const basis: RegressionBasis = state && state.points.length > 0 ? 'interval' : 'cumulative';
+    if (this.basisLogged.get(ctx.connectionId) !== basis) {
+      this.basisLogged.set(ctx.connectionId, basis);
+      this.logger.log(
+        basis === 'interval'
+          ? `latency regression for ${ctx.connectionName}: judging per-interval P99 from LATENCY HISTOGRAM`
+          : `latency regression for ${ctx.connectionName}: falling back to cumulative latencystats (no histogram rows)`,
+      );
+    }
+
+    let samples: CommandP99Point[];
+    let callsPerMin: Map<string, number>;
+    if (state && basis === 'interval') {
+      samples = state.points.map((p) => ({
+        command: p.command,
+        p99Us: p.p99Us,
+        capturedAt: p.capturedAt,
+        serverVersion: versionAt(stored, p.capturedAt),
+      }));
+      callsPerMin = callsPerMinute(state.points, nowMs - VOLUME_WINDOW_MS, nowMs);
+    } else {
+      samples = stored.map((s) => ({
+        command: s.command,
+        p99Us: s.p99Us,
+        serverVersion: s.serverVersion,
+        capturedAt: s.capturedAt,
+      }));
+      callsPerMin = await this.cumulativeCallsPerMin(ctx.connectionId, samples, nowMs);
     }
 
     // Topology-refresh correlation input (hourly-spike symptom in #3527).
@@ -146,7 +275,7 @@ export class LatencyRegressionService extends MultiConnectionPoller implements O
       this.detectors.set(ctx.connectionId, detector);
     }
 
-    const input: DetectorInput = { nowMs, samples, callsPerMin, clusterRefreshDeltas };
+    const input: DetectorInput = { nowMs, samples, callsPerMin, clusterRefreshDeltas, basis };
     const findings = detector.evaluate(input);
     this.anomalyEventSink?.reportLatencyDegraded?.(ctx.connectionId, detector.isDegraded());
 
@@ -228,6 +357,7 @@ export class LatencyRegressionService extends MultiConnectionPoller implements O
           currentVersion: finding.currentVersion,
           commands: finding.commands,
           topologyRefreshCorrelated: finding.topologyRefreshCorrelated,
+          basis: finding.basis,
           prefetchBatchMaxSize,
           runbook,
           message: finding.message,
