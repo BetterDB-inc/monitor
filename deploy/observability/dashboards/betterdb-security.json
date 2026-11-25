@@ -140,7 +140,7 @@
             "uid": "${ds}"
           },
           "expr": "betterdb_acl_denied_by_reason{job=~\"$job\",connection=~\"$connection\"}",
-          "legendFormat": "{{reason}}"
+          "legendFormat": "{{connection}} {{reason}}"
         }
       ],
       "gridPos": {
@@ -176,7 +176,7 @@
             "uid": "${ds}"
           },
           "expr": "betterdb_acl_denied_by_user{job=~\"$job\",connection=~\"$connection\"}",
-          "legendFormat": "{{username}}"
+          "legendFormat": "{{connection}} {{username}}"
         }
       ],
       "gridPos": {

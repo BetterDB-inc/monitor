@@ -531,7 +531,7 @@
             "uid": "${ds}"
           },
           "expr": "betterdb_correlated_groups_by_severity{job=~\"$job\",connection=~\"$connection\"}",
-          "legendFormat": "{{severity}}"
+          "legendFormat": "{{connection}} {{severity}}"
         }
       ],
       "gridPos": {

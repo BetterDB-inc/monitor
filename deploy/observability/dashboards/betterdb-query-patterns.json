@@ -101,7 +101,7 @@
             "uid": "${ds}"
           },
           "expr": "topk(10, betterdb_slowlog_pattern_count{job=~\"$job\",connection=~\"$connection\"})",
-          "legendFormat": "{{pattern}}",
+          "legendFormat": "{{connection}} {{pattern}}",
           "instant": true,
           "range": false
         }
@@ -175,7 +175,7 @@
             "uid": "${ds}"
           },
           "expr": "topk(10, betterdb_slowlog_pattern_avg_duration_us{job=~\"$job\",connection=~\"$connection\"})",
-          "legendFormat": "{{pattern}}"
+          "legendFormat": "{{connection}} {{pattern}}"
         }
       ],
       "gridPos": {
@@ -287,7 +287,7 @@
             "uid": "${ds}"
           },
           "expr": "topk(10, betterdb_commandlog_large_request_by_pattern{job=~\"$job\",connection=~\"$connection\"})",
-          "legendFormat": "{{pattern}}"
+          "legendFormat": "{{connection}} {{pattern}}"
         }
       ],
       "gridPos": {
@@ -323,7 +323,7 @@
             "uid": "${ds}"
           },
           "expr": "topk(10, betterdb_commandlog_large_reply_by_pattern{job=~\"$job\",connection=~\"$connection\"})",
-          "legendFormat": "{{pattern}}"
+          "legendFormat": "{{connection}} {{pattern}}"
         }
       ],
       "gridPos": {
