@@ -859,7 +859,7 @@ On Valkey 9.0 and later an admin can run a plan from the panel. Running is off u
 | `migration_running` | A slot migration is running, or a run from this monitor is starting or running on the connection. |
 | `plan_outdated` | A start of this plan found that the slots or the nodes changed. It clears when the plan is made again. |
 | `server_refused` | The server refused `CLUSTER MIGRATESLOTS` for this plan, did not answer it in time, or the connection closed after it was sent. It clears when the plan is made again. |
-| `observe_mode` | The cluster runs in Observe (see [Placement modes](#placement-modes)). It is set only when nothing above applies. |
+| `observe_mode` | The cluster runs in Observe (see [Placement modes](#placement-modes)). The plan itself is then left out of the hot shards, so this comes only as the `403` of a run (below). |
 
 When the placement mode of the cluster cannot be read, for example while its connection is being removed, a plan that could run is still shown, with `available: false` and no `blockedBy`.
 
@@ -884,7 +884,7 @@ Each cluster has a placement mode, shown with its support and the load of every 
 
 | Mode | What it does |
 | --- | --- |
-| Observe | Shows the load and the imbalance, and why a hot shard cannot be fixed by moving slots. No plan is shown and none can be run. |
+| Observe | Shows the load and the imbalance, and why a hot shard cannot be fixed by moving slots. No plan is shown and none can be run: `GET /anomaly/hot-shards` and the MCP `get_hot_shards` leave the plans and their commands out too. |
 | Recommend | Shows the plan with the projected load, as described above. An admin can run it (see [Running a plan](#running-a-plan)). |
 | Approve | Not available yet. |
 | Auto | Not available yet. |
@@ -897,20 +897,21 @@ When one slot carries the load (`key_level`), the explanation also advises movin
 
 | Reason | Meaning | Blocks |
 | --- | --- | --- |
+| `not_connected` | The monitor has not connected to the cluster yet. Nothing else is checked, and the verdict is read again on the next request. | Recommend and up |
 | `not_cluster` | The connection is not in cluster mode. Nothing else is checked. | Recommend and up |
-| `provider_managed` | A managed service (by host name, a Redis Cloud build, or `MONITOR_PROVIDER_OVERRIDE`). Slot moves go through the provider's resharding. When `MONITOR_PROVIDER_OVERRIDE` is set it decides alone: `self-hosted` clears this reason whatever the host name or build says. | Approve and up |
+| `provider_managed` | A managed service (by host name, a Redis Cloud build, or `MONITOR_PROVIDER_OVERRIDE`). Slot moves go through the provider's resharding. When `MONITOR_PROVIDER_OVERRIDE` is set it decides alone, for this reason and for the run button of a plan: `self-hosted` clears it whatever the host name or build says. | Approve and up |
 | `per_node_connections` | The cluster's nodes are registered one by one, so no connection sees the whole cluster. | Recommend and up |
 | `slot_stats_off` | Per-slot load is not collected: `METRICS_SLOT_STATS_TOP_N` is `0`, `CLUSTER SLOT-STATS` is unavailable, or its replies carry no CPU and network counters (`cluster-slot-stats-enabled` is off). | Recommend and up |
 | `not_dialed` | The monitor reaches the cluster through an agent or OTLP and cannot open node connections. | Recommend and up |
 | `server_version` | A primary runs a server older than Valkey 9.0, or its version could not be read. The detail names the nodes. | Approve and up |
 | `copy_only` | Every primary runs Redis 8.4 or later: the plan is shown as commands to copy, and BetterDB does not run it. | Approve and up |
 | `command_unavailable` | `CLUSTER MIGRATESLOTS` is renamed, disabled, or could not be checked on a primary. | Approve and up |
-| `acl` | The monitoring user was refused a slot migration command (`NOPERM`). It is kept until the monitor restarts. | Approve and up |
+| `acl` | The server refused `CLUSTER MIGRATESLOTS` to the monitoring user (`NOPERM`). It is kept until the primaries of the cluster change, or the monitor restarts. | Approve and up |
 | `flag_off` | `BETTERDB_SLOT_MIGRATION` is not `true`. | Approve and up |
 | `memory_storage` | The monitor uses in-memory storage. Approve and Auto need sqlite, turso or postgres. | Approve and up |
 | `no_sign_in` | The install runs without sign-in. | Auto |
 
-Observe is never blocked. When the stored mode is blocked, the cluster runs in the highest mode below it that is not, and the card says why. The verdict is computed when it is read and kept for 30 seconds.
+Observe is never blocked. When the stored mode is blocked, the cluster runs in the highest mode below it that is not, and the card says why. The verdict is computed when it is read and kept for 30 seconds. Whether a plan is shown and can be run reads the stored mode first: Observe asks no node, and Recommend checks only the reasons that block it, so a slow primary does not hold up the hot shards or the run.
 
 **API.** Both routes take the connection in `X-Connection-Id` and need the Anomaly Detection feature (Pro).
 

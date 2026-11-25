@@ -3,7 +3,6 @@ import {
   Controller,
   Get,
   Logger,
-  Optional,
   Param,
   Query,
   UseGuards,
@@ -31,7 +30,7 @@ export class McpAnomalyController {
   constructor(
     private readonly anomalyService: AnomalyService,
     private readonly registry: ConnectionRegistry,
-    @Optional() private readonly placement?: PlacementService,
+    private readonly placement: PlacementService,
   ) {}
 
   @Get('instance/:id/history/anomalies')
@@ -92,7 +91,7 @@ export class McpAnomalyController {
     try {
       this.registry.get(id);
       const shards = this.anomalyService.getHotShards(id);
-      return this.placement ? await this.placement.withPlacementBlocker(id, shards) : shards;
+      return await this.placement.withPlacementBlocker(id, shards);
     } catch (error) {
       throw mapMcpError(this.logger, error, 'Failed to get hot shards');
     }

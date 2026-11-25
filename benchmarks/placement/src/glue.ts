@@ -4,7 +4,6 @@ import {
   type HashTagRead,
   type HotKeyRead,
   type HotKeyReader,
-  type PlacementPrimaryFacts,
   type PlacementSupportFacts,
   type RebalanceShard,
   type ShardLoadSample,
@@ -13,12 +12,13 @@ import {
   hashTagsOfNames,
   hashTagsUnavailable,
   hotKeysUnavailable,
+  isAclRefusal,
   isManagedProviderBuild,
   managedPlacementProvider,
   migrateSlotsListed,
+  placementPrimaryFacts,
   readSlotNames,
   sampleHotKeys,
-  shardServerFromInfo,
 } from './product';
 
 export interface PrimaryReply {
@@ -54,20 +54,17 @@ export function rebalanceShards(
   }));
 }
 
-function primaryFacts(reply: PrimaryReply): PlacementPrimaryFacts & {
-  serverInfo?: Record<string, string | undefined>;
-} {
-  return {
-    address: reply.address,
-    server: (reply.info && shardServerFromInfo(reply.info)) ?? null,
-    migrateSlotsCommand: migrateSlotsListed(reply.commandInfo),
-    serverInfo: reply.info?.server,
-  };
-}
-
 export function supportFacts(install: InstallFacts): PlacementSupportFacts {
   const primaries =
-    install.clusterEnabled && install.dialsDataNodes ? install.primaries.map(primaryFacts) : null;
+    install.clusterEnabled && install.dialsDataNodes
+      ? install.primaries.map((reply) =>
+          placementPrimaryFacts(
+            reply.address,
+            reply.info ?? undefined,
+            migrateSlotsListed(reply.commandInfo),
+          ),
+        )
+      : null;
   const managedBuild = primaries?.find((primary) => isManagedProviderBuild(primary.serverInfo));
   return {
     clusterEnabled: install.clusterEnabled,
@@ -76,7 +73,7 @@ export function supportFacts(install: InstallFacts): PlacementSupportFacts {
     slotStats: install.slotStatsTopN > 0 && install.slotStatsCommand,
     dialsDataNodes: install.dialsDataNodes,
     primaries,
-    aclDenied: install.rebalanceRefusal !== null && /\bNOPERM\b/i.test(install.rebalanceRefusal),
+    aclDenied: install.rebalanceRefusal !== null && isAclRefusal(install.rebalanceRefusal),
     slotMigrationFlag: String(install.env.BETTERDB_SLOT_MIGRATION) === 'true',
     memoryStorage: String(install.env.STORAGE_TYPE ?? 'memory') === 'memory',
     signIn: install.signIn,

@@ -35,6 +35,7 @@ import { PlacementCard } from './PlacementCard';
 const ALL_MODES: PlacementMode[] = ['observe', 'recommend', 'approve', 'auto'];
 
 const RUN_BLOCKERS: PlacementSupportReason[] = [
+  'not_connected',
   'not_cluster',
   'per_node_connections',
   'slot_stats_off',
@@ -51,7 +52,7 @@ const RUN_BLOCKERS: PlacementSupportReason[] = [
 function support(issues: PlacementSupportIssue[]): PlacementStatus['support'] {
   const blockers: Record<PlacementMode, PlacementSupportReason[]> = {
     observe: [],
-    recommend: RUN_BLOCKERS.slice(0, 4),
+    recommend: RUN_BLOCKERS.slice(0, 5),
     approve: RUN_BLOCKERS,
     auto: [...RUN_BLOCKERS, 'no_sign_in'],
   };
@@ -181,6 +182,18 @@ describe('PlacementCard', () => {
     expect(screen.getByText('Suggestions in observe mode')).toBeInTheDocument();
   });
 
+  it('reads the hot-shard suggestions again after a new mode is saved', async () => {
+    setMode.mockResolvedValue(status({ mode: 'observe', effectiveMode: 'observe' }));
+    const client = await show(status());
+    const invalidate = vi.spyOn(client, 'invalidateQueries');
+
+    fireEvent.click(modeButton(await card(), 'Observe'));
+
+    await waitFor(() =>
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ['open-hot-shards', 'conn-1'] }),
+    );
+  });
+
   it('keeps the saved mode when a read started before the save ends after it', async () => {
     get.mockResolvedValueOnce(status());
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -297,7 +310,7 @@ describe('PlacementCard', () => {
     expect(rows[1]).not.toHaveTextContent('Over the trigger');
     expect(rows[2]).toHaveTextContent('No slots');
     expect(region).toHaveTextContent(
-      'A shard over 2x the median load is a hot shard; it counts as fixed below 1.25x.',
+      'A shard over 2x the median load is a hot shard; a slot move aims to bring it under 1.25x.',
     );
   });
 

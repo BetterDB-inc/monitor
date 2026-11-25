@@ -1,15 +1,13 @@
 {
-  "commit": "47fa4fa2",
+  "commit": "049e98bb",
   "files": {
-    "apps/api/src/cluster/shard-load.ts": "c35f4133520681e8e52b509969787d3df5000b2a02280ffcde9f1584597bf0a1",
+    "apps/api/src/cluster/shard-load.ts": "458ec888d1497b120f571b7e342ea2e9baea01c18e4627940eb5a6458d0c5fba",
     "apps/api/src/monitor/provider-detector.ts": "3aaed64f0e2351d973cb864b3e058a834d130358fbcb3ad8eb7b93782d34a935",
-    "proprietary/anomaly-detection/hash-tag-advisor.ts": "d1746ab01265e2030bc423d626378594306daa8b90299dc0553d3684450690c0",
-    "proprietary/anomaly-detection/hot-shard-detector.ts": "4a32e7bf3359d06c1963274d5ac55a24b6201f3ca8dc26dc9dbab1812f58d3c8",
-    "proprietary/anomaly-detection/hot-shard-keys.ts": "165eefe9930b1a83b1e2ce4babf242010625620495c6d2784d771a3eee24c394",
-    "proprietary/anomaly-detection/rebalance-planner.ts": "2159626a5e5d37447a9b8e03eb90c492346de75a7db7cdee97b65c13f914d603",
-    "proprietary/anomaly-detection/anomaly.service.ts": "630e5845defe30ed6a9d9c9ad11865c91423917cd3c710d9f7823bdafe821b9f",
-    "proprietary/placement/placement-balance.ts": "d5dafefe5f8c50d2987adb7f3c8ce25924210141c25a49d3bc3a07e2c3f58a2b",
-    "proprietary/placement/placement-support.ts": "e6ef7a3c6e34720703882ece18cca49f0bd9323aea4d2ae4e8d24aad81928142",
-    "proprietary/placement/placement.service.ts": "a69785e99c1e611c2fb18444fbc60980993771a39a723cf919afc3ea1c54bbf5"
+    "proprietary/anomaly-detection/hot-shard-detector.ts": "d223c01294797ce7e94a71e63c3c222dff03f3143bcc719930f60143da1eec0f",
+    "proprietary/anomaly-detection/rebalance-planner.ts": "c6d7ffb1b201ec3d4b83b52e6f754dcbf702045ada8189985765107e05647cde",
+    "proprietary/placement/placement-balance.ts": "b2d4e30a19df3ab654c86804e2acd1da2607e1c2499608d960ed2bdb43db7430",
+    "proprietary/placement/placement-primaries.ts": "af1e4c2fe5a86d29a4acb9b7a374a296520f70fe8a4774af678a309af4785c25",
+    "proprietary/placement/placement-support.ts": "7807d67fcc17f44858ce8d5429850f0dec1d55b41c465b9995025f62bca72c77",
+    "proprietary/placement/placement.service.ts": "5b5706ca842391401becd0b73920b613d8be8850394b87cd72e11a6edf1d6d23"
   }
 }

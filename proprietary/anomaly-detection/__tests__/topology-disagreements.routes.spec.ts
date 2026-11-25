@@ -9,6 +9,7 @@ import { Feature, LicenseService } from '@proprietary/licenses';
 import { AnomalyController } from '../anomaly.controller';
 import { AnomalyService } from '../anomaly.service';
 import { McpAnomalyController } from '../mcp-anomaly.controller';
+import { PlacementService } from '../../placement/placement.service';
 import { summarizeDisagreements } from '../topology-disagreements';
 
 const AT = 1_000_000;
@@ -110,6 +111,7 @@ describe('topology disagreement routes', () => {
         { provide: AnomalyService, useValue: service },
         { provide: ConnectionRegistry, useValue: registry },
         { provide: LicenseService, useValue: license },
+        { provide: PlacementService, useValue: {} },
       ],
     })
       .overrideGuard(AgentTokenGuard)

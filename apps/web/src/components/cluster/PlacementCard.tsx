@@ -96,10 +96,12 @@ function Support({ status }: { status: PlacementStatus }) {
   );
 }
 
+const BAR_HEADROOM = 1.25;
+
 function BalanceBars({ balance }: { balance: PlacementBalance | null }) {
   if (!balance) return <p className="text-muted-foreground">No per-slot load sampled yet.</p>;
   const scale = Math.max(
-    balance.triggerRatio * 1.25,
+    balance.triggerRatio * BAR_HEADROOM,
     ...balance.shards.map((shard) => shard.ratio ?? 0),
   );
   const at = (ratio: number) => `${Math.min(100, (ratio / scale) * 100)}%`;
@@ -134,7 +136,7 @@ function BalanceBars({ balance }: { balance: PlacementBalance | null }) {
         ))}
       </ul>
       <p className="text-muted-foreground">
-        {`A shard over ${formatRatio(balance.triggerRatio)} the median load is a hot shard; it counts as fixed below ${formatRatio(balance.resolveRatio)}.`}
+        {`A shard over ${formatRatio(balance.triggerRatio)} the median load is a hot shard; a slot move aims to bring it under ${formatRatio(balance.resolveRatio)}.`}
       </p>
     </div>
   );
