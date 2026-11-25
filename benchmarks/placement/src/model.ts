@@ -11,6 +11,7 @@ export interface ModelShard {
 export interface HotSlot {
   slot: number;
   cpuUsecPerSecond: number;
+  keyCount?: number;
 }
 
 export interface LoadModel {
@@ -35,6 +36,10 @@ export function slotCpu(model: LoadModel, slot: number): number {
   return hot ? hot.cpuUsecPerSecond : model.baseCpuUsecPerSlot;
 }
 
+export function slotKeys(model: LoadModel, slot: number): number {
+  return model.hotSlots.find((each) => each.slot === slot)?.keyCount ?? model.keysPerSlot;
+}
+
 export function ownerOf(model: LoadModel, slot: number): ModelShard {
   const shard = model.shards.find(({ slots: [start, end] }) => slot >= start && slot <= end);
   if (!shard) throw new Error(`no shard owns slot ${slot}`);
@@ -46,7 +51,7 @@ export function slotStatsAt(model: LoadModel, seconds: number): NodeSlotStats[] 
     const stats: NodeSlotStats['stats'] = {};
     for (let slot = shard.slots[0]; slot <= shard.slots[1]; slot++) {
       stats[slot] = {
-        key_count: model.keysPerSlot,
+        key_count: slotKeys(model, slot),
         cpu_usec: Math.round(slotCpu(model, slot) * seconds),
         network_bytes_in: Math.round(model.baseBytesPerSlot * seconds),
         network_bytes_out: Math.round(model.baseBytesPerSlot * seconds),

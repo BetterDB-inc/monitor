@@ -1,11 +1,23 @@
 import {
+  HOT_KEY_SLOTS,
+  type HashTagAdvice,
+  type HashTagRead,
+  type HotKeyRead,
+  type HotKeyReader,
   type PlacementPrimaryFacts,
   type PlacementSupportFacts,
   type RebalanceShard,
   type ShardLoadSample,
+  type ShardLoadTracker,
+  hashTagsOfNames,
+  hashTagsUnavailable,
+  hotKeysUnavailable,
   isManagedProviderBuild,
+  keyCountOutliers,
   managedPlacementProvider,
   migrateSlotsListed,
+  readSlotNames,
+  sampleHotKeys,
   shardServerFromInfo,
 } from './product';
 
@@ -68,5 +80,38 @@ export function supportFacts(install: InstallFacts): PlacementSupportFacts {
     slotMigrationFlag: String(install.env.BETTERDB_SLOT_MIGRATION) === 'true',
     memoryStorage: String(install.env.STORAGE_TYPE ?? 'memory') === 'memory',
     signIn: install.signIn,
+  };
+}
+
+export interface HotShardRead {
+  keys: HotKeyRead;
+  hashTags: HashTagRead;
+}
+
+export async function readHotShardKeys(
+  client: HotKeyReader,
+  topSlots: readonly number[],
+): Promise<HotShardRead> {
+  const slots = topSlots.slice(0, HOT_KEY_SLOTS);
+  const read = await readSlotNames(client, slots);
+  if (read.note !== undefined) {
+    return { keys: hotKeysUnavailable(read.note), hashTags: hashTagsUnavailable(read.note) };
+  }
+  return {
+    keys: await sampleHotKeys(client, slots, read.names),
+    hashTags: hashTagsOfNames(read.names),
+  };
+}
+
+export function hotShardAdvice(
+  tracker: ShardLoadTracker,
+  shardId: string,
+  read: HotShardRead,
+): HashTagAdvice {
+  const median = tracker.medianKeyCount();
+  return {
+    ...read.hashTags,
+    keyCountOutliers: median === null ? [] : keyCountOutliers(tracker.slotsOf(shardId), median),
+    medianKeyCount: median ?? 0,
   };
 }

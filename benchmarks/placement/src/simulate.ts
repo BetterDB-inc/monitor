@@ -16,6 +16,7 @@ export interface Simulation {
   hotShardIds: string[];
   verdicts: RebalanceVerdict[];
   balance: ReturnType<typeof placementBalance>;
+  tracker: ShardLoadTracker;
 }
 
 export function simulate(model: LoadModel, minutes: number): Simulation {
@@ -31,5 +32,5 @@ export function simulate(model: LoadModel, minutes: number): Simulation {
     hotShardIds.map((hotShardId) => ({ hotShardId, slots: tracker.slotsOf(hotShardId) })),
     rebalanceShards(sample, new Set(hotShardIds)),
   );
-  return { sample, hotShardIds, verdicts, balance: placementBalance(sample) };
+  return { sample, hotShardIds, verdicts, balance: placementBalance(sample), tracker };
 }

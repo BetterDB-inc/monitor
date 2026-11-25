@@ -1,6 +1,18 @@
-import { type InstallFacts, type PrimaryReply, supportFacts } from './glue';
-import { type LoadModel, evenShards, ownerOf } from './model';
-import { judgePlacementSupport } from './product';
+import {
+  type InstallFacts,
+  type PrimaryReply,
+  hotShardAdvice,
+  readHotShardKeys,
+  supportFacts,
+} from './glue';
+import { type LoadModel, evenShards, ownerOf, slotKeys } from './model';
+import {
+  type HashTagAdvice,
+  type HotKeyRead,
+  type HotKeyReader,
+  describeHashTags,
+  judgePlacementSupport,
+} from './product';
 import { simulate } from './simulate';
 
 export interface Check {
@@ -80,6 +92,137 @@ export function runB2(): ScenarioResult {
         ? `${verdict.reason}, pinned slots ${pinned.join(', ') || 'none'}`
         : (verdict?.kind ?? 'no verdict'),
     ),
+  ]);
+}
+
+export const B2_TAG = '42';
+export const B2_TAG_KEYS = 1200;
+export const B2_HOT_KEY = `cart:{${B2_TAG}}:item:0`;
+
+const LFU_OFF =
+  'ERR An LFU maxmemory policy is not selected, access frequency not tracked. ' +
+  'Please note that when switching between policies at runtime LRU and LFU data ' +
+  'will take some time to adjust.';
+
+export function b2TagModel(): LoadModel {
+  return {
+    ...b2Model(),
+    hotSlots: [{ slot: B2_HOT_SLOT, cpuUsecPerSecond: B2_HOT_SLOT_CPU, keyCount: B2_TAG_KEYS }],
+  };
+}
+
+function slotNames(model: LoadModel, slot: number): string[] {
+  const tagged = model.hotSlots.some((each) => each.slot === slot && each.keyCount !== undefined);
+  return Array.from({ length: slotKeys(model, slot) }, (_, index) =>
+    tagged && index % 10 !== 9 ? `cart:{${B2_TAG}}:item:${index}` : `session:${slot}:${index}`,
+  );
+}
+
+export interface FakeNode extends HotKeyReader {
+  sent: Array<Array<string | number | Buffer>>;
+}
+
+function fakeNode(model: LoadModel, lfu: boolean): FakeNode {
+  const sent: FakeNode['sent'] = [];
+  return {
+    sent,
+    async callBuffer(...args) {
+      sent.push(args);
+      const [, , slot, count] = args as [string, string, number, number];
+      return slotNames(model, slot)
+        .slice(0, count)
+        .map((name) => Buffer.from(name));
+    },
+    pipeline() {
+      const names: Buffer[] = [];
+      return {
+        call(...args) {
+          sent.push(args);
+          names.push(args[2] as Buffer);
+        },
+        async exec() {
+          return names.map((name): [Error | null, unknown] => {
+            if (!lfu) return [new Error(LFU_OFF), null];
+            return [null, name.toString() === B2_HOT_KEY ? 255 : 3];
+          });
+        },
+      };
+    },
+  };
+}
+
+export interface B2Advice {
+  node: FakeNode;
+  keys: HotKeyRead;
+  advice: HashTagAdvice;
+  message: string;
+  hotShardIds: string[];
+  verdicts: ReturnType<typeof simulate>['verdicts'];
+}
+
+export async function readB2Advice(model: LoadModel, lfu: boolean): Promise<B2Advice> {
+  const hotShard = ownerOf(model, B2_HOT_SLOT);
+  const { tracker, hotShardIds, verdicts } = simulate(model, 10);
+  const node = fakeNode(model, lfu);
+  const topSlots = tracker.topSlots(hotShard.nodeId, 3).map((each) => each.slot);
+  const read = await readHotShardKeys(node, topSlots);
+  const advice = hotShardAdvice(tracker, hotShard.nodeId, read);
+  return {
+    node,
+    keys: read.keys,
+    advice,
+    message: describeHashTags(advice),
+    hotShardIds,
+    verdicts,
+  };
+}
+
+export async function runB2HashTag(lfu: boolean): Promise<ScenarioResult> {
+  const { node, keys, advice, message, hotShardIds, verdicts } = await readB2Advice(
+    b2TagModel(),
+    lfu,
+  );
+  const verdict = verdicts[0];
+  const tag = advice.tags.find((each) => each.slot === B2_HOT_SLOT);
+  const listed = node.sent.filter((args) => args[0] === 'CLUSTER').length;
+  const outlier = advice.keyCountOutliers.find((each) => each.slot === B2_HOT_SLOT);
+  return result('B2', lfu ? 'hash tag, LFU' : 'hash tag, no LFU', [
+    check(
+      'the shard is hot and the explanation stays key_level',
+      hotShardIds.length === 1 && verdict?.kind === 'no_plan' && verdict.reason === 'key_level',
+      verdict?.kind === 'no_plan' ? verdict.reason : (verdict?.kind ?? 'no verdict'),
+    ),
+    check(
+      'the hot slot names the shared tag',
+      tag?.tag === B2_TAG && tag.share >= 0.5,
+      tag ? `{${tag.tag}} on ${Math.round(tag.share * 100)}% of ${tag.keysSampled} names` : 'none',
+    ),
+    check(
+      'the message tells the application to split the tag',
+      message.includes(`{${B2_TAG}}`) && message.includes('Splitting that tag'),
+      message.trim(),
+    ),
+    check(
+      'the hot slot is named as crowded',
+      outlier !== undefined && outlier.ratio >= 20,
+      outlier ? `${outlier.keyCount} keys, ${Math.round(outlier.ratio)}x the median` : 'none',
+    ),
+    check(
+      'each top slot is listed once, for the tags and the hot keys together',
+      listed === 3,
+      `${listed} CLUSTER GETKEYSINSLOT`,
+    ),
+    lfu
+      ? check(
+          'the hot key leads the hot keys',
+          keys.keySource === 'lfu' && keys.topKeys[0]?.key === B2_HOT_KEY,
+          keys.topKeys[0] ? `${keys.topKeys[0].key} (freq ${keys.topKeys[0].freq})` : 'none',
+        )
+      : check(
+          'the hot keys are unavailable but the tag is still named',
+          keys.keySource === 'unavailable' && tag !== undefined,
+          keys.keyNote ?? keys.keySource,
+        ),
   ]);
 }
 
@@ -221,6 +364,6 @@ export function runB8Case(entry: SupportCase): ScenarioResult {
   ]);
 }
 
-export function runAll(): ScenarioResult[] {
-  return [runB2(), ...B8_CASES.map(runB8Case)];
+export async function runAll(): Promise<ScenarioResult[]> {
+  return [runB2(), await runB2HashTag(false), await runB2HashTag(true), ...B8_CASES.map(runB8Case)];
 }

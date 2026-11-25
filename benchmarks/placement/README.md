@@ -14,18 +14,20 @@ no Docker. Each phase adds the scenarios it needs.
   planner and placement balance on the last sample.
 - `src/scenarios.ts` holds the scenarios and checks their expectations.
 
-The product modules are imported by path, not copied. Two small pieces cannot
+The product modules are imported by path, not copied. A few small pieces cannot
 be imported without their Nest services, so `src/glue.ts` restates them: the
-list of shards the anomaly service hands the planner, and the facts the
-placement service reads before it judges support. `product-pin.json` holds the
-hashes of the imported files and of those two services; the run and the tests
-refuse to start when any of them differs.
+list of shards the anomaly service hands the planner, how it reads the key names
+of a hot shard and turns them into hash-tag advice, and the facts the placement
+service reads before it judges support. `product-pin.json` holds the hashes of
+the imported files and of those two services; the run and the tests refuse to
+start when any of them differs.
 
 ## Scenarios
 
 | # | Variant | Expectation |
 | --- | --- | --- |
 | B2 | Single hot key: one slot carries 85% of its shard and more than the node CPU limit | The shard is hot and over the trigger, no plan in any mode, and the `key_level` explanation names the slot |
+| B2 | Hash tag, with and without an LFU policy: 90% of the hot slot's keys share `{42}` and the slot holds 40x the median key count | Still `key_level`; the advice names the tag and the crowded slot, each top slot is listed once, and with LFU the hot key leads the hot keys |
 | B8 | Self-hosted control | Supported; every mode available |
 | B8 | ElastiCache host name; the provider override | `provider_managed`; Approve and Auto refused, Recommend available |
 | B8 | Self-hosted EC2 host with Amazon Linux in the OS field | Supported; the OS field is never a managed signal |
@@ -33,9 +35,9 @@ refuse to start when any of them differs.
 | B8 | `METRICS_SLOT_STATS_TOP_N=0` | `slot_stats_off`; only Observe |
 | B8 | `STORAGE_TYPE=memory` | `memory_storage`; Approve and Auto refused, Recommend clean |
 
-Not covered yet: B2's hash-tag variant comes with the hash tag advisor, and the
-LFU variant with the key name needs the hot key reads. Nothing in phase 1 sends
-a write command, so B8's count of write commands waits for the fake cluster
+The B2 hash-tag variants read key names from a fake node built from the model,
+through the same product functions the anomaly service calls. Nothing in phase 1
+sends a write command, so B8's count of write commands waits for the fake cluster
 layer, which arrives with Approve.
 
 ## Running it

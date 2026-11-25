@@ -10,7 +10,23 @@ export type {
 } from '../../../apps/api/src/cluster/shard-load';
 export { ShardLoadTracker } from '../../../apps/api/src/cluster/shard-load';
 export { isManagedProviderBuild } from '../../../apps/api/src/monitor/provider-detector';
+export {
+  type HashTagAdvice,
+  type HashTagRead,
+  describeHashTags,
+  hashTagsOfNames,
+  hashTagsUnavailable,
+  keyCountOutliers,
+} from '../../../proprietary/anomaly-detection/hash-tag-advisor';
 export { judgeHotShards } from '../../../proprietary/anomaly-detection/hot-shard-detector';
+export {
+  HOT_KEY_SLOTS,
+  type HotKeyRead,
+  type HotKeyReader,
+  hotKeysUnavailable,
+  readSlotNames,
+  sampleHotKeys,
+} from '../../../proprietary/anomaly-detection/hot-shard-keys';
 export {
   type RebalanceShard,
   type RebalanceVerdict,
@@ -32,7 +48,9 @@ const pinFile = join(__dirname, '..', 'product-pin.json');
 export const PINNED_FILES = [
   'apps/api/src/cluster/shard-load.ts',
   'apps/api/src/monitor/provider-detector.ts',
+  'proprietary/anomaly-detection/hash-tag-advisor.ts',
   'proprietary/anomaly-detection/hot-shard-detector.ts',
+  'proprietary/anomaly-detection/hot-shard-keys.ts',
   'proprietary/anomaly-detection/rebalance-planner.ts',
   'proprietary/anomaly-detection/anomaly.service.ts',
   'proprietary/placement/placement-balance.ts',
