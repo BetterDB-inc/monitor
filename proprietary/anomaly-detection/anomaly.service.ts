@@ -2460,6 +2460,7 @@ export class AnomalyService
             shards,
             perNodeView.notReadIds,
             perNodeView.unseenIds,
+            perNodeView.waitingIds,
           );
         }
 
@@ -8880,6 +8881,7 @@ export class AnomalyService
     shards: ClusterShard[] | undefined,
     notReadReplicaIds: Set<string> = new Set(),
     unseenReplicaIds: Set<string> = notReadReplicaIds,
+    waitingReplicaIds: Set<string> = new Set(),
   ): Promise<void> {
     try {
       // A replica not read this poll, unreachable or waiting its turn in the
@@ -8902,6 +8904,7 @@ export class AnomalyService
         signatureOf: replicaSlotSignature,
         firstSeenByConn: this.replicaSlotFirstSeen,
         activeByConn: this.activeReplicaSlotAnomalies,
+        isConfirmed: (finding) => !waitingReplicaIds.has(finding.replicaId),
         eventIdsByConn: this.replicaSlotEventIds,
         minPersistMs: AnomalyService.REPLICA_SLOT_STATE_MIN_PERSIST_MS,
         metricType: MetricType.REPLICA_SLOT_STATE,
@@ -8962,8 +8965,13 @@ export class AnomalyService
   private async gatherReplicaSlotView(
     baseNodes: ClusterNode[],
     ctx: ConnectionContext,
-  ): Promise<{ nodes: ClusterNode[]; notReadIds: Set<string>; unseenIds: Set<string> }> {
-    const unchanged = { nodes: baseNodes, notReadIds: new Set<string>(), unseenIds: new Set<string>() };
+  ): Promise<{ nodes: ClusterNode[]; notReadIds: Set<string>; unseenIds: Set<string>; waitingIds: Set<string> }> {
+    const unchanged = {
+      nodes: baseNodes,
+      notReadIds: new Set<string>(),
+      unseenIds: new Set<string>(),
+      waitingIds: new Set<string>(),
+    };
     if (!this.clusterDiscovery || !this.dialsDataNodes(ctx.connectionId)) {
       return unchanged;
     }
@@ -9068,14 +9076,20 @@ export class AnomalyService
     }
     this.replicaSlotUnreachable.set(ctx.connectionId, unreachableIds);
     const notReadIds = new Set([...replicaIds].filter((id) => !read.has(id)));
+    const waitingIds = new Set([...notReadIds].filter((id) => !unreachableIds.has(id)));
     if (!this.legacyReplicaSlotEvents.has(ctx.connectionId)) {
       this.legacyReplicaSlotRead.delete(ctx.connectionId);
-      return { nodes: merged, notReadIds, unseenIds: notReadIds };
+      return { nodes: merged, notReadIds, unseenIds: notReadIds, waitingIds };
     }
     const seen = this.legacyReplicaSlotRead.get(ctx.connectionId) ?? new Set<string>();
     read.forEach((id) => seen.add(id));
     this.legacyReplicaSlotRead.set(ctx.connectionId, seen);
-    return { nodes: merged, notReadIds, unseenIds: new Set([...replicaIds].filter((id) => !seen.has(id))) };
+    return {
+      nodes: merged,
+      notReadIds,
+      unseenIds: new Set([...replicaIds].filter((id) => !seen.has(id))),
+      waitingIds,
+    };
   }
 
   private replicaSlotWatchedIds(connectionId: string): Set<string> {

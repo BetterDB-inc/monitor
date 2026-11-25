@@ -9191,6 +9191,28 @@ describe('AnomalyService', () => {
         expect(storage.resolveAnomaly).not.toHaveBeenCalled();
       });
 
+      it('does not warn from the seed row of a promoted node that waits its turn', async () => {
+        const PROMOTED = REPLICAS - 1;
+        const nodes = await dbClient.getClusterNodes!();
+        nodes[PROMOTED + 1].slots = [[0, 100]];
+        const dial = (service as any).clusterDiscovery.getNodeConnection;
+        (service as any).clusterDiscovery.getNodeConnection = jest.fn(async (id: string) => {
+          if (id !== replicaId(PROMOTED)) return dial(id);
+          reads.push(id);
+          const own = `${id} ${replicaAddr(PROMOTED)} myself,master - 0 0 2 connected 0-100`;
+          return { call: jest.fn().mockResolvedValue(`${primaryLine}\n${own}`) };
+        });
+        [0, 1].forEach((i) => stuck.add(i));
+
+        await polls(2, 31_000);
+        expect(readsOf(PROMOTED)).toBe(0);
+        expect(openWarnings()).toHaveLength(2);
+
+        await polls(1, 31_000);
+        expect(readsOf(PROMOTED)).toBe(1);
+        expect(slotEvents()).toHaveLength(2);
+      });
+
       it('keeps counting an unreachable replica until its turn comes round again', async () => {
         down.add(0);
         await polls(2);
