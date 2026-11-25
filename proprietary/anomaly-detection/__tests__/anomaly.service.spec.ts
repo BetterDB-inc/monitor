@@ -9145,6 +9145,7 @@ describe('AnomalyService', () => {
 
     describe('with more replicas than one poll reads', () => {
       const BUDGET = 8;
+      const PRIORITY = 6;
       const REPLICAS = 20;
       const replicaId = (i: number) => `bb${i.toString(16).padStart(6, '0')}`;
       const replicaAddr = (i: number) => `10.0.1.${i}:6379@16379`;
@@ -9229,14 +9230,32 @@ describe('AnomalyService', () => {
         expect(readsOf(0)).toBeLessThan(6);
       });
 
+      it('reads several replicas that showed slot state on every poll', async () => {
+        [0, 1, 2, 3, 4].forEach((i) => stuck.add(i));
+
+        await polls(4);
+
+        expect([0, 1, 2, 3, 4].map(readsOf)).toEqual([4, 4, 4, 4, 4]);
+      });
+
+      it('reads a replica with slot state past the priority cap on its turn', async () => {
+        Array.from({ length: PRIORITY + 1 }, (_, i) => i).forEach((i) => stuck.add(i));
+
+        await polls(4);
+
+        expect(readsOf(PRIORITY - 1)).toBe(4);
+        expect(readsOf(PRIORITY)).toBe(1);
+        expect(new Set(reads).size).toBe(8 + 3 * (BUDGET - PRIORITY));
+      });
+
       it('keeps the warning of a replica open on a poll that does not read it', async () => {
-        [0, 1, 2].forEach((i) => stuck.add(i));
-        await polls(4, 11_000);
-        expect(openWarnings()).toHaveLength(3);
+        Array.from({ length: PRIORITY + 1 }, (_, i) => i).forEach((i) => stuck.add(i));
+        await polls(8, 11_000);
+        expect(openWarnings()).toHaveLength(PRIORITY + 1);
 
         await polls(2, 11_000);
-        expect(readsOf(2)).toBeLessThan(6);
-        expect(openWarnings()).toHaveLength(3);
+        expect(readsOf(PRIORITY)).toBeLessThan(10);
+        expect(openWarnings()).toHaveLength(PRIORITY + 1);
         expect(storage.resolveAnomaly).not.toHaveBeenCalled();
       });
 
@@ -9251,15 +9270,15 @@ describe('AnomalyService', () => {
           const own = `${id} ${replicaAddr(PROMOTED)} myself,master - 0 0 2 connected 0-100`;
           return { call: jest.fn().mockResolvedValue(`${primaryLine}\n${own}`) };
         });
-        [0, 1].forEach((i) => stuck.add(i));
+        Array.from({ length: PRIORITY }, (_, i) => i).forEach((i) => stuck.add(i));
 
-        await polls(2, 31_000);
+        await polls(6, 31_000);
         expect(readsOf(PROMOTED)).toBe(0);
-        expect(openWarnings()).toHaveLength(2);
+        expect(openWarnings()).toHaveLength(PRIORITY);
 
         await polls(1, 31_000);
         expect(readsOf(PROMOTED)).toBe(1);
-        expect(slotEvents()).toHaveLength(2);
+        expect(slotEvents()).toHaveLength(PRIORITY);
       });
 
       it('keeps counting an unreachable replica until its turn comes round again', async () => {

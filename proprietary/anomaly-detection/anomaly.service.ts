@@ -8882,6 +8882,7 @@ export class AnomalyService
   private static readonly REPLICA_READ_TIMED_OUT = 'Reading the replica timed out';
   private static readonly FANOUT_NODE_EVENT_LIMIT = 8;
   private static readonly REPLICA_SLOT_READ_BUDGET = 8;
+  private static readonly REPLICA_SLOT_PRIORITY_READS = 6;
 
   /**
    * Detects a replica wrongly reporting slot migrating/importing/owned state
@@ -8976,8 +8977,9 @@ export class AnomalyService
    * discovery is unavailable, returns the base view unchanged (degrade: detection
    * then works only when the monitor connects directly to the stuck replica).
    *
-   * Reads a budget of replicas per poll, in rotation; a replica that showed
-   * slot state is read on every poll until it is clean. `notReadIds` are the
+   * Reads a budget of 8 replicas per poll, in rotation. Up to 6 replicas that
+   * showed slot state are read on every poll until they are clean; any more
+   * keep their state and wait their turn. `notReadIds` are the
    * replicas with no own line this poll, `unseenIds` the ones not read since
    * the connection's rows from before dedupe keys were adopted.
    */
@@ -9015,6 +9017,7 @@ export class AnomalyService
       (r) => r.id,
       AnomalyService.REPLICA_SLOT_READ_BUDGET,
       (r) => watched.has(r.id),
+      AnomalyService.REPLICA_SLOT_PRIORITY_READS,
     );
     const selfViews = await Promise.allSettled(
       due.map(async (r) => {

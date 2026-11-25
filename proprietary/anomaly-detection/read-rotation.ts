@@ -15,13 +15,14 @@ export class ReadRotation {
     idOf: (item: T) => string,
     budget: number,
     isPriority: (item: T) => boolean = () => false,
+    priorityCap: number = Math.floor(budget / PRIORITY_SHARE),
   ): RotationPick<T> {
     if (items.length <= budget) {
       this.lastRead.delete(scope);
       return { due: [...items], everyPoll: [...items], sweepPolls: 1 };
     }
     const sorted = [...items].sort((a, b) => (idOf(a) < idOf(b) ? -1 : idOf(a) > idOf(b) ? 1 : 0));
-    const priority = sorted.filter(isPriority).slice(0, Math.floor(budget / PRIORITY_SHARE));
+    const priority = sorted.filter(isPriority).slice(0, Math.min(priorityCap, budget - 1));
     const rotating = sorted.filter((item) => !priority.includes(item));
     const slots = budget - priority.length;
     const last = this.lastRead.get(scope);

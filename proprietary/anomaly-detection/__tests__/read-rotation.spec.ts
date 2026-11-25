@@ -81,6 +81,26 @@ describe('ReadRotation', () => {
     expect([...read].sort()).toEqual(items);
   });
 
+  it('takes the priority cap from the caller', () => {
+    const rotation = new ReadRotation();
+    const urgent = (id: string) => ['n010', 'n011', 'n012', 'n013', 'n014'].includes(id);
+
+    const pick = rotation.pick('c', ids(20), self, 8, urgent, 6);
+
+    expect(pick.everyPoll).toEqual(['n010', 'n011', 'n012', 'n013', 'n014']);
+    expect(pick.due).toHaveLength(8);
+    expect(pick.sweepPolls).toBe(5);
+  });
+
+  it('leaves one read to the rotation whatever cap the caller asks for', () => {
+    const rotation = new ReadRotation();
+
+    const pick = rotation.pick('c', ids(20), self, 4, () => true, 4);
+
+    expect(pick.everyPoll).toEqual(['n000', 'n001', 'n002']);
+    expect(pick.due).toEqual(['n000', 'n001', 'n002', 'n003']);
+  });
+
   it('keeps a place per scope and starts over once the scope is forgotten', () => {
     const rotation = new ReadRotation();
     const items = ids(10);
