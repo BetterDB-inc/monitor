@@ -149,7 +149,7 @@
             "uid": "${ds}"
           },
           "expr": "betterdb_client_connections_by_name{job=~\"$job\",connection=~\"$connection\"}",
-          "legendFormat": "{{client_name}}"
+          "legendFormat": "{{connection}} {{client_name}}"
         }
       ],
       "gridPos": {
@@ -185,7 +185,7 @@
             "uid": "${ds}"
           },
           "expr": "betterdb_client_connections_by_user{job=~\"$job\",connection=~\"$connection\"}",
-          "legendFormat": "{{user}}"
+          "legendFormat": "{{connection}} {{user}}"
         }
       ],
       "gridPos": {

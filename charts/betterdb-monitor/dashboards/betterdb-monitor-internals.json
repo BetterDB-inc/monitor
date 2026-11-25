@@ -84,7 +84,7 @@
             "uid": "${ds}"
           },
           "expr": "rate(betterdb_process_cpu_user_seconds_total{job=~\"$job\"}[5m])",
-          "legendFormat": "user"
+          "legendFormat": "{{instance}} user"
         },
         {
           "refId": "B",
@@ -93,7 +93,7 @@
             "uid": "${ds}"
           },
           "expr": "rate(betterdb_process_cpu_system_seconds_total{job=~\"$job\"}[5m])",
-          "legendFormat": "sys"
+          "legendFormat": "{{instance}} sys"
         },
         {
           "refId": "C",
@@ -102,7 +102,7 @@
             "uid": "${ds}"
           },
           "expr": "rate(betterdb_process_cpu_seconds_total{job=~\"$job\"}[5m])",
-          "legendFormat": "total"
+          "legendFormat": "{{instance}} total"
         }
       ],
       "gridPos": {

@@ -196,9 +196,14 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "percent"
+          "unit": "short"
         },
         "overrides": []
+      },
+      "options": {
+        "displayLabels": [
+          "percent"
+        ]
       },
       "targets": [
         {
@@ -207,7 +212,7 @@
             "type": "prometheus",
             "uid": "${ds}"
           },
-          "expr": "betterdb_slowlog_pattern_percentage{job=~\"$job\",connection=~\"$connection\"}",
+          "expr": "sum by (pattern) (betterdb_slowlog_pattern_count{job=~\"$job\",connection=~\"$connection\"})",
           "legendFormat": "{{pattern}}",
           "instant": true,
           "range": false

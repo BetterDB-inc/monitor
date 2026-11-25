@@ -154,7 +154,7 @@
             "type": "prometheus",
             "uid": "${ds}"
           },
-          "expr": "rate(betterdb_anomaly_events_total{job=~\"$job\",connection=~\"$connection\"}[15m])",
+          "expr": "sum by (connection) (rate(betterdb_anomaly_events_total{job=~\"$job\",connection=~\"$connection\"}[15m]))",
           "legendFormat": "{{connection}}"
         }
       ],
