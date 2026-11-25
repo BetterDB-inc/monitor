@@ -194,6 +194,22 @@ describe('CommandExecutor read-only', () => {
     expect(call.mock.calls[1]).toEqual(['CLIENT', 'LIST', 'ID', Buffer.from('9')]);
   });
 
+  it('judges binary operands by their bytes, so a binary RESET cannot clear the ACL log', async () => {
+    const { executor, call } = executorWith({ readOnly: true });
+
+    await expect(
+      executor.execute('ACL', ['LOG', 'placeholder'], { placeholder: Buffer.from('RESET') }),
+    ).rejects.toThrow('Command not allowed: ACL LOG <binary>');
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it('only substitutes own placeholders, never inherited names like constructor', async () => {
+    const { executor, call } = executorWith({ readOnly: true });
+
+    await executor.execute('CLIENT', ['LIST', 'ID', 'constructor'], {});
+    expect(call.mock.calls[0]).toEqual(['CLIENT', 'LIST', 'ID', 'constructor']);
+  });
+
   it('still runs reads', async () => {
     const { executor, call } = executorWith({ readOnly: true });
 

@@ -8,8 +8,8 @@ function isLfuPolicyMismatch(error: Error | null | undefined): boolean {
   return !!error && /LFU maxmemory policy/i.test(error.message);
 }
 
-// Stands in for binary operands when the safety checks and redaction look
-// at the arguments; it can never equal a sub-command name.
+// Stands in for binary operands in the refusal message only; the checks
+// themselves see the decoded bytes.
 const BINARY_OPERAND = '<binary>';
 
 /**
@@ -21,7 +21,11 @@ const BINARY_OPERAND = '<binary>';
 export function substituteBinaryArgs(args?: string[], binaryArgs?: Record<string, Buffer>): (string | Buffer)[] | undefined {
   if (!args) return undefined;
   if (!binaryArgs) return [...args];
-  return args.map((arg, index) => (index > 0 && arg in binaryArgs ? binaryArgs[arg] : arg));
+  // Own properties only: an argument named "constructor" or "toString" is
+  // not a placeholder.
+  return args.map((arg, index) =>
+    index > 0 && Object.prototype.hasOwnProperty.call(binaryArgs, arg) ? binaryArgs[arg] : arg,
+  );
 }
 
 const SIZE_COMMAND_BY_TYPE = new Map<string, string>([
@@ -78,13 +82,14 @@ export class CommandExecutor {
     const upperCmd = cmd.toUpperCase();
 
     // Binary placeholders are resolved first and the checks run on what will
-    // actually reach the server: a placeholder named after an allowed
-    // sub-command must not smuggle another one in. Binary data only ever
-    // stands for a data operand, never the sub-command slot.
+    // actually reach the server, decoded: a binary operand that spells RESET
+    // is judged as RESET (ACL LOG RESET), and a placeholder never stands for
+    // the sub-command slot.
     const effective = substituteBinaryArgs(args, binaryArgs);
-    const checked = effective?.map((arg) => (typeof arg === 'string' ? arg : BINARY_OPERAND));
+    const checked = effective?.map((arg) => (typeof arg === 'string' ? arg : arg.toString('utf8')));
     if (!this.isAllowed(upperCmd, checked)) {
-      const full = checked ? `${upperCmd} ${checked.join(' ')}` : upperCmd;
+      const shown = effective?.map((arg) => (typeof arg === 'string' ? arg : BINARY_OPERAND));
+      const full = shown ? `${upperCmd} ${shown.join(' ')}` : upperCmd;
       throw new Error(`Command not allowed: ${full}`);
     }
 
