@@ -5,6 +5,7 @@ import { Feature, type ServedClusterNodeRef } from '@betterdb/shared';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
 import { useLicense } from '../hooks/useLicense';
+import { usePlacement } from '../hooks/usePlacement';
 import { metricsApi } from '../api/metrics';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
 import { dateRangeFromParams } from '../components/ui/date-range';
@@ -111,6 +112,10 @@ const INCIDENT_POLL_MS = 30_000;
 
 export function AnomalyDashboard() {
   const { currentConnection } = useConnection();
+  const { status: placement } = usePlacement(
+    currentConnection?.id,
+    currentConnection?.capabilities?.clusterEnabled === true,
+  );
   const { hasFeature } = useLicense();
   const captureActionEnabled =
     hasFeature(Feature.MONITOR_ANOMALY_TRIGGER) && !!currentConnection?.id;
@@ -333,7 +338,7 @@ export function AnomalyDashboard() {
       <ReplicaSlotStateBanner events={replicaSlotStateEvents ?? undefined} />
       <HotShardCaptureNotice connectionId={currentConnection?.id} />
       <RebalanceRuns connectionId={currentConnection?.id} />
-      <RebalanceSuggestion connectionId={currentConnection?.id} />
+      <RebalanceSuggestion connectionId={currentConnection?.id} mode={placement?.effectiveMode} />
       <FanoutCoverageNotice
         coverage={fanoutCoverage?.find((c) => c.connectionId === currentConnection?.id)}
         error={fanoutCoverageError}

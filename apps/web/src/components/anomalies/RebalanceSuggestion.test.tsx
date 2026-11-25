@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import type { PlacementMode } from '@betterdb/shared';
 import type {
   HotShardDetail,
   RebalanceNoPlanReason,
@@ -115,7 +116,11 @@ function hotShard(
 
 async function show(
   hotShards: HotShardDetail[] | Error,
-  { events = [EVENT] as unknown[], connected = true } = {},
+  {
+    events = [EVENT] as unknown[],
+    connected = true,
+    mode,
+  }: { events?: unknown[]; connected?: boolean; mode?: PlacementMode } = {},
 ): Promise<QueryClient> {
   getAnomalyEvents.mockResolvedValue(events);
   if (hotShards instanceof Error) getHotShards.mockRejectedValue(hotShards);
@@ -123,7 +128,7 @@ async function show(
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <RebalanceSuggestion connectionId={connected ? 'conn-1' : undefined} />
+      <RebalanceSuggestion connectionId={connected ? 'conn-1' : undefined} mode={mode} />
     </QueryClientProvider>,
   );
   await act(async () => {
@@ -595,8 +600,59 @@ describe('RebalanceSuggestion', () => {
       'Client-side caching for the hot keys.',
       'Reads from replicas.',
       'Splitting the hot key into several keys.',
+      'Moving slot 9189 to a shard of its own (Isolate). This is advice: BetterDB does not run it.',
     ]);
     expect(within(region).queryByRole('table')).not.toBeInTheDocument();
+  });
+
+  it('advises moving each of several hot slots to a shard of its own', async () => {
+    await show([
+      hotShard(
+        noPlan('key_level', [
+          { slot: 5, shareOfShard: 0.45 },
+          { slot: 9, shareOfShard: 0.41 },
+        ]),
+      ),
+    ]);
+
+    const options = within(within(await panel()).getByRole('list', { name: 'What can help' }))
+      .getAllByRole('listitem')
+      .map((item) => item.textContent);
+    expect(options).toContain(
+      'Moving slots 5 and 9 each to a shard of its own (Isolate). This is advice: BetterDB does not run it.',
+    );
+  });
+
+  it('gives no Isolate advice when no slot stands out', async () => {
+    await show([hotShard(noPlan('key_level'))]);
+
+    expect(await panel()).not.toHaveTextContent('Isolate');
+  });
+
+  it('hides plans in Observe mode', async () => {
+    await show([hotShard(plan({ execution: { available: true } }))], { mode: 'observe' });
+
+    await waitFor(() => expect(getHotShards).toHaveBeenCalled());
+    await act(async () => {});
+    expect(screen.queryByRole('region', { name: /hot shard 3f2a9c1e/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('table')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Run this plan' })).not.toBeInTheDocument();
+  });
+
+  it('keeps the advice for a shard without a plan in Observe mode', async () => {
+    await show([hotShard(noPlan('key_level', [{ slot: 9189, shareOfShard: 0.81 }]))], {
+      mode: 'observe',
+    });
+
+    expect(await panel()).toHaveTextContent('Rebalancing will not help');
+  });
+
+  it('shows the plan and its run button in Recommend mode', async () => {
+    await show([hotShard(plan({ execution: { available: true } }))], { mode: 'recommend' });
+
+    const region = await panel();
+    expect(within(region).getByRole('table')).toBeInTheDocument();
+    expect(within(region).getByRole('button', { name: 'Run this plan' })).toBeInTheDocument();
   });
 
   it('says several slots are the load when no single one is', async () => {

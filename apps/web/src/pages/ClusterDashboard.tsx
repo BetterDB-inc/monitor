@@ -26,6 +26,7 @@ import { ClusterSlowlog } from '../components/cluster/ClusterSlowlog';
 import { ReplicationLag } from '../components/cluster/ReplicationLag';
 import { SlotMigrations } from '../components/cluster/SlotMigrations';
 import { RaftHealthPanel } from '../components/cluster/RaftHealthPanel';
+import { PlacementCard } from '../components/cluster/PlacementCard';
 import {
   ClusterDisagreements,
   ClusterDisagreementsLoading,
@@ -318,6 +319,8 @@ export function ClusterDashboard() {
             />
             <SlotMigrations migrations={migrations || undefined} />
           </div>
+
+          <PlacementCard connectionId={currentConnection?.id} />
 
           {/* Top Slots */}
           <Card>

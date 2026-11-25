@@ -75,6 +75,7 @@ vi.mock('../components/cluster/ClusterSlowlog', () => ({ ClusterSlowlog: () => n
 vi.mock('../components/cluster/ReplicationLag', () => ({ ReplicationLag: () => null }));
 vi.mock('../components/cluster/SlotMigrations', () => ({ SlotMigrations: () => null }));
 vi.mock('../components/cluster/RaftHealthPanel', () => ({ RaftHealthPanel: () => null }));
+vi.mock('../components/cluster/PlacementCard', () => ({ PlacementCard: () => null }));
 
 import { ClusterDashboard } from './ClusterDashboard';
 

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Check, Copy } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
-import { displayKeyName } from '@betterdb/shared';
+import { displayKeyName, type PlacementMode } from '@betterdb/shared';
 import { ApiError } from '../../api/client';
 import { metricsApi } from '../../api/metrics';
 import { useCanMutate } from '../../hooks/useCanMutate';
@@ -38,6 +38,7 @@ const COPIED_FOR_MS = 2000;
 
 interface Props {
   connectionId: string | undefined;
+  mode?: PlacementMode;
 }
 
 const percent = (share: number) => `${Math.round(share * 100)}%`;
@@ -144,6 +145,13 @@ function describeKeyLevel(verdict: RebalanceNoPlan, shard: HotShardDetail): stri
     `Rebalancing will not help: slot ${slots[0].slot} alone is ${share} of this shard's CPU.` +
     (key ? ` Its hottest key is "${displayKeyName(key.key)}".` : '')
   );
+}
+
+function describeIsolate(slots: RebalancePinnedSlot[]): string {
+  const advice = 'This is advice: BetterDB does not run it.';
+  if (slots.length === 1) return `Moving slot ${slots[0].slot} to a shard of its own (Isolate). ${advice}`;
+  const numbers = listed(slots.map((slot) => `${slot.slot}`));
+  return `Moving slots ${numbers} each to a shard of its own (Isolate). ${advice}`;
 }
 
 function CommandLine({ command, label }: { command: RebalanceCommand; label?: string }) {
@@ -448,14 +456,15 @@ function NoPlan({ verdict, shard }: { verdict: RebalanceNoPlan; shard: HotShardD
         <li>Client-side caching for the hot keys.</li>
         <li>Reads from replicas.</li>
         <li>Splitting the hot key into several keys.</li>
+        {verdict.pinnedSlots.length > 0 && <li>{describeIsolate(verdict.pinnedSlots)}</li>}
       </ul>
     </div>
   );
 }
 
-export function RebalanceSuggestion({ connectionId }: Props) {
+export function RebalanceSuggestion({ connectionId, mode }: Props) {
   const shards = useOpenHotShards(connectionId, { keepOnError: true }).filter(
-    (shard) => shard.rebalance,
+    (shard) => shard.rebalance && (mode !== 'observe' || shard.rebalance.kind !== 'plan'),
   );
   const [confirmed, setConfirmed] = useState<RebalancePlan | null>(null);
   const current = shards
