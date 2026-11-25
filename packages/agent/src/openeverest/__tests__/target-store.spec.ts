@@ -61,6 +61,32 @@ describe('TargetStore', () => {
     expect(kube.puts).toBe(3);
   });
 
+  it('lands every write when many instances are removed at once', async () => {
+    const kube = new FakeKube();
+    const store = new TargetStore(kube as never, 'betterdb-targets');
+    const refs = Array.from({ length: 10 }, (_, i) => ({ cluster: 'main', namespace: 'db', instance: `vk${i}` }));
+    for (const ref of refs) await store.add(ref, { enabledAt: 'a' });
+    const putsBefore = kube.puts;
+
+    // Fired together, as a namespace deletion or the startup prune does.
+    await Promise.all(refs.map((ref) => store.remove(ref)));
+
+    expect(await store.list()).toEqual([]);
+    // Serialized in-process: one write each, no conflicts to retry.
+    expect(kube.puts - putsBefore).toBe(10);
+  });
+
+  it('keeps retrying conflicts from another writer instead of giving up after a few', async () => {
+    const kube = new FakeKube();
+    const store = new TargetStore(kube as never, 'betterdb-targets');
+    await store.add(ORDERS, { enabledAt: 'a' });
+    kube.conflictsLeft = 8;
+
+    await store.remove(ORDERS);
+
+    expect(await store.list()).toEqual([]);
+  });
+
   it('lists nothing when the ConfigMap does not exist yet', async () => {
     const store = new TargetStore(new FakeKube() as never, 'betterdb-targets');
     expect(await store.list()).toEqual([]);

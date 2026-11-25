@@ -1,4 +1,4 @@
-import { KubeApiError, KubeClient, KubeObject } from './kube-client';
+import { KubeApiError, KubeClient, KubeObject, sleep } from './kube-client';
 import type { InstanceRef } from './everest-client';
 
 // Which instances a user opted into, kept in a ConfigMap in the plugin's
@@ -34,8 +34,17 @@ function fromDataKey(key: string): InstanceRef | null {
   return { cluster, namespace, instance };
 }
 
+// A conflict means another writer got in first, never that the change is
+// wrong, so it is retried from a fresh read with a short, capped backoff.
+const MAX_ATTEMPTS = 20;
+const MAX_BACKOFF_MS = 1_000;
+
 export class TargetStore {
   private readonly path: string;
+  // Every write in this process goes through one queue: the plugin runs as a
+  // single pod, so its own writes (a namespace of instances deleted at once,
+  // the startup prune) never race each other for the resourceVersion.
+  private writes: Promise<unknown> = Promise.resolve();
 
   constructor(
     private readonly client: KubeClient,
@@ -81,10 +90,17 @@ export class TargetStore {
     }
   }
 
+  private update(mutate: (data: Record<string, string>) => Record<string, string>): Promise<void> {
+    const run = this.writes.then(() => this.write(mutate), () => this.write(mutate));
+    this.writes = run.catch(() => undefined);
+    return run;
+  }
+
   // Read-modify-write with the resourceVersion as the optimistic lock; a 409
-  // from a concurrent writer (two enables at once) is retried from a fresh read.
-  private async update(mutate: (data: Record<string, string>) => Record<string, string>): Promise<void> {
-    for (let attempt = 0; attempt < 5; attempt++) {
+  // (a writer outside this process, or a racing create) is retried from a
+  // fresh read.
+  private async write(mutate: (data: Record<string, string>) => Record<string, string>): Promise<void> {
+    for (let attempt = 1; ; attempt++) {
       const current = await this.read();
       const data = mutate(current?.data ?? {});
       try {
@@ -100,8 +116,8 @@ export class TargetStore {
         }
         return;
       } catch (err) {
-        if (err instanceof KubeApiError && err.status === 409 && attempt < 4) continue;
-        throw err;
+        if (!(err instanceof KubeApiError && err.status === 409) || attempt >= MAX_ATTEMPTS) throw err;
+        await sleep(Math.min(25 * 2 ** attempt, MAX_BACKOFF_MS));
       }
     }
   }
