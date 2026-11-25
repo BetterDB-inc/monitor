@@ -1,6 +1,7 @@
 import {
   judgePlacementSupport,
   managedPlacementProvider,
+  migrateSlotsListed,
   type PlacementSupportFacts,
 } from '../placement-support';
 
@@ -240,5 +241,15 @@ describe('managedPlacementProvider', () => {
   it('ignores a self-hosted override', () => {
     process.env.MONITOR_PROVIDER_OVERRIDE = 'self-hosted';
     expect(managedPlacementProvider('10.0.0.1', undefined)).toBeNull();
+  });
+});
+
+describe('migrateSlotsListed', () => {
+  it('finds the subcommand in a COMMAND INFO reply', () => {
+    expect(migrateSlotsListed([['cluster|migrateslots', -4, ['admin'], 0, 0, 0]])).toBe(true);
+  });
+
+  it.each([[[null]], [[]], [null], ['ERR unknown']])('treats %j as missing', (reply) => {
+    expect(migrateSlotsListed(reply)).toBe(false);
   });
 });

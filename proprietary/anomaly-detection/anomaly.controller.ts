@@ -15,10 +15,12 @@ import {
   ServiceUnavailableException,
   UseGuards,
   NotFoundException,
+  Optional,
   Req,
 } from '@nestjs/common';
 import { ApiHeader, ApiOperation } from '@nestjs/swagger';
 import { AnomalyService } from './anomaly.service';
+import { PlacementService } from '../placement/placement.service';
 import { IncidentTimeline } from './incident-timeline';
 import {
   AnomalyEvent,
@@ -64,7 +66,10 @@ function parseLimit(value: string | undefined, fallback: number): number {
 
 @Controller('anomaly')
 export class AnomalyController {
-  constructor(private readonly anomalyService: AnomalyService) {}
+  constructor(
+    private readonly anomalyService: AnomalyService,
+    @Optional() private readonly placement?: PlacementService,
+  ) {}
 
   @Get('events')
   @UseGuards(LicenseGuard)
@@ -200,6 +205,9 @@ export class AnomalyController {
     if (!confirmed) {
       throw new BadRequestException('moves must list each target shard with its slot ranges');
     }
+    if (this.placement && !(await this.placement.allowsRun(connectionId))) {
+      throw new ForbiddenException({ blockedBy: 'observe_mode' });
+    }
     const actor = request.actor;
     const result = await this.anomalyService.runRebalance(connectionId, shardId, confirmed, {
       userId: actor?.userId ?? null,
@@ -213,6 +221,7 @@ export class AnomalyController {
       case 'changed':
         throw new ConflictException({ reason: result.reason, rebalance: result.rebalance });
       case 'refused':
+        this.placement?.noteRebalanceRefusal(connectionId, result.message);
         throw new BadGatewayException({ message: result.message });
     }
   }

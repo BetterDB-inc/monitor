@@ -131,6 +131,7 @@ import {
   shardServerFromInfo,
   withCommands,
 } from './rebalance-planner';
+import { migrateSlotsListed, type PlacementPrimaryRead } from '../placement/placement-support';
 import {
   type ConfirmedMove,
   type RebalanceCancelResult,
@@ -7070,6 +7071,35 @@ export class AnomalyService
             providerManaged,
           )
         : verdict,
+    );
+  }
+
+  async readPlacementPrimaries(connectionId: string): Promise<PlacementPrimaryRead[] | null> {
+    const discovery = this.clusterDiscovery;
+    if (!discovery || !this.dialsDataNodes(connectionId)) return null;
+    let nodes: DiscoveredNode[];
+    try {
+      nodes = await discovery.discoverNodes(connectionId);
+    } catch {
+      return null;
+    }
+    const primaries = nodes.filter((node) => node.role === 'master' && node.slots.length > 0);
+    return Promise.all(
+      primaries.map(async (node) => {
+        const info = await this.readShardInfo(connectionId, node.id);
+        const migrateSlotsCommand = await this.readShard(
+          connectionId,
+          node.id,
+          'reading COMMAND INFO on the shard timed out',
+          (client) => client.call('COMMAND', 'INFO', 'CLUSTER|MIGRATESLOTS'),
+        ).then(migrateSlotsListed, () => null);
+        return {
+          address: node.address,
+          server: (info && shardServerFromInfo(info)) ?? null,
+          migrateSlotsCommand,
+          serverInfo: info?.server,
+        };
+      }),
     );
   }
 

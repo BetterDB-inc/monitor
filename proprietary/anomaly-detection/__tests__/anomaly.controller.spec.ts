@@ -400,3 +400,26 @@ describe('AnomalyController slot rebalance runs', () => {
     }
   });
 });
+
+describe('AnomalyController rebalance and the placement mode', () => {
+  const moves = { moves: [{ targetShardId: 't1', ranges: [[0, 10]] }] };
+  const admin = { actor: { userId: 'u1', email: 'a@example.com', role: 'admin' } } as never;
+
+  it('refuses to run a plan while the cluster is in Observe', async () => {
+    const service = { runRebalance: jest.fn() };
+    const placement = { allowsRun: jest.fn().mockResolvedValue(false), noteRebalanceRefusal: jest.fn() };
+    const controller = new AnomalyController(service as unknown as AnomalyService, placement as never);
+    await expect(controller.runRebalance('c1', 'src', moves, admin)).rejects.toMatchObject({
+      response: { blockedBy: 'observe_mode' },
+    });
+    expect(service.runRebalance).not.toHaveBeenCalled();
+  });
+
+  it('runs a plan in Recommend and passes a refusal on to placement', async () => {
+    const service = { runRebalance: jest.fn().mockResolvedValue({ status: 'refused', message: 'NOPERM no' }) };
+    const placement = { allowsRun: jest.fn().mockResolvedValue(true), noteRebalanceRefusal: jest.fn() };
+    const controller = new AnomalyController(service as unknown as AnomalyService, placement as never);
+    await expect(controller.runRebalance('c1', 'src', moves, admin)).rejects.toThrow('NOPERM no');
+    expect(placement.noteRebalanceRefusal).toHaveBeenCalledWith('c1', 'NOPERM no');
+  });
+});

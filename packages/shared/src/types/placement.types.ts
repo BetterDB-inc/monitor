@@ -59,3 +59,14 @@ export interface PlacementBalance {
   resolveRatio: number;
   shards: PlacementShardBalance[];
 }
+
+export const PLACEMENT_SETTABLE_MODES: readonly PlacementMode[] = ['observe', 'recommend'];
+
+export interface PlacementStatus {
+  connectionId: string;
+  mode: PlacementMode;
+  effectiveMode: PlacementMode;
+  selectableModes: PlacementMode[];
+  support: PlacementSupport;
+  balance: PlacementBalance | null;
+}

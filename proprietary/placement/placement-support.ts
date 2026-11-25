@@ -85,6 +85,14 @@ export function managedPlacementProvider(
   return isManagedProviderBuild(server) ? 'Redis Cloud' : null;
 }
 
+export function migrateSlotsListed(reply: unknown): boolean {
+  return Array.isArray(reply) && reply.length > 0 && Array.isArray(reply[0]) && reply[0].length > 0;
+}
+
+export interface PlacementPrimaryRead extends PlacementPrimaryFacts {
+  serverInfo?: Record<string, string | undefined>;
+}
+
 const listed = (addresses: readonly string[]) => addresses.join(', ');
 
 function serverIssue(primaries: readonly PlacementPrimaryFacts[] | null): PlacementSupportIssue | null {

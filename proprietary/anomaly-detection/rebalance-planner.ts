@@ -129,7 +129,8 @@ export type RebalanceExecutionBlocker =
   | 'unsupported_server'
   | 'migration_running'
   | 'plan_outdated'
-  | 'server_refused';
+  | 'server_refused'
+  | 'observe_mode';
 
 export interface RebalanceExecution {
   available: boolean;
