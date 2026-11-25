@@ -876,7 +876,7 @@ Each cluster has a placement mode, shown with its support and the load of every 
 
 | Mode | What it does |
 | --- | --- |
-| Observe | Shows the load and the imbalance, and why a hot shard cannot be fixed by moving slots. No plan is shown and none can be run: `GET /anomaly/hot-shards` and the MCP `get_hot_shards` leave the plans and their commands out too. |
+| Observe | Shows the load and the imbalance, and why a hot shard cannot be fixed by moving slots. No plan is shown and none can be run: `GET /anomaly/hot-shards` and the MCP `get_hot_shards` leave the plans and their commands out too, and so the `covered_by_other_plan` and `conflicts_with_other_plan` answers, which point at a plan. |
 | Recommend | Shows the plan with the projected load, as described above. An admin can run it (see [Running a plan](#running-a-plan)). |
 | Approve | Not available yet. |
 | Auto | Not available yet. |
