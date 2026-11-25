@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common';
+import { APP_FILTER } from '@nestjs/core';
+import { AgentReadOnlyFilter } from '../common/filters/agent-read-only.filter';
 import { MetricsController } from './metrics.controller';
 import { MetricsService } from './metrics.service';
 import { CommandstatsController } from './commandstats.controller';
@@ -13,7 +15,13 @@ import { PrometheusModule } from '../prometheus/prometheus.module';
 @Module({
   imports: [ClusterModule, StorageModule, ConnectionsModule, PrometheusModule],
   controllers: [MetricsController, CommandstatsController, LatencystatsController],
-  providers: [MetricsService, CommandstatsPollerService, LatencystatsPollerService],
+  providers: [
+    MetricsService,
+    CommandstatsPollerService,
+    LatencystatsPollerService,
+    // Global: a read-only agent connection's refusal is a 403 on every route.
+    { provide: APP_FILTER, useClass: AgentReadOnlyFilter },
+  ],
   exports: [MetricsService],
 })
 export class MetricsModule {}

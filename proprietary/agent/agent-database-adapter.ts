@@ -44,6 +44,7 @@ import {
 } from '../../apps/api/src/database/parsers/vector-index.parser';
 import type { AgentHelloMessage, KeyAnalyticsOptions, KeyAnalyticsResult } from '@betterdb/shared';
 import { checkAgentReadOnly, redactSensitiveReply, supportsClusterSlotStats } from '@betterdb/shared';
+import { AgentReadOnlyError } from '../../apps/api/src/common/errors/agent-read-only.error';
 
 const COMMAND_TIMEOUT_MS = 15000;
 
@@ -134,12 +135,9 @@ export class AgentDatabaseAdapter implements DatabasePort {
         reject(new Error('Agent connection is closed'));
         return;
       }
-      if (this.readOnly) {
-        const denied = checkAgentReadOnly(cmd.toUpperCase(), args);
-        if (denied !== null) {
-          reject(new Error(denied));
-          return;
-        }
+      if (this.readOnly && checkAgentReadOnly(cmd.toUpperCase(), args) !== null) {
+        reject(new AgentReadOnlyError());
+        return;
       }
 
       const id = randomUUID();

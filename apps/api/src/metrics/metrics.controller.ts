@@ -7,7 +7,6 @@ import { withHealthy } from '../cluster/node-health-response';
 import type { NodeCollection } from '../cluster/node-collection';
 import { ClusterMetricsService, NodeStats, ClusterSlowlogEntry, ClusterClientEntry, ClusterCommandlogEntry, SlotMigration } from '../cluster/cluster-metrics.service';
 import { ConnectionId } from '../common/decorators';
-import { AGENT_READ_ONLY_MESSAGE } from '@betterdb/shared';
 import { Roles } from '../auth/guards/roles.decorator';
 import { ExternalConnectionUnsupportedError } from '../external-metrics/external-connection-unsupported.error';
 import {
@@ -59,13 +58,13 @@ import {
 } from '../common/dto/metrics.dto';
 
 /**
- * Error for a failed state-changing call. A refusal from a read-only agent
- * connection is the caller's problem (403), not a server failure.
+ * Error for a failed state-changing call. The original error travels as the
+ * cause, so AgentReadOnlyFilter can answer 403 for a read-only agent
+ * connection's refusal instead of this 500.
  */
-function resetFailure(prefix: string, error: unknown, fallback = HttpStatus.INTERNAL_SERVER_ERROR): HttpException {
+function mutationFailure(prefix: string, error: unknown, status = HttpStatus.INTERNAL_SERVER_ERROR): HttpException {
   const message = error instanceof Error ? error.message : 'Unknown error';
-  const status = message === AGENT_READ_ONLY_MESSAGE ? HttpStatus.FORBIDDEN : fallback;
-  return new HttpException(`${prefix}: ${message}`, status);
+  return new HttpException(`${prefix}: ${message}`, status, { cause: error });
 }
 
 @ApiTags('metrics')
@@ -163,7 +162,7 @@ export class MetricsController {
       await this.metricsService.resetSlowLog(connectionId);
       return { success: true };
     } catch (error) {
-      throw resetFailure('Failed to reset slowlog', error);
+      throw mutationFailure('Failed to reset slowlog', error);
     }
   }
 
@@ -263,7 +262,7 @@ export class MetricsController {
       const status = error instanceof Error && error.message.includes('not supported')
         ? HttpStatus.NOT_IMPLEMENTED
         : HttpStatus.INTERNAL_SERVER_ERROR;
-      throw resetFailure('Failed to reset commandlog', error, status);
+      throw mutationFailure('Failed to reset commandlog', error, status);
     }
   }
 
@@ -389,7 +388,7 @@ export class MetricsController {
       await this.metricsService.resetLatencyEvents(eventName, connectionId);
       return { success: true };
     } catch (error) {
-      throw resetFailure('Failed to reset latency events', error);
+      throw mutationFailure('Failed to reset latency events', error);
     }
   }
 
@@ -496,10 +495,7 @@ export class MetricsController {
       const killed = await this.metricsService.killClient(filters, connectionId);
       return { killed };
     } catch (error) {
-      throw new HttpException(
-        `Failed to kill client: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
+      throw mutationFailure('Failed to kill client', error);
     }
   }
 
@@ -542,10 +538,7 @@ export class MetricsController {
       const status = error instanceof Error && error.message.includes('not supported')
         ? HttpStatus.NOT_IMPLEMENTED
         : HttpStatus.INTERNAL_SERVER_ERROR;
-      throw new HttpException(
-        `Failed to reset ACL log: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        status,
-      );
+      throw mutationFailure('Failed to reset ACL log', error, status);
     }
   }
 
