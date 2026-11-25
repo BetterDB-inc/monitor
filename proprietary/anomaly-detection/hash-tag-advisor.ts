@@ -126,8 +126,10 @@ export function hashTagAdvice(
   slots: readonly SlotKeyCount[],
   medianKeyCount: number | null,
 ): HashTagAdvice {
+  const owned = new Set(slots.map((each) => each.slot));
   return {
     ...read,
+    tags: read.tags.filter((tag) => owned.has(tag.slot)),
     keyCountOutliers: medianKeyCount === null ? [] : keyCountOutliers(slots, medianKeyCount),
     keyCountOutlierFactor: KEY_COUNT_OUTLIER_FACTOR,
     medianKeyCount,

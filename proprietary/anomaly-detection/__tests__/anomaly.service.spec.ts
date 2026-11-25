@@ -2989,6 +2989,34 @@ describe('AnomalyService', () => {
         ]);
       });
 
+      it('drops the hash tag of a slot that moved off the hot shard', async () => {
+        keys = {
+          0: [
+            ['{cart}:1', NO_LFU],
+            ['{cart}:2', NO_LFU],
+          ],
+          1: [['user:2', NO_LFU]],
+        };
+        owners[0] = [0, 1, 2];
+        dial(hotNode());
+
+        await step(HOT, 6);
+        expect(service.getHotShards('conn-a')[0].advice?.hashTags.tags).toMatchObject([
+          { slot: 0, tag: 'cart' },
+        ]);
+
+        owners = [
+          [1, 2],
+          [10, 11, 0],
+          [20, 21],
+        ];
+        await step(HOT, 4);
+
+        const [shard] = service.getHotShards('conn-a');
+        expect(shard.shardId).toBe('a0000000');
+        expect(shard.advice?.hashTags).toMatchObject({ tags: [], slotsSampled: 3 });
+      });
+
       it('names the hash tag next to the hot keys when LFU is on', async () => {
         keys = {
           0: [

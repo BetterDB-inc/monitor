@@ -186,6 +186,15 @@ describe('hashTagAdvice', () => {
     expect(outliersOf(slots, 1).map((each) => each.slot)).toEqual([11, 10, 9, 8, 7, 6, 5, 4, 3, 2]);
   });
 
+  it('keeps only the tags on slots the shard owns now', () => {
+    const cart = { slot: 7, tag: 'cart', share: 1, keysSampled: 2, keysWithTag: 2 };
+    const user = { slot: 9, tag: 'user', share: 1, keysSampled: 2, keysWithTag: 2 };
+    const read = { tags: [cart, user], slotsSampled: 2 };
+
+    expect(hashTagAdvice(read, [{ slot: 9, keyCount: 10 }], 10).tags).toEqual([user]);
+    expect(hashTagAdvice(read, [], 10)).toMatchObject({ tags: [], slotsSampled: 2 });
+  });
+
   it('gives the factor and leaves the median null when it is not known', () => {
     const read = { tags: [], slotsSampled: 2 };
 

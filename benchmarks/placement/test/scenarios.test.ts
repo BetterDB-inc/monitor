@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { readHotShardKeys } from '../src/glue';
+import { hotShardAdvice, readHotShardKeys } from '../src/glue';
+import { ownerOf } from '../src/model';
 import { checkPin } from '../src/product';
 import {
   B2_HOT_SLOT,
@@ -80,6 +81,34 @@ test('a hot slot without a shared tag names none', async () => {
   const { advice } = await readB2Advice(b2Model(), true);
   assert.deepEqual(advice.tags, []);
   assert.deepEqual(advice.keyCountOutliers, []);
+});
+
+test('the advice keeps only the tags on slots the shard owns now, as in the service', async () => {
+  const model = b2TagModel();
+  const { tracker } = simulate(model, 10);
+  const read = await readHotShardKeys(
+    {
+      async callBuffer() {
+        return ['{cart}:1', '{cart}:2'].map((name) => Buffer.from(name));
+      },
+      pipeline() {
+        return {
+          call() {},
+          async exec() {
+            return [];
+          },
+        };
+      },
+    },
+    [B2_HOT_SLOT],
+  );
+  const owner = ownerOf(model, B2_HOT_SLOT).nodeId;
+  const other = model.shards.find((shard) => shard.nodeId !== owner)!.nodeId;
+  assert.deepEqual(
+    hotShardAdvice(tracker, owner, read).tags.map((tag) => tag.slot),
+    [B2_HOT_SLOT],
+  );
+  assert.deepEqual(hotShardAdvice(tracker, other, read).tags, []);
 });
 
 test('the tags are kept when the frequency read fails, as in the service', async () => {
