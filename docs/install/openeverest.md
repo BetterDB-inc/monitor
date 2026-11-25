@@ -147,7 +147,9 @@ kubectl logs -n everest-system deploy/betterdb-openeverest -f
 
 - *"enabling BetterDB needs the read-connection permission"*: ask an OpenEverest admin for
   `read-connection` on the instance (or namespace).
-- *"BetterDB is not configured"*: set the URL and token under Settings → BetterDB.
+- *"BetterDB is not configured"*: set `betterdb.url` and `betterdb.token` on the release
+  (`helm upgrade betterdb-openeverest … --reuse-values --set betterdb.url=… --set betterdb.token=…`),
+  or point `betterdb.existingSecret` at a Secret with keys `url` and `token`.
 - *"instance ... is not visible to the plugin"*: the instance is outside `watchNamespaces`, or in
   another OpenEverest cluster than the one the plugin runs in (`openeverest.clusterName`).
 - *Connecting* for long: the instance has not published `status.connectionSecretRef` yet, or the

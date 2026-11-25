@@ -4,10 +4,15 @@ OpenEverest picks up the Plugin "{{ .Values.plugin.name }}" on its own; reload t
 and open a Valkey instance to see the BetterDB tab.
 {{- if and (not .Values.betterdb.url) (not .Values.betterdb.existingSecret) }}
 
-BetterDB is not configured yet. In OpenEverest go to Settings -> BetterDB and enter:
-  - the agent URL: wss://<workspace>.app.betterdb.com/agent/ws for BetterDB Cloud, or
-    wss://<monitor-host>/api/agent/ws for a self-hosted BetterDB
-  - an agent token, created in BetterDB under Connections -> Via Agent
+BetterDB is not configured yet. Set the agent URL and token on the release:
+
+  helm upgrade {{ .Release.Name }} <chart> --namespace {{ .Release.Namespace }} --reuse-values \
+    --set betterdb.url=wss://<workspace>.app.betterdb.com/agent/ws \
+    --set betterdb.token=<agent token>
+
+(self-hosted: wss://<monitor-host>/api/agent/ws). Or point betterdb.existingSecret at a Secret with
+keys `url` and `token`. The token is created in BetterDB under Connections -> Via Agent; the
+Settings -> BetterDB panel in OpenEverest shows the values but cannot change them.
 {{- end }}
 
 Enabling monitoring on an instance needs the read-connection permission on it. The agent uses

@@ -134,6 +134,18 @@ tests:
           path: spec.template.spec.volumes[0].secret.secretName
           value: RELEASE-NAME-betterdb-openeverest-ca
 
+  - it: ignores a leftover custom key when the chart creates the CA Secret
+    set:
+      betterdb.ca: PEM
+      betterdb.existingCaSecret.key: bundle.pem
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[0].secret.secretName
+          value: RELEASE-NAME-betterdb-openeverest-ca
+      - equal:
+          path: spec.template.spec.volumes[0].secret.items[0].key
+          value: ca.crt
+
   - it: mounts an existing CA Secret under its own key
     set:
       betterdb.existingCaSecret.name: corp-ca

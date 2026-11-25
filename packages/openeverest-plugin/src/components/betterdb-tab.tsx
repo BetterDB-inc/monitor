@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Alert,
   Box,
@@ -45,12 +45,19 @@ const BetterDbTabBody = ({ instanceName, namespace }: { instanceName: string; na
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Bumped by every Enable/Disable: a status poll that started before the
+  // action must not overwrite the state the action returned.
+  const generation = useRef(0);
 
   const refresh = useCallback(async () => {
+    const issued = generation.current;
     try {
-      setView(await api.status(namespace, instanceName));
+      const status = await api.status(namespace, instanceName);
+      if (issued !== generation.current) return;
+      setView(status);
       setLoadError(null);
     } catch (err) {
+      if (issued !== generation.current) return;
       setLoadError(err instanceof Error ? err.message : String(err));
     }
   }, [namespace, instanceName]);
@@ -65,6 +72,7 @@ const BetterDbTabBody = ({ instanceName, namespace }: { instanceName: string; na
     if (!view) return;
     setBusy(true);
     setActionError(null);
+    generation.current += 1;
     try {
       setView(view.enabled ? await api.disable(namespace, instanceName) : await api.enable(namespace, instanceName));
     } catch (err) {
@@ -119,7 +127,8 @@ const BetterDbTabBody = ({ instanceName, namespace }: { instanceName: string; na
       )}
       {!dashboardUrl && view?.enabled && (
         <Alert severity="info">
-          BetterDB is not configured yet: set the URL and agent token under Settings &rarr; BetterDB.
+          BetterDB is not configured yet: set <code>betterdb.url</code> and <code>betterdb.token</code> (or{' '}
+          <code>betterdb.existingSecret</code>) on the Helm release.
         </Alert>
       )}
 

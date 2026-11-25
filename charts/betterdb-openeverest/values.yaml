@@ -55,10 +55,10 @@ openeverest:
   # The plugin only reaches instances of this cluster, through its ServiceAccount.
   clusterName: main
 
-# Where the agents stream to. Both can also be set later from the plugin's
-# settings panel, which writes them into the settings Secret; values set here
-# are re-applied on every `helm upgrade`, so prefer existingSecret or the panel
-# for anything that changes.
+# Where the agents stream to. Set them here or bring a Secret (existingSecret);
+# the plugin's settings panel shows them but cannot change them. Values set
+# here are re-applied on every `helm upgrade`; a change to the Secret is picked
+# up without a restart.
 betterdb:
   # BetterDB Cloud: wss://<workspace>.app.betterdb.com/agent/ws
   # Self-hosted:    wss://<monitor-host>/api/agent/ws  (or ws:// to an in-cluster
@@ -67,8 +67,7 @@ betterdb:
   # Agent token from BetterDB (Connections -> Via Agent).
   token: ""
   # Name of an existing Secret with keys `url` and `token` instead of the two
-  # values above. The backend updates this Secret from the settings panel, so
-  # it needs patch access to it (granted by the chart's Role).
+  # values above. The backend only reads it (get/list/watch).
   existingSecret: ""
   # PEM bundle to trust for the BetterDB WebSocket (added to the public
   # roots), for a self-hosted Monitor behind a private CA. Rendered into its

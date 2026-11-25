@@ -59,8 +59,11 @@ jobs:
     permissions:
       contents: read
       packages: write
+    # One group per chart and source ref: a newer pending run only replaces
+    # an older one for the same ref (the same version), never another
+    # version's push. The push itself is idempotent.
     concurrency:
-      group: helm-publish-oci-${{ inputs.chart || 'betterdb-openeverest' }}
+      group: helm-publish-oci-${{ inputs.chart || 'betterdb-openeverest' }}-${{ inputs.ref || github.ref }}
       cancel-in-progress: false
     env:
       # A tag push carries no inputs: the tag names the chart.

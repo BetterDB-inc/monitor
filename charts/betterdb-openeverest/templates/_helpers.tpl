@@ -47,9 +47,9 @@ release that carries the openeverest mode.
 {{- end -}}
 
 {{/*
-Secret holding the BetterDB url and token. The backend reads it through the
-API (so the settings panel can change it without a rollout) and writes it from
-the panel. Bring-your-own existingSecret replaces the chart-managed one.
+Secret holding the BetterDB url and token. The backend watches it through the
+API, so a change is picked up without a rollout; nothing in the plugin writes
+it. Bring-your-own existingSecret replaces the chart-managed one.
 */}}
 {{- define "betterdb-openeverest.settingsSecretName" -}}
 {{- default (printf "%s-settings" (include "betterdb-openeverest.fullname" .)) .Values.betterdb.existingSecret -}}
@@ -78,8 +78,16 @@ from the settings Secret so it works with betterdb.existingSecret too.
 {{- end -}}
 {{- end -}}
 
+{{/*
+Key of the CA bundle in that Secret. The chart-created Secret always uses
+ca.crt; a custom key only applies to a Secret the user brought.
+*/}}
 {{- define "betterdb-openeverest.caSecretKey" -}}
+{{- if .Values.betterdb.existingCaSecret.name -}}
 {{- default "ca.crt" .Values.betterdb.existingCaSecret.key -}}
+{{- else -}}
+ca.crt
+{{- end -}}
 {{- end -}}
 
 {{- define "betterdb-openeverest.mountCa" -}}
