@@ -94,6 +94,7 @@ import {
   HOT_SHARD_HOLD_MS,
   HOT_SHARD_RAISE_FACTOR,
   HOT_SHARD_TOP_SLOTS,
+  HotShardAdvice,
   HotShardDetail,
   ServedHotShardDetail,
   HotShardFinding,
@@ -111,8 +112,16 @@ import {
   describeMissingKeys,
   hotKeysAfterRead,
   hotKeysUnavailable,
+  readSlotNames,
   sampleHotKeys,
 } from './hot-shard-keys';
+import {
+  type HashTagRead,
+  describeHashTags,
+  hashTagsOfNames,
+  hashTagsUnavailable,
+  keyCountOutliers,
+} from './hash-tag-advisor';
 import {
   REBALANCE_REFRESH_MS,
   isTransientNoPlan,
@@ -962,7 +971,7 @@ export class AnomalyService
   private refusedRebalancePlans = new WeakMap<RebalancePlan, RebalanceExecutionBlocker>();
   private hotShardKeys = new Map<
     string,
-    Map<string, { detail: HotShardKeyDetail; checkedAt: number }>
+    Map<string, { detail: HotShardKeyDetail; hashTags: HashTagRead; checkedAt: number }>
   >();
   private hotKeyNoteLogged = new Map<string, string>();
   // Full-resync failure loop (valkey#1836): per-connection window/cycle state
@@ -6858,7 +6867,10 @@ export class AnomalyService
     const connectionId = ctx.connectionId;
     const eventIds = this.hotShardEventIds.get(connectionId);
     const known = this.hotShardKeys.get(connectionId);
-    const kept = new Map<string, { detail: HotShardKeyDetail; checkedAt: number }>();
+    const kept = new Map<
+      string,
+      { detail: HotShardKeyDetail; hashTags: HashTagRead; checkedAt: number }
+    >();
     const due: Array<{ signature: string; shardId: string; last?: HotShardKeyDetail }> = [];
     for (const finding of findings) {
       const signature = hotShardSignature(finding.shardId);
@@ -6875,9 +6887,11 @@ export class AnomalyService
       ),
     );
     for (const [index, { signature, last }] of due.entries()) {
-      this.logHotKeySource(ctx, reads[index]);
+      const { keys, hashTags } = reads[index];
+      this.logHotKeySource(ctx, keys);
       kept.set(signature, {
-        detail: hotKeysAfterRead(last, reads[index], timestamp),
+        detail: hotKeysAfterRead(last, keys, timestamp),
+        hashTags,
         checkedAt: timestamp,
       });
     }
@@ -7257,22 +7271,49 @@ export class AnomalyService
     connectionId: string,
     shardId: string,
     topSlots: HotShardSlot[],
-  ): Promise<HotKeyRead> {
+  ): Promise<{ keys: HotKeyRead; hashTags: HashTagRead }> {
+    const unavailable = (note: string) => ({
+      keys: hotKeysUnavailable(note),
+      hashTags: hashTagsUnavailable(note),
+    });
     if (!this.clusterDiscovery || !this.dialsDataNodes(connectionId)) {
-      return hotKeysUnavailable('the monitor does not connect to the cluster nodes directly');
+      return unavailable('the monitor does not connect to the cluster nodes directly');
     }
     const slots = topSlots.slice(0, HOT_KEY_SLOTS).map((slot) => slot.slot);
     const timedOut = 'reading the keys from the hot primary timed out';
     try {
-      return await this.readShard(connectionId, shardId, timedOut, (client) =>
-        sampleHotKeys(client, slots),
-      );
+      return await this.readShard(connectionId, shardId, timedOut, async (client) => {
+        const read = await readSlotNames(client, slots);
+        if (read.note !== undefined) return unavailable(read.note);
+        return {
+          keys: await sampleHotKeys(client, slots, read.names),
+          hashTags: hashTagsOfNames(read.names),
+        };
+      });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
-      return hotKeysUnavailable(
+      return unavailable(
         reason === timedOut ? timedOut : `reading the keys from the hot primary failed: ${reason}`,
       );
     }
+  }
+
+  private hotShardAdvice(
+    connectionId: string,
+    shardId: string,
+    signature: string,
+    medianKeyCount: number | null,
+  ): HotShardAdvice {
+    const read = this.hotShardKeys.get(connectionId)?.get(signature);
+    const slots = this.shardLoad?.getSlots(connectionId, shardId) ?? [];
+    return {
+      hashTags: {
+        ...(read?.hashTags ?? hashTagsUnavailable('the keys have not been read yet')),
+        keyCountOutliers: medianKeyCount === null ? [] : keyCountOutliers(slots, medianKeyCount),
+        medianKeyCount: medianKeyCount ?? 0,
+        ...(read ? { sampledAt: read.checkedAt } : {}),
+      },
+    };
   }
 
   private logHotKeySource(ctx: ConnectionContext, read: HotKeyRead): void {
@@ -7360,6 +7401,12 @@ export class AnomalyService
     sinceBySignature.set(signature, since);
     const keys = this.hotShardKeys.get(ctx.connectionId)?.get(signature)?.detail;
     const rebalance = this.hotShardRebalance.get(ctx.connectionId)?.get(signature)?.verdict;
+    const advice = this.hotShardAdvice(
+      ctx.connectionId,
+      finding.shardId,
+      signature,
+      this.shardLoad?.getMedianKeyCount(ctx.connectionId) ?? null,
+    );
     return {
       id: randomUUID(),
       timestamp,
@@ -7380,7 +7427,9 @@ export class AnomalyService
           this.canCaptureMissingKeys(ctx.connectionId, keys)
             ? describeMissingKeys(keys?.keyNote)
             : '',
-        ) + describeNoPlan(rebalance, keys?.topKeys ?? []),
+        ) +
+        describeNoPlan(rebalance, keys?.topKeys ?? []) +
+        describeHashTags(advice.hashTags),
       resolved: false,
       connectionId: ctx.connectionId,
       ...(nodeAddr ? { nodeAddr } : {}),
@@ -7403,6 +7452,8 @@ export class AnomalyService
       this.hotShardKeys.delete(connectionId);
       this.hotShardRebalance.delete(connectionId);
     }
+    const medianKeyCount =
+      findings.length > 0 ? (this.shardLoad?.getMedianKeyCount(connectionId) ?? null) : null;
     for (const finding of findings) {
       const signature = hotShardSignature(finding.shardId);
       const eventId = eventIds?.get(signature);
@@ -7421,6 +7472,7 @@ export class AnomalyService
         network: finding.network,
         topSlots: topSlots.get(finding.shardId) ?? [],
         ...read,
+        advice: this.hotShardAdvice(connectionId, finding.shardId, signature, medianKeyCount),
         ...(rebalance?.has(signature) ? { rebalance: rebalance.get(signature)!.verdict } : {}),
       });
     }

@@ -1,9 +1,10 @@
 import { displayKeyName } from '@betterdb/shared';
-import { type HotKeyReader, keysInSlotRefusal } from './hot-shard-keys';
+import { type HotKeyReader, readSlotNames } from './hot-shard-keys';
 
 export const HASH_TAG_SLOTS = 3;
 export const HASH_TAG_NAMES_PER_SLOT = 500;
 export const HASH_TAG_MIN_SHARE = 0.5;
+export const HASH_TAG_MIN_KEYS = 2;
 export const KEY_COUNT_OUTLIER_FACTOR = 20;
 export const KEY_COUNT_OUTLIERS = 10;
 
@@ -71,7 +72,9 @@ export function judgeSlotTag(
   for (const entry of [...counts].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
     if (!best || entry[1] > best[1]) best = entry;
   }
-  if (!best || best[1] / names.length < HASH_TAG_MIN_SHARE) return null;
+  if (!best || best[1] < HASH_TAG_MIN_KEYS || best[1] / names.length < HASH_TAG_MIN_SHARE) {
+    return null;
+  }
   return {
     slot,
     tag: best[0],
@@ -81,29 +84,21 @@ export function judgeSlotTag(
   };
 }
 
+export function hashTagsOfNames(names: ReadonlyMap<number, ReadonlyArray<Buffer>>): HashTagRead {
+  const tags: HashTagShare[] = [];
+  for (const [slot, slotNames] of names) {
+    const shared = judgeSlotTag(slot, slotNames);
+    if (shared) tags.push(shared);
+  }
+  return { tags, slotsSampled: names.size };
+}
+
 export async function sampleHashTags(
   client: HashTagReader,
   slots: readonly number[],
 ): Promise<HashTagRead> {
-  const tags: HashTagShare[] = [];
-  for (const slot of slots) {
-    let names: Buffer[];
-    try {
-      names = (await client.callBuffer(
-        'CLUSTER',
-        'GETKEYSINSLOT',
-        slot,
-        HASH_TAG_NAMES_PER_SLOT,
-      )) as Buffer[];
-    } catch (error) {
-      const note = keysInSlotRefusal(error);
-      if (note === undefined) throw error;
-      return hashTagsUnavailable(note);
-    }
-    const shared = judgeSlotTag(slot, names);
-    if (shared) tags.push(shared);
-  }
-  return { tags, slotsSampled: slots.length };
+  const read = await readSlotNames(client, slots);
+  return read.note === undefined ? hashTagsOfNames(read.names) : hashTagsUnavailable(read.note);
 }
 
 export function keyCountOutliers(

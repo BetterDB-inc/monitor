@@ -4,6 +4,7 @@ import {
   type HashTagReader,
   describeHashTags,
   hashTagOf,
+  hashTagsOfNames,
   judgeSlotTag,
   keyCountOutliers,
   sampleHashTags,
@@ -28,6 +29,9 @@ function node(slots: Record<number, Array<string | Buffer>>, fail?: Error): Fake
 
 const names = (count: number, make: (index: number) => string) =>
   Array.from({ length: count }, (_, index) => make(index));
+
+const names10 = (prefix: string) =>
+  names(10, (i) => `${prefix}:${i}`).map((name) => Buffer.from(name));
 
 function advice(overrides: Partial<HashTagAdvice> = {}): HashTagAdvice {
   return { tags: [], slotsSampled: 1, keyCountOutliers: [], medianKeyCount: 30, ...overrides };
@@ -83,10 +87,34 @@ describe('judgeSlotTag', () => {
     expect(judgeSlotTag(1, [])).toBeNull();
   });
 
+  it('names nothing when a single key carries the tag', () => {
+    expect(judgeSlotTag(1, ['cart:{9}'])).toBeNull();
+    expect(judgeSlotTag(1, ['{9}:a', 'b'])).toBeNull();
+    expect(judgeSlotTag(1, ['{9}:a', '{9}:b'])?.tag).toBe('9');
+  });
+
   it('picks the first tag in name order when two tie at half', () => {
     const sampled = [...names(5, (i) => `{b}:${i}`), ...names(5, (i) => `{a}:${i}`)];
 
     expect(judgeSlotTag(1, sampled)?.tag).toBe('a');
+  });
+});
+
+describe('hashTagsOfNames', () => {
+  it('names the shared tag of each slot in the order read', () => {
+    const names = new Map([
+      [7, names10('{b}')],
+      [3, names10('{a}')],
+      [5, names10('plain')],
+    ]);
+
+    expect(hashTagsOfNames(names)).toEqual({
+      slotsSampled: 3,
+      tags: [
+        { slot: 7, tag: 'b', share: 1, keysSampled: 10, keysWithTag: 10 },
+        { slot: 3, tag: 'a', share: 1, keysSampled: 10, keysWithTag: 10 },
+      ],
+    });
   });
 });
 
