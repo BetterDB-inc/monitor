@@ -473,6 +473,7 @@ import {
   splitHostPort,
   topologyStateKey,
 } from './topology-targets';
+import { ReadRotation } from './read-rotation';
 import {
   ReplicaSample,
   ReplicaView,
@@ -1125,6 +1126,8 @@ export class AnomalyService
   private sentinelMastersFailed = new Set<string>();
   private readonly topologyTargetClaims = new TopologyTargetClaims();
   private topologyBackoff = new Map<string, { failures: number; until: number; auth?: boolean }>();
+  private readonly fanoutRotation = new ReadRotation();
+  private fanoutReadOk = new Set<string>();
   private removedConnectionSweeps = new Map<string, MetricType[]>();
   private readonly persistenceOutbox = new PersistenceOutbox((entry, reason) => {
     this.logger.warn(`Dropped pending ${entry.kind} of anomaly ${entry.id}: ${reason}`);
@@ -1769,6 +1772,10 @@ export class AnomalyService
     for (const key of [...this.topologyBackoff.keys()]) {
       if (isTopologyStateKeyOf(key, connectionId)) this.topologyBackoff.delete(key);
     }
+    for (const key of [...this.fanoutReadOk]) {
+      if (isTopologyStateKeyOf(key, connectionId)) this.fanoutReadOk.delete(key);
+    }
+    this.fanoutRotation.forget(connectionId);
     void this.clusterDiscovery?.releaseConnection(connectionId).catch(() => undefined);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
   }
@@ -12877,7 +12884,6 @@ export class AnomalyService
       scope.targets,
       now,
       staleMs,
-      TOPOLOGY_TARGET_LIMIT,
       [...scope.members].filter((addr) => !reachable.has(addr)),
     );
     const claimedAddrs = new Set(claimed.map((t) => t.addr));
@@ -12895,19 +12901,11 @@ export class AnomalyService
     const kept = new Set(
       [...scope.members].filter((addr) => claimedAddrs.has(addr) || !reachable.has(addr)),
     );
-    // Primaries past the target cap that no other connection holds either:
-    // nothing checks them until a connection has room. One held as down is
-    // counted unreachable by its holder, so it is not counted here as well.
-    const skipped = scope.targets.filter(
-      (t) =>
-        !claimedAddrs.has(t.addr) &&
-        !this.topologyTargetClaims.heldByOther(ctx.connectionId, t.addr, now, staleMs),
-    ).length;
     const down = [...kept].filter(
       (addr) =>
         !reachable.has(addr) && !this.topologyTargetClaims.heldByOther(ctx.connectionId, addr, now, staleMs),
     ).length;
-    const coverage = (checked: number, unreachable: number, authFailed: number) => {
+    const coverage = (checked: number, unreachable: number, authFailed: number, skipped = 0) => {
       const notDialed = gap?.notDialed ?? 0;
       const reason =
         gap?.reason ??
@@ -12922,6 +12920,9 @@ export class AnomalyService
     for (const key of this.topologyBackoff.keys()) {
       if (isTopologyStateKeyOf(key, ctx.connectionId) && !active.has(key)) this.topologyBackoff.delete(key);
     }
+    for (const key of this.fanoutReadOk) {
+      if (isTopologyStateKeyOf(key, ctx.connectionId) && !active.has(key)) this.fanoutReadOk.delete(key);
+    }
     void this.clusterDiscovery
       ?.retainAddressConnections(
         ctx.connectionId,
@@ -12931,10 +12932,10 @@ export class AnomalyService
         ]),
       )
       .catch(() => undefined);
-    const targets = claimed.filter(
+    const readable = claimed.filter(
       (t) => (this.topologyBackoff.get(topologyStateKey(ctx.connectionId, t.addr))?.until ?? 0) <= now,
     );
-    const backedOffTargets = claimed.filter((t) => !targets.includes(t) && !takeovers.has(t.addr));
+    const backedOffTargets = claimed.filter((t) => !readable.includes(t) && !takeovers.has(t.addr));
     const backedOff = backedOffTargets.length;
     // A primary backing off after refusing the credentials still counts as
     // refusing them, not as unreachable.
@@ -12943,9 +12944,9 @@ export class AnomalyService
     ).length;
     // Recorded before the awaits below, so a storage error there cannot leave
     // the previous cycle's counts in place.
-    if (targets.length === 0) coverage(0, backedOff - backedOffAuth + down, backedOffAuth);
+    if (readable.length === 0) coverage(0, backedOff - backedOffAuth + down, backedOffAuth);
     for (const target of claimed) {
-      if (!targets.includes(target)) this.topologyTargetClaims.releaseTarget(ctx.connectionId, target.addr);
+      if (!readable.includes(target)) this.topologyTargetClaims.releaseTarget(ctx.connectionId, target.addr);
     }
     for (const key of this.divergenceKeysOf(ctx.connectionId)) {
       if (key !== ctx.connectionId && !active.has(key)) {
@@ -12970,10 +12971,12 @@ export class AnomalyService
       }
     }
     this.forgetNodeWriteP99(ctx.connectionId, active);
-    const read = new Set(targets.map((t) => t.addr));
+    // A primary waiting its turn in the rotation keeps its signals and its
+    // reshard view; only one that cannot be read at all loses them.
+    const inRotation = new Set(readable.map((t) => t.addr));
     for (const addr of kept) {
       const key = topologyStateKey(ctx.connectionId, addr);
-      if (!read.has(addr) && this.reshardSnapshot.has(key)) this.reshardMissedReads.add(key);
+      if (!inRotation.has(addr) && this.reshardSnapshot.has(key)) this.reshardMissedReads.add(key);
     }
     this.closePendingNodeEvents(ctx.connectionId, active);
     for (const nodeAddr of [...(this.adoptedNodeReshardEventIds.get(ctx.connectionId)?.keys() ?? [])]) {
@@ -12982,7 +12985,7 @@ export class AnomalyService
       if (adopted) this.closeLater(adopted);
     }
     for (const addr of kept) {
-      if (!read.has(addr)) this.clearNodeSignals(ctx.connectionId, topologyStateKey(ctx.connectionId, addr));
+      if (!inRotation.has(addr)) this.clearNodeSignals(ctx.connectionId, topologyStateKey(ctx.connectionId, addr));
     }
     try {
       await this.persistPendingDivergenceWindows(ctx);
@@ -12994,19 +12997,19 @@ export class AnomalyService
       // connection of the topology can take the primaries over instead of
       // reporting them covered here.
       this.topologyTargetClaims.release(ctx.connectionId);
-      if (targets.length > 0) {
+      if (readable.length > 0) {
         this.recordFanoutCoverage(ctx, topology, {
           checked: 0,
           unreachable: backedOff - backedOffAuth + down,
           authFailed: backedOffAuth,
-          skipped,
-          notDialed: targets.length,
+          skipped: 0,
+          notDialed: readable.length,
           reason: 'fanout_failed',
         });
       }
       throw err;
     }
-    if (targets.length === 0) {
+    if (readable.length === 0) {
       if (backedOff === 0 && (this.topologyFanoutUnreachable.get(ctx.connectionId) ?? 0) > 0) {
         this.logger.log(
           `Node fan-out for ${ctx.connectionName}: no reachable primaries left to check.`,
@@ -13014,6 +13017,28 @@ export class AnomalyService
         this.topologyFanoutUnreachable.delete(ctx.connectionId);
       }
       return;
+    }
+
+    const { due: targets } = this.fanoutRotation.pick(
+      ctx.connectionId,
+      readable,
+      (t) => t.addr,
+      TOPOLOGY_TARGET_LIMIT,
+    );
+    // Primaries waiting their turn count as their last read left them: checked,
+    // failed, or not read yet. A takeover is counted by its holder until a read
+    // here succeeds.
+    const due = new Set(targets);
+    const waiting = { checked: 0, failed: 0, authFailed: 0, skipped: 0 };
+    for (const target of readable) {
+      if (due.has(target) || takeovers.has(target.addr)) continue;
+      const key = topologyStateKey(ctx.connectionId, target.addr);
+      const backoff = this.topologyBackoff.get(key);
+      if (backoff) {
+        waiting.failed++;
+        if (backoff.auth) waiting.authFailed++;
+      } else if (this.fanoutReadOk.has(key)) waiting.checked++;
+      else waiting.skipped++;
     }
 
     const timestamp = Date.now();
@@ -13059,8 +13084,8 @@ export class AnomalyService
     );
     const counted = (i: number) => !takeovers.has(targets[i].addr);
     const failed = results.filter((result, i) => result.status === 'rejected' && counted(i)).length;
-    const authFailed = backedOffAuth + refused.filter((r, i) => r && counted(i)).length;
-    const unreachable = backedOff + failed;
+    const authFailed = backedOffAuth + waiting.authFailed + refused.filter((r, i) => r && counted(i)).length;
+    const unreachable = backedOff + waiting.failed + failed;
     // A takeover whose reservation was lost while the read was in flight stays
     // with the connection that now holds the primary: it is neither counted
     // nor checked here.
@@ -13070,12 +13095,15 @@ export class AnomalyService
       if (result.status !== 'fulfilled' || !takeovers.has(addr)) continue;
       if (!this.topologyTargetClaims.confirm(ctx.connectionId, addr, now)) lost.add(addr);
     }
-    const checked = results.filter((result, i) => result.status === 'fulfilled' && !lost.has(targets[i].addr)).length;
+    const checked =
+      waiting.checked +
+      results.filter((result, i) => result.status === 'fulfilled' && !lost.has(targets[i].addr)).length;
     // Recorded as soon as the reads settle: detection below can throw.
-    coverage(checked, unreachable - authFailed + down, authFailed);
+    coverage(checked, unreachable - authFailed + down, authFailed, waiting.skipped);
     for (const [i, result] of results.entries()) {
       const key = topologyStateKey(ctx.connectionId, targets[i].addr);
       if (result.status === 'rejected') {
+        this.fanoutReadOk.delete(key);
         this.clearNodeSignals(ctx.connectionId, key);
         this.topologyTargetClaims.releaseTarget(ctx.connectionId, targets[i].addr);
         if (targets[i].nodeId) this.reshardMissedReads.add(topologyStateKey(ctx.connectionId, targets[i].addr));
@@ -13086,9 +13114,11 @@ export class AnomalyService
       }
       this.topologyBackoff.delete(key);
       if (lost.has(targets[i].addr)) {
+        this.fanoutReadOk.delete(key);
         this.clearNodeSignals(ctx.connectionId, key);
         continue;
       }
+      this.fanoutReadOk.add(key);
       const target = targets[i];
       const nodeCtx: ConnectionContext = {
         ...ctx,

@@ -25358,10 +25358,10 @@ describe('AnomalyService', () => {
           expect(claims.heldByOther('conn-2', other.addr, T0, 30_000)).toBe(false);
         });
 
-        it('leaves a primary past the cap to the connection holding it as down, not skipped', async () => {
+        it('does not count a primary another connection holds as down before reading it', async () => {
           discovery();
           jest.spyOn(Date, 'now').mockReturnValue(T0);
-          (service as any).topologyTargetClaims.claim('conn-2', [], T0, 30_000, TOPOLOGY_TARGET_LIMIT, [other.addr]);
+          (service as any).topologyTargetClaims.claim('conn-2', [], T0, 30_000, [other.addr]);
           const targets = Array.from({ length: TOPOLOGY_TARGET_LIMIT }, (_, i) => ({
             addr: `10.0.0.${i}:6379`,
             host: `10.0.0.${i}`,
@@ -25394,23 +25394,94 @@ describe('AnomalyService', () => {
           expect(claims.heldByOther('conn-2', other.addr, T0, 30_000)).toBe(true);
         });
 
-        it('counts the primaries past the target cap as skipped', async () => {
-          discovery();
-          const targets = Array.from({ length: TOPOLOGY_TARGET_LIMIT + 3 }, (_, i) => ({
+        const primaries = (count: number): TopologyTarget[] =>
+          Array.from({ length: count }, (_, i) => ({
             addr: `10.0.2.${i}:6379`,
             host: `10.0.2.${i}`,
             port: 6379,
             nodeId: `node-${i}`,
           }));
 
+        it('reads a budget of primaries each poll and every primary within a sweep', async () => {
+          const getNodeConnection = discovery();
+          const targets = primaries(TOPOLOGY_TARGET_LIMIT + 3);
+
+          await poll(targets, 1, T0);
+          const first = new Set(getNodeConnection.mock.calls.map(([nodeId]) => nodeId));
+          await poll(targets, 1, T0 + 10_000);
+          const both = new Set(getNodeConnection.mock.calls.map(([nodeId]) => nodeId));
+
+          expect(first.size).toBe(TOPOLOGY_TARGET_LIMIT);
+          expect(both.size).toBe(TOPOLOGY_TARGET_LIMIT + 3);
+        });
+
+        it('keeps the claim on a primary it does not read this poll', async () => {
+          discovery();
+          const targets = primaries(TOPOLOGY_TARGET_LIMIT + 3);
+
           await poll(targets, 1, T0);
 
+          const claims = (service as any).topologyTargetClaims;
+          expect(targets.filter((t) => !claims.heldByOther('conn-2', t.addr, T0, 30_000))).toEqual([]);
+        });
+
+        it('counts a primary it has not read yet as skipped, until the sweep reaches it', async () => {
+          discovery();
+          const targets = primaries(TOPOLOGY_TARGET_LIMIT + 3);
+
+          await poll(targets, 1, T0);
           expect(latest()).toMatchObject({
             checked: TOPOLOGY_TARGET_LIMIT,
             unreachable: 0,
             skipped: 3,
             reason: null,
           });
+
+          await poll(targets, 1, T0 + 10_000);
+          expect(latest()).toMatchObject({
+            checked: TOPOLOGY_TARGET_LIMIT + 3,
+            unreachable: 0,
+            skipped: 0,
+            reason: null,
+          });
+        });
+
+        it('keeps the signals of a primary it does not read this poll', async () => {
+          discovery();
+          const targets = primaries(TOPOLOGY_TARGET_LIMIT + 3);
+          await poll(targets, 1, T0);
+          (prometheusService.clearNodeSignals as jest.Mock).mockClear();
+
+          await poll(targets, 1, T0 + 10_000);
+
+          expect(prometheusService.clearNodeSignals).not.toHaveBeenCalled();
+        });
+
+        it('keeps counting a primary whose read failed while it waits its turn', async () => {
+          const client = nodeClient([2]);
+          const targets = primaries(2 * TOPOLOGY_TARGET_LIMIT + 2);
+          const byAddr = [...targets].sort((a, b) => (a.addr < b.addr ? -1 : 1));
+          const refusing = new Set(byAddr.slice(0, 5).map((t) => t.nodeId));
+          const down = new Set(byAddr.slice(5, 20).map((t) => t.nodeId));
+          discovery().mockImplementation(async (nodeId: string) => {
+            if (refusing.has(nodeId)) throw new Error(REFUSED);
+            if (down.has(nodeId)) throw new Error('ECONNREFUSED');
+            return client;
+          });
+
+          await poll(targets, 2, T0);
+
+          expect(latest()).toMatchObject({ unreachable: 15, authFailed: 5 });
+        });
+
+        it('does not mark the reshard view of a primary stale for waiting its turn', async () => {
+          discovery();
+          const targets = primaries(TOPOLOGY_TARGET_LIMIT + 3);
+          for (const t of targets) (service as any).reshardSnapshot.set(`conn-1@${t.addr}`, {});
+
+          await poll(targets, 1, T0);
+
+          expect((service as any).reshardMissedReads.size).toBe(TOPOLOGY_TARGET_LIMIT);
         });
 
         it('leaves a primary another connection checks out of every count', async () => {
@@ -25743,7 +25814,7 @@ describe('AnomalyService', () => {
         const t = await poll([target], 18, T0);
         // The failed read released the claim; the other connection polls first.
         (service as any).topologyTargetClaims.releaseTarget('conn-1', NODE);
-        (service as any).topologyTargetClaims.claim('conn-2', [], t, 30_000, TOPOLOGY_TARGET_LIMIT, [NODE]);
+        (service as any).topologyTargetClaims.claim('conn-2', [], t, 30_000, [NODE]);
 
         await poll([], 1, t, new Set([NODE]));
 
