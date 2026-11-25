@@ -35,7 +35,7 @@ import {
   recoverySightingSignature,
 } from '@app/cluster/cluster-identity.service';
 import { nodeAclDigest, clusterKeyFromNodes } from '../acl-drift-detector';
-import { RETRY_AMP_LATENCY_VERDICT_TTL_MS } from '../retry-amplification-detector';
+import { RETRY_AMP_LATENCY_VERDICT_TTL_MS, retryAmplificationMaxPollGap } from '../retry-amplification-detector';
 import { NODE_ATTRIBUTION_UNAVAILABLE } from '../retry-amplification-attribution';
 import {
   RETRY_AMP_MAX_ATTRIBUTION_SPAN_MS,
@@ -25573,6 +25573,86 @@ describe('AnomalyService', () => {
 
             expect(busy.filter((t) => read.has(t.nodeId!))).toHaveLength(TOPOLOGY_TARGET_LIMIT / 4);
             expect(read.size).toBe(TOPOLOGY_TARGET_LIMIT);
+          });
+        });
+
+        describe('with a sweep longer than one poll', () => {
+          const INTERVAL = 10_000;
+          const targets = primaries(2 * TOPOLOGY_TARGET_LIMIT + 2);
+          const SWEEP_POLLS = 3;
+          const first = [...targets].sort((a, b) => (a.addr < b.addr ? -1 : 1))[0];
+          const firstKey = `conn-1@${first.addr}`;
+
+          function ownClients(of: TopologyTarget[]) {
+            const clients = new Map(
+              of.map((t) => [
+                t.nodeId!,
+                {
+                  info: nodeClient([2]).info,
+                  call: jest.fn().mockImplementation(async (...args: string[]) => {
+                    if (args.join(' ') !== 'CLUSTER NODES') throw new Error('ERR unknown command');
+                    return `${t.nodeId} ${t.addr}@16379 myself,master - 0 0 1 connected 0-10\n`;
+                  }),
+                },
+              ]),
+            );
+            discovery().mockImplementation(async (nodeId: string) => clients.get(nodeId));
+            return clients;
+          }
+
+          beforeEach(() => {
+            jest.spyOn(service as any, 'getIntervalMs').mockReturnValue(INTERVAL);
+            (service as any).connectionClusterKeys.set('conn-1', 'cluster-1');
+          });
+
+          it('keeps the own line of a primary for two of its reads, not two polls', async () => {
+            ownClients(targets);
+
+            await poll(targets, 5, T0);
+
+            expect((service as any).reshardNodeSelves.get(firstKey).readAt).toBe(T0);
+          });
+
+          it('keeps the reshard view of a primary fresh for the whole sweep', async () => {
+            const many = primaries(6 * TOPOLOGY_TARGET_LIMIT + 16);
+            ownClients(many);
+
+            const end = (await poll(many, 7, T0)) - INTERVAL;
+
+            expect((service as any).freshReshardShards('cluster-1', end, INTERVAL)).toHaveLength(many.length);
+            expect((service as any).reshardNodeSnapshots('conn-1', 'cluster-1', end, INTERVAL).fresh).toHaveLength(
+              many.length,
+            );
+          });
+
+          it('sizes the divergence window to the reads of a primary, not to the polls', async () => {
+            ownClients(targets);
+
+            await poll(targets, 7, T0);
+
+            const state = (service as any).divergenceState.get(firstKey);
+            expect(state.windowSamples).toBeGreaterThanOrEqual(3);
+            expect(state.closedWindowCount).toBe(0);
+          });
+
+          it('still reports a replica as observed between two reads of its primary', async () => {
+            ownClients(targets);
+            const end = (await poll(targets, 13, T0)) - INTERVAL;
+            jest.spyOn(Date, 'now').mockReturnValue(end + 4 * INTERVAL);
+
+            const history = await service.getReplicationDivergenceHistory('conn-1', T0, end + 4 * INTERVAL);
+
+            expect(history.map((h) => h.level)).toEqual(['none']);
+          });
+
+          it('allows a retry amplification gap as long as the reads of a primary are apart', async () => {
+            ownClients(targets);
+
+            await poll(targets, 1, T0);
+
+            expect((service as any).retryAmplificationState.get(firstKey).maxPollGapMs).toBe(
+              retryAmplificationMaxPollGap(SWEEP_POLLS * INTERVAL),
+            );
           });
         });
 

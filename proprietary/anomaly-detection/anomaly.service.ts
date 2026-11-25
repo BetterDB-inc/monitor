@@ -1128,6 +1128,7 @@ export class AnomalyService
   private topologyBackoff = new Map<string, { failures: number; until: number; auth?: boolean }>();
   private readonly fanoutRotation = new ReadRotation();
   private fanoutReadOk = new Set<string>();
+  private fanoutSweepPolls = new Map<string, number>();
   private removedConnectionSweeps = new Map<string, MetricType[]>();
   private readonly persistenceOutbox = new PersistenceOutbox((entry, reason) => {
     this.logger.warn(`Dropped pending ${entry.kind} of anomaly ${entry.id}: ${reason}`);
@@ -1381,6 +1382,10 @@ export class AnomalyService
 
   protected getIntervalMs(): number {
     return this.settingsService.getCachedSettings().anomalyPollIntervalMs;
+  }
+
+  private nodeReadIntervalMs(connectionId: string): number {
+    return this.getIntervalMs() * (this.fanoutSweepPolls.get(connectionId) ?? 1);
   }
 
   protected supportsExternalConnections(): boolean {
@@ -1776,6 +1781,7 @@ export class AnomalyService
       if (isTopologyStateKeyOf(key, connectionId)) this.fanoutReadOk.delete(key);
     }
     this.fanoutRotation.forget(connectionId);
+    this.fanoutSweepPolls.delete(connectionId);
     void this.clusterDiscovery?.releaseConnection(connectionId).catch(() => undefined);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
   }
@@ -4723,7 +4729,7 @@ export class AnomalyService
     state.maxPollGapMs =
       ctx.connectionType === 'external'
         ? observePushCadence(state, timestamp, this.getIntervalMs())
-        : retryAmplificationMaxPollGap(this.getIntervalMs());
+        : retryAmplificationMaxPollGap(nodeAddr ? this.nodeReadIntervalMs(ctx.connectionId) : this.getIntervalMs());
 
     const connectionEvents = (nodeAddr ? [] : this.recentEventsOf(ctx.connectionId)).filter((a) => {
       const relativeCpuMove =
@@ -7491,7 +7497,7 @@ export class AnomalyService
       if (!key.startsWith(prefix) || snapshot.clusterKey !== clusterKey) continue;
       const age = timestamp - snapshot.timestamp;
       if (age > RESHARD_MARKER_STALL_MS) continue;
-      if (age > RESHARD_STALE_POLLS * intervalMs) {
+      if (age > RESHARD_STALE_POLLS * this.reshardReadIntervalMs(key, intervalMs)) {
         unread.add(reshardSkewSignature(snapshot));
         continue;
       }
@@ -8101,7 +8107,7 @@ export class AnomalyService
     if (!cached || cached.self.id !== nodeId) return null;
     if ((cached.self.migratingSlots?.length ?? 0) + (cached.self.importingSlots?.length ?? 0) > 0) return null;
     const intervalMs = this.getIntervalMs();
-    if (timestamp - cached.readAt >= RESHARD_QUIET_POLLS * intervalMs) return null;
+    if (timestamp - cached.readAt >= RESHARD_QUIET_POLLS * this.nodeReadIntervalMs(connectionId)) return null;
     const clusterKey = this.connectionClusterKeys.get(connectionId);
     const shards = clusterKey ? this.freshReshardShards(clusterKey, timestamp, intervalMs) : [];
     return isReshardActive(shards, timestamp, RESHARD_QUIET_POLLS * intervalMs) ? null : cached.self;
@@ -8129,15 +8135,21 @@ export class AnomalyService
     }
   }
 
+  private reshardReadIntervalMs(key: string, intervalMs: number): number {
+    const connectionId = connectionOfStateKey(key);
+    return key === connectionId ? intervalMs : intervalMs * (this.fanoutSweepPolls.get(connectionId) ?? 1);
+  }
+
   private freshReshardShards(
     clusterKey: string,
     timestamp: number,
     intervalMs: number,
   ): ReshardShardSnapshot[] {
     const shards = new Map<string, ReshardShardSnapshot>();
-    for (const snapshot of this.reshardSnapshot.values()) {
+    for (const [key, snapshot] of this.reshardSnapshot) {
       if (snapshot.clusterKey !== clusterKey) continue;
-      if (timestamp - snapshot.timestamp > RESHARD_STALE_POLLS * intervalMs) continue;
+      const readEveryMs = this.reshardReadIntervalMs(key, intervalMs);
+      if (timestamp - snapshot.timestamp > RESHARD_STALE_POLLS * readEveryMs) continue;
       shards.set(snapshot.shardId, snapshot);
     }
     return [...shards.values()];
@@ -12116,7 +12128,12 @@ export class AnomalyService
     }
     for (const windows of series.values()) windows.sort((a, b) => a.end - b.end);
     const now = Date.now();
-    const staleAfterMs = divergenceWindowMs(this.getIntervalMs());
+    const nodeStates = new Set(
+      keys.filter((key) => key !== connectionId).flatMap((key) => this.divergenceState.get(key) ?? []),
+    );
+    const staleAfterOf = (state: DivergenceConnectionState | undefined) =>
+      divergenceWindowMs(state && nodeStates.has(state) ? this.nodeReadIntervalMs(connectionId) : this.getIntervalMs());
+    const staleAfterMs = Math.max(...[undefined, ...states].map(staleAfterOf));
     const orphaned = new Set(keys.flatMap((key) => [...(this.divergenceOrphans.get(key)?.keys() ?? [])]));
     const reachesNow = endTime >= now - staleAfterMs;
     return [...series.entries()]
@@ -12127,7 +12144,7 @@ export class AnomalyService
           state,
           replica,
           now,
-          staleAfterMs,
+          staleAfterOf(state),
           reachesNow ? windows[windows.length - 1] : undefined,
         );
         const level = observed === 'none' && orphaned.has(replica) ? 'behind' : observed;
@@ -12345,7 +12362,11 @@ export class AnomalyService
       }
 
       const windowsBefore = state.closedWindowCount;
-      const observed = observeDivergence(state, sample, divergenceWindowMs(this.getIntervalMs()));
+      const observed = observeDivergence(
+        state,
+        sample,
+        divergenceWindowMs(nodeAddr ? this.nodeReadIntervalMs(ctx.connectionId) : this.getIntervalMs()),
+      );
       const windowClosed = state.closedWindowCount > windowsBefore;
       const samples = windowClosed
         ? await this.sampleReplicas(ctx, replicasToSample(state, observed), !nodeAddr, readPrimary)
@@ -13019,7 +13040,7 @@ export class AnomalyService
       return;
     }
 
-    const { due: targets } = this.fanoutRotation.pick(
+    const { due: targets, sweepPolls } = this.fanoutRotation.pick(
       ctx.connectionId,
       readable,
       (t) => t.addr,
@@ -13029,6 +13050,7 @@ export class AnomalyService
     // Primaries waiting their turn count as their last read left them: checked,
     // failed, or not read yet. A takeover is counted by its holder until a read
     // here succeeds.
+    this.fanoutSweepPolls.set(ctx.connectionId, sweepPolls);
     const due = new Set(targets);
     const waiting = { checked: 0, failed: 0, authFailed: 0, skipped: 0 };
     for (const target of readable) {
