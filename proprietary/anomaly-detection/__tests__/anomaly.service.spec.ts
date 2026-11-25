@@ -6605,6 +6605,21 @@ describe('AnomalyService', () => {
 
         expect(hotSkews().map((e) => e.resolved)).toEqual([false]);
       });
+
+      it('keeps an open skew of a waiting primary through a poll whose fan-out failed', async () => {
+        migrating = (i) => i === HOT;
+        fillLaneWithOthers();
+        for (let i = 0; i < 12 && hotSkews().length === 0; i += 1) await pollOnce();
+        const reads = hotReads.size;
+        while (hotReads.size === reads) await pollOnce();
+        await pollOnce();
+        jest.spyOn(service as any, 'persistPendingDivergenceWindows').mockRejectedValueOnce(new Error('db down'));
+
+        await pollOnce();
+        await pollOnce();
+
+        expect(hotSkews().map((e) => e.resolved)).toEqual([false]);
+      });
     });
 
     describe('with only the seed registered', () => {
@@ -25860,6 +25875,20 @@ describe('AnomalyService', () => {
             sweepPolls: 1,
           });
           expect(prometheusService.updateFanoutSweep).toHaveBeenLastCalledWith('conn-1', null);
+        });
+
+        it('sizes node windows to one poll again while every primary is flagged down', async () => {
+          discovery();
+          const targets = primaries(2 * TOPOLOGY_TARGET_LIMIT + 2);
+          const members = new Set(targets.map((t) => t.addr));
+          const key = `conn-1@${targets[0].addr}`;
+          await poll(targets, 1, T0, members);
+          const whileRotating = (service as any).nodeReadIntervalMs('conn-1', key);
+
+          await poll([], 1, T0 + 10_000, members);
+
+          expect(whileRotating).toBe(3 * (service as any).getIntervalMs());
+          expect((service as any).nodeReadIntervalMs('conn-1', key)).toBe((service as any).getIntervalMs());
         });
 
         it('counts a primary that was flagged down as not read until it is read again', async () => {

@@ -13115,7 +13115,8 @@ export class AnomalyService
     const readable = claimed.filter(
       (t) => (this.topologyBackoff.get(topologyStateKey(ctx.connectionId, t.addr))?.until ?? 0) <= now,
     );
-    const backedOffTargets = claimed.filter((t) => !readable.includes(t) && !takeovers.has(t.addr));
+    const inRotation = new Set(readable.map((t) => t.addr));
+    const backedOffTargets = claimed.filter((t) => !inRotation.has(t.addr) && !takeovers.has(t.addr));
     const backedOff = backedOffTargets.length;
     // A primary backing off after refusing the credentials still counts as
     // refusing them, not as unreachable.
@@ -13126,7 +13127,7 @@ export class AnomalyService
     // the previous cycle's counts in place.
     if (readable.length === 0) coverage(0, backedOff - backedOffAuth + down, backedOffAuth);
     for (const target of claimed) {
-      if (!readable.includes(target)) this.topologyTargetClaims.releaseTarget(ctx.connectionId, target.addr);
+      if (!inRotation.has(target.addr)) this.topologyTargetClaims.releaseTarget(ctx.connectionId, target.addr);
     }
     for (const key of this.divergenceKeysOf(ctx.connectionId)) {
       if (key !== ctx.connectionId && !active.has(key)) {
@@ -13153,7 +13154,6 @@ export class AnomalyService
     this.forgetNodeWriteP99(ctx.connectionId, active);
     // A primary waiting its turn in the rotation keeps its signals and its
     // reshard view; only one that cannot be read at all loses them.
-    const inRotation = new Set(readable.map((t) => t.addr));
     for (const addr of kept) {
       const key = topologyStateKey(ctx.connectionId, addr);
       if (!inRotation.has(addr) && this.reshardSnapshot.has(key)) this.reshardMissedReads.add(key);
@@ -13192,6 +13192,7 @@ export class AnomalyService
       throw err;
     }
     if (readable.length === 0) {
+      this.fanoutSweepPolls.delete(ctx.connectionId);
       if (backedOff === 0 && (this.topologyFanoutUnreachable.get(ctx.connectionId) ?? 0) > 0) {
         this.logger.log(
           `Node fan-out for ${ctx.connectionName}: no reachable primaries left to check.`,
