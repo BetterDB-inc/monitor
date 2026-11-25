@@ -47,6 +47,7 @@ export async function monitorSession(baseUrl) {
     save();
     return res;
   };
+  call.cookieHeader = () => Array.from(jar, ([name, value]) => `${name}=${value}`).join('; ');
 
   if (jar.size > 0) {
     const session = await call('/api/auth/get-session');
@@ -63,4 +64,12 @@ export async function monitorSession(baseUrl) {
   }
   if (!res.ok) throw new Error(`monitor sign-in failed: ${res.status} ${await res.text()}`);
   return call;
+}
+
+/** The session's Cookie header, for a WebSocket upgrade (the CLI) that cannot go through fetch. */
+export async function monitorCookie(baseUrl) {
+  const call = await monitorSession(baseUrl);
+  // A round trip refreshes the jar; the cookie is what call() would send next.
+  await call('/api/auth/get-session');
+  return call.cookieHeader();
 }

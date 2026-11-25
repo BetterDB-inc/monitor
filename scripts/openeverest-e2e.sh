@@ -233,6 +233,44 @@ wait_for_agents() {
   die "expected $want agent connections, still $remaining"
 }
 
+log "Checking ACL LIST through the CLI redacts password hashes"
+acl_list="$(node scripts/e2e/cli-command.mjs "http://localhost:$MONITOR_PORT" "$first_id" ACL LIST)"
+printf '%s\n' "$acl_list" | cut -c1-300
+printf '%s' "$acl_list" | grep -qE '#[0-9a-f]{64}' && die "ACL LIST leaked a password hash through the CLI"
+printf '%s' "$acl_list" | grep -q '#<redacted>' || die "ACL LIST through the CLI shows no redacted hash: $acl_list"
+
+log "Checking the settings cannot be changed through the plugin API"
+code="$(plugin settings-put | head -n1)"
+[ "$code" = "405" ] || die "PUT /api/settings answered $code, expected 405"
+
+log "Seeding keys and checking a replica serves keyed reads (READONLY)"
+# valkey-cli in a throwaway pod with the instance's own connection Secret; -c follows MOVED while writing.
+kubectl -n "$DB_NAMESPACE" delete pod seed --ignore-not-found >/dev/null 2>&1 || true
+kubectl -n "$DB_NAMESPACE" run seed --rm -i --restart=Never --image=valkey/valkey:9.0 --quiet \
+  --overrides="{\"spec\":{\"containers\":[{\"name\":\"seed\",\"image\":\"valkey/valkey:9.0\",\"command\":[\"sh\",\"-c\",\"for i in \$(seq 1 120); do valkey-cli --tls --cacert /conn/ca.crt --cert /conn/tls.crt --key /conn/tls.key -h \$HOST -p 6379 -a \$PASSWORD --no-auth-warning -c SET e2e:key\$i value\$i >/dev/null || exit 1; done; echo seeded\"],\"env\":[{\"name\":\"HOST\",\"valueFrom\":{\"secretKeyRef\":{\"name\":\"$INSTANCE-conn\",\"key\":\"host\"}}},{\"name\":\"PASSWORD\",\"valueFrom\":{\"secretKeyRef\":{\"name\":\"$INSTANCE-conn\",\"key\":\"password\"}}}],\"volumeMounts\":[{\"name\":\"conn\",\"mountPath\":\"/conn\"}]}],\"volumes\":[{\"name\":\"conn\",\"secret\":{\"secretName\":\"$INSTANCE-conn\"}}]}}" \
+  | grep -q seeded || die "seeding keys failed"
+replica_pod="$(plugin status | tail -n +2 | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const n=JSON.parse(s).status.nodes.find(n=>n.role==="replica");process.stdout.write(n?n.name:"")})')"
+[ -n "$replica_pod" ] || die "no replica node in the plugin status"
+replica_id="$(grep "\"name\":\"$DB_NAMESPACE/$INSTANCE/$replica_pod\"" "$connections_file" | head -n1 | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).id))')"
+[ -n "$replica_id" ] || die "no Monitor connection for replica $replica_pod"
+# The CLI parser keeps the content of a single-quoted token, so the JSON option survives.
+analytics="$(node scripts/e2e/cli-command.mjs "http://localhost:$MONITOR_PORT" "$replica_id" "COLLECT_KEY_ANALYTICS '{\"sampleSize\":200,\"scanBatchSize\":100}'")"
+printf '%s' "$analytics" | node -e '
+  let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
+    const reply = JSON.parse(s);
+    if (reply.type !== "result") { console.error("key analytics on the replica failed: " + JSON.stringify(reply)); process.exit(1); }
+    const r = JSON.parse(reply.result);
+    const measured = (r.keyDetails || []).filter(k => k.memoryBytes !== null).length;
+    console.log(`replica ${process.argv[1]}: scanned ${r.scanned} keys, ${measured} with MEMORY USAGE served`);
+    if (r.scanned === 0 || measured === 0) { console.error("keyed reads on the replica were not served (MOVED?)"); process.exit(1); }
+  })' "$replica_pod" || die "replica keyed read check failed"
+
+log "Checking the NetworkPolicy's from-selector matches a running everest-server pod"
+selector="$(kubectl -n "$OE_NAMESPACE" get networkpolicy betterdb-openeverest -o json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const m=JSON.parse(s).spec.ingress[0].from[0].podSelector.matchLabels;process.stdout.write(Object.entries(m).map(([k,v])=>k+"="+v).join(","))})')"
+matched="$(kubectl -n "$OE_NAMESPACE" get pods -l "$selector" --field-selector=status.phase=Running --no-headers | wc -l)"
+echo "selector $selector matches $matched running pod(s)"
+[ "$matched" -ge 1 ] || die "the NetworkPolicy selector matches no everest-server pod"
+
 log "Restarting the plugin pod and checking the opt-in survives, then disabling"
 kubectl -n "$OE_NAMESPACE" rollout restart deploy/betterdb-openeverest >/dev/null
 kubectl -n "$OE_NAMESPACE" rollout status deploy/betterdb-openeverest --timeout=180s >/dev/null

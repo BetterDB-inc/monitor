@@ -33,3 +33,22 @@ for (const pattern of ['requirepass', 'masterauth', '*']) {
   if (pattern === '*' && values.maxmemory === undefined) throw new Error('CONFIG GET * lost the non-secret parameters');
   console.log(`CONFIG GET ${pattern}: credentials redacted (${Object.keys(values).length} parameters)`);
 }
+
+// ACL LIST carries #<sha256> password hashes; a read-only connection must not.
+const acl = await call('/api/metrics/acl/list', { headers });
+if (acl.status === 404) {
+  console.log('ACL LIST: no HTTP route, checked through the CLI instead');
+} else {
+  if (!acl.ok) throw new Error(`ACL LIST failed: ${acl.status} ${await acl.text()}`);
+  const rules = await acl.json();
+  const text = JSON.stringify(rules);
+  if (/#[0-9a-f]{64}/i.test(text)) throw new Error(`ACL LIST leaked a password hash on read-only connection ${connectionId}`);
+  if (!/#<redacted>|nopass/.test(text)) throw new Error(`ACL LIST returned no rules to check: ${text.slice(0, 200)}`);
+  console.log(`ACL LIST: hashes redacted (${Array.isArray(rules) ? rules.length : '?'} rules)`);
+}
+
+// ACL LOG RESET is a mutation too, and the refusal must be a 403 like the others.
+const aclReset = await call('/api/metrics/acl/log', { method: 'DELETE', headers });
+const aclBody = await aclReset.text();
+if (aclReset.status !== 403 || !/read-only/i.test(aclBody)) throw new Error(`ACL LOG RESET was not refused with 403: ${aclReset.status} ${aclBody}`);
+console.log(`ACL LOG RESET refused as expected: ${aclReset.status}`);

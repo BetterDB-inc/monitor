@@ -239,7 +239,8 @@ Facts learned while implementing that correct the plan above:
 - `status.connectionSecretRef` is an object `{name}`. provider-valkey always runs `cluster-enabled yes`, so per-node discovery is the only path; the agent's single-node fallback is for other sources.
 - Node identity uses the Valkey cluster node id (stable in `nodes.conf` on the volume), with the pod name from reverse DNS for display. Pod IPs change on restart, so they are not part of the identity.
 - Connection ids are scoped by the agent token's **name**, not its id: tokens have no owner today, and the name is the handle an admin controls. Rotating a token under the same name keeps the ids; a token under another name cannot take a node over. Identities are validated on arrival and capped at 512 per token.
-- Read-only connections redact `requirepass`, `masterauth`/`primaryauth` and the TLS passphrases in `CONFIG GET` replies (agent and Monitor both), rather than denying `CONFIG GET`, so the Monitor's own config reads keep working.
+- Read-only connections redact `requirepass`, `masterauth`/`primaryauth` and the TLS passphrases in `CONFIG GET` replies and the password hashes in `ACL LIST`/`ACL GETUSER` (agent and Monitor both), rather than denying the commands, so the Monitor's own config and ACL views keep working.
+- The Monitor answers a registered hello with a `welcome` message (`identity`, `readOnly`, `serverVersion`). An identified agent that gets none within 15s is talking to a Monitor from before this PR (which would register every node under the token's id); it stops reconnecting and reports "BetterDB server too old: needs Monitor 0.57.0 or later, or BetterDB Cloud". Cluster replicas run with `READONLY` so keyed reads are served locally.
 
 ### TODO (out of scope of the first PR)
 

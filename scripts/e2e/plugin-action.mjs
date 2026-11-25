@@ -7,9 +7,9 @@
 import process from 'node:process';
 
 const [base, password, namespace, instance, action, flag] = process.argv.slice(2);
-const routes = { on: ['POST', 'enable'], off: ['POST', 'disable'], status: ['GET', 'status'] };
+const routes = { on: ['POST', 'enable'], off: ['POST', 'disable'], status: ['GET', 'status'], 'settings-put': ['PUT', null] };
 if (!base || !password || !namespace || !instance || !routes[action]) {
-  throw new Error('usage: plugin-action.mjs <base> <password> <namespace> <instance> <on|off|status> [--forged]');
+  throw new Error('usage: plugin-action.mjs <base> <password> <namespace> <instance> <on|off|status|settings-put> [--forged]');
 }
 const [method, segment] = routes[action];
 
@@ -26,7 +26,14 @@ if (flag !== '--forged') {
 }
 
 // Single cluster "main" in alpha.1; the proxy strips this prefix for the backend.
-const path = `/v1/clusters/main/plugins/betterdb/api/instances/main/${encodeURIComponent(namespace)}/${encodeURIComponent(instance)}/${segment}`;
-const res = await fetch(`${base}${path}`, { method, headers: { Authorization: `Bearer ${token}` } });
+const plugin = '/v1/clusters/main/plugins/betterdb';
+// settings-put tries to change the BetterDB URL and token; the backend must refuse (405).
+const path = segment === null
+  ? `${plugin}/api/settings`
+  : `${plugin}/api/instances/main/${encodeURIComponent(namespace)}/${encodeURIComponent(instance)}/${segment}`;
+const init = segment === null
+  ? { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ url: 'wss://attacker.example/agent/ws', token: 'x' }) }
+  : { method, headers: { Authorization: `Bearer ${token}` } };
+const res = await fetch(`${base}${path}`, init);
 console.log(res.status);
 console.log(await res.text());
