@@ -12,6 +12,12 @@ test('even shards cover every slot once', () => {
   assert.equal(shards[5].slots[1], TOTAL_SLOTS - 1);
 });
 
+test('even shards get distinct 40-character node ids', () => {
+  const ids = evenShards(12).map(({ nodeId }) => nodeId);
+  assert.equal(new Set(ids).size, 12);
+  assert.ok(ids.every((id) => id.length === 40));
+});
+
 test('counters grow with the modelled rate', () => {
   const model = b2Model();
   const owner = ownerOf(model, 9189);

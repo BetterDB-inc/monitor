@@ -24,7 +24,7 @@ export interface LoadModel {
 export function evenShards(count: number): ModelShard[] {
   const size = Math.floor(TOTAL_SLOTS / count);
   return Array.from({ length: count }, (_, index) => ({
-    nodeId: `node${index + 1}`.padEnd(40, '0'),
+    nodeId: `node${String(index + 1).padStart(36, '0')}`,
     address: `10.0.0.${index + 1}:6379`,
     slots: [index * size, index === count - 1 ? TOTAL_SLOTS - 1 : (index + 1) * size - 1] as const,
   }));
