@@ -42,6 +42,7 @@ import type {
   ReadinessDimension,
   ReadinessDimensionKey,
   ScalingReadinessSettings,
+  PlacementPolicy,
   SessionNamespace,
   KvCacheEngineSample,
   KvCacheEngineSource,
@@ -856,6 +857,9 @@ export interface StoragePort {
   pruneOldScalingReadinessScores(cutoffTimestamp: number, connectionId?: string): Promise<number>;
   getScalingReadinessSettings(connectionId: string): Promise<ScalingReadinessSettings | null>;
   saveScalingReadinessSettings(settings: ScalingReadinessSettings): Promise<ScalingReadinessSettings>;
+
+  getPlacementPolicy(connectionId: string): Promise<PlacementPolicy | null>;
+  savePlacementPolicy(policy: PlacementPolicy): Promise<PlacementPolicy>;
   saveKvCacheFootprintSnapshot(snapshot: KvCacheFootprintSnapshot): Promise<void>;
   getKvCacheFootprintSnapshots(query: KvCacheFootprintQuery): Promise<KvCacheFootprintSnapshot[]>;
   pruneOldKvCacheFootprintSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number>;
