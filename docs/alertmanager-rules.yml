@@ -17,6 +17,18 @@
 # The chart ships a byte-identical copy at
 # charts/betterdb-monitor/files/alert-rules.yaml. Edit this file, then run
 # `node scripts/sync-chart-observability.mjs` to refresh the copy.
+#
+# Known limitation (lazily created counters): rules of the form
+#   (m unless m offset W) or increase(m[W])
+# count a counter series on its first appearance. If a scrape gap covers the
+# `offset W` lookup (Prometheus or monitor unreachable longer than W), the left
+# side returns the counter's lifetime total when the series reappears, so the
+# rule can fire for up to W afterwards even if no new event occurred. Affected:
+# BetterDBCriticalAnomaly, BetterDBWarningSpike, BetterDBMemoryPressure,
+# BetterDBAuthAnomaly, BetterDBConnectionLeak, BetterDBTrafficBurst.
+# A monitor restart resets the counters, so this only applies to events seen
+# since the monitor process started. No PromQL-only expression can tell a
+# returning series from a new one across an unbounded gap.
 groups:
   - name: betterdb-anomaly-alerts
     rules:
@@ -179,7 +191,7 @@ groups:
       # grew by more than 100 MiB over the last hour. Tune the threshold to
       # your workload; see docs/prometheus-metrics.md for the static variant.
       - alert: BetterDBKeyMemoryGrowth
-        expr: delta(max_over_time(betterdb_key_memory_bytes[15m])[1h:5m]) > 104857600
+        expr: betterdb_key_memory_bytes - betterdb_key_memory_bytes offset 1h > 104857600
         for: 10m
         labels:
           severity: warning

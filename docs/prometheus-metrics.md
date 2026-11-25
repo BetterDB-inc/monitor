@@ -1023,15 +1023,14 @@ for: 30m
 **BetterDBKeyMemoryGrowth** - A tracked key ballooning in size (requires Pro key analytics; 104857600 = 100 MiB growth over an hour — tune to your workload)
 
 ```promql
-delta(max_over_time(betterdb_key_memory_bytes[15m])[1h:5m]) > 104857600
+betterdb_key_memory_bytes - betterdb_key_memory_bytes offset 1h > 104857600
 for: 10m
 ```
 
-> This is a growth rule, matching the name: the inner `max_over_time[15m]`
-> smooths a single key's series, and the outer `delta(...[1h:5m])` measures how
-> much it grew over the last hour — so it fires on a key that *balloons*, not on
-> one that is merely large. (For a static "this key is too big" alert instead,
-> drop the `delta` and compare `max_over_time(betterdb_key_memory_bytes[15m])`
+> This is a growth rule, matching the name: it compares the latest sample with
+> the value one hour earlier, so a short spike that has already receded does not
+> fire, and it catches a key that *balloons*, not one that is merely large. (For
+> a static "this key is too big" alert instead, compare `betterdb_key_memory_bytes`
 > to an absolute threshold, and rename it, e.g. `BetterDBLargeKey`.)
 >
 > It alerts on `betterdb_key_memory_bytes` (a specific tracked key), not
@@ -1040,16 +1039,19 @@ for: 10m
 > run can pick a different key and the value jumps with no real growth.
 >
 > **Key names reach your alert receivers.** The alert keeps the `key` label and
-> names the key in its summary, so Alertmanager passes key names to whatever
-> receives it (Slack, PagerDuty, email). If key names can carry user
-> identifiers, rewrite the `key` label with Prometheus `alert_relabel_configs`
-> (and drop it from the summary) before enabling this rule.
+> renders it in its `summary` and `description` annotations, so Alertmanager
+> passes key names to whatever receives it (default PagerDuty details and email
+> templates include annotations). If key names can carry user identifiers, do
+> both before enabling this rule:
 >
-> Because `delta()` is the difference between the first and last samples *within
-> the window*, a key that simply enters the tracked top-N at a steady large size
-> has a delta near zero and does not trip this rule — only actual growth within
-> the window does. To also catch keys that are already large but not growing, use
-> the absolute-size variant above (`BetterDBLargeKey`).
+> 1. Rewrite or drop the `key` label with Prometheus `alert_relabel_configs`.
+> 2. Remove `{{ $labels.key }}` from the `summary` and `description`. Relabeling
+>    does not change annotations, because they are rendered at rule evaluation.
+>    Copy the rule into your own rule group without the key in its annotations
+>    and do not load the shipped copy. (The Helm chart cannot disable a single
+>    shipped rule, and `metrics.prometheusRule.additionalGroups` only appends
+>    groups, so with the chart turn `metrics.prometheusRule.enabled` off and load
+>    your own PrometheusRule.)
 
 **BetterDBRepeatedFullResyncs** - Replicas keep needing full syncs instead of partial ones
 
