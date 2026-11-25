@@ -33,7 +33,10 @@ const CLUSTER_SUITE_EXCLUSION = "-- --exclude '**/*.cluster.integration.test.ts'
 /** Paths that cannot change the outcome of any test. */
 const INERT_PATHS = [/^docs\//, /\.md$/];
 
-const DOCS_READ_BY_TESTS = new Map([['docs/minimum-acl.md', 'api']]);
+const DOCS_READ_BY_TESTS = new Map([
+  ['docs/minimum-acl.md', 'api'],
+  ['docs/alertmanager-rules.yml', 'api'],
+]);
 
 function workspaceGlobs() {
   const raw = readFileSync(join(ROOT, 'pnpm-workspace.yaml'), 'utf8');
