@@ -258,11 +258,51 @@ describe('PlacementService', () => {
       expect(await service.withPlacementBlocker('seed', shards)).toEqual(shards);
     });
 
+    it('keeps the plan, not runnable, when the client of the seed is gone', async () => {
+      const { service, registry } = await setup({ env: { STORAGE_TYPE: 'memory' } });
+      registry.get.mockImplementation(() => {
+        throw new Error("Connection 'seed' not found");
+      });
+      const [marked] = await service.withPlacementBlocker('seed', [shard(plan({ available: true }))]);
+      expect(marked.rebalance).toMatchObject({ kind: 'plan', execution: { available: false } });
+      expect((marked.rebalance as RebalancePlan).execution?.blockedBy).toBeUndefined();
+    });
+
+    it('keeps the plan, not runnable, when the mode cannot be read', async () => {
+      const { service, storage } = await setup();
+      jest.spyOn(storage, 'getPlacementPolicy').mockRejectedValue(new Error('db down'));
+      const [marked] = await service.withPlacementBlocker('seed', [shard(plan({ available: true }))]);
+      expect(marked.rebalance).toMatchObject({ kind: 'plan', execution: { available: false } });
+    });
+
+    it('keeps the plan, not runnable, when the seed is being removed', async () => {
+      const { service } = await setup({ configs: {} });
+      const [marked] = await service.withPlacementBlocker('seed', [shard(plan({ available: true }))]);
+      expect(marked.rebalance).toMatchObject({ kind: 'plan', execution: { available: false } });
+    });
+
+    it('keeps an earlier blocker when the mode cannot be read', async () => {
+      const { service, storage } = await setup();
+      jest.spyOn(storage, 'getPlacementPolicy').mockRejectedValue(new Error('db down'));
+      const blocked = plan({ available: false, blockedBy: 'flag_off' });
+      const [marked] = await service.withPlacementBlocker('seed', [shard(blocked)]);
+      expect(marked.rebalance).toEqual(blocked);
+    });
+
     it('reads no support when there is no plan to mark', async () => {
       const { service, anomaly } = await setup();
       await service.withPlacementBlocker('seed', []);
       expect(anomaly.readPlacementPrimaries).not.toHaveBeenCalled();
     });
+  });
+
+  it('runs no plan when the client of the seed is gone after support was read', async () => {
+    const { service, registry } = await setup({ env: { STORAGE_TYPE: 'memory' } });
+    await service.getStatus('seed');
+    registry.get.mockImplementation(() => {
+      throw new Error("Connection 'seed' not found");
+    });
+    await expect(service.allowsRun('seed')).resolves.toBe(false);
   });
 
   it('fails for an unknown connection', async () => {

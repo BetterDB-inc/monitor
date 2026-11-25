@@ -19,6 +19,7 @@ import { WORKSPACE_CONFIG, type WorkspaceConfig } from '@app/auth/workspace-conf
 import { isManagedProviderBuild } from '@app/monitor/provider-detector';
 import { AnomalyService } from '../anomaly-detection/anomaly.service';
 import type { ServedHotShardDetail } from '../anomaly-detection/hot-shard-detector';
+import type { RebalanceExecution } from '../anomaly-detection/rebalance-planner';
 import { judgePlacementSupport, managedPlacementProvider } from './placement-support';
 import { placementBalance } from './placement-balance';
 
@@ -90,16 +91,13 @@ export class PlacementService {
     const runnable = (shard: ServedHotShardDetail) =>
       shard.rebalance?.kind === 'plan' && shard.rebalance.execution?.available === true;
     if (!shards.some(runnable)) return shards;
-    if ((await this.runningMode(this.seedOf(connectionId))) !== 'observe') return shards;
+    const mode = await this.readableMode(connectionId);
+    if (mode !== null && mode !== 'observe') return shards;
+    const execution: RebalanceExecution =
+      mode === 'observe' ? { available: false, blockedBy: 'observe_mode' } : { available: false };
     return shards.map((shard) =>
       runnable(shard) && shard.rebalance?.kind === 'plan'
-        ? {
-            ...shard,
-            rebalance: {
-              ...shard.rebalance,
-              execution: { available: false, blockedBy: 'observe_mode' },
-            },
-          }
+        ? { ...shard, rebalance: { ...shard.rebalance, execution } }
         : shard,
     );
   }
@@ -117,6 +115,14 @@ export class PlacementService {
     return config.membership?.seedId ?? connectionId;
   }
 
+  private async readableMode(connectionId: string): Promise<PlacementMode | null> {
+    try {
+      return await this.runningMode(this.seedOf(connectionId));
+    } catch {
+      return null;
+    }
+  }
+
   private async runningMode(seedId: string): Promise<PlacementMode> {
     const [mode, support] = await Promise.all([this.storedMode(seedId), this.support(seedId)]);
     return effectiveModeOf(mode, support);
@@ -125,9 +131,16 @@ export class PlacementService {
   private async storedMode(seedId: string): Promise<PlacementMode> {
     const stored = (await this.storage.getPlacementPolicy(seedId))?.mode;
     if (stored) return stored;
-    return this.memoryStorage() && this.registry.get(seedId).getCapabilities().clusterEnabled === true
-      ? 'recommend'
-      : PLACEMENT_DEFAULT_MODE;
+    return this.memoryStorage() && this.clusterEnabled(seedId) ? 'recommend' : PLACEMENT_DEFAULT_MODE;
+  }
+
+  private clusterEnabled(seedId: string): boolean {
+    if (!this.registry.getConfig(seedId)) return false;
+    try {
+      return this.registry.get(seedId).getCapabilities().clusterEnabled === true;
+    } catch {
+      return false;
+    }
   }
 
   private memoryStorage(): boolean {
