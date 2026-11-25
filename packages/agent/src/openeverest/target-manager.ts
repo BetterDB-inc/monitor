@@ -115,11 +115,23 @@ export class TargetManager implements PluginBackend {
   }
 
   async disable(ref: InstanceRef, authorization: string): Promise<InstanceView> {
-    // An instance that is already gone answers 404 on /connection; its
-    // opt-in must still be removable.
-    await this.authorize(ref, authorization, { allowMissing: !this.findInstance(ref) });
+    // An instance that is already gone answers 404 on /connection; its opt-in
+    // must still be removable. "Gone" can only be trusted once the instance
+    // informers have listed and the namespace is one they cover.
+    const missing = !this.findInstance(ref);
+    const trusted = this.instancesSynced() && this.namespaceWatched(ref.namespace);
+    await this.authorize(ref, authorization, { allowMissing: missing && trusted, notReady: missing && !this.instancesSynced() });
     await this.removeTarget(ref);
     return this.status(ref);
+  }
+
+  private instancesSynced(): boolean {
+    return this.instanceInformers.length > 0 && this.syncedInformers.size === this.instanceInformers.length;
+  }
+
+  private namespaceWatched(namespace: string): boolean {
+    const { watchNamespaces } = this.options.config;
+    return watchNamespaces.length === 0 || watchNamespaces.includes(namespace);
   }
 
   status(ref: InstanceRef): InstanceView {
@@ -141,13 +153,20 @@ export class TargetManager implements PluginBackend {
 
   // --- internals ---
 
-  private async authorize(ref: InstanceRef, authorization: string, options: { allowMissing?: boolean } = {}): Promise<void> {
+  private async authorize(
+    ref: InstanceRef,
+    authorization: string,
+    options: { allowMissing?: boolean; notReady?: boolean } = {},
+  ): Promise<void> {
     if (ref.cluster !== this.options.config.localCluster) {
       throw new HttpError(400, `this plugin runs in cluster "${this.options.config.localCluster}" and can only monitor its instances`);
     }
     const check = await this.options.everest.checkConnectionAccess(ref, authorization);
     if (check.ok) return;
     if (check.status === 404 && options.allowMissing) return;
+    if (check.status === 404 && options.notReady) {
+      throw new HttpError(503, 'the plugin has not finished listing instances yet, retry shortly');
+    }
     throw new HttpError(check.status, check.reason);
   }
 

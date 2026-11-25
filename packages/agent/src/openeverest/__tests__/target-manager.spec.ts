@@ -224,16 +224,35 @@ describe('TargetManager opt-ins', () => {
     await manager.stop();
   });
 
-  it('lets an opt-in be disabled when the instance is gone and /connection answers 404', async () => {
+  it('lets an opt-in be disabled when the instance is gone and /connection answers 404, once the informers have listed', async () => {
     const kube = new FakeKube();
     kube.configMap = { metadata: { name: 'targets', resourceVersion: '1' }, data: { main__db__orders: '{}' } };
     const { manager, everest } = build(kube, {}, 404);
-    // Not synced yet: the opt-in is still there and the instance unknown.
+    // Before start(): nothing listed yet, so "gone" cannot be trusted.
+    await expect(manager.disable(ORDERS, 'Bearer x')).rejects.toMatchObject({ status: 503 });
+    expect(kube.enabledKeys()).toEqual(['main__db__orders']);
+
+    await manager.start();
+    // The initial list prunes the orphan on its own; re-add an opt-in to disable by hand.
+    await flush();
+    kube.configMap = { metadata: { name: 'targets', resourceVersion: '9' }, data: { main__db__orders: '{}' } };
     const view = await manager.disable(ORDERS, 'Bearer x');
 
     expect(view.enabled).toBe(false);
     expect(kube.enabledKeys()).toEqual([]);
     expect(everest.checkConnectionAccess).toHaveBeenCalled();
+    await manager.stop();
+  });
+
+  it('does not take a 404 as "gone" for a namespace it does not watch', async () => {
+    const kube = new FakeKube();
+    kube.configMap = { metadata: { name: 'targets', resourceVersion: '1' }, data: {} };
+    const { manager } = build(kube, { watchNamespaces: ['databases'] }, 404);
+    await manager.start();
+    await flush();
+
+    await expect(manager.disable({ cluster: 'main', namespace: 'elsewhere', instance: 'x' }, 'Bearer x')).rejects.toMatchObject({ status: 404 });
+    await manager.stop();
   });
 
   it('still refuses to disable a present instance when the check fails', async () => {
