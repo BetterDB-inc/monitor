@@ -413,6 +413,8 @@ export interface FanoutCoverage {
   targetLimit: number;
   /** How long the connection takes to read every primary once. */
   sweepMs: number;
+  /** Polls one sweep takes: more than 1 while the primaries are read in rotation. */
+  sweepPolls: number;
   /** Per-primary connect and INFO timeout. */
   timeoutMs: number;
   timestamp: number;

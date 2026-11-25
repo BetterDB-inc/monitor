@@ -12877,7 +12877,8 @@ export class AnomalyService
     coverage: Pick<FanoutCoverage, FanoutCount | 'reason'>,
   ): void {
     const reading = coverage.reason === null;
-    const sweepMs = reading ? this.nodeReadIntervalMs(ctx.connectionId) : this.getIntervalMs();
+    const sweepPolls = reading ? (this.fanoutSweepPolls.get(ctx.connectionId) ?? 1) : 1;
+    const sweepMs = this.getIntervalMs() * sweepPolls;
     this.fanoutCoverage.set(ctx.connectionId, {
       connectionId: ctx.connectionId,
       topology,
@@ -12885,6 +12886,7 @@ export class AnomalyService
       tunnelled: !!this.connectionRegistry.getConfig(ctx.connectionId)?.sshTunnel?.enabled,
       targetLimit: TOPOLOGY_TARGET_LIMIT,
       sweepMs,
+      sweepPolls,
       timeoutMs: AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
       timestamp: Date.now(),
     });

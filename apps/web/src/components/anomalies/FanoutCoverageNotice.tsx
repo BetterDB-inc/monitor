@@ -212,11 +212,11 @@ function CoverageNotice({ coverage }: { coverage: FanoutCoverage | null | undefi
       return null;
   }
 
-  const { checked, unreachable, authFailed, skipped, targetLimit, sweepMs, timeoutMs } = coverage;
+  const { checked, unreachable, authFailed, skipped, targetLimit, sweepMs, sweepPolls, timeoutMs } = coverage;
   const total = checked + unreachable + authFailed + skipped;
   const failing = unreachable + authFailed > 0;
   const rotation =
-    total > targetLimit
+    sweepPolls > 1
       ? `This connection reads ${targetLimit} primaries per poll, in turn, so each is checked about every ${Math.round(sweepMs / 1000)} seconds. `
       : '';
   if (!failing && skipped === 0) {

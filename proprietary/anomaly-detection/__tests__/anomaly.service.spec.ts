@@ -25306,6 +25306,7 @@ describe('AnomalyService', () => {
                 tunnelled: false,
                 targetLimit: TOPOLOGY_TARGET_LIMIT,
                 sweepMs: (service as any).getIntervalMs(),
+                sweepPolls: 1,
                 timeoutMs: 2_000,
                 timestamp: T0,
                 ageMs: 0,
@@ -25425,6 +25426,7 @@ describe('AnomalyService', () => {
             tunnelled: false,
             targetLimit: TOPOLOGY_TARGET_LIMIT,
             sweepMs: (service as any).getIntervalMs(),
+            sweepPolls: 1,
             timeoutMs: 2_000,
             timestamp: T0,
             ageMs: 0,
@@ -25734,8 +25736,23 @@ describe('AnomalyService', () => {
 
           await poll(primaries(TOPOLOGY_TARGET_LIMIT + 3), 1, T0);
 
-          expect(latest().sweepMs).toBe(2 * interval);
+          expect(latest()).toMatchObject({ sweepMs: 2 * interval, sweepPolls: 2 });
           expect(prometheusService.updateFanoutSweep).toHaveBeenLastCalledWith('conn-1', 2 * interval);
+        });
+
+        it('reports one poll per sweep when only down primaries take it past the budget', async () => {
+          discovery();
+          const targets = primaries(TOPOLOGY_TARGET_LIMIT - 4);
+          const down = Array.from({ length: 6 }, (_, i) => `10.9.9.${i}:6379`);
+
+          await poll(targets, 1, T0, new Set([...targets.map((t) => t.addr), ...down]));
+
+          expect(latest()).toMatchObject({
+            checked: TOPOLOGY_TARGET_LIMIT - 4,
+            unreachable: 6,
+            sweepMs: (service as any).getIntervalMs(),
+            sweepPolls: 1,
+          });
         });
 
         it('stops exporting the sweep of a connection with no primary to read', async () => {
@@ -25744,7 +25761,11 @@ describe('AnomalyService', () => {
 
           await poll([], 1, T0 + 10_000);
 
-          expect(latest()).toMatchObject({ reason: 'no_targets', sweepMs: (service as any).getIntervalMs() });
+          expect(latest()).toMatchObject({
+            reason: 'no_targets',
+            sweepMs: (service as any).getIntervalMs(),
+            sweepPolls: 1,
+          });
           expect(prometheusService.updateFanoutSweep).toHaveBeenLastCalledWith('conn-1', null);
         });
 
