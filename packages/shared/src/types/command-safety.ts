@@ -187,9 +187,55 @@ export function redactConfigGetReply(reply: unknown): unknown {
   return reply;
 }
 
-/** True for `CONFIG GET ...`, the one read whose reply needs redactConfigGetReply. */
-export function isConfigGet(command: string, args?: readonly string[]): boolean {
-  return command.toUpperCase() === 'CONFIG' && args?.[0]?.toUpperCase() === 'GET';
+const ACL_HASH_TOKEN = /(^|\s)#[0-9a-f]{64}(?=\s|$)/gi;
+const ACL_PASSWORD_TOKEN = /(^|\s)[><][^\s]+/g;
+const ACL_HASH = /^[0-9a-f]{64}$/i;
+
+/** One ACL rule string (`ACL LIST` line, `ACL GETUSER` flags): hashes and passwords redacted. */
+function redactAclRule(rule: string): string {
+  return rule.replace(ACL_HASH_TOKEN, '$1#<redacted>').replace(ACL_PASSWORD_TOKEN, (match) => `${match[0] === ' ' ? ' ' : ''}${match.trim()[0]}<redacted>`);
+}
+
+function redactAclList(reply: unknown): unknown {
+  return Array.isArray(reply) ? reply.map((line) => (typeof line === 'string' ? redactAclRule(line) : line)) : reply;
+}
+
+// ACL GETUSER: a flat [field, value, ...] array (RESP2) or an object (RESP3);
+// `passwords` holds the hashes, and the flags/commands fields are rule text.
+function redactAclGetUser(reply: unknown): unknown {
+  const redactValue = (field: unknown, value: unknown): unknown => {
+    if (field === 'passwords' && Array.isArray(value)) {
+      return value.map((hash) => (typeof hash === 'string' && ACL_HASH.test(hash) ? '<redacted>' : hash));
+    }
+    return typeof value === 'string' ? redactAclRule(value) : value;
+  };
+  if (Array.isArray(reply)) {
+    if (reply.length % 2 !== 0) return reply;
+    const out = reply.slice();
+    for (let i = 0; i + 1 < out.length; i += 2) out[i + 1] = redactValue(out[i], out[i + 1]);
+    return out;
+  }
+  if (reply !== null && typeof reply === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [field, value] of Object.entries(reply as Record<string, unknown>)) out[field] = redactValue(field, value);
+    return out;
+  }
+  return reply;
+}
+
+/**
+ * Strips credentials from the replies a read-only agent connection may carry:
+ * CONFIG GET values (see redactConfigGetReply), the password hashes in ACL
+ * LIST rules and the `passwords` of ACL GETUSER. Every other reply passes
+ * through untouched, so the Monitor's ACL and config views keep working.
+ */
+export function redactSensitiveReply(command: string, args: readonly string[] | undefined, reply: unknown): unknown {
+  const cmd = command.toUpperCase();
+  const sub = args?.[0]?.toUpperCase();
+  if (cmd === 'CONFIG' && sub === 'GET') return redactConfigGetReply(reply);
+  if (cmd === 'ACL' && sub === 'LIST') return redactAclList(reply);
+  if (cmd === 'ACL' && sub === 'GETUSER') return redactAclGetUser(reply);
+  return reply;
 }
 
 /**

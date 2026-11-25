@@ -1,4 +1,34 @@
-import { checkAgentReadOnly, isConfigGet, redactConfigGetReply, AGENT_READ_ONLY_MESSAGE } from '@betterdb/shared';
+import { checkAgentReadOnly, redactConfigGetReply, redactSensitiveReply, AGENT_READ_ONLY_MESSAGE } from '@betterdb/shared';
+
+describe('redactSensitiveReply', () => {
+  const hash = 'a'.repeat(64);
+
+  it('redacts password hashes and plaintext passwords in ACL LIST rules, keeping the rest', () => {
+    expect(redactSensitiveReply('ACL', ['LIST'], [
+      `user default on #${hash} ~* &* +@all`,
+      'user monitor on nopass ~* resetchannels -@all +@read',
+      `user app on #${hash} #${'b'.repeat(64)} >plain ~app:* +get`,
+    ])).toEqual([
+      'user default on #<redacted> ~* &* +@all',
+      'user monitor on nopass ~* resetchannels -@all +@read',
+      'user app on #<redacted> #<redacted> ><redacted> ~app:* +get',
+    ]);
+  });
+
+  it('redacts the passwords of ACL GETUSER in both reply shapes', () => {
+    expect(redactSensitiveReply('acl', ['getuser', 'default'], ['flags', ['on'], 'passwords', [hash], 'commands', '+@all', 'keys', '~*']))
+      .toEqual(['flags', ['on'], 'passwords', ['<redacted>'], 'commands', '+@all', 'keys', '~*']);
+    expect(redactSensitiveReply('ACL', ['GETUSER', 'default'], { flags: ['on'], passwords: [hash], keys: '~*' }))
+      .toEqual({ flags: ['on'], passwords: ['<redacted>'], keys: '~*' });
+  });
+
+  it('routes CONFIG GET to the config redaction and leaves other replies alone', () => {
+    expect(redactSensitiveReply('config', ['get', '*'], ['requirepass', 'p'])).toEqual(['requirepass', '<redacted>']);
+    expect(redactSensitiveReply('ACL', ['USERS'], ['default', 'app'])).toEqual(['default', 'app']);
+    expect(redactSensitiveReply('ACL', ['LOG', '10'], [['count', 1]])).toEqual([['count', 1]]);
+    expect(redactSensitiveReply('INFO', ['server'], 'redis_version:7')).toBe('redis_version:7');
+  });
+});
 
 describe('redactConfigGetReply', () => {
   it('redacts every credential parameter in a flat reply and keeps the rest', () => {
@@ -16,11 +46,6 @@ describe('redactConfigGetReply', () => {
     expect(redactConfigGetReply(['odd'])).toEqual(['odd']);
   });
 
-  it('identifies CONFIG GET case-insensitively and nothing else', () => {
-    expect(isConfigGet('config', ['get', '*'])).toBe(true);
-    expect(isConfigGet('CONFIG', ['SET', 'x', 'y'])).toBe(false);
-    expect(isConfigGet('INFO', ['server'])).toBe(false);
-  });
 });
 
 describe('checkAgentReadOnly', () => {

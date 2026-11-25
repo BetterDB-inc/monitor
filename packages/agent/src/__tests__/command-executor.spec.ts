@@ -203,6 +203,17 @@ describe('CommandExecutor read-only', () => {
     expect(await plain.execute('CONFIG', ['GET', '*'])).toEqual(['requirepass', 's3cret', 'maxmemory', '0', 'masterauth', 's3cret']);
   });
 
+  it('redacts password hashes from ACL LIST replies', async () => {
+    const hash = 'd'.repeat(64);
+    const call = jest.fn().mockResolvedValue([`user default on #${hash} ~* +@all`, 'user ro on nopass ~* +@read']);
+    const client = { call, config: jest.fn(), info: jest.fn() } as unknown as Valkey;
+
+    expect(await new CommandExecutor(client, { readOnly: true }).execute('ACL', ['LIST']))
+      .toEqual(['user default on #<redacted> ~* +@all', 'user ro on nopass ~* +@read']);
+    expect(await new CommandExecutor(client, {}).execute('ACL', ['LIST']))
+      .toEqual([`user default on #${hash} ~* +@all`, 'user ro on nopass ~* +@read']);
+  });
+
   it('allows the RESET sub-commands when not read-only, as before', async () => {
     const { executor, call } = executorWith({});
 

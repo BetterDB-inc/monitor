@@ -91,6 +91,21 @@ describe('AgentDatabaseAdapter read-only', () => {
     expect(await adapter.getConfigValue('maxmemory')).toBe('0');
   });
 
+  it('redacts password hashes from ACL LIST and ACL GETUSER on a read-only connection', async () => {
+    const socket = new FakeSocket();
+    const hash = 'c'.repeat(64);
+    socket.reply = (command) => (command.args[0].toUpperCase() === 'LIST'
+      ? [`user default on #${hash} ~* &* +@all`, 'user ro on nopass ~* +@read']
+      : ['flags', ['on'], 'passwords', [hash], 'keys', '~*']);
+    const hello = { valkey: { type: 'valkey', version: '8.1.0' }, capabilities: ['ACL'], readOnly: true, identity };
+    const adapter = new AgentDatabaseAdapter(socket as unknown as WebSocket, hello as never);
+
+    expect(await adapter.getAclList()).toEqual(['user default on #<redacted> ~* &* +@all', 'user ro on nopass ~* +@read']);
+    expect(await adapter.call('acl', ['list'], { cli: true })).toEqual(['user default on #<redacted> ~* &* +@all', 'user ro on nopass ~* +@read']);
+    // GETUSER is outside the read-only allowlist altogether.
+    await expect(adapter.call('ACL', ['GETUSER', 'default'], { cli: true })).rejects.toThrow('read-only');
+  });
+
   it('leaves CONFIG GET replies alone when the agent did not ask for read-only', async () => {
     const socket = new FakeSocket();
     socket.reply = () => ['requirepass', 'hunter2'];

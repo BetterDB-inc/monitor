@@ -1,6 +1,6 @@
 import Valkey from 'iovalkey';
 import type { KeyAnalyticsOptions, KeyDetail, KeyPatternData } from '@betterdb/shared';
-import { extractPattern, checkAgentReadOnly, checkBlocked, checkSafeMode, pruneKeyDetails, redactConfigGetReply, KEY_DETAILS_PRUNE_AT, STALE_KEY_IDLE_SECONDS } from '@betterdb/shared';
+import { extractPattern, checkAgentReadOnly, checkBlocked, checkSafeMode, pruneKeyDetails, redactSensitiveReply, KEY_DETAILS_PRUNE_AT, STALE_KEY_IDLE_SECONDS } from '@betterdb/shared';
 
 // OBJECT IDLETIME is rejected under an LFU maxmemory-policy and OBJECT FREQ
 // under any other; both errors name the LFU policy.
@@ -66,6 +66,12 @@ export class CommandExecutor {
       throw new Error(`Command not allowed: ${full}`);
     }
 
+    const reply = await this.run(upperCmd, args, binaryArgs);
+    // Read-only holds the admin user: never ship its password or hashes out.
+    return this.readOnly ? redactSensitiveReply(upperCmd, args, reply) : reply;
+  }
+
+  private async run(upperCmd: string, args?: string[], binaryArgs?: Record<string, Buffer>): Promise<unknown> {
     if (upperCmd === 'PING') {
       return this.client.ping();
     }
@@ -83,9 +89,7 @@ export class CommandExecutor {
     }
 
     if (upperCmd === 'CONFIG' && args) {
-      const reply = await this.client.config('GET', ...args.slice(1));
-      // Read-only holds the admin user: never ship requirepass/masterauth out.
-      return this.readOnly ? redactConfigGetReply(reply) : reply;
+      return this.client.config('GET', ...args.slice(1));
     }
 
     if (upperCmd === 'COLLECT_KEY_ANALYTICS' && args) {
