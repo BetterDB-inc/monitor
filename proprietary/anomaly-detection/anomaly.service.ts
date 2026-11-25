@@ -13140,12 +13140,16 @@ export class AnomalyService
       return;
     }
 
+    const alone = this.primariesWithoutSyncedReplica();
     const { due: targets, sweepPolls } = this.fanoutRotation.pick(
       ctx.connectionId,
       readable,
       (t) => t.addr,
       TOPOLOGY_TARGET_LIMIT,
-      (t) => this.needsEveryPoll(ctx.connectionId, t.addr),
+      (t) =>
+        this.needsEveryPoll(ctx.connectionId, t.addr) ||
+        alone.has(t.nodeId ?? '') ||
+        alone.has(this.primaryReplicaPaths.get(`node:${t.addr}`) ?? ''),
     );
     // Primaries waiting their turn count as their last read left them: checked,
     // failed, or not read yet. A takeover is counted by its holder until a read
@@ -13291,9 +13295,20 @@ export class AnomalyService
     }
   }
 
+  private primariesWithoutSyncedReplica(): Set<string> {
+    const alone = new Set<string>();
+    for (const [key, state] of this.primaryReplicaState) {
+      if (state.zeroSince === null && state.alerted === 'none') continue;
+      alone.add(key);
+      if (state.primaryId) alone.add(state.primaryId);
+    }
+    return alone;
+  }
+
   private needsEveryPoll(connectionId: string, addr: string): boolean {
     const key = topologyStateKey(connectionId, addr);
     const reshard = this.reshardSnapshot.get(key);
+    const skew = reshard ? reshardSkewSignature(reshard) : '';
     const retry = this.retryAmplificationState.get(key);
     const backlog = this.backlogCoverage.get(key);
     const cob = this.cobState.get(key);
@@ -13304,6 +13319,8 @@ export class AnomalyService
       !!this.adoptedNodeReshardEventIds.get(connectionId)?.has(addr) ||
       this.restoredCobLevel.has(key) ||
       (!!reshard && reshard.migratingSlots + reshard.importingSlots > 0) ||
+      !!this.reshardSkewFirstSeen.get(connectionId)?.has(skew) ||
+      !!this.reshardSkewEventIds.get(connectionId)?.has(skew) ||
       [...(this.divergenceState.get(key)?.replicas.values() ?? [])].some(
         (replica) => replica.level !== 'none' || !!replica.eventId || !!replica.disagreeEventId,
       ) ||

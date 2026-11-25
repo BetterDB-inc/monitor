@@ -25824,6 +25824,45 @@ describe('AnomalyService', () => {
                 }),
             ],
             ['a backoff that just ended', (state) => state.topologyBackoff.set(key, { failures: 1, until: T0 })],
+            [
+              'a reshard skew being judged',
+              (state) => {
+                state.reshardSnapshot.set(key, { shardId: 'shard-x', migratingSlots: 0, importingSlots: 0 });
+                state.reshardSkewFirstSeen.set('conn-1', new Map([['reshard_skew:shard-x', T0]]));
+              },
+            ],
+            [
+              'an open reshard skew event',
+              (state) => {
+                state.reshardSnapshot.set(key, { shardId: 'shard-x', migratingSlots: 0, importingSlots: 0 });
+                state.reshardSkewEventIds.set('conn-1', new Map([['reshard_skew:shard-x', 'evt-1']]));
+              },
+            ],
+            [
+              'no synced replica, before the alert',
+              (state) =>
+                state.primaryReplicaState.set('cluster-1:0-10', {
+                  primaryId: last.nodeId,
+                  zeroSince: T0,
+                  alerted: 'none',
+                }),
+            ],
+            [
+              'an open event for having no synced replica',
+              (state) =>
+                state.primaryReplicaState.set('cluster-1:0-10', {
+                  primaryId: last.nodeId,
+                  zeroSince: null,
+                  alerted: 'warning',
+                }),
+            ],
+            [
+              'no synced replica outside a cluster',
+              (state) => {
+                state.primaryReplicaPaths.set(`node:${last.addr}`, 'replid:abc');
+                state.primaryReplicaState.set('replid:abc', { primaryId: 'abc', zeroSince: T0, alerted: 'none' });
+              },
+            ],
           ])('reads a primary with %s without waiting for its turn', async (_name, seed) => {
             expect((await readsOnFirstPoll(seed)).has(last.nodeId!)).toBe(true);
           });
@@ -25971,6 +26010,32 @@ describe('AnomalyService', () => {
             const history = await service.getReplicationDivergenceHistory('conn-1', T0, end + 4 * INTERVAL);
 
             expect(history.map((h) => h.level)).toEqual(['none']);
+          });
+
+          it('reads a primary that lost its replicas on every poll while that lasts', async () => {
+            const clients = ownClients(targets);
+            const readAt: number[] = [];
+            let alone = false;
+            clients.get(first.nodeId!)!.info = jest.fn().mockImplementation(async (section?: string) => {
+              if (section === 'replication') readAt.push(Date.now());
+              const lines = ['# Replication', 'role:master', `master_replid:${'b'.repeat(40)}`];
+              lines.push('master_repl_offset:1000', `connected_slaves:${alone ? 0 : 1}`);
+              if (!alone) lines.push('slave0:ip=10.0.1.6,port=6379,state=online,offset=1000,lag=0');
+              return lines.join('\r\n');
+            });
+            clients.get(first.nodeId!)!.call = jest
+              .fn()
+              .mockResolvedValue(`${first.nodeId} ${first.addr}@16379 myself,master - 0 0 1 connected 100-110\n`);
+            await poll(targets, 1, T0);
+            alone = true;
+
+            await poll(targets, 45, T0 + INTERVAL);
+
+            const gaps = readAt.slice(2).map((at, i) => at - readAt[i + 1]);
+            expect(new Set(gaps)).toEqual(new Set([INTERVAL]));
+            expect(
+              service.getRecentEvents(10, MetricType.PRIMARY_WITHOUT_REPLICAS).map((e) => e.nodeAddr),
+            ).toContain(first.addr);
           });
 
           it('allows a retry amplification gap as long as the reads of a primary are apart', async () => {
