@@ -44,6 +44,7 @@ import {
 import { AnomalySavedBus, SavedAnomaly } from '@app/common/services/anomaly-saved-bus';
 import { ClientListCache } from '@app/common/services/client-list-cache';
 import { rearmLevel } from './rearm-level';
+import { mapWithLimit } from './bounded-map';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { MetricBuffer } from './metric-buffer';
 import { SpikeDetector } from './spike-detector';
@@ -771,6 +772,7 @@ const MAX_SCANNED_CALLER_EVENTS = 50_000;
 const NEXT_FIRING_CONCURRENCY = 5;
 const NEXT_FIRING_TTL_MS = 5 * 60_000;
 const NEXT_FIRING_CACHE_SIZE = 2_000;
+const PLACEMENT_READ_CONCURRENCY = 4;
 const NEXT_FIRING_BUDGET_MS = 10_000;
 const NEXT_FIRING_BUDGET_EXHAUSTED = 'lookup budget exhausted';
 const NEXT_FIRING_MIN_REMAINING_MS = 250;
@@ -7084,23 +7086,21 @@ export class AnomalyService
       return null;
     }
     const primaries = nodes.filter((node) => node.role === 'master' && node.slots.length > 0);
-    return Promise.all(
-      primaries.map(async (node) => {
-        const info = await this.readShardInfo(connectionId, node.id);
-        const migrateSlotsCommand = await this.readShard(
-          connectionId,
-          node.id,
-          'reading COMMAND INFO on the shard timed out',
-          (client) => client.call('COMMAND', 'INFO', 'CLUSTER|MIGRATESLOTS'),
-        ).then(migrateSlotsListed, () => null);
-        return {
-          address: node.address,
-          server: (info && shardServerFromInfo(info)) ?? null,
-          migrateSlotsCommand,
-          serverInfo: info?.server,
-        };
-      }),
-    );
+    return mapWithLimit(primaries, PLACEMENT_READ_CONCURRENCY, async (node) => {
+      const info = await this.readShardInfo(connectionId, node.id);
+      const migrateSlotsCommand = await this.readShard(
+        connectionId,
+        node.id,
+        'reading COMMAND INFO on the shard timed out',
+        (client) => client.call('COMMAND', 'INFO', 'CLUSTER|MIGRATESLOTS'),
+      ).then(migrateSlotsListed, () => null);
+      return {
+        address: node.address,
+        server: (info && shardServerFromInfo(info)) ?? null,
+        migrateSlotsCommand,
+        serverInfo: info?.server,
+      };
+    });
   }
 
   private async readShardInfo(
