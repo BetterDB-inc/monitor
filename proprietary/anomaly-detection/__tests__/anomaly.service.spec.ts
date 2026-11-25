@@ -25735,6 +25735,68 @@ describe('AnomalyService', () => {
           });
         });
 
+        describe('with an own line the view sampler read', () => {
+          const INTERVAL = 10_000;
+          const [target] = primaries(1);
+          const key = `conn-1@${target.addr}`;
+          const sampled = {
+            id: target.nodeId!,
+            address: `${target.addr}@16379`,
+            flags: ['myself', 'master'],
+            master: '',
+            pingSent: 0,
+            pongReceived: 0,
+            configEpoch: 1,
+            linkState: 'connected',
+            slots: [[0, 10]],
+          };
+          let call: jest.Mock;
+
+          const sampledAt = (at: number) =>
+            jest
+              .spyOn((service as any).topologyDivergence, 'lastRound')
+              .mockReturnValue({ at, selves: new Map([[target.nodeId!, sampled]]) });
+          const ownLineReads = () => call.mock.calls.filter((args) => args.join(' ') === 'CLUSTER NODES');
+
+          beforeEach(() => {
+            jest.spyOn(service as any, 'getIntervalMs').mockReturnValue(INTERVAL);
+            (service as any).connectionClusterKeys.set('conn-1', 'cluster-1');
+            call = jest.fn().mockImplementation(async (...args: string[]) => {
+              if (args.join(' ') !== 'CLUSTER NODES') throw new Error('ERR unknown command');
+              return `${target.nodeId} ${target.addr}@16379 myself,master - 0 0 1 connected 0-10\n`;
+            });
+            discovery().mockResolvedValue({ info: nodeClient([2]).info, call });
+          });
+
+          it('uses the line sampled on this poll instead of reading it again', async () => {
+            sampledAt(T0);
+
+            await poll([target], 1, T0);
+
+            expect(ownLineReads()).toHaveLength(0);
+            expect((service as any).reshardNodeSelves.get(key)).toEqual({ self: sampled, readAt: T0 });
+          });
+
+          it('reads the line itself when the sampled one is from an earlier poll', async () => {
+            sampledAt(T0 - INTERVAL);
+
+            await poll([target], 1, T0);
+
+            expect(ownLineReads()).toHaveLength(1);
+            expect((service as any).reshardNodeSelves.get(key).self).not.toBe(sampled);
+          });
+
+          it('reads the line itself when the sampler did not read this primary', async () => {
+            jest
+              .spyOn((service as any).topologyDivergence, 'lastRound')
+              .mockReturnValue({ at: T0, selves: new Map([['another-node', sampled]]) });
+
+            await poll([target], 1, T0);
+
+            expect(ownLineReads()).toHaveLength(1);
+          });
+        });
+
         describe('with a sweep longer than one poll', () => {
           const INTERVAL = 10_000;
           const targets = primaries(2 * TOPOLOGY_TARGET_LIMIT + 2);

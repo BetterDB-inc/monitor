@@ -8123,6 +8123,20 @@ export class AnomalyService
     return isReshardActive(shards, timestamp, RESHARD_QUIET_POLLS * intervalMs) ? null : cached.self;
   }
 
+  private sampledNodeSelf(
+    connectionId: string,
+    key: string,
+    nodeId: string,
+    timestamp: number,
+  ): ClusterNode | null {
+    const clusterKey = this.connectionClusterKeys.get(connectionId);
+    const round = clusterKey ? this.topologyDivergence.lastRound(clusterKey) : undefined;
+    const self = round?.selves.get(nodeId);
+    if (!round || !self || timestamp - round.at >= this.getIntervalMs()) return null;
+    this.reshardNodeSelves.set(key, { self, readAt: round.at });
+    return self;
+  }
+
   private async readNodeSelf(
     client: { call(...args: string[]): Promise<unknown> },
     socket: FanoutSocket,
@@ -13149,7 +13163,8 @@ export class AnomalyService
           const cobRead = this.readFanoutCob(client, socket, stateKey, target.addr, info);
           const [self, writeP99, cob] = await Promise.all([
             target.nodeId
-              ? (this.cachedNodeSelf(ctx.connectionId, stateKey, target.nodeId, timestamp) ??
+              ? (this.sampledNodeSelf(ctx.connectionId, stateKey, target.nodeId, timestamp) ??
+                this.cachedNodeSelf(ctx.connectionId, stateKey, target.nodeId, timestamp) ??
                 this.readNodeSelf(client, socket, target.addr, stateKey))
               : Promise.resolve(null),
             target.nodeId ? this.readNodeWriteP99(client, socket, stateKey, target.addr, timestamp) : null,
