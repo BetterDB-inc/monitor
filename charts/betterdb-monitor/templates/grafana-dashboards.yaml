@@ -5,17 +5,16 @@ dashboards/*.json are byte-identical copies of deploy/observability/dashboards
 (scripts/sync-chart-observability.mjs). .Files.Get returns them as data, so
 Grafana's own legend templates are not evaluated by Helm.
 
-Names must stay within 63 characters and be unique per release. A fullname of
-up to 34 characters is used as is (the longest suffix, -dashboard-
-monitor-internals, adds 28). A longer one is cut to 27 characters and followed
-by 6 characters of its sha256, so two releases sharing a long prefix in one
-namespace still get distinct ConfigMaps.
+Names must stay within 63 characters and be unique per release. The prefix is
+the fullname cut to 25 characters plus 8 characters of the sha256 of
+"<release namespace>/<fullname>", so same-named releases in different
+namespaces that publish to one Grafana namespace do not collide. The prefix is
+at most 34 characters; the longest suffix, -dashboard-monitor-internals, adds
+28, for 62 in total.
 */}}
 {{- $fullname := include "betterdb-monitor.fullname" . }}
-{{- $prefix := $fullname }}
-{{- if gt (len $fullname) 34 }}
-{{- $prefix = printf "%s-%s" ($fullname | trunc 27 | trimSuffix "-") ($fullname | sha256sum | trunc 6) }}
-{{- end }}
+{{- $hash := printf "%s/%s" .Release.Namespace $fullname | sha256sum | trunc 8 }}
+{{- $prefix := printf "%s-%s" ($fullname | trunc 25 | trimSuffix "-") $hash }}
 {{- range $path, $_ := .Files.Glob "dashboards/*.json" }}
 {{- $dashboard := base $path | trimSuffix ".json" | trimPrefix "betterdb-" }}
 ---
