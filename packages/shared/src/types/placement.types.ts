@@ -39,3 +39,23 @@ export interface PlacementSupport {
   issues: PlacementSupportIssue[];
   modes: Record<PlacementMode, PlacementModeSupport>;
 }
+
+export interface PlacementShardBalance {
+  shardId: string;
+  address: string;
+  slotCount: number;
+  cpuUsecPerSecond: number;
+  cpuShare: number | null;
+  networkShare: number | null;
+  ratio: number | null;
+  overTrigger: boolean;
+}
+
+export interface PlacementBalance {
+  sampledAt: number;
+  settling: boolean;
+  medianCpuUsecPerSecond: number;
+  triggerRatio: number;
+  resolveRatio: number;
+  shards: PlacementShardBalance[];
+}
