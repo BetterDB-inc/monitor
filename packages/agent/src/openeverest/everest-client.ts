@@ -68,13 +68,14 @@ export class EverestClient {
         headers: { Authorization: authorization, Accept: 'application/json' },
         signal: controller.signal,
       });
+      // Drain without keeping the body (credentials, identities) around; a
+      // stalled body is cut off by the same deadline as the headers.
+      await res.arrayBuffer().catch(() => undefined);
     } catch (err) {
       throw new EverestApiError(502, `OpenEverest API unreachable: ${(err as Error).message}`);
     } finally {
       clearTimeout(timer);
     }
-    // Drain without keeping the body (credentials, identities) around.
-    await res.arrayBuffer().catch(() => undefined);
     return res;
   }
 

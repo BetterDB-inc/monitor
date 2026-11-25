@@ -44,6 +44,9 @@ export class TargetManager implements PluginBackend {
   private settingsKey = '';
   private clusterId: string | undefined;
   private started = false;
+  // Enable, disable and informer-driven removal of one instance run one at a
+  // time, so two mutations can never leave the map and the ConfigMap apart.
+  private readonly locks = new Map<string, Promise<void>>();
 
   constructor(private readonly options: TargetManagerOptions) {
     this.store = new TargetStore(options.kube, options.config.targetsConfigMap);
@@ -55,6 +58,12 @@ export class TargetManager implements PluginBackend {
     // before it is known (or known to be unavailable).
     this.clusterId = await this.readClusterId();
     log(`Kubernetes cluster id: ${this.clusterId ?? 'unavailable'}`);
+
+    // A retried start() must not leave the previous attempt's informers running.
+    await this.settingsInformer?.stop();
+    await Promise.all(this.instanceInformers.map((informer) => informer.stop()));
+    this.instanceInformers = [];
+    this.syncedInformers.clear();
 
     this.settingsInformer = new Informer<Secret>({
       client: kube,
@@ -108,10 +117,25 @@ export class TargetManager implements PluginBackend {
     if (!SUPPORTED_PROVIDERS.has(provider)) {
       throw new HttpError(400, `BetterDB monitors Valkey instances; this one is provided by ${provider || 'an unknown provider'}`);
     }
-    await this.store.add(ref, { enabledAt: new Date().toISOString() });
-    this.ensureTarget(ref);
+    await this.serialized(ref, async () => {
+      await this.store.add(ref, { enabledAt: new Date().toISOString() });
+      this.ensureTarget(ref);
+    });
     this.options.log(`enabled ${targetKey(ref)}`);
     return this.status(ref);
+  }
+
+  /** Runs `fn` after every earlier mutation of the same instance has finished. */
+  private serialized<T>(ref: InstanceRef, fn: () => Promise<T>): Promise<T> {
+    const key = targetKey(ref);
+    const previous = this.locks.get(key) ?? Promise.resolve();
+    const run = previous.then(fn, fn);
+    const settled = run.then(() => undefined, () => undefined);
+    this.locks.set(key, settled);
+    void settled.then(() => {
+      if (this.locks.get(key) === settled) this.locks.delete(key);
+    });
+    return run;
   }
 
   async disable(ref: InstanceRef, authorization: string): Promise<InstanceView> {
@@ -221,18 +245,20 @@ export class TargetManager implements PluginBackend {
    * if the ConfigMap write then fails the target is put back, so the map
    * and the ConfigMap never disagree about what is enabled.
    */
-  private async removeTarget(ref: InstanceRef): Promise<void> {
-    const key = targetKey(ref);
-    const target = this.targets.get(key);
-    this.targets.delete(key);
-    await target?.stop();
-    try {
-      await this.store.remove(ref);
-    } catch (err) {
-      if (target) this.ensureTarget(ref);
-      throw err;
-    }
-    if (target) this.options.log(`disabled ${key}`);
+  private removeTarget(ref: InstanceRef): Promise<void> {
+    return this.serialized(ref, async () => {
+      const key = targetKey(ref);
+      const target = this.targets.get(key);
+      this.targets.delete(key);
+      await target?.stop();
+      try {
+        await this.store.remove(ref);
+      } catch (err) {
+        if (target) this.ensureTarget(ref);
+        throw err;
+      }
+      if (target) this.options.log(`disabled ${key}`);
+    });
   }
 
   private findInstance(ref: InstanceRef): Instance | undefined {

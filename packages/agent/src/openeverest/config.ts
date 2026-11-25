@@ -2,8 +2,8 @@ import { readFileSync } from 'fs';
 import { everestApiUrl } from './everest-client';
 
 // Settings for the OpenEverest mode. Everything comes from the environment the
-// chart sets; the BetterDB URL and token live in a Secret (see
-// SettingsSource) so the settings panel can change them without a rollout.
+// chart sets; the BetterDB URL and token live in a Secret the backend watches,
+// so a change to it is picked up without a rollout.
 
 export interface OpenEverestConfig {
   /** Plugin CR name; the proxy path is /v1/clusters/{cluster}/plugins/{pluginName}. */

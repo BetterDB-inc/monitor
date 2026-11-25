@@ -9,7 +9,8 @@ import type { TargetStatus } from './instance-target';
 // HTTP surface of the plugin. OpenEverest reverse-proxies
 // /v1/clusters/{cluster}/plugins/{name}/* to the backend Service with the
 // prefix stripped, so routes here are bare: /main.js for the UI bundle,
-// /healthz for the probes and /api/... for the tab and the settings panel.
+// /healthz and /readyz for the probes and /api/... for the tab and the
+// (read-only) settings panel.
 // The proxy checks the user's JWT (and the `use` permission on the plugin)
 // for POST/PUT/DELETE, but not for GET, so nothing sensitive is served on GET,
 // and nothing here changes where the agents stream to.

@@ -224,6 +224,33 @@ describe('TargetManager opt-ins', () => {
     await manager.stop();
   });
 
+  it('runs a disable and an enable of the same instance one after the other, so map and ConfigMap agree', async () => {
+    const kube = new FakeKube();
+    kube.objects.set(INSTANCES, [instance('db', 'orders')]);
+    kube.configMap = { metadata: { name: 'targets', resourceVersion: '1' }, data: { main__db__orders: '{}' } };
+    const { manager } = build(kube);
+    await manager.start();
+    await flush();
+    kube.removeFails = 1;
+
+    // The disable's ConfigMap write fails and rolls back; the enable that was
+    // issued meanwhile must not interleave with that rollback.
+    const disabling = manager.disable(ORDERS, 'Bearer x').catch((err: Error) => err);
+    const enabling = manager.enable(ORDERS, 'Bearer x');
+    expect(await disabling).toBeInstanceOf(Error);
+    await enabling;
+
+    expect(manager.status(ORDERS).enabled).toBe(true);
+    expect(kube.enabledKeys()).toEqual(['main__db__orders']);
+    expect(mockTargets.filter((t) => !t.stopped)).toHaveLength(1);
+
+    await Promise.all([manager.disable(ORDERS, 'Bearer x'), manager.disable(ORDERS, 'Bearer x')]);
+    expect(manager.status(ORDERS).enabled).toBe(false);
+    expect(kube.enabledKeys()).toEqual([]);
+    expect(mockTargets.every((t) => t.stopped)).toBe(true);
+    await manager.stop();
+  });
+
   it('lets an opt-in be disabled when the instance is gone and /connection answers 404, once the informers have listed', async () => {
     const kube = new FakeKube();
     kube.configMap = { metadata: { name: 'targets', resourceVersion: '1' }, data: { main__db__orders: '{}' } };
