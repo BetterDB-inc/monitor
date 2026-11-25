@@ -50,7 +50,7 @@ import type {
   KeyDetail,
   KeyPatternData,
 } from '@betterdb/shared';
-import { extractPattern, pruneKeyDetails, KEY_DETAILS_PRUNE_AT, STALE_KEY_IDLE_SECONDS } from '@betterdb/shared';
+import { extractPattern, pruneKeyDetails, supportsClusterSlotStats, KEY_DETAILS_PRUNE_AT, STALE_KEY_IDLE_SECONDS } from '@betterdb/shared';
 
 import type { SshTunnelConfig } from '@betterdb/shared';
 import { SshTunnelService } from '../ssh/ssh-tunnel.service';
@@ -729,8 +729,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     const majorVersion = versionParts[0] || 0;
     const minorVersion = versionParts[1] || 0;
 
-    const redisSupportsSlotStats =
-      !isValkey && (majorVersion > 8 || (majorVersion === 8 && minorVersion >= 2));
+    const slotStats = supportsClusterSlotStats(isValkey ? 'valkey' : 'redis', version);
 
     // Sentinel mode is reported in the Server section (spelled differently per
     // engine: server_mode on Valkey unless extended-redis-compat, else redis_mode;
@@ -791,9 +790,9 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     this.capabilities = {
       dbType: isValkey ? 'valkey' : 'redis',
       version,
-      hasSlotStats: (isValkey && majorVersion >= 8) || redisSupportsSlotStats,
+      hasSlotStats: slotStats,
       hasCommandLog: isValkey && (majorVersion > 8 || (majorVersion === 8 && minorVersion >= 1)), // Still Valkey-only
-      hasClusterSlotStats: (isValkey && majorVersion >= 8) || redisSupportsSlotStats,
+      hasClusterSlotStats: slotStats,
       hasLatencyMonitor: true,
       hasAclLog: majorVersion >= 6,
       hasMemoryDoctor: true,

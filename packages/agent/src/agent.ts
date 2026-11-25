@@ -1,9 +1,9 @@
 import Valkey from 'iovalkey';
-import type { ConnectionOptions as TlsConnectionOptions } from 'tls';
 import { isElastiCacheServerlessHost } from '@betterdb/shared';
 import type { AgentIdentity } from '@betterdb/shared';
 import { WsClient } from './ws-client';
 import { CommandExecutor } from './command-executor';
+import { valkeyTlsOptions, ValkeyTlsMaterial } from './valkey-tls';
 import type { AgentCommandMessage, AgentHelloMessage } from './protocol';
 import type { AuthProvider } from './auth';
 import { PasswordProvider, ElastiCacheIamProvider } from './auth';
@@ -25,13 +25,8 @@ export interface AgentConfig {
   awsResourceName?: string;
   awsUserId?: string;
   awsServerless?: boolean;
-  /**
-   * TLS material for the Valkey connection, used when valkeyTls is on. With
-   * verifyHostname off the certificate chain is still checked against `ca`
-   * but the server name is not: cluster nodes are dialled by pod IP, which is
-   * never in their certificate's SANs.
-   */
-  valkeyTlsOptions?: { ca?: string; cert?: string; key?: string; verifyHostname?: boolean };
+  /** TLS material for the Valkey connection, used when valkeyTls is on (see ValkeyTlsMaterial). */
+  valkeyTlsOptions?: ValkeyTlsMaterial;
   /** Sent in the hello; identifies this target when one process relays many. */
   identity?: AgentIdentity;
   /** Sent in the hello; asks the cloud to refuse state-changing commands. */
@@ -69,19 +64,6 @@ export class Agent {
     return { unsafeMode: this.config.unsafeMode, readOnly: this.config.readOnly === true };
   }
 
-  private tlsOptions(): TlsConnectionOptions {
-    const options = this.config.valkeyTlsOptions;
-    if (!options) return {};
-    const tls: TlsConnectionOptions = {};
-    if (options.ca) tls.ca = options.ca;
-    if (options.cert) tls.cert = options.cert;
-    if (options.key) tls.key = options.key;
-    // Verify the chain only: a successful chain check returns undefined here,
-    // which tls.connect takes as "identity ok".
-    if (options.verifyHostname === false) tls.checkServerIdentity = () => undefined;
-    return tls;
-  }
-
   private async createValkeyClient(connectionName: string): Promise<Valkey> {
     const result = await Promise.race([
       this.authProvider.getToken().then(t => ({ token: t, shutdown: false as const })),
@@ -102,7 +84,7 @@ export class Agent {
       port: this.config.valkeyPort,
       username: this.config.valkeyUsername,
       password,
-      tls: this.config.valkeyTls ? this.tlsOptions() : undefined,
+      tls: this.config.valkeyTls ? valkeyTlsOptions(this.config.valkeyTlsOptions) : undefined,
       db: this.config.valkeyDb,
       lazyConnect: true,
       connectionName,

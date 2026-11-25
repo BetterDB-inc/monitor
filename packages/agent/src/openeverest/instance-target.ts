@@ -2,6 +2,7 @@ import Valkey from 'iovalkey';
 import { promises as dns } from 'dns';
 import type { AgentIdentity } from '@betterdb/shared';
 import { Agent } from '../agent';
+import { valkeyTlsOptions } from '../valkey-tls';
 import { Informer, KubeClient, KubeObject, sleep } from './kube-client';
 import { parseConnectionSecret, ConnectionCredentials, SecretLike } from './connection-secret';
 import { discoverNodes, DiscoveredNode } from './cluster-discovery';
@@ -275,7 +276,7 @@ export class InstanceTarget {
       port: credentials.port,
       username: credentials.username,
       password: credentials.password,
-      tls: tlsOptions(credentials),
+      tls: credentials.tls ? valkeyTlsOptions({ ...credentials.tls, verifyHostname: false }) : undefined,
       lazyConnect: true,
       connectTimeout: CONNECT_TIMEOUT_MS,
       connectionName: 'BetterDB-Agent-Discovery',
@@ -347,13 +348,6 @@ function displayName(node: DiscoveredNode): string {
 
 function sameAddress(a: DiscoveredNode, b: DiscoveredNode): boolean {
   return a.host === b.host && a.port === b.port;
-}
-
-function tlsOptions(credentials: ConnectionCredentials): Record<string, unknown> | undefined {
-  if (!credentials.tls) return undefined;
-  const { ca, cert, key } = credentials.tls;
-  // Chain-only verification, see AgentConfig.valkeyTlsOptions.
-  return { ca, cert, key, checkServerIdentity: () => undefined };
 }
 
 /** Runs `fn` over `items` with at most `limit` in flight. */

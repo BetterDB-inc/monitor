@@ -139,6 +139,15 @@ export function checkMemberReadOnly(command: string, subCommand?: string): strin
 export const AGENT_READ_ONLY_MESSAGE = 'This agent connection is read-only.';
 
 /**
+ * Whether the server has CLUSTER SLOT-STATS: Valkey 8.0+, Redis 8.2+. Shared
+ * by the direct adapter and the agent adapter so the two never disagree.
+ */
+export function supportsClusterSlotStats(type: 'valkey' | 'redis', version: string): boolean {
+  const [major = 0, minor = 0] = version.split('.').map((part) => parseInt(part, 10) || 0);
+  return type === 'valkey' ? major >= 8 : major > 8 || (major === 8 && minor >= 2);
+}
+
+/**
  * CONFIG parameters whose values are credentials. A read-only agent connection
  * holds the admin user, so CONFIG GET on these (or on a glob covering them,
  * like `*`) must not hand the password to whoever can reach the Monitor.

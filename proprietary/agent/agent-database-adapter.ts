@@ -43,14 +43,10 @@ import {
   FIELD_NAME_RE,
 } from '../../apps/api/src/database/parsers/vector-index.parser';
 import type { AgentHelloMessage, KeyAnalyticsOptions, KeyAnalyticsResult } from '@betterdb/shared';
-import { checkAgentReadOnly, redactSensitiveReply } from '@betterdb/shared';
+import { checkAgentReadOnly, redactSensitiveReply, supportsClusterSlotStats } from '@betterdb/shared';
 
 const COMMAND_TIMEOUT_MS = 15000;
 
-function supportsSlotStats(type: 'valkey' | 'redis', version: string): boolean {
-  const [major = 0, minor = 0] = version.split('.').map((part) => parseInt(part, 10) || 0);
-  return type === 'valkey' ? major >= 8 : major > 8 || (major === 8 && minor >= 2);
-}
 
 interface PendingRequest {
   resolve: (value: unknown) => void;
@@ -73,7 +69,7 @@ export class AgentDatabaseAdapter implements DatabasePort {
   ) {
     // CLUSTER SLOT-STATS arrived in Valkey 8.0 and Redis 8.2; the agent's
     // CLUSTER capability only says the server runs in cluster mode.
-    const slotStats = agentHello.capabilities.includes('CLUSTER') && supportsSlotStats(agentHello.valkey.type, agentHello.valkey.version);
+    const slotStats = agentHello.capabilities.includes('CLUSTER') && supportsClusterSlotStats(agentHello.valkey.type, agentHello.valkey.version);
     this.capabilities = {
       dbType: agentHello.valkey.type,
       version: agentHello.valkey.version,
