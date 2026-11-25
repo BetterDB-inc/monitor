@@ -1649,7 +1649,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (existedBefore) return;
     await this.pool.query(
       `INSERT INTO placement_policies (connection_id, mode, updated_at)
-       SELECT id, 'recommend', $1 FROM connections
+       SELECT id, 'recommend', $1 FROM connections WHERE membership IS NULL
        ON CONFLICT (connection_id) DO NOTHING`,
       [Date.now()],
     );

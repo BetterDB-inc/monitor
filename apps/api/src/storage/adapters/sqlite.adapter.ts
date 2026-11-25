@@ -1943,10 +1943,11 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       );
     `);
     if (existedBefore || !this.tableExists('connections')) return;
+    this.ensureConnectionsSchema();
     this.db
       .prepare(
         `INSERT OR IGNORE INTO placement_policies (connection_id, mode, updated_at)
-         SELECT id, 'recommend', ? FROM connections`,
+         SELECT id, 'recommend', ? FROM connections WHERE membership IS NULL`,
       )
       .run(Date.now());
   }
