@@ -1,11 +1,13 @@
 {
-  "commit": "bfcc3c0c",
+  "commit": "fa1eadae",
   "files": {
-    "apps/api/src/cluster/shard-load.ts": "458ec888d1497b120f571b7e342ea2e9baea01c18e4627940eb5a6458d0c5fba",
+    "apps/api/src/cluster/shard-load.ts": "c35f4133520681e8e52b509969787d3df5000b2a02280ffcde9f1584597bf0a1",
     "apps/api/src/monitor/provider-detector.ts": "3aaed64f0e2351d973cb864b3e058a834d130358fbcb3ad8eb7b93782d34a935",
-    "proprietary/anomaly-detection/hot-shard-detector.ts": "d223c01294797ce7e94a71e63c3c222dff03f3143bcc719930f60143da1eec0f",
+    "proprietary/anomaly-detection/hash-tag-advisor.ts": "f77c22d1e6d240273bf0e890c494a0523ac232f4c48e3f76b3c26a6b7657d47b",
+    "proprietary/anomaly-detection/hot-shard-detector.ts": "4a32e7bf3359d06c1963274d5ac55a24b6201f3ca8dc26dc9dbab1812f58d3c8",
+    "proprietary/anomaly-detection/hot-shard-keys.ts": "165eefe9930b1a83b1e2ce4babf242010625620495c6d2784d771a3eee24c394",
     "proprietary/anomaly-detection/rebalance-planner.ts": "c6d7ffb1b201ec3d4b83b52e6f754dcbf702045ada8189985765107e05647cde",
-    "proprietary/anomaly-detection/anomaly.service.ts": "275b4f8d3cdcfb1eb2537d2632dfec1ca2529217391c28411a47fbc3aa46e0cf",
+    "proprietary/anomaly-detection/anomaly.service.ts": "b1d8c76dc8083dec5adf6eab51327d9b66b8bb86b5bd22b93e5d75c3a15a024f",
     "proprietary/placement/placement-balance.ts": "d5dafefe5f8c50d2987adb7f3c8ce25924210141c25a49d3bc3a07e2c3f58a2b",
     "proprietary/placement/placement-support.ts": "e6ef7a3c6e34720703882ece18cca49f0bd9323aea4d2ae4e8d24aad81928142",
     "proprietary/placement/placement.service.ts": "a69785e99c1e611c2fb18444fbc60980993771a39a723cf919afc3ea1c54bbf5"
