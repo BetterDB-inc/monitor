@@ -660,7 +660,14 @@ describe('RebalanceSuggestion', () => {
     overrides: Partial<NonNullable<HotShardDetail['advice']>['hashTags']> = {},
   ): HotShardDetail['advice'] {
     return {
-      hashTags: { tags: [], slotsSampled: 1, keyCountOutliers: [], medianKeyCount: 30, ...overrides },
+      hashTags: {
+        tags: [],
+        slotsSampled: 1,
+        keyCountOutliers: [],
+        keyCountOutlierFactor: 20,
+        medianKeyCount: 30,
+        ...overrides,
+      },
     };
   }
 
@@ -707,6 +714,42 @@ describe('RebalanceSuggestion', () => {
     ]);
 
     expect(await panel()).toHaveTextContent('Slot 4 holds 1200 keys, 40x the median slot.');
+  });
+
+  it('gives the factor the advice carries for crowded slots', async () => {
+    await show([
+      hotShard(plan(), {
+        advice: hashTags({
+          keyCountOutlierFactor: 25,
+          keyCountOutliers: [
+            { slot: 4, keyCount: 1200, ratio: 40 },
+            { slot: 2, keyCount: 750, ratio: 25 },
+          ],
+        }),
+      }),
+    ]);
+
+    expect(await panel()).toHaveTextContent(
+      'Slots 4 (1200 keys, 40x) and 2 (750 keys, 25x) each hold at least 25x the median slot.',
+    );
+  });
+
+  it('says the median slot is empty instead of giving a ratio', async () => {
+    await show([
+      hotShard(plan(), {
+        advice: hashTags({
+          medianKeyCount: 0,
+          keyCountOutliers: [
+            { slot: 4, keyCount: 1200, ratio: null },
+            { slot: 2, keyCount: 1100, ratio: null },
+          ],
+        }),
+      }),
+    ]);
+
+    expect(await panel()).toHaveTextContent(
+      'Slots 4 (1200 keys) and 2 (1100 keys) are crowded, while the median slot holds none.',
+    );
   });
 
   it('says nothing about hash tags without a finding', async () => {

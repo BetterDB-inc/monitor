@@ -27,7 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   suggested. Read-only; nothing is moved.
 - `get_hot_shards` returns `advice.hashTags` for each hot shard: the hash tag
   most of the sampled keys of a top slot share, and the slots holding at
-  least 20x the median key count. It needs no LFU policy.
+  least `keyCountOutlierFactor` (20) times the median key count and at
+  least 1000 keys. It needs no LFU policy.
 - `get_anomalies`, `get_incident_timeline` and `get_hot_shards` name the
   cluster node an event or hot shard is about in `node`: its id, address,
   role, shard and zone when known, and `collected`, which is false when no

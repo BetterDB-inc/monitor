@@ -2122,19 +2122,29 @@ describe('AnomalyService', () => {
     });
 
     it('names a slot of the hot shard holding twenty times the median key count', async () => {
-      keyCounts.set(1, 500);
+      keyCounts.set(1, 1500);
 
       await step(HOT, 6);
 
       expect(hotEvents()[0].message).toBe(
         "Hot shard a0000000 at 10.0.0.1:6379: CPU 9.0x the cluster median (82% of the cluster's slot CPU) for 60s. " +
           `Top slots by CPU: 0 (75% of the shard), 1 (25%).${NO_PLAN_SENTENCE}` +
-          ' Slot 1 holds 500 keys, 50x the median slot.',
+          ' Slot 1 holds 1500 keys, 150x the median slot.',
       );
       expect(service.getHotShards('conn-a')[0].advice?.hashTags).toMatchObject({
-        keyCountOutliers: [{ slot: 1, keyCount: 500, ratio: 50 }],
+        keyCountOutliers: [{ slot: 1, keyCount: 1500, ratio: 150 }],
+        keyCountOutlierFactor: 20,
         medianKeyCount: 10,
       });
+    });
+
+    it('does not name a slot under a thousand keys as crowded', async () => {
+      keyCounts.set(1, 500);
+
+      await step(HOT, 6);
+
+      expect(hotEvents()[0].message).not.toContain('median slot');
+      expect(service.getHotShards('conn-a')[0].advice?.hashTags.keyCountOutliers).toEqual([]);
     });
 
     it('stamps the address of a hot primary that is not the node the connection points at', async () => {
@@ -2225,6 +2235,7 @@ describe('AnomalyService', () => {
               slotsSampled: 0,
               note: 'the monitor does not connect to the cluster nodes directly',
               keyCountOutliers: [],
+              keyCountOutlierFactor: 20,
               medianKeyCount: 10,
               sampledAt: BASE + 6 * STEP_MS,
             },
@@ -2967,6 +2978,7 @@ describe('AnomalyService', () => {
             tags: [{ slot: 0, tag: 'cart', share: 2 / 3, keysSampled: 3, keysWithTag: 2 }],
             slotsSampled: 2,
             keyCountOutliers: [],
+            keyCountOutlierFactor: 20,
             medianKeyCount: 10,
             sampledAt: BASE + 6 * STEP_MS,
           },
@@ -2994,6 +3006,28 @@ describe('AnomalyService', () => {
             `${NO_PLAN_SENTENCE} 100% of the sampled keys in slot 0 share the hash tag {cart}. ` +
             'Splitting that tag in the application spreads them across slots.',
         );
+      });
+
+      it('keeps the last hash tag and its time when a refresh fails', async () => {
+        keys = {
+          0: [
+            ['{cart}:1', 255],
+            ['{cart}:2', 201],
+          ],
+          1: [['user:1', 40]],
+        };
+        const discovery = dial(hotNode());
+        await step(HOT, 6);
+        discovery.getNodeConnection.mockRejectedValue(new Error('ECONNREFUSED'));
+
+        await step(HOT, 20);
+
+        expect(service.getHotShards('conn-a')[0].advice?.hashTags).toMatchObject({
+          tags: [{ slot: 0, tag: 'cart', keysWithTag: 2 }],
+          slotsSampled: 2,
+          sampledAt: BASE + 6 * STEP_MS,
+        });
+        expect(service.getHotShards('conn-a')[0].advice?.hashTags).not.toHaveProperty('note');
       });
 
       it('keeps the hash tag when the frequency read fails', async () => {

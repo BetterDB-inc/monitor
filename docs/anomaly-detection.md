@@ -796,13 +796,13 @@ In the last two cases the event is raised without key names, the detail has `key
 
   Then read `topKeys` from `GET /api/monitor/sessions/<session-id>/cross-reference?baseline=24h`.
 
-**Hash tags and crowded slots**: moving slots cannot split keys that share a [hash tag](https://valkey.io/topics/cluster-spec/#hash-tags), because a tag pins all of them to one slot. Every open hot shard carries advice on that. The same `CLUSTER GETKEYSINSLOT` read that finds the hot keys gives the names; no LFU policy is needed and no other command is sent. A top slot is named when one tag (the text between the first `{` and the first `}` after it) is shared by at least half of its sampled names and by at least 2 of them. Separately, any slot of the shard that holds at least 20 times the median key count of the cluster's slots is named, up to 10. The first 3 of each go into the message:
+**Hash tags and crowded slots**: moving slots cannot split keys that share a [hash tag](https://valkey.io/topics/cluster-spec/#hash-tags), because a tag pins all of them to one slot. Every open hot shard carries advice on that. The same `CLUSTER GETKEYSINSLOT` read that finds the hot keys gives the names; no LFU policy is needed and no other command is sent. A top slot is named when one tag (the text between the first `{` and the first `}` after it) is shared by at least half of its sampled names and by at least 2 of them. Separately, any slot of the shard that holds at least 20 times the median key count of the cluster's slots, and at least 1000 keys, is named, up to 10. The first 3 of each go into the message:
 
 ```
 ... 92% of the sampled keys in slot 1234 share the hash tag {cart}. Splitting that tag in the application spreads them across slots. Slot 88 holds 41000 keys, 40x the median slot.
 ```
 
-The advice is in the `advice.hashTags` field of [`GET /api/anomaly/hot-shards`](#get-hot-shards), in the `get_hot_shards` MCP tool and on the rebalance card. When the names cannot be read, for example because the monitoring user may not run `CLUSTER GETKEYSINSLOT`, `note` says why, and no tag is named. A tag is shown with the same escaping and 64 character cut as a key name.
+The advice is in the `advice.hashTags` field of [`GET /api/anomaly/hot-shards`](#get-hot-shards), in the `get_hot_shards` MCP tool and on the rebalance card. When the names cannot be read, for example because the monitoring user may not run `CLUSTER GETKEYSINSLOT`, `note` says why, and no tag is named. A tag is shown with the same escaping and 64 character cut as a key name. When a later read of the names fails, the tags of the last good read are kept, with the time of that read.
 
 **Rebalance suggestion**: every open hot shard carries a suggestion, shown in a panel at the top of the Anomalies page, in the `rebalance` field of [`GET /api/anomaly/hot-shards`](#get-hot-shards) and in the `get_hot_shards` MCP tool. It is advice only. BetterDB moves no slot and sends nothing to the cluster for it beyond reads.
 
@@ -1411,7 +1411,7 @@ The open [`hot_shard`](#hot_shard) events of one cluster connection, with the nu
 
 `cpu` gives the shard's CPU rate per second, its share of the cluster, the cluster median and the ratio the rule used. `network` gives the same for bytes in plus bytes out, without a ratio: it is detail only, and it includes replication, counted once per replica. `topSlots` (up to 5) are ranked by CPU. `topKeys` (up to 10, full names) are ranked by `freq`, the LFU counter of the key (0 to 255). `keySource` is `lfu` when the keys were read and `unavailable` when they were not, with the reason in `keyNote`. `keysSampledAt` is the time of the read the names come from and `keysSampled` the number of keys whose frequency it got. When a later read gave no names, the names of the earlier read stay and `keyNote` says so. `eventId` is the id of the open event. `captureAvailable` is `true` when the key names are missing and a [capture on the hot primary](#hot_shard) can show them. `node` names the hot primary, with whether it is collected (see [Failing node on cluster events](#failing-node-on-cluster-events)); it is left out when the primary is not in the cluster view.
 
-`advice.hashTags` is the [hash tag advice](#hot_shard): `tags` (each with `slot`, `tag`, `share`, `keysSampled` and `keysWithTag`), `slotsSampled`, `keyCountOutliers` (each with `slot`, `keyCount` and its `ratio` to `medianKeyCount`), `sampledAt` (the time of the read the tags come from) and `note` when the names could not be read.
+`advice.hashTags` is the [hash tag advice](#hot_shard): `tags` (each with `slot`, `tag`, `share`, `keysSampled` and `keysWithTag`), `slotsSampled`, `keyCountOutliers` (each with `slot`, `keyCount` and its `ratio` to `medianKeyCount`, null when the median slot holds no keys), `keyCountOutlierFactor` (the factor over the median a crowded slot must reach), `medianKeyCount` (null until the key counts are measured), `sampledAt` (the time of the read the tags come from) and `note` when the names could not be read.
 
 `rebalance` is the [rebalance suggestion](#hot_shard): `kind` is `plan` or `no_plan`. A plan has `moves` (each with `targetShardId`, `targetAddr`, inclusive slot `ranges`, and the slots, keys and CPU it moves), `projection` (every shard's CPU, share and ratio to the median `before` and `after`, with its `role`), `medianBefore`, `medianAfter`, `pinnedSlots`, `warnings`, `plannedAfter` (the IDs of the hot shards whose plans its numbers count as applied; empty when it starts from the measured loads), `support` and `commands` (each with the `nodeAddr` to run it on and the command `text`). A `no_plan` has a `reason` and `pinnedSlots`, and `coveredBy` when the reason is `covered_by_other_plan` and `conflictsWith` when it is `conflicts_with_other_plan`. The field is missing for a moment after a restart, until the suggestion is computed again.
 
@@ -1455,6 +1455,7 @@ The open [`hot_shard`](#hot_shard) events of one cluster connection, with the nu
         "tags": [{ "slot": 1234, "tag": "cart", "share": 0.92, "keysSampled": 500, "keysWithTag": 460 }],
         "slotsSampled": 3,
         "keyCountOutliers": [],
+        "keyCountOutlierFactor": 20,
         "medianKeyCount": 120,
         "sampledAt": 1704067200000
       }

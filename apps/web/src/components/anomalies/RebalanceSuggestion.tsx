@@ -173,15 +173,23 @@ function describeHashTags(advice: HashTagAdvice): string {
 function describeKeyCountOutliers(advice: HashTagAdvice): string {
   const outliers = advice.keyCountOutliers.slice(0, ADVICE_ITEMS);
   if (outliers.length === 0) return '';
-  const times = (ratio: number) => `${Math.round(ratio)}x`;
+  const times = (ratio: number | null) => `${Math.round(ratio ?? 0)}x`;
+  const emptyMedian = !advice.medianKeyCount;
   if (outliers.length === 1) {
     const [only] = outliers;
-    return `Slot ${only.slot} holds ${only.keyCount} keys, ${times(only.ratio)} the median slot.`;
+    const against = emptyMedian
+      ? 'while the median slot holds none'
+      : `${times(only.ratio)} the median slot`;
+    return `Slot ${only.slot} holds ${only.keyCount} keys, ${against}.`;
+  }
+  if (emptyMedian) {
+    const slots = listed(outliers.map((each) => `${each.slot} (${each.keyCount} keys)`));
+    return `Slots ${slots} are crowded, while the median slot holds none.`;
   }
   const slots = listed(
     outliers.map((each) => `${each.slot} (${each.keyCount} keys, ${times(each.ratio)})`),
   );
-  return `Slots ${slots} each hold at least 20x the median slot.`;
+  return `Slots ${slots} each hold at least ${advice.keyCountOutlierFactor}x the median slot.`;
 }
 
 function HashTagNotes({ advice }: { advice?: HashTagAdvice }) {

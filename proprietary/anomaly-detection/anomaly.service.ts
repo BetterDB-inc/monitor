@@ -116,11 +116,13 @@ import {
   sampleHotKeys,
 } from './hot-shard-keys';
 import {
+  type DatedHashTags,
   type HashTagRead,
   describeHashTags,
+  hashTagAdvice,
+  hashTagsAfterRead,
   hashTagsOfNames,
   hashTagsUnavailable,
-  keyCountOutliers,
 } from './hash-tag-advisor';
 import {
   REBALANCE_REFRESH_MS,
@@ -601,6 +603,12 @@ interface FanoutGap {
 type FanoutCount = 'checked' | 'unreachable' | 'authFailed' | 'skipped' | 'notDialed';
 type SlotMigrationState = 'running' | 'none' | 'unknown';
 
+interface HotShardKeyEntry {
+  detail: HotShardKeyDetail;
+  hashTags: DatedHashTags;
+  checkedAt: number;
+}
+
 const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 /** Coverage as recorded; its age and staleness are worked out when it is read. */
@@ -969,10 +977,7 @@ export class AnomalyService
     { timestamp: number; report: SlotMigrationReport }
   >();
   private refusedRebalancePlans = new WeakMap<RebalancePlan, RebalanceExecutionBlocker>();
-  private hotShardKeys = new Map<
-    string,
-    Map<string, { detail: HotShardKeyDetail; hashTags: HashTagRead; checkedAt: number }>
-  >();
+  private hotShardKeys = new Map<string, Map<string, HotShardKeyEntry>>();
   private hotKeyNoteLogged = new Map<string, string>();
   // Full-resync failure loop (valkey#1836): per-connection window/cycle state
   // folded from INFO replication on the polled replica itself.
@@ -6711,8 +6716,8 @@ export class AnomalyService
         const judgedAt = this.hotShardJudgedAt.get(connectionId);
         if (judgedAt === undefined) this.hotShardJudgedAt.set(connectionId, timestamp);
         else if (timestamp - judgedAt > HOT_SHARD_BLIND_MS && this.tracksHotShards(connectionId)) {
-          await this.applyHotShardGate(ctx, timestamp, timestamp, [], new Map(), selfId);
-          this.rememberHotShards(connectionId, timestamp, [], new Map());
+          await this.applyHotShardGate(ctx, timestamp, timestamp, [], new Map(), new Map(), selfId);
+          this.rememberHotShards(connectionId, timestamp, [], new Map(), new Map());
         }
         return;
       }
@@ -6755,8 +6760,16 @@ export class AnomalyService
       await this.refreshHotShardKeys(ctx, timestamp, sample.timestamp, findings, topSlots);
       const judged = await this.withoutHotShardsResolvedSince(connectionId, findings, open);
       await this.refreshRebalance(ctx, timestamp, sample, judged, nodes ?? [], slots);
-      await this.applyHotShardGate(ctx, timestamp, sample.timestamp, judged, topSlots, selfId);
-      this.rememberHotShards(connectionId, sample.timestamp, judged, topSlots);
+      await this.applyHotShardGate(
+        ctx,
+        timestamp,
+        sample.timestamp,
+        judged,
+        topSlots,
+        slots,
+        selfId,
+      );
+      this.rememberHotShards(connectionId, sample.timestamp, judged, topSlots, slots);
     } catch (err) {
       this.logger.warn(
         `Hot shard check failed for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
@@ -6867,11 +6880,8 @@ export class AnomalyService
     const connectionId = ctx.connectionId;
     const eventIds = this.hotShardEventIds.get(connectionId);
     const known = this.hotShardKeys.get(connectionId);
-    const kept = new Map<
-      string,
-      { detail: HotShardKeyDetail; hashTags: HashTagRead; checkedAt: number }
-    >();
-    const due: Array<{ signature: string; shardId: string; last?: HotShardKeyDetail }> = [];
+    const kept = new Map<string, HotShardKeyEntry>();
+    const due: Array<{ signature: string; shardId: string; last?: HotShardKeyEntry }> = [];
     for (const finding of findings) {
       const signature = hotShardSignature(finding.shardId);
       const wanted =
@@ -6879,7 +6889,7 @@ export class AnomalyService
       if (!wanted) continue;
       const last = known?.get(signature);
       if (last && timestamp - last.checkedAt < HOT_KEY_REFRESH_MS) kept.set(signature, last);
-      else due.push({ signature, shardId: finding.shardId, last: last?.detail });
+      else due.push({ signature, shardId: finding.shardId, last });
     }
     const reads = await Promise.all(
       due.map(({ shardId }) =>
@@ -6890,8 +6900,8 @@ export class AnomalyService
       const { keys, hashTags } = reads[index];
       this.logHotKeySource(ctx, keys);
       kept.set(signature, {
-        detail: hotKeysAfterRead(last, keys, timestamp),
-        hashTags,
+        detail: hotKeysAfterRead(last?.detail, keys, timestamp),
+        hashTags: hashTagsAfterRead(last?.hashTags, hashTags, timestamp),
         checkedAt: timestamp,
       });
     }
@@ -7300,20 +7310,17 @@ export class AnomalyService
 
   private hotShardAdvice(
     connectionId: string,
-    shardId: string,
     signature: string,
+    slots: readonly SlotLoadRate[],
     medianKeyCount: number | null,
   ): HotShardAdvice {
-    const read = this.hotShardKeys.get(connectionId)?.get(signature);
-    const slots = this.shardLoad?.getSlots(connectionId, shardId) ?? [];
-    return {
-      hashTags: {
-        ...(read?.hashTags ?? hashTagsUnavailable('the keys have not been read yet')),
-        keyCountOutliers: medianKeyCount === null ? [] : keyCountOutliers(slots, medianKeyCount),
-        medianKeyCount: medianKeyCount ?? 0,
-        ...(read ? { sampledAt: read.checkedAt } : {}),
-      },
-    };
+    const read = this.hotShardKeys.get(connectionId)?.get(signature)?.hashTags;
+    const advice = hashTagAdvice(
+      read?.read ?? hashTagsUnavailable('the keys have not been read yet'),
+      slots,
+      medianKeyCount,
+    );
+    return { hashTags: read ? { ...advice, sampledAt: read.readAt } : advice };
   }
 
   private logHotKeySource(ctx: ConnectionContext, read: HotKeyRead): void {
@@ -7342,6 +7349,7 @@ export class AnomalyService
     sampledAt: number,
     findings: HotShardFinding[],
     topSlots: ReadonlyMap<string, HotShardSlot[]>,
+    slots: ReadonlyMap<string, SlotLoadRate[]>,
     selfId: string | undefined,
   ): Promise<void> {
     const nodeAddrOf = (finding: HotShardFinding) =>
@@ -7365,6 +7373,7 @@ export class AnomalyService
           finding,
           signature,
           topSlots.get(finding.shardId) ?? [],
+          slots.get(finding.shardId) ?? [],
           nodeAddrOf(finding),
         ),
     });
@@ -7390,6 +7399,7 @@ export class AnomalyService
     finding: HotShardFinding,
     signature: string,
     topSlots: HotShardSlot[],
+    slots: readonly SlotLoadRate[],
     nodeAddr: string | undefined,
   ): AnomalyEvent {
     const since = this.hotShardFirstSeen.get(ctx.connectionId)?.get(signature) ?? sampledAt;
@@ -7403,8 +7413,8 @@ export class AnomalyService
     const rebalance = this.hotShardRebalance.get(ctx.connectionId)?.get(signature)?.verdict;
     const advice = this.hotShardAdvice(
       ctx.connectionId,
-      finding.shardId,
       signature,
+      slots,
       this.shardLoad?.getMedianKeyCount(ctx.connectionId) ?? null,
     );
     return {
@@ -7442,6 +7452,7 @@ export class AnomalyService
     sampledAt: number,
     findings: HotShardFinding[],
     topSlots: ReadonlyMap<string, HotShardSlot[]>,
+    slots: ReadonlyMap<string, SlotLoadRate[]>,
   ): void {
     const eventIds = this.hotShardEventIds.get(connectionId);
     const since = this.hotShardSince.get(connectionId);
@@ -7472,7 +7483,12 @@ export class AnomalyService
         network: finding.network,
         topSlots: topSlots.get(finding.shardId) ?? [],
         ...read,
-        advice: this.hotShardAdvice(connectionId, finding.shardId, signature, medianKeyCount),
+        advice: this.hotShardAdvice(
+          connectionId,
+          signature,
+          slots.get(finding.shardId) ?? [],
+          medianKeyCount,
+        ),
         ...(rebalance?.has(signature) ? { rebalance: rebalance.get(signature)!.verdict } : {}),
       });
     }

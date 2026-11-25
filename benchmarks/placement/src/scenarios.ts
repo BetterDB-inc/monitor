@@ -204,8 +204,8 @@ export async function runB2HashTag(lfu: boolean): Promise<ScenarioResult> {
     ),
     check(
       'the hot slot is named as crowded',
-      outlier !== undefined && outlier.ratio >= 20,
-      outlier ? `${outlier.keyCount} keys, ${Math.round(outlier.ratio)}x the median` : 'none',
+      outlier?.ratio != null && outlier.ratio >= 20,
+      outlier ? `${outlier.keyCount} keys, ${Math.round(outlier.ratio ?? 0)}x the median` : 'none',
     ),
     check(
       'each top slot is listed once, for the tags and the hot keys together',

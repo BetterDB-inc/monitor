@@ -9,11 +9,11 @@ import {
   type RebalanceShard,
   type ShardLoadSample,
   type ShardLoadTracker,
+  hashTagAdvice,
   hashTagsOfNames,
   hashTagsUnavailable,
   hotKeysUnavailable,
   isManagedProviderBuild,
-  keyCountOutliers,
   managedPlacementProvider,
   migrateSlotsListed,
   readSlotNames,
@@ -93,14 +93,21 @@ export async function readHotShardKeys(
   topSlots: readonly number[],
 ): Promise<HotShardRead> {
   const slots = topSlots.slice(0, HOT_KEY_SLOTS);
-  const read = await readSlotNames(client, slots);
-  if (read.note !== undefined) {
-    return { keys: hotKeysUnavailable(read.note), hashTags: hashTagsUnavailable(read.note) };
+  const unavailable = (note: string): HotShardRead => ({
+    keys: hotKeysUnavailable(note),
+    hashTags: hashTagsUnavailable(note),
+  });
+  let hashTags: HashTagRead | undefined;
+  try {
+    const read = await readSlotNames(client, slots);
+    if (read.note !== undefined) return unavailable(read.note);
+    hashTags = hashTagsOfNames(read.names);
+    return { keys: await sampleHotKeys(client, slots, read.names), hashTags };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    const failed = unavailable(`reading the keys from the hot primary failed: ${reason}`);
+    return hashTags ? { ...failed, hashTags } : failed;
   }
-  return {
-    keys: await sampleHotKeys(client, slots, read.names),
-    hashTags: hashTagsOfNames(read.names),
-  };
 }
 
 export function hotShardAdvice(
@@ -108,10 +115,5 @@ export function hotShardAdvice(
   shardId: string,
   read: HotShardRead,
 ): HashTagAdvice {
-  const median = tracker.medianKeyCount();
-  return {
-    ...read.hashTags,
-    keyCountOutliers: median === null ? [] : keyCountOutliers(tracker.slotsOf(shardId), median),
-    medianKeyCount: median ?? 0,
-  };
+  return hashTagAdvice(read.hashTags, tracker.slotsOf(shardId), tracker.medianKeyCount());
 }

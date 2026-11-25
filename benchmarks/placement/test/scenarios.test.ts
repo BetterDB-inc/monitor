@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { readHotShardKeys } from '../src/glue';
 import { checkPin } from '../src/product';
 import {
   B2_HOT_SLOT,
@@ -79,4 +80,32 @@ test('a hot slot without a shared tag names none', async () => {
   const { advice } = await readB2Advice(b2Model(), true);
   assert.deepEqual(advice.tags, []);
   assert.deepEqual(advice.keyCountOutliers, []);
+});
+
+test('the tags are kept when the frequency read fails, as in the service', async () => {
+  const read = await readHotShardKeys(
+    {
+      async callBuffer() {
+        return ['{cart}:1', '{cart}:2'].map((name) => Buffer.from(name));
+      },
+      pipeline() {
+        return {
+          call() {},
+          async exec() {
+            throw new Error('CLUSTERDOWN The cluster is down');
+          },
+        };
+      },
+    },
+    [7],
+  );
+  assert.equal(read.keys.keySource, 'unavailable');
+  assert.equal(
+    read.keys.keyNote,
+    'reading the keys from the hot primary failed: CLUSTERDOWN The cluster is down',
+  );
+  assert.deepEqual(
+    read.hashTags.tags.map((tag) => [tag.slot, tag.tag]),
+    [[7, 'cart']],
+  );
 });

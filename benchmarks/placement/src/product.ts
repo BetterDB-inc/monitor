@@ -14,9 +14,9 @@ export {
   type HashTagAdvice,
   type HashTagRead,
   describeHashTags,
+  hashTagAdvice,
   hashTagsOfNames,
   hashTagsUnavailable,
-  keyCountOutliers,
 } from '../../../proprietary/anomaly-detection/hash-tag-advisor';
 export { judgeHotShards } from '../../../proprietary/anomaly-detection/hot-shard-detector';
 export {

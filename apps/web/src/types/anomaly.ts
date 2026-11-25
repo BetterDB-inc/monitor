@@ -268,7 +268,7 @@ export interface HashTagShare {
 export interface KeyCountOutlier {
   slot: number;
   keyCount: number;
-  ratio: number;
+  ratio: number | null;
 }
 
 export interface HashTagAdvice {
@@ -276,7 +276,8 @@ export interface HashTagAdvice {
   slotsSampled: number;
   note?: string;
   keyCountOutliers: KeyCountOutlier[];
-  medianKeyCount: number;
+  keyCountOutlierFactor: number;
+  medianKeyCount: number | null;
   sampledAt?: number;
 }
 
