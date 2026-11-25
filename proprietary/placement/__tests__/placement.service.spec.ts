@@ -3,6 +3,8 @@ import { MemoryAdapter } from '@app/storage/adapters/memory.adapter';
 import type { ShardLoadSample } from '@app/cluster/shard-load';
 import { PlacementService, PlacementModeError } from '../placement.service';
 import type { PlacementPrimaryRead } from '../placement-support';
+import type { ServedHotShardDetail } from '../../anomaly-detection/hot-shard-detector';
+import type { RebalanceNoPlan, RebalancePlan } from '../../anomaly-detection/rebalance-planner';
 
 const valkey9 = { dbType: 'valkey' as const, version: '9.0.0' };
 
@@ -180,6 +182,87 @@ describe('PlacementService', () => {
     expect(await service.allowsRun('seed')).toBe(false);
     await storage.savePlacementPolicy({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
     expect(await service.allowsRun('seed')).toBe(true);
+  });
+
+  it('keeps a cluster on Recommend without a stored policy on memory storage', async () => {
+    const { service } = await setup({ env: { STORAGE_TYPE: 'memory' } });
+    expect((await service.getStatus('seed')).mode).toBe('recommend');
+    expect(await service.allowsRun('seed')).toBe(true);
+  });
+
+  it('starts a standalone connection in Observe on memory storage', async () => {
+    const { service } = await setup({ env: { STORAGE_TYPE: 'memory' }, clusterEnabled: false, primaries: null });
+    expect((await service.getStatus('seed')).mode).toBe('observe');
+  });
+
+  it('keeps a stored Observe on memory storage', async () => {
+    const { service, storage } = await setup({ env: { STORAGE_TYPE: 'memory' } });
+    await storage.savePlacementPolicy({ connectionId: 'seed', mode: 'observe', updatedAt: 1 });
+    expect(await service.allowsRun('seed')).toBe(false);
+  });
+
+  it('lets no plan run while the cluster runs as Observe', async () => {
+    const { service, storage, prometheus } = await setup();
+    await storage.savePlacementPolicy({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+    prometheus.collectsClusterSlotStats.mockReturnValue(false);
+    expect(await service.allowsRun('seed')).toBe(false);
+  });
+
+  it('shares a support read already in flight', async () => {
+    const { service, anomaly } = await setup();
+    let release: (value: PlacementPrimaryRead[]) => void = () => undefined;
+    anomaly.readPlacementPrimaries.mockImplementationOnce(
+      () => new Promise<PlacementPrimaryRead[]>((resolve) => (release = resolve)),
+    );
+    const first = service.getStatus('seed');
+    const second = service.getStatus('seed');
+    await new Promise((resolve) => setImmediate(resolve));
+    release(primaries());
+    await Promise.all([first, second]);
+    expect(anomaly.readPlacementPrimaries).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads the nodes again after a failed support read', async () => {
+    const { service, anomaly } = await setup();
+    anomaly.readPlacementPrimaries.mockRejectedValueOnce(new Error('boom'));
+    await expect(service.getStatus('seed')).rejects.toThrow('boom');
+    await service.getStatus('seed');
+    expect(anomaly.readPlacementPrimaries).toHaveBeenCalledTimes(2);
+  });
+
+  describe('marking runnable plans in Observe', () => {
+    const shard = (rebalance: ServedHotShardDetail['rebalance']) =>
+      ({ eventId: 'evt', shardId: 'a', nodeAddr: 'a:7000', rebalance }) as ServedHotShardDetail;
+    const plan = (execution: RebalancePlan['execution']) =>
+      ({ kind: 'plan', sourceShardId: 'a', moves: [], execution }) as unknown as RebalancePlan;
+
+    it('blocks a runnable plan with observe_mode', async () => {
+      const { service } = await setup();
+      const [marked] = await service.withPlacementBlocker('seed', [shard(plan({ available: true }))]);
+      expect(marked.rebalance).toMatchObject({ execution: { available: false, blockedBy: 'observe_mode' } });
+      expect(marked).toMatchObject({ eventId: 'evt', shardId: 'a', nodeAddr: 'a:7000' });
+    });
+
+    it('keeps an earlier blocker and verdicts without a plan', async () => {
+      const { service } = await setup();
+      const blocked = plan({ available: false, blockedBy: 'flag_off' });
+      const none: RebalanceNoPlan = { kind: 'no_plan', action: 'spread', reason: 'key_level', pinnedSlots: [] };
+      const marked = await service.withPlacementBlocker('seed', [shard(blocked), shard(none), shard(undefined)]);
+      expect(marked.map((each: ServedHotShardDetail) => each.rebalance)).toEqual([blocked, none, undefined]);
+    });
+
+    it('leaves plans alone in Recommend', async () => {
+      const { service, storage } = await setup();
+      await storage.savePlacementPolicy({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+      const shards = [shard(plan({ available: true }))];
+      expect(await service.withPlacementBlocker('seed', shards)).toEqual(shards);
+    });
+
+    it('reads no support when there is no plan to mark', async () => {
+      const { service, anomaly } = await setup();
+      await service.withPlacementBlocker('seed', []);
+      expect(anomaly.readPlacementPrimaries).not.toHaveBeenCalled();
+    });
   });
 
   it('fails for an unknown connection', async () => {

@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   Logger,
+  Optional,
   Param,
   Query,
   UseGuards,
@@ -12,6 +13,7 @@ import { AgentTokenGuard } from '@app/common/guards/agent-token.guard';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { ValidateInstanceIdPipe, mapMcpError, safeLimit, safeParseInt } from '@app/mcp/mcp-helpers';
 import { AnomalyService } from './anomaly.service';
+import { PlacementService } from '../placement/placement.service';
 import { withDisputedShardsOnly } from './topology-disagreements';
 import { MetricType } from './types';
 
@@ -29,6 +31,7 @@ export class McpAnomalyController {
   constructor(
     private readonly anomalyService: AnomalyService,
     private readonly registry: ConnectionRegistry,
+    @Optional() private readonly placement?: PlacementService,
   ) {}
 
   @Get('instance/:id/history/anomalies')
@@ -85,10 +88,11 @@ export class McpAnomalyController {
   }
 
   @Get('instance/:id/anomalies/hot-shards')
-  getHotShards(@Param('id', ValidateInstanceIdPipe) id: string) {
+  async getHotShards(@Param('id', ValidateInstanceIdPipe) id: string) {
     try {
       this.registry.get(id);
-      return this.anomalyService.getHotShards(id);
+      const shards = this.anomalyService.getHotShards(id);
+      return this.placement ? await this.placement.withPlacementBlocker(id, shards) : shards;
     } catch (error) {
       throw mapMcpError(this.logger, error, 'Failed to get hot shards');
     }

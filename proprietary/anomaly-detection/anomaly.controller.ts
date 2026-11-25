@@ -186,8 +186,11 @@ export class AnomalyController {
   @UseGuards(LicenseGuard)
   @RequiresFeature(Feature.ANOMALY_DETECTION)
   @ApiHeader({ name: CONNECTION_ID_HEADER, required: true, description: 'Connection ID of the cluster' })
-  getHotShards(@ConnectionId({ required: true }) connectionId: string): ServedHotShardDetail[] {
-    return this.anomalyService.getHotShards(connectionId);
+  async getHotShards(
+    @ConnectionId({ required: true }) connectionId: string,
+  ): Promise<ServedHotShardDetail[]> {
+    const shards = this.anomalyService.getHotShards(connectionId);
+    return this.placement ? this.placement.withPlacementBlocker(connectionId, shards) : shards;
   }
 
   @Post('hot-shards/:shardId/rebalance')

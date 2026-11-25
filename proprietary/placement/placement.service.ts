@@ -18,6 +18,7 @@ import { ClusterMetricsService } from '@app/cluster/cluster-metrics.service';
 import { WORKSPACE_CONFIG, type WorkspaceConfig } from '@app/auth/workspace-config';
 import { isManagedProviderBuild } from '@app/monitor/provider-detector';
 import { AnomalyService } from '../anomaly-detection/anomaly.service';
+import type { ServedHotShardDetail } from '../anomaly-detection/hot-shard-detector';
 import { judgePlacementSupport, managedPlacementProvider } from './placement-support';
 import { placementBalance } from './placement-balance';
 
@@ -35,6 +36,7 @@ export class PlacementModeError extends Error {
 @Injectable()
 export class PlacementService {
   private readonly supportCache = new Map<string, { at: number; support: PlacementSupport }>();
+  private readonly supportReads = new Map<string, Promise<PlacementSupport>>();
   private readonly aclDenied = new Set<string>();
 
   constructor(
@@ -78,7 +80,28 @@ export class PlacementService {
   }
 
   async allowsRun(connectionId: string): Promise<boolean> {
-    return (await this.storedMode(this.seedOf(connectionId))) !== 'observe';
+    return (await this.runningMode(this.seedOf(connectionId))) !== 'observe';
+  }
+
+  async withPlacementBlocker(
+    connectionId: string,
+    shards: ServedHotShardDetail[],
+  ): Promise<ServedHotShardDetail[]> {
+    const runnable = (shard: ServedHotShardDetail) =>
+      shard.rebalance?.kind === 'plan' && shard.rebalance.execution?.available === true;
+    if (!shards.some(runnable)) return shards;
+    if ((await this.runningMode(this.seedOf(connectionId))) !== 'observe') return shards;
+    return shards.map((shard) =>
+      runnable(shard) && shard.rebalance?.kind === 'plan'
+        ? {
+            ...shard,
+            rebalance: {
+              ...shard.rebalance,
+              execution: { available: false, blockedBy: 'observe_mode' },
+            },
+          }
+        : shard,
+    );
   }
 
   noteRebalanceRefusal(connectionId: string, message: string): void {
@@ -94,16 +117,36 @@ export class PlacementService {
     return config.membership?.seedId ?? connectionId;
   }
 
+  private async runningMode(seedId: string): Promise<PlacementMode> {
+    const [mode, support] = await Promise.all([this.storedMode(seedId), this.support(seedId)]);
+    return effectiveModeOf(mode, support);
+  }
+
   private async storedMode(seedId: string): Promise<PlacementMode> {
-    return (await this.storage.getPlacementPolicy(seedId))?.mode ?? PLACEMENT_DEFAULT_MODE;
+    const stored = (await this.storage.getPlacementPolicy(seedId))?.mode;
+    if (stored) return stored;
+    return this.memoryStorage() && this.registry.get(seedId).getCapabilities().clusterEnabled === true
+      ? 'recommend'
+      : PLACEMENT_DEFAULT_MODE;
+  }
+
+  private memoryStorage(): boolean {
+    return String(this.config.get('STORAGE_TYPE') ?? 'memory') === 'memory';
   }
 
   private async support(seedId: string): Promise<PlacementSupport> {
     const cached = this.supportCache.get(seedId);
     if (cached && Date.now() - cached.at < SUPPORT_CACHE_MS) return cached.support;
-    const support = await this.judge(seedId);
-    this.supportCache.set(seedId, { at: Date.now(), support });
-    return support;
+    const inFlight = this.supportReads.get(seedId);
+    if (inFlight) return inFlight;
+    const read = this.judge(seedId)
+      .then((support) => {
+        this.supportCache.set(seedId, { at: Date.now(), support });
+        return support;
+      })
+      .finally(() => this.supportReads.delete(seedId));
+    this.supportReads.set(seedId, read);
+    return read;
   }
 
   private async judge(seedId: string): Promise<PlacementSupport> {
@@ -127,7 +170,7 @@ export class PlacementService {
       primaries,
       aclDenied: this.aclDenied.has(seedId),
       slotMigrationFlag: String(this.config.get('BETTERDB_SLOT_MIGRATION')) === 'true',
-      memoryStorage: String(this.config.get('STORAGE_TYPE') ?? 'memory') === 'memory',
+      memoryStorage: this.memoryStorage(),
       signIn: this.workspace?.enabled === true,
     });
   }

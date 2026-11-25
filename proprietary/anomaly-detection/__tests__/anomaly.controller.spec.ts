@@ -179,9 +179,21 @@ describe('AnomalyController hot shards', () => {
 
   beforeEach(() => jest.clearAllMocks());
 
-  it('returns the open hot shards of the connection in the header', () => {
-    expect(controller.getHotShards('c1')).toEqual([detail]);
+  it('returns the open hot shards of the connection in the header', async () => {
+    expect(await controller.getHotShards('c1')).toEqual([detail]);
     expect(service.getHotShards).toHaveBeenCalledWith('c1');
+  });
+
+  it('marks the hot shards with the placement mode of the cluster', async () => {
+    const blocked = [{ ...detail, rebalance: { kind: 'plan' } }];
+    const placement = { withPlacementBlocker: jest.fn().mockResolvedValue(blocked) };
+    const withPlacement = new AnomalyController(
+      service as unknown as AnomalyService,
+      placement as never,
+    );
+
+    expect(await withPlacement.getHotShards('c1')).toBe(blocked);
+    expect(placement.withPlacementBlocker).toHaveBeenCalledWith('c1', [detail]);
   });
 
   it('is served at hot-shards and requires the connection header', () => {
