@@ -1,26 +1,23 @@
 import {
-  HASH_TAG_NAMES_PER_SLOT,
   type HashTagAdvice,
-  type HashTagReader,
   describeHashTags,
   hashTagOf,
   hashTagsOfNames,
   judgeSlotTag,
   keyCountOutliers,
-  sampleHashTags,
 } from '../hash-tag-advisor';
+import { type HotKeyReader, readSlotNames } from '../hot-shard-keys';
 
-interface FakeNode extends HashTagReader {
+interface FakeNode extends Pick<HotKeyReader, 'callBuffer'> {
   sent: Array<Array<string | number | Buffer>>;
 }
 
-function node(slots: Record<number, Array<string | Buffer>>, fail?: Error): FakeNode {
+function node(slots: Record<number, Array<string | Buffer>>): FakeNode {
   const sent: FakeNode['sent'] = [];
   return {
     sent,
     async callBuffer(...args: Array<string | number | Buffer>) {
       sent.push(args);
-      if (fail) throw fail;
       const [, , slot, count] = args as [string, string, number, number];
       return (slots[slot] ?? []).slice(0, count).map((name) => Buffer.from(name));
     },
@@ -116,53 +113,19 @@ describe('hashTagsOfNames', () => {
       ],
     });
   });
-});
 
-describe('sampleHashTags', () => {
-  it('reads up to 500 names from each slot and names their shared tags', async () => {
+  it('names the shared tags of the names read from each slot', async () => {
     const client = node({
       9189: [...names(9, (i) => `{cart}:${i}`), 'user:1'],
       9190: names(10, (i) => `user:${i}`),
     });
 
-    await expect(sampleHashTags(client, [9189, 9190])).resolves.toEqual({
+    const read = await readSlotNames(client, [9189, 9190]);
+
+    expect(hashTagsOfNames(read.names)).toEqual({
       slotsSampled: 2,
       tags: [{ slot: 9189, tag: 'cart', share: 0.9, keysSampled: 10, keysWithTag: 9 }],
     });
-    expect(client.sent).toEqual([
-      ['CLUSTER', 'GETKEYSINSLOT', 9189, HASH_TAG_NAMES_PER_SLOT],
-      ['CLUSTER', 'GETKEYSINSLOT', 9190, HASH_TAG_NAMES_PER_SLOT],
-    ]);
-  });
-
-  it('ends the read with a note when the user may not list keys', async () => {
-    const client = node(
-      {},
-      new Error(
-        "NOPERM User monitor has no permissions to run the 'cluster|getkeysinslot' command",
-      ),
-    );
-
-    await expect(sampleHashTags(client, [1, 2])).resolves.toEqual({
-      slotsSampled: 0,
-      tags: [],
-      note: 'the monitoring user may not run CLUSTER GETKEYSINSLOT',
-    });
-    expect(client.sent).toHaveLength(1);
-  });
-
-  it('ends the read with a note when the server lacks the command', async () => {
-    const client = node({}, new Error("ERR unknown subcommand 'GETKEYSINSLOT'"));
-
-    await expect(sampleHashTags(client, [1])).resolves.toMatchObject({
-      note: 'the server does not support CLUSTER GETKEYSINSLOT',
-    });
-  });
-
-  it('lets any other failure through', async () => {
-    await expect(sampleHashTags(node({}, new Error('Connection is closed.')), [1])).rejects.toThrow(
-      'Connection is closed.',
-    );
   });
 });
 

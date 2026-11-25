@@ -93,6 +93,14 @@ describe('readSlotNames', () => {
     expect(keysInSlotCalls(client)).toHaveLength(1);
   });
 
+  it('stops with a note when the server lacks the command', async () => {
+    const client = node({}, new Error("ERR unknown subcommand 'GETKEYSINSLOT'"));
+
+    const read = await readSlotNames(client, [12]);
+
+    expect(read.note).toBe('the server does not support CLUSTER GETKEYSINSLOT');
+  });
+
   it('lets any other failure through', async () => {
     await expect(readSlotNames(node({}, new Error('Connection is closed.')), [1])).rejects.toThrow(
       'Connection is closed.',

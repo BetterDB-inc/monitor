@@ -1,8 +1,5 @@
 import { displayKeyName } from '@betterdb/shared';
-import { type HotKeyReader, readSlotNames } from './hot-shard-keys';
 
-export const HASH_TAG_SLOTS = 3;
-export const HASH_TAG_NAMES_PER_SLOT = 500;
 export const HASH_TAG_MIN_SHARE = 0.5;
 export const HASH_TAG_MIN_KEYS = 2;
 export const KEY_COUNT_OUTLIER_FACTOR = 20;
@@ -11,8 +8,6 @@ export const KEY_COUNT_OUTLIERS = 10;
 const MESSAGE_ITEMS = 3;
 const OPEN_BRACE = 0x7b;
 const CLOSE_BRACE = 0x7d;
-
-export type HashTagReader = Pick<HotKeyReader, 'callBuffer'>;
 
 export interface HashTagShare {
   slot: number;
@@ -91,14 +86,6 @@ export function hashTagsOfNames(names: ReadonlyMap<number, ReadonlyArray<Buffer>
     if (shared) tags.push(shared);
   }
   return { tags, slotsSampled: names.size };
-}
-
-export async function sampleHashTags(
-  client: HashTagReader,
-  slots: readonly number[],
-): Promise<HashTagRead> {
-  const read = await readSlotNames(client, slots);
-  return read.note === undefined ? hashTagsOfNames(read.names) : hashTagsUnavailable(read.note);
 }
 
 export function keyCountOutliers(
