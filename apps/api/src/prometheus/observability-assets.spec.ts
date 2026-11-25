@@ -490,6 +490,12 @@ describe('Prometheus alert rules (docs/alertmanager-rules.yml)', () => {
 
   const rules = loadRules();
 
+  // Fleet-wide per monitor: thresholds count across connections, so these
+  // aggregate by (namespace, job) and name the monitor, not a connection.
+  const FLEET_WIDE = ['BetterDBPersistentAnomalies', 'BetterDBUnresolvedCriticalAnomalies'];
+  // Attached by Prometheus at scrape time, so no metric registers them.
+  const SCRAPE_LABELS = ['job', 'namespace'];
+
   it('declares each alert once', () => {
     const names = rules.map((rule) => rule.alert);
     expect(new Set(names).size).toBe(names.length);
@@ -532,8 +538,10 @@ describe('Prometheus alert rules (docs/alertmanager-rules.yml)', () => {
       for (const label of templatedLabels(rule)) {
         expect(label).not.toBe('instance');
         expect(aggregatesWithoutBy).toBe(false);
-        for (const metric of metrics) {
-          expect(labels.get(metric)).toContain(label);
+        if (!SCRAPE_LABELS.includes(label)) {
+          for (const metric of metrics) {
+            expect(labels.get(metric)).toContain(label);
+          }
         }
         for (const kept of aggregations) {
           expect(kept).toContain(label);
@@ -545,17 +553,46 @@ describe('Prometheus alert rules (docs/alertmanager-rules.yml)', () => {
   it.each(rules.map((rule) => [rule.alert, rule] as const))(
     '%s names the monitored instance in its summary',
     (_name, rule) => {
-      expect(rule.annotations?.summary).toContain('{{ $labels.connection }}');
+      const label = FLEET_WIDE.includes(rule.alert) ? 'job' : 'connection';
+      expect(rule.annotations?.summary).toContain(`{{ $labels.${label} }}`);
     },
   );
+
+  // Relabeling aside, a label removed with without() is gone from the result,
+  // so templating it renders empty.
+  it.each(rules.map((rule) => [rule.alert, rule] as const))(
+    '%s does not template a label it aggregates away with without()',
+    (_name, rule) => {
+      const dropped = [...rule.expr.matchAll(/without\s*\(([^)]*)\)/g)].flatMap((m) =>
+        m[1]
+          .split(',')
+          .map((l) => l.trim())
+          .filter(Boolean),
+      );
+      for (const label of templatedLabels(rule)) {
+        expect(dropped).not.toContain(label);
+      }
+    },
+  );
+
+  it('lists as fleet-wide exactly the rules whose by clause omits connection', () => {
+    const omitting = rules
+      .filter((rule) => byClauses(rule.expr).some((kept) => !kept.includes('connection')))
+      .map((rule) => rule.alert)
+      .sort();
+    expect(omitting).toEqual([...FLEET_WIDE].sort());
+  });
 
   // Keeping namespace and job stops two releases that watch the same
   // host:port from merging into one alert, and lets namespaced
   // AlertmanagerConfigs match (both labels are simply absent elsewhere).
   it('keeps namespace, job and connection through every aggregation', () => {
     for (const rule of rules) {
+      const required = FLEET_WIDE.includes(rule.alert)
+        ? ['namespace', 'job']
+        : ['namespace', 'job', 'connection'];
       for (const kept of byClauses(rule.expr)) {
-        expect(kept).toEqual(expect.arrayContaining(['namespace', 'job', 'connection']));
+        expect(kept).toEqual(expect.arrayContaining(required));
       }
     }
   });

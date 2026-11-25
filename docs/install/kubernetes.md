@@ -144,7 +144,9 @@ metrics:
 
 The `release` label has to match your Prometheus's `serviceMonitorSelector` and
 `ruleSelector`. Every alert names the monitored instance in its `connection`
-label, so one monitor watching many instances raises one alert per instance.
+label, so one monitor watching many instances raises one alert per instance
+(except `BetterDBUnresolvedCriticalAnomalies` and `BetterDBPersistentAnomalies`,
+which are fleet-wide per monitor and carry `job`/`namespace` instead).
 See the [chart README](https://github.com/BetterDB-inc/monitor/tree/master/charts/betterdb-monitor#prometheus-operator--kube-prometheus-stack)
 for the token Secret and dashboard folder details.
 

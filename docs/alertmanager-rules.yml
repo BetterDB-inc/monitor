@@ -7,6 +7,8 @@
 # watching many instances raises one alert per instance, two releases watching
 # the same instance stay apart, and namespaced AlertmanagerConfigs still match.
 # (Outside Kubernetes `namespace` is simply absent, which is harmless.)
+# Exceptions: BetterDBUnresolvedCriticalAnomalies and BetterDBPersistentAnomalies
+# are fleet-wide per monitor and aggregate `by (namespace, job)`.
 #
 # The anomaly and correlated-group counters are created on their first
 # increment, so a new label set first appears already at 1 and increase()
@@ -95,13 +97,13 @@ groups:
       # High number of unresolved critical anomalies
       - alert: BetterDBUnresolvedCriticalAnomalies
         # The gauge is per connection; summing keeps the threshold fleet-wide.
-        expr: sum without (connection) (betterdb_anomaly_events_current{severity="critical"}) > 3
+        expr: sum by (namespace, job) (betterdb_anomaly_events_current{severity="critical"}) > 3
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: "Multiple unresolved critical anomalies on {{ $labels.connection }}"
-          description: "{{ $value }} critical anomalies remain unresolved. Review and resolve to prevent alert fatigue."
+          summary: "Multiple unresolved critical anomalies across connections monitored by {{ $labels.job }}"
+          description: "{{ $value }} critical anomalies remain unresolved across connections. Review and resolve to prevent alert fatigue. Check the Anomalies dashboard to see which connections are affected."
 
       # Traffic burst pattern
       - alert: BetterDBTrafficBurst
@@ -115,13 +117,13 @@ groups:
 
       # Persistent anomalies
       - alert: BetterDBPersistentAnomalies
-        expr: sum without (connection) (betterdb_anomaly_by_severity{severity!="info"}) > 10
+        expr: sum by (namespace, job) (betterdb_anomaly_by_severity{severity!="info"}) > 10
         for: 30m
         labels:
           severity: warning
         annotations:
-          summary: "Persistent anomalies on {{ $labels.connection }}"
-          description: "{{ $value }} anomalies detected in the last hour. System may be unstable."
+          summary: "Persistent anomalies across connections monitored by {{ $labels.job }}"
+          description: "{{ $value }} anomalies detected in the last hour across connections. System may be unstable. Check the Anomalies dashboard to see which connections are affected."
 
       # Level alert: fires while unpatched (webhooks are fire-on-change)
       - alert: CveKevPresent

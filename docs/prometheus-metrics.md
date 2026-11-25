@@ -957,7 +957,7 @@ count(betterdb_client_connections_by_name)
 
 The following alert rules are production-ready. See `docs/alertmanager-rules.yml` for the complete YAML configuration; on Kubernetes the Helm chart installs the same file as a `PrometheusRule` (`metrics.prometheusRule.enabled=true`, see the [Kubernetes guide](install/kubernetes.md#prometheus-operator-and-grafana)).
 
-Every alert carries the monitored instance in its `connection` label, and rules that aggregate keep `namespace`, `job` and `connection`, so a monitor watching several instances raises one alert per instance and two releases watching the same instance stay separate. The anomaly and correlated-group counters only appear on their first increment, so the counter rules use `(m unless m offset W) or increase(m[W])`: a series that did not exist `W` ago counts at its current value, and the first event after a restart still alerts. Name the instance in your own rules' annotations through the `connection` label, not `instance`: `instance` is the scrape target, which is the monitor itself, not the Valkey/Redis instance.
+Every alert carries the monitored instance in its `connection` label, and rules that aggregate keep `namespace`, `job` and `connection`, so a monitor watching several instances raises one alert per instance (except `BetterDBUnresolvedCriticalAnomalies` and `BetterDBPersistentAnomalies`, which are fleet-wide per monitor and aggregate `by (namespace, job)`) and two releases watching the same instance stay separate. The anomaly and correlated-group counters only appear on their first increment, so the counter rules use `(m unless m offset W) or increase(m[W])`: a series that did not exist `W` ago counts at its current value, and the first event after a restart still alerts. Name the instance in your own rules' annotations through the `connection` label, not `instance`: `instance` is the scrape target, which is the monitor itself, not the Valkey/Redis instance.
 
 ### Critical Alerts
 
@@ -1044,7 +1044,28 @@ for: 10m
 > templates include annotations). If key names can carry user identifiers, do
 > both before enabling this rule:
 >
-> 1. Rewrite or drop the `key` label with Prometheus `alert_relabel_configs`.
+> 1. Replace the `key` label with a stable per-key pseudonym in Prometheus
+>    `alert_relabel_configs`. **Do not drop the label:** it is the only label
+>    that separates alerts for different keys, and without it Alertmanager
+>    merges them into one alert, so one growing key can hide another.
+>
+>    ```yaml
+>    alert_relabel_configs:
+>      - source_labels: [key]
+>        target_label: __tmp_key_hash
+>        modulus: 4294967296
+>        action: hashmod
+>      - source_labels: [key, __tmp_key_hash]
+>        regex: '.+;(.+)'          # only alerts that carry a key
+>        target_label: key
+>        replacement: 'k$1'
+>        action: replace
+>      - regex: __tmp_key_hash
+>        action: labeldrop
+>    ```
+>
+>    `hashmod` is a pseudonym, not encryption: short or guessable key names
+>    can be recovered by hashing candidates.
 > 2. Remove `{{ $labels.key }}` from the `summary` and `description`. Relabeling
 >    does not change annotations, because they are rendered at rule evaluation.
 >    Copy the rule into your own rule group without the key in its annotations

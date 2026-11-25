@@ -99,7 +99,9 @@ helm upgrade --install betterdb-monitor betterdb/betterdb-monitor -n betterdb \
   `grafana_dashboard: "1"` and annotated `grafana_folder: BetterDB`; folder
   placement needs the sidecar's `folderAnnotation` set to `grafana_folder`.
 - The ServiceMonitor and PrometheusRule need the `monitoring.coreos.com` CRDs.
-- Every alert names the monitored instance in its `connection` label. The rules
+- Every alert names the monitored instance in its `connection` label, except
+  `BetterDBUnresolvedCriticalAnomalies` and `BetterDBPersistentAnomalies`, which
+  are fleet-wide per monitor and carry `job`/`namespace` instead. The rules
   are [docs/alertmanager-rules.yml](../../docs/alertmanager-rules.yml); add your
   own groups with `metrics.prometheusRule.additionalGroups`.
 
