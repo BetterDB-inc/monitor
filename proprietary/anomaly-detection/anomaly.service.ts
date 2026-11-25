@@ -1076,6 +1076,7 @@ export class AnomalyService
   // outside a cluster by its replication ID. `primaryReplicaPaths` holds the
   // state key each connection or fan-out address last used.
   private primaryReplicaState = new Map<string, ShardReplicaState>();
+  private primaryReplicaNodeKeys = new WeakMap<ShardReplicaState, string>();
   private primaryReplicaEvents = new Map<string, PrimaryReplicaEvent[]>();
   private primaryReplicaPaths = new Map<string, string>();
   private readonly primaryReplicaConfig: PrimaryWithoutReplicasConfig;
@@ -9578,6 +9579,7 @@ export class AnomalyService
     await this.reconcilePrimaryReplicaAlert(key);
     const state = this.primaryReplicaState.get(key) ?? createShardReplicaState(timestamp);
     this.primaryReplicaState.set(key, state);
+    if (nodeAddr) this.primaryReplicaNodeKeys.set(state, topologyStateKey(ctx.connectionId, nodeAddr));
     const primaryId = self ? self.id : info.master_replid;
     if (primaryId) state.primaryId = primaryId;
 
@@ -9748,8 +9750,12 @@ export class AnomalyService
    * TTL: a primary that comes back alone after an outage must still alert.
    */
   private sweepPrimaryReplicaShards(timestamp: number): void {
-    const unobservedMs = Math.max(PRIMARY_REPLICA_UNOBSERVED_MS, 3 * this.getIntervalMs());
     for (const [key, state] of [...this.primaryReplicaState]) {
+      const nodeKey = this.primaryReplicaNodeKeys.get(state);
+      const readEveryMs = nodeKey
+        ? this.nodeReadIntervalMs(connectionOfStateKey(nodeKey), nodeKey)
+        : this.getIntervalMs();
+      const unobservedMs = Math.max(PRIMARY_REPLICA_UNOBSERVED_MS, 3 * readEveryMs);
       const idleMs = timestamp - state.lastSeenAt;
       if (idleMs <= unobservedMs) continue;
       this.closePrimaryReplicaEvents(key);

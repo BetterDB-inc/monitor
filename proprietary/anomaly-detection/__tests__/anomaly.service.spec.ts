@@ -26209,6 +26209,46 @@ describe('AnomalyService', () => {
             );
           });
 
+          it('keeps the alert of a primary without replicas open while it waits its turn', async () => {
+            const MINUTE = 60_000;
+            jest.spyOn(service as any, 'getIntervalMs').mockReturnValue(MINUTE);
+            const many = primaries(6 * TOPOLOGY_TARGET_LIMIT + 16);
+            const members = new Set(many.map((t) => t.addr));
+            const sorted = [...many].sort((a, b) => (a.addr < b.addr ? -1 : 1));
+            const crowd = new Set(sorted.slice(0, TOPOLOGY_TARGET_LIMIT / 4).map((t) => t.addr));
+            const lone = sorted[TOPOLOGY_TARGET_LIMIT / 4];
+            const clients = ownClients(many);
+            const readAt: number[] = [];
+            clients.get(lone.nodeId!)!.info = jest.fn().mockImplementation(async (section?: string) => {
+              if (section === 'replication') readAt.push(Date.now());
+              const lines = ['# Replication', 'role:master', `master_replid:${'b'.repeat(40)}`];
+              lines.push('master_repl_offset:1000', 'connected_slaves:1');
+              lines.push('slave0:ip=10.0.1.9,port=6379,state=wait_bgsave,offset=0,lag=0');
+              return lines.join('\r\n');
+            });
+            clients.get(lone.nodeId!)!.call = jest
+              .fn()
+              .mockResolvedValue(`${lone.nodeId} ${lone.addr}@16379 myself,master - 0 0 1 connected 100-110\n`);
+            let crowded = false;
+            jest
+              .spyOn(service as any, 'needsEveryPoll')
+              .mockImplementation((_id: unknown, addr: unknown) => crowded && crowd.has(addr as string));
+            const pollAt = async (at: number) => {
+              jest.spyOn(Date, 'now').mockReturnValue(at);
+              await (service as any).detectTopologyAnomalies(mockCtx, { targets: many, members });
+            };
+            await pollAt(T0);
+            await pollAt(T0 + MINUTE);
+            const raised = [...(service as any).primaryReplicaEvents.values()].flat().map((e: any) => e.id);
+            crowded = true;
+
+            for (let i = 2; i <= 7; i++) await pollAt(T0 + i * MINUTE);
+
+            expect(raised).not.toHaveLength(0);
+            expect(readAt).toEqual([T0, T0 + MINUTE, T0 + 7 * MINUTE]);
+            expect([...(service as any).primaryReplicaEvents.values()].flat().map((e: any) => e.id)).toEqual(raised);
+          });
+
           describe('for a primary read on every poll', () => {
             const many = primaries(6 * TOPOLOGY_TARGET_LIMIT + 16);
             let urgent = true;
