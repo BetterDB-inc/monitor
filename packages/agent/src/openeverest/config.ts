@@ -33,6 +33,26 @@ export interface OpenEverestConfig {
   fallbackSettings?: { url: string; token: string };
 }
 
+// Rediscovery below 10s would hammer every instance with CLUSTER SHARDS and
+// reverse DNS; above an hour a failover goes unnoticed for too long.
+export const MIN_REDISCOVER_INTERVAL_MS = 10_000;
+export const MAX_REDISCOVER_INTERVAL_MS = 3_600_000;
+
+/**
+ * An integer setting from the environment, within [min, max]. A value that is
+ * not an integer or out of range fails startup with a message naming the
+ * variable: a silently substituted default would hide a typo in a chart value.
+ */
+export function integerSetting(env: NodeJS.ProcessEnv, name: string, fallback: number, min: number, max: number): number {
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const value = /^-?\d+$/.test(raw.trim()) ? Number(raw.trim()) : NaN;
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max} (got "${raw}")`);
+  }
+  return value;
+}
+
 export function loadOpenEverestConfig(env: NodeJS.ProcessEnv = process.env): OpenEverestConfig {
   const caFile = env.BETTERDB_CA_FILE;
   const watchNamespaces = (env.WATCH_NAMESPACES || '')
@@ -43,7 +63,7 @@ export function loadOpenEverestConfig(env: NodeJS.ProcessEnv = process.env): Ope
   const token = env.BETTERDB_TOKEN || '';
   return {
     pluginName: env.PLUGIN_NAME || 'betterdb',
-    port: parseInt(env.PORT || '8080', 10),
+    port: integerSetting(env, 'PORT', 8080, 1, 65535),
     uiDir: env.PLUGIN_UI_DIR || '/app/ui',
     everestApiUrl: everestApiUrl(env),
     settingsSecret: env.BETTERDB_SETTINGS_SECRET || 'betterdb-openeverest-settings',
@@ -51,7 +71,7 @@ export function loadOpenEverestConfig(env: NodeJS.ProcessEnv = process.env): Ope
     watchNamespaces,
     localCluster: env.OPENEVEREST_CLUSTER_NAME || 'main',
     cloudCa: caFile ? readFileSync(caFile, 'utf8') : undefined,
-    rediscoverIntervalMs: parseInt(env.BETTERDB_REDISCOVER_INTERVAL_MS || '60000', 10),
+    rediscoverIntervalMs: integerSetting(env, 'BETTERDB_REDISCOVER_INTERVAL_MS', 60_000, MIN_REDISCOVER_INTERVAL_MS, MAX_REDISCOVER_INTERVAL_MS),
     fallbackSettings: url && token ? { url, token } : undefined,
   };
 }
