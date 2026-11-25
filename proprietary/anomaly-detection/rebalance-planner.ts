@@ -862,7 +862,7 @@ const ATOMIC_MIGRATION_SINCE: Record<ShardServer['dbType'], [number, number]> = 
   redis: [8, 4],
 };
 
-function atomicMigration(server: ShardServer): boolean | undefined {
+export function atomicMigration(server: ShardServer): boolean | undefined {
   const [major, minor] = server.version.split('.').map(Number);
   if (!Number.isInteger(major) || !Number.isInteger(minor)) return undefined;
   const [sinceMajor, sinceMinor] = ATOMIC_MIGRATION_SINCE[server.dbType];
