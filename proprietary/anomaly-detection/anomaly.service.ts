@@ -12884,9 +12884,10 @@ export class AnomalyService
     ctx: ConnectionContext,
     topology: FanoutCoverage['topology'],
     coverage: Pick<FanoutCoverage, FanoutCount | 'reason'>,
+    pickedSweepPolls: number | null = null,
   ): void {
-    const reading = coverage.reason === null;
-    const sweepPolls = reading ? (this.fanoutSweepPolls.get(ctx.connectionId) ?? 1) : 1;
+    const reading = coverage.reason === null && pickedSweepPolls !== null;
+    const sweepPolls = reading ? pickedSweepPolls : 1;
     const sweepMs = this.getIntervalMs() * sweepPolls;
     this.fanoutCoverage.set(ctx.connectionId, {
       connectionId: ctx.connectionId,
@@ -13037,7 +13038,13 @@ export class AnomalyService
       (addr) =>
         !reachable.has(addr) && !this.topologyTargetClaims.heldByOther(ctx.connectionId, addr, now, staleMs),
     ).length;
-    const coverage = (checked: number, unreachable: number, authFailed: number, skipped = 0) => {
+    const coverage = (
+      checked: number,
+      unreachable: number,
+      authFailed: number,
+      skipped = 0,
+      pickedSweepPolls: number | null = null,
+    ) => {
       const notDialed = gap?.notDialed ?? 0;
       const reason =
         gap?.reason ??
@@ -13046,7 +13053,12 @@ export class AnomalyService
           : scope.members.size > 0
             ? 'covered_elsewhere'
             : 'no_targets');
-      this.recordFanoutCoverage(ctx, topology, { checked, unreachable, authFailed, skipped, notDialed, reason });
+      this.recordFanoutCoverage(
+        ctx,
+        topology,
+        { checked, unreachable, authFailed, skipped, notDialed, reason },
+        pickedSweepPolls,
+      );
     };
     const active = new Set([...kept].map((addr) => topologyStateKey(ctx.connectionId, addr)));
     for (const key of this.topologyBackoff.keys()) {
@@ -13117,7 +13129,9 @@ export class AnomalyService
       if (adopted) this.closeLater(adopted);
     }
     for (const addr of kept) {
-      if (!inRotation.has(addr)) this.clearNodeSignals(ctx.connectionId, topologyStateKey(ctx.connectionId, addr));
+      if (inRotation.has(addr)) continue;
+      this.clearNodeSignals(ctx.connectionId, topologyStateKey(ctx.connectionId, addr));
+      this.fanoutReadOk.delete(topologyStateKey(ctx.connectionId, addr));
     }
     try {
       await this.persistPendingDivergenceWindows(ctx);
@@ -13239,7 +13253,7 @@ export class AnomalyService
       waiting.checked +
       results.filter((result, i) => result.status === 'fulfilled' && !lost.has(targets[i].addr)).length;
     // Recorded as soon as the reads settle: detection below can throw.
-    coverage(checked, unreachable - authFailed + down, authFailed, waiting.skipped);
+    coverage(checked, unreachable - authFailed + down, authFailed, waiting.skipped, sweepPolls);
     for (const [i, result] of results.entries()) {
       const key = topologyStateKey(ctx.connectionId, targets[i].addr);
       if (result.status === 'rejected') {

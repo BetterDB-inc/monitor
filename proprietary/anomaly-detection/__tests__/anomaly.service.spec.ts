@@ -25777,6 +25777,36 @@ describe('AnomalyService', () => {
           });
         });
 
+        it('withdraws the sweep while every primary is flagged down', async () => {
+          discovery();
+          const targets = primaries(TOPOLOGY_TARGET_LIMIT + 3);
+          const members = new Set(targets.map((t) => t.addr));
+          await poll(targets, 1, T0, members);
+
+          await poll([], 1, T0 + 10_000, members);
+
+          expect(latest()).toMatchObject({
+            unreachable: targets.length,
+            reason: null,
+            sweepMs: (service as any).getIntervalMs(),
+            sweepPolls: 1,
+          });
+          expect(prometheusService.updateFanoutSweep).toHaveBeenLastCalledWith('conn-1', null);
+        });
+
+        it('counts a primary that was flagged down as not read until it is read again', async () => {
+          discovery();
+          const targets = primaries(3 * TOPOLOGY_TARGET_LIMIT);
+          const members = new Set(targets.map((t) => t.addr));
+          const rest = [...targets].sort((a, b) => (a.addr < b.addr ? -1 : 1)).slice(1);
+          await poll(targets, 3, T0, members);
+          await poll(rest, 1, T0 + 30_000, members);
+
+          await poll(targets, 1, T0 + 40_000, members);
+
+          expect(latest()).toMatchObject({ checked: targets.length - 1, unreachable: 0, skipped: 1 });
+        });
+
         it('stops exporting the sweep of a connection with no primary to read', async () => {
           discovery();
           await poll(primaries(TOPOLOGY_TARGET_LIMIT + 3), 1, T0);
