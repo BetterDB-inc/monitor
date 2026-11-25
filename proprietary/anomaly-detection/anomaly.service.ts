@@ -6683,8 +6683,6 @@ export class AnomalyService
         primaries >= RESHARD_MIN_PRIMARIES &&
         (this.reshardWatchedSince.get(ctx.connectionId)! > stallStart ||
           this.reshardPeerSeenSince(ctx.connectionId, clusterKey, stallStart));
-      // A primary that waits its turn in the fan-out rotation is judged again on
-      // every poll from the same reading, so persistence counts readings too.
       const reads =
         this.reshardSkewReads.get(ctx.connectionId) ?? new Map<string, { readAt: number; reads: number }>();
       this.reshardSkewReads.set(ctx.connectionId, reads);
@@ -9117,7 +9115,6 @@ export class AnomalyService
     // (grace preserved) nor auto-resolved — their prior state is carried forward
     // rather than read as recovery.
     preserveSignature?: (signature: string) => boolean;
-    // False while a finding old enough to alert still rests on too few readings.
     isConfirmed?: (finding: T) => boolean;
     contextOf?: (finding: T) => ConnectionContext;
     ownerOf?: (eventId: string) => string | undefined;
