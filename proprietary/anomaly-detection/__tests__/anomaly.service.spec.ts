@@ -2,7 +2,7 @@ import { TOPOLOGY_TARGET_LIMIT, type TopologyTarget } from '../topology-targets'
 import { randomUUID } from 'crypto';
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
-import { RESHARD_MARKER_STALL_MS } from '../reshard-pressure-detector';
+import { RESHARD_MARKER_STALL_MS, RESHARD_PERSIST_POLLS } from '../reshard-pressure-detector';
 import { RESYNC_ESCALATION_WINDOW_MS } from '../recovery-amplification-detector';
 import { judgeSlotMigrations, type SlotMigrationWatch } from '../slot-migration-detector';
 import { AnomalyService } from '../anomaly.service';
@@ -6449,6 +6449,113 @@ describe('AnomalyService', () => {
       }
 
       expect(skewEvents()[0].resolved).toBe(true);
+    });
+
+    describe('with more primaries than one poll reads', () => {
+      const COUNT = 199;
+      const LANE = TOPOLOGY_TARGET_LIMIT / 4;
+      const HOT = 60;
+      const idOf = (i: number) => `b${String(i).padStart(3, '0')}0000`;
+      const addrOf = (i: number) => `10.${1 + Math.floor(i / 100)}.0.${100 + (i % 100)}:6379`;
+      let hotOps: number;
+      let hotReads: Set<number>;
+
+      function clusterCtx() {
+        const info = {
+          server: { redis_version: '8.0.0' },
+          replication: { role: 'master' },
+          clients: { connected_clients: '10', blocked_clients: '0' },
+          memory: { used_memory: '1000000' },
+          stats: { instantaneous_ops_per_sec: '6000', cluster_enabled: '1' },
+        };
+        const node = (id: string, address: string, flags: string[]) => ({
+          id,
+          address: `${address}@16379`,
+          flags,
+          master: '-',
+          pingSent: 0,
+          pongReceived: 0,
+          configEpoch: 1,
+          linkState: 'connected',
+          slots: [],
+          migratingSlots: [],
+        });
+        const nodes = [
+          node('a0000000', '10.0.0.1:6379', ['myself', 'master']),
+          ...Array.from({ length: COUNT }, (_, i) => node(idOf(i), addrOf(i), ['master'])),
+        ];
+        return {
+          ...mockCtx,
+          connectionId: 'conn-a',
+          connectionName: 'a',
+          client: {
+            ...dbClient,
+            getInfoParsed: jest.fn().mockResolvedValue(info),
+            getClusterInfo: jest.fn().mockResolvedValue({ cluster_state: 'ok' }),
+            getClusterNodes: jest.fn().mockResolvedValue(nodes),
+          },
+        } as unknown as ConnectionContext;
+      }
+
+      function fanoutNode(i: number) {
+        const marker = i < LANE ? '[1->-a0000000]' : '';
+        return {
+          info: jest.fn(async (section?: string) => {
+            if (i === HOT) hotReads.add(clock);
+            if (section === 'latencystats') return '';
+            return [
+              '# Replication',
+              'role:master',
+              'connected_slaves:0',
+              '# Memory',
+              'used_memory:1000000',
+              '# Stats',
+              `instantaneous_ops_per_sec:${i === HOT ? hotOps : 6000}`,
+            ].join('\r\n');
+          }),
+          call: jest.fn().mockResolvedValue(`${idOf(i)} ${addrOf(i)}@16379 myself,master - 0 0 1 connected ${marker}`),
+        };
+      }
+
+      async function pollOnce(): Promise<void> {
+        clock += (service as any).getIntervalMs();
+        await poll(clusterCtx());
+      }
+
+      const hotSkews = () => skewEvents().filter((e) => e.nodeAddr === addrOf(HOT));
+
+      beforeEach(() => {
+        hotOps = 18_000;
+        hotReads = new Set();
+        const clients = new Map(Array.from({ length: COUNT }, (_, i) => [idOf(i), fanoutNode(i)]));
+        (service as any).clusterDiscovery = {
+          retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+          releaseConnection: jest.fn().mockResolvedValue(undefined),
+          getNodeConnection: jest.fn(async (nodeId: string) => clients.get(nodeId)),
+        };
+      });
+
+      it('does not raise a skew from one reading of a primary that waits its turn', async () => {
+        await pollOnce();
+        expect(hotReads.size).toBe(1);
+        hotOps = 6000;
+
+        for (let i = 0; i < 3; i += 1) await pollOnce();
+
+        expect(hotReads.size).toBe(1);
+        expect(hotSkews()).toHaveLength(0);
+      });
+
+      it('raises a skew on a primary that stays hot once it was read three times', async () => {
+        let readsWhenRaised: number | null = null;
+
+        for (let i = 0; i < 12 && readsWhenRaised === null; i += 1) {
+          await pollOnce();
+          if (hotSkews().length > 0) readsWhenRaised = hotReads.size;
+        }
+
+        expect(readsWhenRaised).toBe(RESHARD_PERSIST_POLLS);
+      });
     });
 
     describe('with only the seed registered', () => {

@@ -911,6 +911,7 @@ export class AnomalyService
   private reshardSkewFirstSeen = new Map<string, Map<string, number>>();
   private activeReshardSkews = new Map<string, Set<string>>();
   private reshardSkewEventIds = new Map<string, Map<string, string>>();
+  private reshardSkewReads = new Map<string, Map<string, { readAt: number; reads: number }>>();
   private reshardWriteP99 = new Map<string, { readAt: number; value: number | null }>();
   private reshardThinViewLogged = new Set<string>();
   private reshardWatchedSince = new Map<string, number>();
@@ -1645,6 +1646,7 @@ export class AnomalyService
     this.reshardSkewFirstSeen.delete(connectionId);
     this.activeReshardSkews.delete(connectionId);
     this.reshardSkewEventIds.delete(connectionId);
+    this.reshardSkewReads.delete(connectionId);
     this.hotShardFirstSeen.delete(connectionId);
     this.activeHotShards.delete(connectionId);
     this.hotShardEventIds.delete(connectionId);
@@ -6635,6 +6637,7 @@ export class AnomalyService
         intervalMs,
       );
       const findings: ReshardSkewFinding[] = [];
+      const readAt = new Map<string, number>();
       const nodeAddrs = new Map<string, string>();
       const shards = this.freshReshardShards(clusterKey, timestamp, intervalMs);
       const judged = seed !== null || nodeSnapshots.length > 0;
@@ -6658,12 +6661,16 @@ export class AnomalyService
             this.reshardSnapshot.set(ctx.connectionId, measured);
             view = shards.map((s) => (s.shardId === measured.shardId ? measured : s));
             const finding = evaluateReshardSkew(measured, view);
-            if (finding) findings.push(finding);
+            if (finding) {
+              findings.push(finding);
+              readAt.set(reshardSkewSignature(finding), measured.timestamp);
+            }
           }
           for (const [nodeAddr, snapshot] of nodeSnapshots) {
             const finding = evaluateReshardSkew(snapshot, view);
             if (!finding) continue;
             findings.push(finding);
+            readAt.set(reshardSkewSignature(finding), snapshot.timestamp);
             nodeAddrs.set(finding.shardId, nodeAddr);
           }
         }
@@ -6676,6 +6683,15 @@ export class AnomalyService
         primaries >= RESHARD_MIN_PRIMARIES &&
         (this.reshardWatchedSince.get(ctx.connectionId)! > stallStart ||
           this.reshardPeerSeenSince(ctx.connectionId, clusterKey, stallStart));
+      // A primary that waits its turn in the fan-out rotation is judged again on
+      // every poll from the same reading, so persistence counts readings too.
+      const reads =
+        this.reshardSkewReads.get(ctx.connectionId) ?? new Map<string, { readAt: number; reads: number }>();
+      this.reshardSkewReads.set(ctx.connectionId, reads);
+      for (const [signature, at] of readAt) {
+        const seen = reads.get(signature);
+        if (seen?.readAt !== at) reads.set(signature, { readAt: at, reads: (seen?.reads ?? 0) + 1 });
+      }
       await this.applyTopologyPersistenceGate({
         ctx,
         timestamp,
@@ -6684,6 +6700,8 @@ export class AnomalyService
         firstSeenByConn: this.reshardSkewFirstSeen,
         activeByConn: this.activeReshardSkews,
         minPersistMs: (RESHARD_PERSIST_POLLS - 1) * intervalMs,
+        isConfirmed: (finding) =>
+          (reads.get(reshardSkewSignature(finding))?.reads ?? 0) >= RESHARD_PERSIST_POLLS,
         eventIdsByConn: this.reshardSkewEventIds,
         metricType: MetricType.RESHARD_SHARD_SKEW,
         preserveSignature: (signature) =>
@@ -6692,6 +6710,10 @@ export class AnomalyService
         buildEvent: (finding) =>
           this.buildReshardSkewEvent(ctx, timestamp, finding, nodeAddrs.get(finding.shardId)),
       });
+      const pending = this.reshardSkewFirstSeen.get(ctx.connectionId);
+      for (const signature of [...reads.keys()]) {
+        if (!pending?.has(signature)) reads.delete(signature);
+      }
     } catch (err) {
       this.logger.warn(
         `Reshard pressure check failed for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
@@ -9095,6 +9117,8 @@ export class AnomalyService
     // (grace preserved) nor auto-resolved — their prior state is carried forward
     // rather than read as recovery.
     preserveSignature?: (signature: string) => boolean;
+    // False while a finding old enough to alert still rests on too few readings.
+    isConfirmed?: (finding: T) => boolean;
     contextOf?: (finding: T) => ConnectionContext;
     ownerOf?: (eventId: string) => string | undefined;
   }): Promise<void> {
@@ -9110,6 +9134,7 @@ export class AnomalyService
       eventIdsByConn,
       metricType,
       preserveSignature,
+      isConfirmed,
       contextOf,
       ownerOf,
     } = params;
@@ -9135,7 +9160,7 @@ export class AnomalyService
       if (!firstSeen.has(signature)) firstSeen.set(signature, timestamp);
 
       // Persistence gate.
-      if (timestamp - seenAt < minPersistMs) continue;
+      if (timestamp - seenAt < minPersistMs || isConfirmed?.(finding) === false) continue;
 
       // Dedupe — but stay aware of EXTERNAL resolution. For tracked detectors an
       // operator can dismiss the banner (resolve the event) while the condition
