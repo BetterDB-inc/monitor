@@ -21,6 +21,15 @@ tests:
           path: spec.template.spec.serviceAccountName
           value: RELEASE-NAME-betterdb-openeverest
 
+  - it: probes liveness on /healthz and readiness on /readyz
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.path
+          value: /healthz
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.path
+          value: /readyz
+
   - it: uses an explicit image tag as given
     set:
       image.tag: 1.2.3

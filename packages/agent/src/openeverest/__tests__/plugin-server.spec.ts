@@ -44,6 +44,7 @@ describe('plugin server', () => {
   let server: Server;
   let base: string;
   let backend: FakeBackend;
+  let readyNow = true;
   let everestStatus = 200;
   const everestCalls: Array<{ url: string; authorization: string | undefined }> = [];
 
@@ -56,7 +57,7 @@ describe('plugin server', () => {
       }) as typeof fetch,
     });
     backend = new FakeBackend(everest);
-    server = createPluginServer({ backend, uiDir: '/nonexistent', log: () => undefined });
+    server = createPluginServer({ backend, uiDir: '/nonexistent', log: () => undefined, ready: () => readyNow });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   });
@@ -74,6 +75,17 @@ describe('plugin server', () => {
   it('answers the probes and reports a missing bundle', async () => {
     expect((await fetch(`${base}/healthz`)).status).toBe(200);
     expect((await fetch(`${base}/main.js`)).status).toBe(404);
+  });
+
+  it('is live before it is ready, and ready once the manager has started', async () => {
+    readyNow = false;
+    expect((await fetch(`${base}/healthz`)).status).toBe(200);
+    const notReady = await fetch(`${base}/readyz`);
+    expect(notReady.status).toBe(503);
+    expect(await notReady.json()).toEqual({ ready: false });
+
+    readyNow = true;
+    expect((await fetch(`${base}/readyz`)).status).toBe(200);
   });
 
   it('enables an instance after OpenEverest accepts the forwarded token', async () => {

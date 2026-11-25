@@ -80,9 +80,11 @@ spec:
               port: http
             initialDelaySeconds: 5
             periodSeconds: 15
+          # /readyz turns 200 once the backend watches instances; /healthz only
+          # says the process is up, so a slow start is not a restart loop.
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: http
             initialDelaySeconds: 3
             periodSeconds: 10

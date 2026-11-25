@@ -52,6 +52,8 @@ export interface PluginServerOptions {
   backend: PluginBackend;
   uiDir: string;
   log: (message: string) => void;
+  /** Readiness: true once the target manager has started. /healthz is liveness and never waits on it. */
+  ready: () => boolean;
 }
 
 const DNS_SUBDOMAIN = /^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$/;
@@ -91,7 +93,7 @@ export function createPluginServer(options: PluginServerOptions): http.Server {
 
   return http.createServer(async (req, res) => {
     try {
-      await route(req, res, options.backend, bundle);
+      await route(req, res, options, bundle);
     } catch (err) {
       const status = statusFor(err);
       if (status >= 500) options.log(`${req.method} ${req.url}: ${(err as Error).message}`);
@@ -103,15 +105,22 @@ export function createPluginServer(options: PluginServerOptions): http.Server {
 async function route(
   req: http.IncomingMessage,
   res: http.ServerResponse,
-  backend: PluginBackend,
+  options: PluginServerOptions,
   bundle: (file: string) => Promise<{ body: Buffer; etag: string } | null>,
 ): Promise<void> {
+  const { backend } = options;
   const url = new URL(req.url || '/', 'http://plugin');
   const method = req.method || 'GET';
   const path = url.pathname;
 
   if (method === 'GET' && path === '/healthz') {
     sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  if (method === 'GET' && path === '/readyz') {
+    const ready = options.ready();
+    sendJson(res, ready ? 200 : 503, { ready });
     return;
   }
 
