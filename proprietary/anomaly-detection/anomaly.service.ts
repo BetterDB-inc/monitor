@@ -887,6 +887,9 @@ export class AnomalyService
   // connection — so the degraded-detection warning is emitted only on a change,
   // not every ~1s poll.
   private replicaFanoutUnreachable = new Map<string, number>();
+  private readonly replicaSlotRotation = new ReadRotation();
+  private replicaSlotUnreachable = new Map<string, Set<string>>();
+  private legacyReplicaSlotRead = new Map<string, Set<string>>();
   private lastReplicationRole = new Map<string, number>();
   private lastClusterState = new Map<string, string>();
   private clusterStateChangedAt = new Map<string, number>();
@@ -1597,6 +1600,9 @@ export class AnomalyService
     this.lastErrorstatCounts.delete(connectionId);
     this.lastCounterReadings.delete(connectionId);
     this.replicaFanoutUnreachable.delete(connectionId);
+    this.replicaSlotRotation.forget(connectionId);
+    this.replicaSlotUnreachable.delete(connectionId);
+    this.legacyReplicaSlotRead.delete(connectionId);
     this.clientEvictionLimit.delete(connectionId);
     this.lastReplicationRole.delete(connectionId);
     this.lastClusterState.delete(connectionId);
@@ -2450,7 +2456,8 @@ export class AnomalyService
             timestamp,
             perNodeView.nodes,
             shards,
-            perNodeView.unreachableIds,
+            perNodeView.notReadIds,
+            perNodeView.unseenIds,
           );
         }
 
@@ -3087,13 +3094,16 @@ export class AnomalyService
       }
     }
     if (eventIds.size > 0) this.replicaSlotEventIds.set(connectionId, eventIds);
-    if (legacy.length > 0) this.legacyReplicaSlotEvents.set(connectionId, legacy);
+    if (legacy.length > 0) {
+      this.legacyReplicaSlotEvents.set(connectionId, legacy);
+      this.legacyReplicaSlotRead.delete(connectionId);
+    }
   }
 
   private claimLegacyReplicaSlotEvents(
     connectionId: string,
     findings: ReplicaSlotAnomaly[],
-    unreachableReplicaIds: Set<string>,
+    unseenReplicaIds: Set<string>,
   ): void {
     const legacy = this.legacyReplicaSlotEvents.get(connectionId);
     if (!legacy) return;
@@ -3109,7 +3119,7 @@ export class AnomalyService
       else eventIds.set(signature, event.id);
     }
     if (eventIds.size > 0) this.replicaSlotEventIds.set(connectionId, eventIds);
-    const sawEveryReplica = unreachableReplicaIds.size === 0;
+    const sawEveryReplica = unseenReplicaIds.size === 0;
     if (sawEveryReplica) unclaimed.forEach((event) => this.closeLater(event.id));
     if (sawEveryReplica || unclaimed.length === 0) this.legacyReplicaSlotEvents.delete(connectionId);
     else this.legacyReplicaSlotEvents.set(connectionId, unclaimed);
@@ -8817,6 +8827,7 @@ export class AnomalyService
   private static readonly REPLICA_READ_MIN_MS = 50;
   private static readonly REPLICA_READ_TIMED_OUT = 'Reading the replica timed out';
   private static readonly FANOUT_NODE_EVENT_LIMIT = 8;
+  private static readonly REPLICA_SLOT_READ_BUDGET = 8;
 
   /**
    * Detects a replica wrongly reporting slot migrating/importing/owned state
@@ -8833,21 +8844,23 @@ export class AnomalyService
     timestamp: number,
     nodes: ClusterNode[],
     shards: ClusterShard[] | undefined,
-    unreachableReplicaIds: Set<string> = new Set(),
+    notReadReplicaIds: Set<string> = new Set(),
+    unseenReplicaIds: Set<string> = notReadReplicaIds,
   ): Promise<void> {
     try {
-      // A replica we couldn't reach this poll is an observation GAP, not a
+      // A replica not read this poll, unreachable or waiting its turn in the
+      // rotation, is an observation GAP, not a
       // recovery: its base gossip line never carries node-local migrating/
       // importing markers, so its finding would vanish and the gate would restart
       // the grace clock and auto-resolve a still-open WARNING. Preserve the prior
-      // state of any signature belonging to an unreachable replica (the signature
+      // state of any signature belonging to such a replica (the signature
       // is `<replicaId>|<reason>|<slots>`, so the node id is the leading field) —
       // mirroring how a failed base CLUSTER NODES fetch skips detectors entirely.
-      const preserveSignature = unreachableReplicaIds.size
-        ? (signature: string) => unreachableReplicaIds.has(signature.split('|')[0])
+      const preserveSignature = notReadReplicaIds.size
+        ? (signature: string) => notReadReplicaIds.has(signature.split('|')[0])
         : undefined;
       const findings = detectReplicaSlotState(nodes, shards);
-      this.claimLegacyReplicaSlotEvents(ctx.connectionId, findings, unreachableReplicaIds);
+      this.claimLegacyReplicaSlotEvents(ctx.connectionId, findings, unseenReplicaIds);
       await this.applyTopologyPersistenceGate({
         ctx,
         timestamp,
@@ -8906,13 +8919,19 @@ export class AnomalyService
    * a stuck replica requires querying that replica directly. When cluster
    * discovery is unavailable, returns the base view unchanged (degrade: detection
    * then works only when the monitor connects directly to the stuck replica).
+   *
+   * Reads a budget of replicas per poll, in rotation; a replica that showed
+   * slot state is read on every poll until it is clean. `notReadIds` are the
+   * replicas with no own line this poll, `unseenIds` the ones not read since
+   * the connection's rows from before dedupe keys were adopted.
    */
   private async gatherReplicaSlotView(
     baseNodes: ClusterNode[],
     ctx: ConnectionContext,
-  ): Promise<{ nodes: ClusterNode[]; unreachableIds: Set<string> }> {
+  ): Promise<{ nodes: ClusterNode[]; notReadIds: Set<string>; unseenIds: Set<string> }> {
+    const unchanged = { nodes: baseNodes, notReadIds: new Set<string>(), unseenIds: new Set<string>() };
     if (!this.clusterDiscovery || !this.dialsDataNodes(ctx.connectionId)) {
-      return { nodes: baseNodes, unreachableIds: new Set() };
+      return unchanged;
     }
 
     // Only fan out to reachable remote replicas. A replica flagged dead/
@@ -8926,10 +8945,18 @@ export class AnomalyService
         !n.flags.includes('myself') &&
         !DEAD_FLAGS.some((flag) => n.flags.includes(flag)),
     );
-    if (remoteReplicas.length === 0) return { nodes: baseNodes, unreachableIds: new Set() };
+    if (remoteReplicas.length === 0) return unchanged;
 
+    const watched = this.replicaSlotWatchedIds(ctx.connectionId);
+    const { due } = this.replicaSlotRotation.pick(
+      ctx.connectionId,
+      remoteReplicas,
+      (r) => r.id,
+      AnomalyService.REPLICA_SLOT_READ_BUDGET,
+      (r) => watched.has(r.id),
+    );
     const selfViews = await Promise.allSettled(
-      remoteReplicas.map(async (r) => {
+      due.map(async (r) => {
         const client = await this.clusterDiscovery!.getNodeConnection(r.id, ctx.connectionId);
         // Bound the command itself, not just connect(): a blackholed peer (socket
         // established but unresponsive) leaves iovalkey `ready`, so the reused
@@ -8952,17 +8979,24 @@ export class AnomalyService
 
     const merged = baseNodes.map((n) => ({ ...n }));
     const byId = new Map(merged.map((n) => [n.id, n]));
-    const unreachableIds = new Set<string>();
-    // allSettled preserves order, so selfViews[i] corresponds to remoteReplicas[i].
+    const replicaIds = new Set(remoteReplicas.map((r) => r.id));
+    // A replica whose last read failed stays unreachable while it waits its turn.
+    const unreachableIds = new Set(
+      [...(this.replicaSlotUnreachable.get(ctx.connectionId) ?? [])].filter((id) => replicaIds.has(id)),
+    );
+    const read = new Set<string>();
+    // allSettled preserves order, so selfViews[i] corresponds to due[i].
     selfViews.forEach((result, i) => {
       // A rejected self-view is an unreachable replica (connect/command timeout or
       // error). Track its id so detection can PRESERVE that node's prior state
       // instead of reading the absence as recovery, and surface a degraded signal
       // below — the discovery service logs each unique connect error only once.
       if (result.status === 'rejected') {
-        unreachableIds.add(remoteReplicas[i].id);
+        unreachableIds.add(due[i].id);
         return;
       }
+      unreachableIds.delete(due[i].id);
+      read.add(due[i].id);
       if (!result.value) return;
       const target = byId.get(result.value.id);
       if (!target) return;
@@ -8998,7 +9032,25 @@ export class AnomalyService
       }
       this.replicaFanoutUnreachable.set(ctx.connectionId, unreachable);
     }
-    return { nodes: merged, unreachableIds };
+    this.replicaSlotUnreachable.set(ctx.connectionId, unreachableIds);
+    const notReadIds = new Set([...replicaIds].filter((id) => !read.has(id)));
+    if (!this.legacyReplicaSlotEvents.has(ctx.connectionId)) {
+      this.legacyReplicaSlotRead.delete(ctx.connectionId);
+      return { nodes: merged, notReadIds, unseenIds: notReadIds };
+    }
+    const seen = this.legacyReplicaSlotRead.get(ctx.connectionId) ?? new Set<string>();
+    read.forEach((id) => seen.add(id));
+    this.legacyReplicaSlotRead.set(ctx.connectionId, seen);
+    return { nodes: merged, notReadIds, unseenIds: new Set([...replicaIds].filter((id) => !seen.has(id))) };
+  }
+
+  private replicaSlotWatchedIds(connectionId: string): Set<string> {
+    const signatures = [
+      ...(this.replicaSlotFirstSeen.get(connectionId)?.keys() ?? []),
+      ...(this.activeReplicaSlotAnomalies.get(connectionId) ?? []),
+      ...(this.replicaSlotEventIds.get(connectionId)?.keys() ?? []),
+    ];
+    return new Set(signatures.map((signature) => signature.split('|')[0]));
   }
 
   /**

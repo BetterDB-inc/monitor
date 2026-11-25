@@ -8986,6 +8986,142 @@ describe('AnomalyService', () => {
       // No duplicate replica-slot event was emitted.
       expect(slotEvents()).toHaveLength(0);
     });
+
+    describe('with more replicas than one poll reads', () => {
+      const BUDGET = 8;
+      const REPLICAS = 20;
+      const replicaId = (i: number) => `bb${i.toString(16).padStart(6, '0')}`;
+      const replicaAddr = (i: number) => `10.0.1.${i}:6379@16379`;
+      const primaryLine = 'aaaaaaaa 10.0.0.1:6379@16379 master - 0 0 1 connected 0-16383';
+      const node = (id: string, address: string, flags: string[], master: string, slots: number[][]) => ({
+        id,
+        address,
+        flags,
+        master,
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 1,
+        linkState: 'connected',
+        slots,
+      });
+      const indexes = Array.from({ length: REPLICAS }, (_, i) => i);
+      let stuck: Set<number>;
+      let down: Set<number>;
+      let reads: string[];
+
+      const readsOf = (i: number) => reads.filter((id) => id === replicaId(i)).length;
+      const unreachable = () => (service as any).replicaFanoutUnreachable.get('conn-1') ?? 0;
+      const openWarnings = () => slotEvents().filter((e) => !e.resolved);
+      const polls = async (count: number, stepMs = 1_000) => {
+        for (let i = 0; i < count; i++) {
+          await poll();
+          now += stepMs;
+        }
+      };
+
+      beforeEach(() => {
+        stuck = new Set();
+        down = new Set();
+        reads = [];
+        dbClient.getClusterNodes = jest
+          .fn()
+          .mockResolvedValue([
+            node('aaaaaaaa', '10.0.0.1:6379@16379', ['myself', 'master'], '', [[0, 16383]]),
+            ...indexes.map((i) => node(replicaId(i), replicaAddr(i), ['slave'], 'aaaaaaaa', [])),
+          ]);
+        dbClient.getClusterShards = jest.fn().mockResolvedValue([
+          {
+            slots: [[0, 16383]],
+            nodes: [
+              { id: 'aaaaaaaa', role: 'master' },
+              ...indexes.map((i) => ({ id: replicaId(i), role: 'replica' })),
+            ],
+          },
+        ]);
+        (service as any).topologyDivergenceSettings.enabled = false;
+        (service as any).clusterDiscovery = {
+          retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+          getNodeConnection: jest.fn(async (id: string) => {
+            reads.push(id);
+            const i = parseInt(id.slice(2), 16);
+            if (down.has(i)) throw new Error('ECONNREFUSED');
+            const marker = stuck.has(i) ? ' [42-<-aaaaaaaa]' : '';
+            const own = `${id} ${replicaAddr(i)} myself,slave aaaaaaaa 0 0 1 connected${marker}`;
+            return { call: jest.fn().mockResolvedValue(`${primaryLine}\n${own}`) };
+          }),
+        };
+      });
+
+      it('reads a budget of replicas each poll and every replica within a sweep', async () => {
+        await polls(1);
+        expect(reads).toHaveLength(BUDGET);
+
+        await polls(2);
+        expect(new Set(reads).size).toBe(REPLICAS);
+        expect(unreachable()).toBe(0);
+      });
+
+      it('reads a replica that showed slot state on every poll until it is clean', async () => {
+        stuck.add(0);
+        await polls(3);
+        expect(readsOf(0)).toBe(3);
+        expect(readsOf(10)).toBe(1);
+
+        stuck.clear();
+        await polls(3);
+        expect(readsOf(0)).toBeGreaterThanOrEqual(4);
+        expect(readsOf(0)).toBeLessThan(6);
+      });
+
+      it('keeps the warning of a replica open on a poll that does not read it', async () => {
+        [0, 1, 2].forEach((i) => stuck.add(i));
+        await polls(4, 11_000);
+        expect(openWarnings()).toHaveLength(3);
+
+        await polls(2, 11_000);
+        expect(readsOf(2)).toBeLessThan(6);
+        expect(openWarnings()).toHaveLength(3);
+        expect(storage.resolveAnomaly).not.toHaveBeenCalled();
+      });
+
+      it('keeps counting an unreachable replica until its turn comes round again', async () => {
+        down.add(0);
+        await polls(2);
+        expect(readsOf(0)).toBe(1);
+        expect(unreachable()).toBe(1);
+
+        down.clear();
+        await polls(2);
+        expect(readsOf(0)).toBe(2);
+        expect(unreachable()).toBe(0);
+      });
+
+      describe('with a row from before dedupe keys', () => {
+        const pending = () => (service as any).legacyReplicaSlotEvents.has('conn-1');
+
+        beforeEach(() => {
+          (service as any).legacyReplicaSlotEvents.set('conn-1', [{ id: 'legacy', message: 'other' }]);
+        });
+
+        it('closes the row once every replica has been read, not before', async () => {
+          await polls(2);
+          expect(pending()).toBe(true);
+
+          await polls(1);
+          expect(pending()).toBe(false);
+        });
+
+        it('keeps the row while a replica has never answered', async () => {
+          down.add(19);
+          await polls(4);
+          expect(pending()).toBe(true);
+
+          down.clear();
+          await polls(3);
+          expect(pending()).toBe(false);
+        });
+      });
+    });
   });
 
   // ─── Orphaned slot keys detection (valkey-io/valkey#539) ───────────────────
