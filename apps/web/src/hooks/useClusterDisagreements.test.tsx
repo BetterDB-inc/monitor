@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { waitFor } from '@testing-library/react';
+import { act, waitFor } from '@testing-library/react';
 import { renderHookWithQuery } from '../test/test-utils';
-import type { TopologyDisagreementSummary } from '../types/anomaly';
+import type { TopologyDisagreementSummary, TopologyFullCheck } from '../types/anomaly';
 
 const state = vi.hoisted(() => ({
   licensed: true,
@@ -9,15 +9,18 @@ const state = vi.hoisted(() => ({
   loading: false,
 }));
 const getTopologyDisagreements = vi.hoisted(() => vi.fn());
+const startTopologyFullCheck = vi.hoisted(() => vi.fn());
 
 vi.mock('./useUpgradePrompt', () => ({ useUpgradePrompt: () => ({ showUpgradePrompt: vi.fn() }) }));
 vi.mock('./useLicense', () => ({
   useLicense: () => ({ tier: 'pro', license: state.license, hasFeature: () => state.licensed }),
   useLicenseStatus: () => ({ license: state.license, loading: state.loading, error: null }),
 }));
-vi.mock('../api/metrics', () => ({ metricsApi: { getTopologyDisagreements } }));
+vi.mock('../api/metrics', () => ({
+  metricsApi: { getTopologyDisagreements, startTopologyFullCheck },
+}));
 
-import { useClusterDisagreements } from './useClusterDisagreements';
+import { disagreementsPollInterval, useClusterDisagreements } from './useClusterDisagreements';
 
 const summary: TopologyDisagreementSummary = {
   status: 'ok',
@@ -27,12 +30,25 @@ const summary: TopologyDisagreementSummary = {
   shards: [],
 };
 
+const running: TopologyFullCheck = {
+  state: 'running',
+  unavailable: null,
+  startedAt: 2000,
+  finishedAt: null,
+  asked: 0,
+  total: 500,
+  retryAt: null,
+  now: 2000,
+  lastFailure: null,
+};
+
 describe('useClusterDisagreements', () => {
   beforeEach(() => {
     state.licensed = true;
     state.license = { tier: 'pro' };
     state.loading = false;
     getTopologyDisagreements.mockReset().mockResolvedValue(summary);
+    startTopologyFullCheck.mockReset().mockResolvedValue(running);
   });
 
   it('loads the summary of a cluster connection', async () => {
@@ -41,6 +57,27 @@ describe('useClusterDisagreements', () => {
     await waitFor(() => expect(result.current.summary).toEqual(summary));
     expect(result.current.licensed).toBe(true);
     expect(result.current.licenseLoading).toBe(false);
+  });
+
+  it('says when the summary arrived, by the clock of the browser', async () => {
+    const before = Date.now();
+    const { result } = renderHookWithQuery(() => useClusterDisagreements('c1', true));
+    expect(result.current.receivedAt).toBeNull();
+
+    await waitFor(() => expect(result.current.summary).toEqual(summary));
+
+    expect(result.current.receivedAt).toBeGreaterThanOrEqual(before);
+    expect(result.current.receivedAt).toBeLessThanOrEqual(Date.now());
+  });
+
+  it('hands on no summary once the licence no longer covers it, though one was loaded', async () => {
+    const { result, rerender } = renderHookWithQuery(() => useClusterDisagreements('c1', true));
+    await waitFor(() => expect(result.current.summary).toEqual(summary));
+
+    state.licensed = false;
+    rerender();
+
+    expect(result.current).toMatchObject({ licensed: false, summary: undefined, receivedAt: null });
   });
 
   it('asks with the id of the connection it was given', async () => {
@@ -94,5 +131,61 @@ describe('useClusterDisagreements', () => {
 
     await waitFor(() => expect(result.current.error?.message).toBe('boom'), { timeout: 4000 });
     expect(result.current.summary).toBeUndefined();
+  });
+
+  it('starts a full check and reads the answer again', async () => {
+    const { result } = renderHookWithQuery(() => useClusterDisagreements('c1', true));
+    await waitFor(() => expect(result.current.summary).toEqual(summary));
+    getTopologyDisagreements.mockResolvedValue({ ...summary, fullCheck: running });
+
+    act(() => result.current.askEveryNode());
+
+    await waitFor(() => expect(result.current.summary?.fullCheck).toEqual(running));
+    expect(startTopologyFullCheck).toHaveBeenCalledTimes(1);
+    expect(startTopologyFullCheck).toHaveBeenCalledWith('c1');
+    await waitFor(() => expect(result.current.asking).toBe(false));
+    expect(result.current.askError).toBeNull();
+  });
+
+  it('hands on why a full check was refused', async () => {
+    startTopologyFullCheck.mockRejectedValue(
+      new Error('The last full check ended less than 30 seconds ago'),
+    );
+    const { result } = renderHookWithQuery(() => useClusterDisagreements('c1', true));
+    await waitFor(() => expect(result.current.summary).toEqual(summary));
+
+    act(() => result.current.askEveryNode());
+
+    await waitFor(() =>
+      expect(result.current.askError?.message).toBe(
+        'The last full check ended less than 30 seconds ago',
+      ),
+    );
+    expect(result.current.asking).toBe(false);
+  });
+
+  it('forgets a refusal when the connection changes', async () => {
+    startTopologyFullCheck.mockRejectedValue(new Error('refused'));
+    let connectionId = 'c1';
+    const { result, rerender } = renderHookWithQuery(() =>
+      useClusterDisagreements(connectionId, true),
+    );
+    await waitFor(() => expect(result.current.summary).toEqual(summary));
+    act(() => result.current.askEveryNode());
+    await waitFor(() => expect(result.current.askError).not.toBeNull());
+
+    connectionId = 'c2';
+    rerender();
+
+    await waitFor(() => expect(result.current.askError).toBeNull());
+  });
+
+  it('reads more often while a full check runs', () => {
+    expect(disagreementsPollInterval({ ...summary, fullCheck: running })).toBe(2000);
+    expect(
+      disagreementsPollInterval({ ...summary, fullCheck: { ...running, state: 'done' } }),
+    ).toBe(5000);
+    expect(disagreementsPollInterval(summary)).toBe(5000);
+    expect(disagreementsPollInterval(undefined)).toBe(5000);
   });
 });

@@ -29831,8 +29831,99 @@ describe('AnomalyService', () => {
         }
       });
 
+      describe('in the disagreements summary', () => {
+        const lines = () => service.getTopologyDisagreements('conn-1').disagreements;
+
+        it('leaves the line of the node without an event while the finding is still counted', async () => {
+          await rounds(6);
+
+          expect(lines()).toMatchObject([
+            { id: 'membership:n', open: true, confirmed: false, eventId: null, eventType: null, resolvedByHand: false },
+          ]);
+        });
+
+        it('points the line of the node at the event of the finding', async () => {
+          await rounds(19);
+
+          const [event] = partialEvents();
+          expect(lines()).toMatchObject([
+            {
+              id: 'membership:n',
+              open: true,
+              confirmed: true,
+              resolvedByHand: false,
+              eventId: event.id,
+              eventType: MetricType.PARTIAL_MEMBERSHIP,
+              eventAt: event.timestamp,
+              eventConnectionId: 'conn-1',
+            },
+          ]);
+        });
+
+        it('keeps the time of the event once the event is no longer held in memory', async () => {
+          await rounds(19);
+          const [event] = partialEvents();
+
+          (service as any).recentAnomalies = [];
+          (service as any).incidentEventsById.clear();
+
+          expect(lines()).toMatchObject([{ id: 'membership:n', eventId: event.id, eventAt: event.timestamp }]);
+        });
+
+        it('says that the event of the finding was resolved by hand until it is raised again', async () => {
+          await rounds(19);
+          const [first] = openPartialEvents();
+
+          await service.resolveAnomaly(first.id);
+          expect(lines()).toMatchObject([
+            { id: 'membership:n', open: true, confirmed: false, eventId: null, eventType: null, resolvedByHand: true },
+          ]);
+
+          await rounds(1);
+          const [again] = openPartialEvents();
+          expect(again.id).not.toBe(first.id);
+          expect(lines()).toMatchObject([
+            { id: 'membership:n', confirmed: true, eventId: again.id, resolvedByHand: false },
+          ]);
+        });
+
+        it('gives the line of a full check the event of the finding', async () => {
+          await rounds(19);
+          const [event] = partialEvents();
+          (discovery as any).onNodeClientOnce = jest.fn(
+            async (node: { id: string }, _connectionId: string, _timeoutMs: number, run: (client: unknown) => unknown) =>
+              run({ call: jest.fn(async () => memberView(node.id)) }),
+          );
+          (service as any).connectionRegistry.get.mockReturnValue(dbClient);
+          (service as any).connectionRegistry.getConfig.mockImplementation((id: string) => ({ id, host: 'seed' }));
+
+          expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'started' });
+          for (let i = 0; i < 50 && service.getTopologyFullCheck('conn-1').state !== 'done'; i++) {
+            await new Promise((resolve) => setImmediate(resolve));
+          }
+
+          expect(service.getTopologyDisagreements('conn-1').fullCheck).toMatchObject({
+            state: 'done',
+            summary: {
+              disagreements: [
+                {
+                  id: 'membership:n',
+                  confirmed: true,
+                  eventId: event.id,
+                  eventType: MetricType.PARTIAL_MEMBERSHIP,
+                },
+              ],
+            },
+          });
+        });
+      });
+
       describe('with two nodes half joined at once', () => {
         const everyone = [...EVERYONE, 'm'];
+        const lineEvents = () =>
+          service
+            .getTopologyDisagreements('conn-1')
+            .disagreements.map((line) => [line.id, line.eventId, line.eventType, line.resolvedByHand]);
         const listed = () =>
           Object.fromEntries(
             report().partialMembership.map((entry) => [
@@ -29885,6 +29976,22 @@ describe('AnomalyService', () => {
             expect(listed()).toEqual({ m: ['membership:m', 'membership:n'], n: [] });
             expect(eventIdsOf('membership', 'n')).toEqual([kept!.id]);
           });
+
+          it('points each line of the summary at the event the report lists it under', async () => {
+            await rounds(19);
+            const ids = Object.fromEntries(openPartialEvents().map((e) => [e.dedupeKey, e.id]));
+            expect(lineEvents()).toEqual([
+              ['membership:m', ids['partial_membership:m'], MetricType.PARTIAL_MEMBERSHIP, false],
+              ['membership:n', ids['partial_membership:n'], MetricType.PARTIAL_MEMBERSHIP, false],
+            ]);
+
+            await service.resolveAnomaly(ids['partial_membership:n']);
+
+            expect(lineEvents()).toEqual([
+              ['membership:m', ids['partial_membership:m'], MetricType.PARTIAL_MEMBERSHIP, false],
+              ['membership:n', ids['partial_membership:m'], MetricType.PARTIAL_MEMBERSHIP, false],
+            ]);
+          });
         });
 
         describe('that lack the same slot owner', () => {
@@ -29903,6 +30010,19 @@ describe('AnomalyService', () => {
             expect(report().partialMembership).toMatchObject([
               { node: { nodeId: 'm' }, ownViewMissing: [{ nodeId: 'b' }] },
               { node: { nodeId: 'n' }, ownViewMissing: [{ nodeId: 'b' }], command: 'CLUSTER MEET 10.0.0.7 6379' },
+            ]);
+          });
+
+          it('points the lines about the owner at the event of the finding that holds them', async () => {
+            await rounds(19);
+
+            const ids = Object.fromEntries(openPartialEvents().map((e) => [e.dedupeKey, e.id]));
+            const held = service
+              .getTopologyDisagreements('conn-1')
+              .disagreements.map((line) => [line.kind, line.eventId, line.eventType]);
+            expect(held).toEqual([
+              ['slot_owner', ids['partial_membership:m'], MetricType.PARTIAL_MEMBERSHIP],
+              ['membership', ids['partial_membership:m'], MetricType.PARTIAL_MEMBERSHIP],
             ]);
           });
         });
@@ -29984,6 +30104,18 @@ describe('AnomalyService', () => {
           ]);
         });
 
+        it('leaves the line of the summary without an event while the event of the finding closes', async () => {
+          await rounds(1);
+
+          expect(openPartialEvents()).toHaveLength(1);
+          expect(
+            service
+              .getTopologyDisagreements('conn-1')
+              .disagreements.filter((line) => line.kind === 'membership')
+              .map((line) => [line.id, line.confirmed, line.eventId]),
+          ).toEqual([['membership:n', false, null]]);
+        });
+
         it('keeps its event and raises no other when the flag clears within the configured rounds', async () => {
           await rounds(2);
           flagsBy = {};
@@ -30028,6 +30160,21 @@ describe('AnomalyService', () => {
             .filter((disagreement) => disagreement.kind === 'membership');
           expect(lines).toHaveLength(1);
           expect(report().partialMembership).toMatchObject([{ eventId: null, node: { nodeId: 'n' } }]);
+        });
+
+        it('takes the line of the summary off the divergence event once the finding holds it', async () => {
+          const [event] = divergenceEvents().filter((e) => !e.resolved);
+          const membership = () =>
+            service
+              .getTopologyDisagreements('conn-1')
+              .disagreements.filter((line) => line.kind === 'membership')
+              .map((line) => [line.id, line.confirmed, line.eventId]);
+          expect(membership()).toEqual([['membership:n', true, event.id]]);
+
+          await rounds(1);
+
+          expect(event.resolved).toBe(false);
+          expect(membership()).toEqual([['membership:n', false, null]]);
         });
 
         it('keeps its open event in the report until that event closes', async () => {
@@ -30125,6 +30272,76 @@ describe('AnomalyService', () => {
               disagreements: [{ kind: 'membership' }, { kind: 'slot_owner', eventType: 'partial_membership' }],
             },
           ]);
+        });
+
+        describe('next to an older dispute over other slots of the same owner', () => {
+          const everyone = [...EVERYONE, 'm'];
+          const OLDER = '[[9000,9100]]';
+          const OF_THE_NODE = '[[5461,8999],[9101,10922]]';
+          type SlotLine = { id: string; slots?: number[][]; eventId: string | null; eventType: unknown };
+          const bySlots = (lines: SlotLine[]) =>
+            Object.fromEntries(
+              lines.filter((line) => line.slots).map((line) => [JSON.stringify(line.slots), line] as const),
+            );
+          const eventsOf = (lines: ReturnType<typeof bySlots>) =>
+            Object.fromEntries(Object.entries(lines).map(([slots, line]) => [slots, [line.eventId, line.eventType]]));
+
+          beforeEach(async () => {
+            (service as any).topologyDivergenceSettings.randomNodes = 5;
+            MEMBERS.m = { host: '10.0.0.8', epoch: 0, slots: '' };
+            knows = { a: everyone, b: everyone, c: everyone, n: everyone, m: everyone };
+            slotsBy = { m: { b: '5461-8999 9101-10922' } };
+            await rounds(2);
+            knows.n = ['a', 'c', 'n', 'm'];
+            await rounds(19);
+          });
+
+          afterEach(() => {
+            delete MEMBERS.m;
+          });
+
+          const fullCheckLines = async (unanswering: string[] = []) => {
+            (discovery as any).onNodeClientOnce = jest.fn(
+              async (node: { id: string }, _connectionId: string, _timeoutMs: number, run: (client: unknown) => unknown) => {
+                if (unanswering.includes(node.id)) throw new Error('ECONNREFUSED');
+                return run({ call: jest.fn(async () => memberView(node.id)) });
+              },
+            );
+            (service as any).connectionRegistry.get.mockReturnValue(dbClient);
+            (service as any).connectionRegistry.getConfig.mockImplementation((id: string) => ({ id, host: 'seed' }));
+            expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'started' });
+            for (let i = 0; i < 50 && service.getTopologyFullCheck('conn-1').state !== 'done'; i++) {
+              await new Promise((resolve) => setImmediate(resolve));
+            }
+            return service.getTopologyFullCheck('conn-1').summary?.disagreements ?? [];
+          };
+
+          it('gives each slot line of a full check the event of the sampled line over the same slots', async () => {
+            const [partial] = openPartialEvents();
+            const sampled = bySlots(service.getTopologyDisagreements('conn-1').disagreements);
+            expect(sampled[OLDER].id).toBe('slot_owner:b|unassigned');
+            expect(sampled[OF_THE_NODE]).toMatchObject({
+              id: 'slot_owner:b|unassigned#2',
+              eventId: partial.id,
+              eventType: MetricType.PARTIAL_MEMBERSHIP,
+            });
+            expect(sampled[OLDER].eventId).not.toBe(partial.id);
+
+            const checked = bySlots(await fullCheckLines());
+            expect(checked[OF_THE_NODE].id).toBe('slot_owner:b|unassigned');
+            expect(eventsOf(checked)).toEqual(eventsOf(sampled));
+          });
+
+          it('gives a line of a full check that covers as much of both disputes the event of the finding', async () => {
+            const [partial] = openPartialEvents();
+            slotsBy = { ...slotsBy, c: { b: '5461-8949 9050-10922' } };
+
+            const checked = (await fullCheckLines(['m', 'n'])).filter((line) => line.slots);
+
+            expect(checked).toMatchObject([
+              { slots: [[8950, 9049]], eventId: partial.id, eventType: MetricType.PARTIAL_MEMBERSHIP },
+            ]);
+          });
         });
 
         describe('once it has learned the owner but still shows no owner for the slots', () => {
@@ -30567,6 +30784,7 @@ describe('AnomalyService', () => {
           shards: [],
           shardTotals: { total: 0, disputed: 0, undisputed: 0, notCompared: 0 },
           shardsListed: 'all',
+          fullCheck: expect.objectContaining({ state: 'none' }),
         });
       });
 
@@ -30845,6 +31063,27 @@ describe('AnomalyService', () => {
         ]);
       });
 
+      it('still says that the event was resolved by hand when the next round cannot check the line again', async () => {
+        views.b = { a: { epoch: 9 } };
+        await rounds(3);
+        await service.resolveAnomaly(divergenceEvents()[0].id);
+        silent.add('b');
+
+        await rounds(1);
+
+        expect(divergenceEvents().filter((event) => !event.resolved)).toEqual([]);
+        expect(service.getTopologyDisagreements('conn-1').disagreements).toMatchObject([
+          { id: 'config_epoch:a', stale: true, open: false, confirmed: false, eventId: null, resolvedByHand: true },
+        ]);
+
+        silent.delete('b');
+        await rounds(1);
+        const raisedAgain = divergenceEvents().find((event) => !event.resolved);
+        expect(service.getTopologyDisagreements('conn-1').disagreements).toMatchObject([
+          { id: 'config_epoch:a', stale: false, confirmed: true, eventId: raisedAgain?.id, resolvedByHand: false },
+        ]);
+      });
+
       it('keeps a line that was not seen again open while its event is open', async () => {
         views.b = { a: { epoch: 9 } };
         await rounds(3);
@@ -30961,6 +31200,547 @@ describe('AnomalyService', () => {
         expect(summary.status).toBe('insufficient_views');
         expect(summary.coverage.complete).toBe(false);
         expect(summary.shards.map((shard) => shard.state)).toEqual(['not_compared', 'not_compared', 'not_compared']);
+      });
+    });
+
+    describe('full check', () => {
+      let once: jest.Mock;
+
+      async function finished(): Promise<void> {
+        for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+      }
+
+      function fullCheck(connectionId = 'conn-1') {
+        return service.getTopologyDisagreements(connectionId).fullCheck;
+      }
+
+      beforeEach(() => {
+        once = jest.fn(
+          async (
+            node: { id: string },
+            _connectionId: string,
+            _timeoutMs: number,
+            run: (client: unknown) => Promise<unknown>,
+          ) => {
+            if (silent.has(node.id)) throw new Error('ECONNREFUSED');
+            return run({ call: jest.fn(async () => rawView(node.id, views[node.id])) });
+          },
+        );
+        (discovery as any).onNodeClientOnce = once;
+        (service as any).connectionRegistry.get.mockReturnValue(dbClient);
+        (service as any).connectionRegistry.getConfig.mockImplementation((id: string) => ({ id, host: 'seed' }));
+      });
+
+      it('is not offered before a cluster view was read on the connection', async () => {
+        expect(fullCheck()).toEqual({
+          state: 'none',
+          unavailable: { reason: 'no_cluster_view', text: 'No cluster view has been read on this connection yet.' },
+          startedAt: null,
+          finishedAt: null,
+          asked: 0,
+          total: 0,
+          retryAt: null,
+          now,
+          lastFailure: null,
+        });
+        expect(await service.startTopologyFullCheck('conn-1')).toMatchObject({
+          result: 'unavailable',
+          reason: 'no_cluster_view',
+        });
+        expect(once).not.toHaveBeenCalled();
+      });
+
+      it('asks every node over a socket of its own and leaves the shared pool alone', async () => {
+        await rounds(1);
+        discovery.getNodeConnection.mockClear();
+
+        expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'started' });
+        await finished();
+
+        expect(once.mock.calls.map(([node, connectionId, timeoutMs]) => [connectionId, node.id, timeoutMs])).toEqual([
+          ['conn-1', 'a', 2_000],
+          ['conn-1', 'b', 2_000],
+          ['conn-1', 'c', 2_000],
+        ]);
+        expect(discovery.getNodeConnection).not.toHaveBeenCalled();
+        expect(fullCheck()).toMatchObject({
+          state: 'done',
+          unavailable: null,
+          startedAt: now,
+          finishedAt: now,
+          asked: 3,
+          total: 3,
+          retryAt: now + 30_000,
+          summary: {
+            status: 'ok',
+            coverage: { nodes: 3, asked: 3, answered: 3, complete: true },
+            disagreements: [],
+          },
+        });
+      });
+
+      it('hands every read a signal, so its socket is closed when the check gives up on the node', async () => {
+        await rounds(1);
+
+        await service.startTopologyFullCheck('conn-1');
+        await finished();
+
+        const signals = once.mock.calls.map((call) => call[4]);
+        expect(signals).toHaveLength(3);
+        expect(signals.every((signal) => signal instanceof AbortSignal)).toBe(true);
+      });
+
+      it('counts every node on each side and links the event that tracks the disagreement', async () => {
+        views.b = { a: { epoch: 9 } };
+        await rounds(4);
+        const [event] = divergenceEvents();
+
+        await service.startTopologyFullCheck('conn-1');
+        await finished();
+
+        const [line] = fullCheck().summary?.disagreements ?? [];
+        expect(line).toMatchObject({ id: 'config_epoch:a', tracked: false, confirmed: true, eventId: event.id });
+        expect(line.positions.map((position) => [position.value, position.count])).toEqual([
+          ['1', 2],
+          ['9', 1],
+        ]);
+        expect(line).not.toHaveProperty('rounds');
+      });
+
+      it('leaves the tracked rounds and the events as they were', async () => {
+        views.b = { a: { epoch: 9 } };
+        await rounds(4);
+        const before = service.getTopologyDisagreements('conn-1').disagreements;
+
+        await service.startTopologyFullCheck('conn-1');
+        await finished();
+
+        expect(service.getTopologyDisagreements('conn-1').disagreements).toEqual(before);
+        expect(divergenceEvents()).toHaveLength(1);
+      });
+
+      it('lists a node that did not answer and does not call the check complete', async () => {
+        await rounds(1);
+        silent.add('c');
+
+        await service.startTopologyFullCheck('conn-1');
+        await finished();
+
+        expect(fullCheck().summary?.coverage).toMatchObject({
+          nodes: 3,
+          asked: 3,
+          answered: 2,
+          complete: false,
+          unanswered: [{ nodeId: 'c' }],
+        });
+      });
+
+      it('does not ask a node that is in handshake or has no address', async () => {
+        views.a = { c: { flags: 'master,noaddr' } };
+        await rounds(1);
+
+        await service.startTopologyFullCheck('conn-1');
+        await finished();
+
+        expect(once.mock.calls.map(([node]) => node.id)).toEqual(['a', 'b']);
+        expect(fullCheck()).toMatchObject({
+          state: 'done',
+          asked: 2,
+          total: 3,
+          summary: { coverage: { nodes: 3, asked: 2, complete: false } },
+        });
+      });
+
+      it('shows a running check and joins it on a second request', async () => {
+        await rounds(1);
+        once.mockImplementation(() => new Promise(() => undefined));
+
+        expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'started' });
+        expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'running' });
+
+        expect(fullCheck()).toMatchObject({ state: 'running', startedAt: now, asked: 0, total: 3, finishedAt: null });
+        expect(once).toHaveBeenCalledTimes(3);
+      });
+
+      it('refuses a new check within 30 seconds of the last one', async () => {
+        await rounds(1);
+        await service.startTopologyFullCheck('conn-1');
+        await finished();
+        const finishedAt = now;
+
+        now += 10_000;
+        expect(await service.startTopologyFullCheck('conn-1')).toEqual({
+          result: 'too_soon',
+          retryAt: finishedAt + 30_000,
+        });
+
+        now += 20_000;
+        expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'started' });
+      });
+
+      it('answers for every connection that watches the cluster', async () => {
+        const second: ConnectionContext = {
+          ...mockCtx,
+          connectionId: 'conn-2',
+          connectionName: 'Second',
+          client: clusterClient('b') as any,
+        };
+        await rounds(1);
+        await rounds(1, second);
+
+        await service.startTopologyFullCheck('conn-1');
+        await finished();
+
+        expect(fullCheck('conn-2')).toMatchObject({ state: 'done', total: 3 });
+        expect(await service.startTopologyFullCheck('conn-2')).toMatchObject({ result: 'too_soon' });
+      });
+
+      it('is not offered on a connection that reaches the cluster through an agent', async () => {
+        await rounds(1);
+        (service as any).connectionRegistry.getConfig.mockReturnValue({ host: 'agent' });
+
+        expect(await service.startTopologyFullCheck('conn-1')).toMatchObject({
+          result: 'unavailable',
+          reason: 'no_direct_access',
+        });
+        expect(fullCheck().unavailable?.reason).toBe('no_direct_access');
+        expect(once).not.toHaveBeenCalled();
+      });
+
+      it('is not offered on a connection that goes through an SSH tunnel', async () => {
+        await rounds(1);
+        (service as any).connectionRegistry.getConfig.mockReturnValue({
+          host: 'seed',
+          sshTunnel: { enabled: true, host: 'bastion' },
+        });
+
+        expect(await service.startTopologyFullCheck('conn-1')).toEqual({
+          result: 'unavailable',
+          reason: 'ssh_tunnel',
+          text: 'This connection goes through an SSH tunnel, so the monitor cannot reach every node.',
+        });
+        expect(fullCheck().unavailable?.reason).toBe('ssh_tunnel');
+        expect(once).not.toHaveBeenCalled();
+      });
+
+      it('is still offered when the SSH tunnel of the connection is switched off', async () => {
+        await rounds(1);
+        (service as any).connectionRegistry.getConfig.mockReturnValue({
+          host: 'seed',
+          sshTunnel: { enabled: false, host: 'bastion' },
+        });
+
+        expect(fullCheck().unavailable).toBeNull();
+        expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'started' });
+      });
+
+      it('does not know a connection that is not registered', async () => {
+        await rounds(1);
+        (service as any).connectionRegistry.getConfig.mockReturnValue(null);
+
+        expect(await service.startTopologyFullCheck('ghost')).toEqual({ result: 'unknown_connection' });
+        expect(once).not.toHaveBeenCalled();
+      });
+
+      it('says that the last check failed and keeps the result before it', async () => {
+        await rounds(1);
+        await service.startTopologyFullCheck('conn-1');
+        await finished();
+        const earlier = fullCheck();
+        const clusterKey = (service as any).connectionClusterKeys.get('conn-1');
+
+        (service as any).topologyFullChecks.start(clusterKey, Date.now() + 40_000, 3, () =>
+          Promise.reject(new Error('boom')),
+        );
+        await finished();
+
+        expect(fullCheck()).toMatchObject({
+          state: 'done',
+          finishedAt: earlier.finishedAt,
+          summary: { status: 'ok' },
+          lastFailure: { at: expect.any(Number), reason: 'boom' },
+        });
+        expect(earlier.lastFailure).toBeNull();
+      });
+
+      it('is not offered on a Raft cluster', async () => {
+        await rounds(1);
+        (service as any).raftMode.set('conn-1', true);
+
+        expect(await service.startTopologyFullCheck('conn-1')).toMatchObject({
+          result: 'unavailable',
+          reason: 'raft_cluster',
+        });
+        expect(once).not.toHaveBeenCalled();
+      });
+
+      it('runs while the divergence detector is switched off', async () => {
+        (service as any).topologyDivergenceSettings.enabled = false;
+        await rounds(1);
+
+        expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'started' });
+        await finished();
+
+        expect(service.getTopologyDisagreements('conn-1')).toMatchObject({
+          status: 'not_sampled',
+          fullCheck: { state: 'done', total: 3, summary: { status: 'ok' } },
+        });
+      });
+
+      it('gives the full check on its own, the one the report carries', async () => {
+        await rounds(1);
+        await service.startTopologyFullCheck('conn-1');
+        await finished();
+
+        const alone = service.getTopologyFullCheck('conn-1');
+
+        expect(alone).toMatchObject({ state: 'done', asked: 3, total: 3, summary: { status: 'ok' } });
+        expect(alone).toEqual(fullCheck());
+        expect(service.getTopologyFullCheck('conn-1').summary).toBe(alone.summary);
+      });
+
+      it('keeps the event links of a finished check as they were when it finished', async () => {
+        views.b = { a: { epoch: 9 } };
+        await rounds(4);
+        const [event] = divergenceEvents();
+        await service.startTopologyFullCheck('conn-1');
+        await finished();
+
+        delete views.b;
+        await rounds(1);
+
+        expect(service.getTopologyDisagreements('conn-1').disagreements).toEqual([]);
+        expect(fullCheck().summary?.disagreements).toMatchObject([{ id: 'config_epoch:a', eventId: event.id }]);
+      });
+
+      it('makes the next check wait after one that broke', async () => {
+        await rounds(1);
+        const clusterKey = (service as any).connectionClusterKeys.get('conn-1');
+        (service as any).topologyFullChecks.start(clusterKey, now, 3, () => Promise.reject(new Error('boom')));
+        await finished();
+
+        now += 10_000;
+
+        expect(await service.startTopologyFullCheck('conn-1')).toMatchObject({ result: 'too_soon' });
+        expect(fullCheck()).toMatchObject({ state: 'none', retryAt: expect.any(Number), lastFailure: { reason: 'boom' } });
+        expect(once).not.toHaveBeenCalled();
+      });
+
+      it('does not start for a connection that was removed while the node list was read', async () => {
+        const second: ConnectionContext = {
+          ...mockCtx,
+          connectionId: 'conn-2',
+          connectionName: 'Second',
+          client: clusterClient('b') as any,
+        };
+        await rounds(1);
+        await rounds(1, second);
+        const clusterKey = (service as any).connectionClusterKeys.get('conn-1');
+        let answer: (nodes: unknown) => void = () => undefined;
+        const listed = clusterClient('a').getClusterNodes;
+        dbClient.getClusterNodes = jest.fn(
+          () =>
+            new Promise((resolve) => {
+              answer = resolve;
+            }),
+        );
+
+        const starting = service.startTopologyFullCheck('conn-1');
+        await finished();
+        (service as any).onConnectionRemoved('conn-1');
+        (service as any).connectionRegistry.getConfig.mockImplementation((id: string) =>
+          id === 'conn-1' ? null : { id, host: 'seed' },
+        );
+        answer(await listed());
+
+        expect(await starting).toEqual({ result: 'unknown_connection' });
+        await finished();
+        expect(once).not.toHaveBeenCalled();
+        expect((service as any).topologyFullChecks.state(clusterKey, now)).toEqual({ state: 'none' });
+        expect((service as any).topologyFullCheckOwners.has(clusterKey)).toBe(false);
+        expect(fullCheck('conn-2')).toMatchObject({ state: 'none', retryAt: null });
+      });
+
+      it('points the event link of a full check at the connection that asks, whoever started it', async () => {
+        views.c = { a: { epoch: 9 } };
+        const second: ConnectionContext = {
+          ...mockCtx,
+          connectionId: 'conn-2',
+          connectionName: 'Second',
+          client: clusterClient('b') as any,
+        };
+        for (let i = 0; i < 4; i++) {
+          now += 5_000;
+          await poll(mockCtx);
+          await poll(second);
+        }
+        const [event] = divergenceEvents();
+        expect(event.connectionId).toBe('conn-1');
+
+        await service.startTopologyFullCheck('conn-1');
+        await finished();
+
+        expect(fullCheck('conn-1').summary?.disagreements).toMatchObject([
+          { eventId: event.id, eventConnectionId: 'conn-1' },
+        ]);
+        expect(fullCheck('conn-2').summary?.disagreements).toMatchObject([
+          { eventId: event.id, eventConnectionId: 'conn-2' },
+        ]);
+        expect(service.getTopologyFullCheck('conn-2').summary?.disagreements).toMatchObject([
+          { eventId: event.id, eventConnectionId: 'conn-2' },
+        ]);
+      });
+
+      it('names the holder of the event to a connection that cannot open it, also when that one started the check', async () => {
+        views.c = { a: { epoch: 9 } };
+        const second: ConnectionContext = {
+          ...mockCtx,
+          connectionId: 'conn-2',
+          connectionName: 'Second',
+          client: clusterClient('b') as any,
+        };
+        (service as any).connectionRegistry.listMembers.mockImplementation((id: string) =>
+          id === 'conn-2' ? [{ id: 'conn-2-member', membership: { seedId: 'conn-2' } }] : [],
+        );
+        for (let i = 0; i < 4; i++) {
+          now += 5_000;
+          await poll(mockCtx);
+          await poll(second);
+        }
+        const [event] = divergenceEvents();
+        expect(event.connectionId).toBe('conn-1');
+
+        await service.startTopologyFullCheck('conn-2');
+        await finished();
+
+        expect(fullCheck('conn-2').summary?.disagreements).toMatchObject([
+          { eventId: event.id, eventConnectionId: 'conn-1' },
+        ]);
+        expect(fullCheck('conn-1').summary?.disagreements).toMatchObject([
+          { eventId: event.id, eventConnectionId: 'conn-1' },
+        ]);
+      });
+
+      it('gives the clock of the server with the full check, to measure its times against', async () => {
+        await rounds(1);
+        expect(fullCheck().now).toBe(now);
+
+        await service.startTopologyFullCheck('conn-1');
+        await finished();
+        now += 7_000;
+
+        expect(fullCheck()).toMatchObject({ state: 'done', now, finishedAt: now - 7_000, retryAt: now + 23_000 });
+      });
+
+      it('does not start when the cluster turned out to be a Raft cluster while the node list was read', async () => {
+        await rounds(1);
+        const clusterKey = (service as any).connectionClusterKeys.get('conn-1');
+        let answer: (nodes: unknown) => void = () => undefined;
+        const listed = clusterClient('a').getClusterNodes;
+        dbClient.getClusterNodes = jest.fn(
+          () =>
+            new Promise((resolve) => {
+              answer = resolve;
+            }),
+        );
+
+        const starting = service.startTopologyFullCheck('conn-1');
+        await finished();
+        (service as any).raftMode.set('conn-1', true);
+        answer(await listed());
+
+        expect(await starting).toMatchObject({ result: 'unavailable', reason: 'raft_cluster' });
+        expect(once).not.toHaveBeenCalled();
+        expect((service as any).topologyFullChecks.state(clusterKey, now)).toEqual({ state: 'none' });
+      });
+
+      it('does not start when the connection moved to another cluster while the node list was read', async () => {
+        await rounds(1);
+        const clusterKey = (service as any).connectionClusterKeys.get('conn-1');
+        let answer: (nodes: unknown) => void = () => undefined;
+        const listed = clusterClient('a').getClusterNodes;
+        dbClient.getClusterNodes = jest.fn(
+          () =>
+            new Promise((resolve) => {
+              answer = resolve;
+            }),
+        );
+
+        const starting = service.startTopologyFullCheck('conn-1');
+        await finished();
+        (service as any).connectionClusterKeys.set('conn-1', 'another-cluster');
+        answer(await listed());
+
+        expect(await starting).toEqual({ result: 'view_unreadable' });
+        expect(once).not.toHaveBeenCalled();
+        expect((service as any).topologyFullChecks.state(clusterKey, now)).toEqual({ state: 'none' });
+      });
+
+      it('does not start when the seed lists the nodes of another cluster than the one it was bound to', async () => {
+        await rounds(1);
+        const clusterKey = (service as any).connectionClusterKeys.get('conn-1');
+        const listed: ClusterNode[] = await clusterClient('a').getClusterNodes();
+        const renamed = (id: string) => (id === '-' ? id : `other-${id}`);
+        dbClient.getClusterNodes = jest.fn(async () =>
+          listed.map((node) => ({ ...node, id: renamed(node.id), master: renamed(node.master) })),
+        );
+
+        expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'view_unreadable' });
+        await finished();
+
+        expect(once).not.toHaveBeenCalled();
+        expect((service as any).topologyFullChecks.state(clusterKey, now)).toEqual({ state: 'none' });
+      });
+
+      it('does not start when the seed lists only nodes the cluster has left, though their ids give its key', async () => {
+        await rounds(1);
+        const clusterKey = (service as any).connectionClusterKeys.get('conn-1');
+        const listed: ClusterNode[] = await clusterClient('a').getClusterNodes();
+        const member = (id: string): ClusterNode => ({ ...listed[0], id, slots: [] });
+        (service as any).rememberClusterKey('conn-1', [listed[2], member('d'), member('e')]);
+        (service as any).rememberClusterKey('conn-1', [member('d'), member('e')]);
+        expect((service as any).connectionClusterKeys.get('conn-1')).toBe(clusterKey);
+        expect(listed.map((node) => (service as any).clusterKeyByNode.get(node.id))).toEqual([
+          undefined,
+          undefined,
+          undefined,
+        ]);
+
+        expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'view_unreadable' });
+        await finished();
+
+        expect(once).not.toHaveBeenCalled();
+        expect((service as any).topologyFullChecks.state(clusterKey, now)).toEqual({ state: 'none' });
+      });
+
+      it('still starts when the seed lists a node the last round did not have', async () => {
+        await rounds(1);
+        const listed: ClusterNode[] = await clusterClient('a').getClusterNodes();
+        dbClient.getClusterNodes = jest.fn(async () => [...listed, { ...listed[0], id: 'joined', slots: [] }]);
+
+        expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'started' });
+        await finished();
+
+        expect(once.mock.calls.map(([node]) => node.id)).toEqual(['a', 'b', 'c', 'joined']);
+      });
+
+      it('says so when the node list cannot be read', async () => {
+        await rounds(1);
+        dbClient.getClusterNodes = jest.fn().mockRejectedValue(new Error('Connection is closed.'));
+
+        expect(await service.startTopologyFullCheck('conn-1')).toEqual({ result: 'view_unreadable' });
+        expect(fullCheck().state).toBe('none');
+      });
+
+      it('drops the check together with the connection that ran it', async () => {
+        await rounds(1);
+        const clusterKey = (service as any).connectionClusterKeys.get('conn-1');
+        await service.startTopologyFullCheck('conn-1');
+        await finished();
+
+        (service as any).onConnectionRemoved('conn-1');
+
+        expect((service as any).topologyFullChecks.state(clusterKey, now)).toEqual({ state: 'none' });
       });
     });
   });

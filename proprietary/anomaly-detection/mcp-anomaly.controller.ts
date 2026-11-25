@@ -101,8 +101,15 @@ export class McpAnomalyController {
     }
     try {
       this.registry.get(id);
-      const summary = this.anomalyService.getTopologyDisagreements(id);
-      return shards === 'all' ? summary : withDisputedShardsOnly(summary);
+      const report = this.anomalyService.getTopologyDisagreements(id);
+      if (shards === 'all') return report;
+      const { fullCheck } = report;
+      return {
+        ...withDisputedShardsOnly(report),
+        fullCheck: fullCheck.summary
+          ? { ...fullCheck, summary: withDisputedShardsOnly(fullCheck.summary) }
+          : fullCheck,
+      };
     } catch (error) {
       throw mapMcpError(this.logger, error, 'Failed to get topology disagreements');
     }
