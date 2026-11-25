@@ -303,9 +303,10 @@ One replica promoted halfway through the window:
 | Run | `cluster.failover` events | Other |
 |---|---|---|
 | 100 nodes, one connection | 1 | Pass time unchanged (91 / 109 ms) |
-| 30 nodes, every node registered | 30 | Plus one `failover.started` and one `failover.completed` |
+| 30 nodes, every node registered | 1 | Plus one `failover.started` and one `failover.completed`. 30 before the event was sent once per cluster |
 
-One failover gives one event per registered connection.
+One failover gives one event per cluster, however many of its nodes are
+registered. The second row was measured again on 2026-11-24.
 
 ### Hung nodes
 

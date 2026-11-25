@@ -501,6 +501,24 @@ If the replica alerts again, the old event closes with no `replication.recovered
 }
 ```
 
+The event is sent once per cluster, not once per registered connection. When several connections of one cluster see the same change, only the first one reports it:
+
+| Change | Reported again after |
+|---|---|
+| Outage: cluster state goes to `fail`, new slot failures, or both | 1 minute, or sooner when a node that was seen recovering fails again |
+| Recovery: cluster state goes back to `ok` | 1 minute, or sooner when a node that was seen failing again recovers |
+| A replica is promoted | 10 minutes for the same new primary, or as soon as that node is promoted again at a later config epoch |
+
+A state failure and slot failures count as one outage, whichever is seen first and by whichever connection. Nodes do not change state at the same moment: a node that only shows the failure after the recovery was reported is a late view of the same outage, and neither its failure nor its recovery is reported again. An outage and a promotion are separate changes. When one poll sees both, they share one event that lists the reasons of both. When they are seen in different polls, each sends its own event. The old primary coming back as a replica and replicas moving to the new primary belong to that promotion and are not reported again. Connections belong to the same cluster when their `CLUSTER NODES` views share a node that is not flagged `fail`, `fail?`, `noaddr` or `handshake`. A node whose view lists only itself, such as one just removed from the cluster or a fresh node that has not joined yet, is on its own: what it reports goes to global webhooks and to webhooks scoped to its own connection.
+
+The event is filed under the seed connection when the connection that saw the change was registered automatically from that seed, also while the seed itself is not connected. Otherwise it is filed under the connection that saw it first. An automatically registered node that reads another cluster than its seed, for example a fresh node that came up at the same address, counts as a connection of that other cluster and not of the seed. The same rule decides which connection the OTLP log record is sent for.
+
+Every webhook of the cluster receives the event once:
+
+- A global webhook and a webhook scoped to the filing connection receive it under the filing connection.
+- A webhook scoped to any other connection of the same cluster, a second connection you added or an automatically registered node, also receives it. In that delivery `connectionId` and `instance` are the connection the webhook is scoped to; the rest of the payload is the same.
+- A webhook scoped to a connection of another cluster does not receive it.
+
 #### anomaly.detected (Pro)
 
 ```json

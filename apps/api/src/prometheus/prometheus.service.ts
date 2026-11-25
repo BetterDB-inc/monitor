@@ -42,6 +42,7 @@ import {
   snapshotTopology,
   TopologyDiff,
   TopologySnapshot,
+  unclaimedFailovers,
 } from '../cluster/topology-diff';
 import {
   ClusterMetricsService,
@@ -50,6 +51,14 @@ import {
   inSlotRanges,
 } from '../cluster/cluster-metrics.service';
 import { ShardLoadService } from '../cluster/shard-load.service';
+import {
+  ClusterIdentityService,
+  FailoverSignature,
+  followerSignature,
+  outageSignature,
+  promotionSignature,
+  recoverySightingSignature,
+} from '../cluster/cluster-identity.service';
 import {
   demotedWritesMessage,
   evaluateDemotedWrites,
@@ -154,6 +163,8 @@ interface IncidentCount {
 // Per-connection state for tracking previous values and stale labels
 interface ConnectionMetricState {
   previousClusterState: string | null;
+  clusterRecoverySeenAt?: number;
+  clusterFailureSeenAt?: number;
   previousSlotsFail: number;
   previousCrcMismatch: number | null;
   previousTopology: TopologySnapshot | null;
@@ -526,6 +537,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     private readonly auditStatsCache?: AuditStatsCacheService,
     @Optional()
     private readonly shardLoadService?: ShardLoadService,
+    @Optional()
+    private readonly clusterIdentity?: ClusterIdentityService,
   ) {
     super(connectionRegistry);
     this.pollIntervalMs = Number(
@@ -1918,6 +1931,21 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.connectionEpochs.set(connectionId, this.currentEpoch(connectionId) + 1);
   }
 
+  private claimFailover(
+    connectionId: string,
+    signature: FailoverSignature,
+    stateChangedAt?: number,
+  ): boolean {
+    const identity = this.clusterIdentity;
+    if (!identity) return true;
+    return identity.claimFailover(
+      identity.clusterKeyOf(connectionId),
+      signature,
+      Date.now(),
+      stateChangedAt,
+    );
+  }
+
   private isSuperseded(connectionId: string, epoch: number): boolean {
     return this.currentEpoch(connectionId) !== epoch;
   }
@@ -2641,6 +2669,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.clusterEnabled.labels(connLabel).set(clusterEnabled ? 1 : 0);
 
     if (!clusterEnabled) {
+      this.clusterIdentity?.forget(connectionId);
       this.clearSlotSeries(connectionId, connLabel, state);
       return;
     }
@@ -2759,13 +2788,14 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       // load and during rolling upgrades (valkey#4340). Diff the topology too.
       let topology: TopologySnapshot | null = null;
       let topologyDiff: TopologyDiff | null = null;
-      let topologyReasons: string[] = [];
-      let changedNodes: Array<{ nodeId: string; reason: string; from: string; to: string }> = [];
       try {
-        topology = snapshotTopology(await client.getClusterNodes());
+        const nodes = await client.getClusterNodes();
+        if (this.isSuperseded(connectionId, epoch)) {
+          return;
+        }
+        this.clusterIdentity?.observe(connectionId, nodes);
+        topology = snapshotTopology(nodes);
         topologyDiff = diffClusterTopology(state.previousTopology, topology);
-        topologyReasons = topologyDiff.reasons;
-        changedNodes = topologyDiff.changedNodes;
       } catch (err) {
         // CLUSTER NODES can be denied or fail independently of CLUSTER INFO.
         // Losing the topology signal must not take metric scraping down with
@@ -2784,17 +2814,37 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       // trips the CLUSTER INFO edges and churns the topology at the same time,
       // and two events for one failover would double-page.
       const reasons: string[] = [];
-      if (stateChanged) {
-        reasons.push('cluster_state');
+      if (
+        (stateChanged || newSlotFailures) &&
+        this.claimFailover(connectionId, outageSignature(), state.clusterRecoverySeenAt)
+      ) {
+        if (stateChanged) reasons.push('cluster_state');
+        if (newSlotFailures) reasons.push('slot_failures');
       }
-      if (newSlotFailures) {
-        reasons.push('slot_failures');
-      }
-      reasons.push(...topologyReasons);
+      const unreported =
+        topology !== null && topologyDiff !== null
+          ? unclaimedFailovers(topologyDiff, topology, (primaryId, configEpoch, promoted) =>
+              this.claimFailover(
+                connectionId,
+                promoted
+                  ? promotionSignature(primaryId, configEpoch)
+                  : followerSignature(primaryId, configEpoch),
+              ),
+            )
+          : null;
+      const changedNodes = unreported?.changedNodes ?? [];
+      reasons.push(...(unreported?.reasons ?? []));
 
       // Advance the baseline before the dispatches, the way the CRC edge does:
       // a pass abandoned at its bound mid-dispatch has already emitted the
       // event, and leaving the edge uncommitted would page again next poll.
+      if (previousClusterState === 'fail' && clusterState === 'ok') {
+        this.claimFailover(connectionId, recoverySightingSignature(), state.clusterFailureSeenAt);
+        state.clusterRecoverySeenAt = Date.now();
+      }
+      if (stateChanged) {
+        state.clusterFailureSeenAt = Date.now();
+      }
       state.previousClusterState = clusterState;
       state.previousSlotsFail = slotsFail;
       if (topology !== null) {
@@ -2807,6 +2857,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       pruneDemotionWatch(state.demotionWatch, topology, demotionCheckedAt);
 
       if (reasons.length > 0) {
+        const filedUnder = this.clusterIdentity?.eventConnectionOf(connectionId) ?? connectionId;
+        const filedConfig =
+          filedUnder === connectionId ? config : this.connectionRegistry.getConfig(filedUnder);
+        const instance = {
+          host: filedConfig?.host || 'localhost',
+          port: filedConfig?.port || 6379,
+        };
         // OTLP mirror is decoupled from the Pro webhook gate (the dispatcher
         // no-ops unless OTEL_* is set).
         try {
@@ -2822,7 +2879,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
               reasons: reasons.join(','),
               ...(changedNodes.length > 0 ? { changedNodes: JSON.stringify(changedNodes) } : {}),
             },
-            connectionId,
+            filedUnder,
           );
         } catch (err) {
           this.logger.error('Failed to dispatch cluster.failover OTLP event', err);
@@ -2839,8 +2896,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
               slotsFailed: slotsFail,
               knownNodes: parseInt(clusterInfo.cluster_known_nodes) || 0,
               timestamp: Date.now(),
-              instance: { host: config?.host || 'localhost', port: config?.port || 6379 },
-              connectionId,
+              instance,
+              connectionId: filedUnder,
+              alsoScopedTo: this.clusterIdentity?.otherClusterConnections(connectionId),
             });
           } catch (err) {
             this.logger.error('Failed to dispatch cluster.failover webhook', err);

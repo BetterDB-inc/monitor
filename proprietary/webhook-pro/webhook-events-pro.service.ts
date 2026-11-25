@@ -287,28 +287,39 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
     timestamp: number;
     instance: { host: string; port: number };
     connectionId?: string;
+    alsoScopedTo?: ReadonlyArray<{ connectionId: string; instance: { host: string; port: number } }>;
   }): Promise<void> {
     if (!this.isEnabled()) {
       this.logger.debug('Cluster failover event skipped - requires PRO license');
       return;
     }
 
-    await this.webhookDispatcher.dispatchEvent(
-      WebhookEventType.CLUSTER_FAILOVER,
-      {
-        clusterState: data.clusterState,
-        previousState: data.previousState,
-        slotsAssigned: data.slotsAssigned,
-        slotsFailed: data.slotsFailed,
-        knownNodes: data.knownNodes,
-        reasons: data.reasons,
-        changedNodes: data.changedNodes,
-        message: clusterFailoverMessage(data),
-        timestamp: data.timestamp,
-        instance: data.instance,
-      },
-      data.connectionId,
-    );
+    const payload = {
+      clusterState: data.clusterState,
+      previousState: data.previousState,
+      slotsAssigned: data.slotsAssigned,
+      slotsFailed: data.slotsFailed,
+      knownNodes: data.knownNodes,
+      reasons: data.reasons,
+      changedNodes: data.changedNodes,
+      message: clusterFailoverMessage(data),
+      timestamp: data.timestamp,
+    };
+    await Promise.all([
+      this.webhookDispatcher.dispatchEvent(
+        WebhookEventType.CLUSTER_FAILOVER,
+        { ...payload, instance: data.instance },
+        data.connectionId,
+      ),
+      ...(data.alsoScopedTo ?? []).map((scoped) =>
+        this.webhookDispatcher.dispatchEvent(
+          WebhookEventType.CLUSTER_FAILOVER,
+          { ...payload, instance: scoped.instance },
+          scoped.connectionId,
+          { skip: (webhook) => webhook.connectionId !== scoped.connectionId },
+        ),
+      ),
+    ]);
   }
 
   /**
@@ -919,6 +930,9 @@ export function clusterFailoverMessage(data: {
   // is the only thing that tells an operator what happened.
   if (labels === '') {
     return `Cluster failover detected (state ${data.clusterState})`;
+  }
+  if (data.previousState !== undefined && data.previousState !== data.clusterState) {
+    return `Cluster failover detected (state ${data.clusterState}): ${labels}`;
   }
   return `Cluster failover detected while state stayed ${data.clusterState}: ${labels}`;
 }

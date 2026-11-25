@@ -28,6 +28,12 @@ import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import { ClusterNode, SentinelNodeInfo } from '@app/common/types/metrics.types';
 import type { NodeSlotStats } from '@app/cluster/shard-load';
 import { ShardLoadService } from '@app/cluster/shard-load.service';
+import {
+  ClusterIdentityService,
+  clusterStateSignature,
+  outageSignature,
+  recoverySightingSignature,
+} from '@app/cluster/cluster-identity.service';
 import { nodeAclDigest, clusterKeyFromNodes } from '../acl-drift-detector';
 import { RETRY_AMP_LATENCY_VERDICT_TTL_MS } from '../retry-amplification-detector';
 import { NODE_ATTRIBUTION_UNAVAILABLE } from '../retry-amplification-attribution';
@@ -7066,6 +7072,342 @@ describe('AnomalyService', () => {
         expect.anything(),
         expect.anything(),
       );
+    });
+
+    describe('with a cluster identity service', () => {
+      const CLUSTER_A = ['a', 'b', 'c'];
+      const CLUSTER_X = ['x', 'y'];
+      let identity: ClusterIdentityService;
+      let states: Record<string, string>;
+      let slotsFailed: string;
+      let configs: Record<string, unknown>;
+
+      function clusterCtx(id: string, cluster: string[]): ConnectionContext {
+        const nodes = cluster.map((node) => ({
+          id: `${node}0000000`,
+          address: `10.0.0.${node.charCodeAt(0)}:6379@16379`,
+          flags: node === id ? ['myself', 'master'] : ['master'],
+          master: '-',
+          pingSent: 0,
+          pongReceived: 0,
+          configEpoch: 1,
+          linkState: 'connected',
+          slots: [],
+        }));
+        return {
+          ...mockCtx,
+          connectionId: `conn-${id}`,
+          connectionName: id,
+          host: `10.0.0.${id.charCodeAt(0)}`,
+          client: {
+            ...dbClient,
+            getInfoParsed: jest.fn().mockResolvedValue({
+              server: { redis_version: '8.0.0' },
+              replication: { role: 'master' },
+              clients: { connected_clients: '10', blocked_clients: '0' },
+              memory: { used_memory: '1000000' },
+              stats: { instantaneous_ops_per_sec: '100', cluster_enabled: '1' },
+            }),
+            getClusterInfo: jest.fn(async () => ({
+              cluster_state: states[id] ?? 'ok',
+              cluster_slots_assigned: '16384',
+              cluster_slots_fail: slotsFailed,
+              cluster_known_nodes: String(cluster.length),
+            })),
+            getClusterNodes: jest.fn().mockResolvedValue(nodes),
+          },
+        } as unknown as ConnectionContext;
+      }
+
+      async function pollCluster(cluster: string[], order: string[] = cluster): Promise<void> {
+        for (const id of order) await poll(clusterCtx(id, cluster));
+      }
+
+      function setState(cluster: string[], state: string): void {
+        for (const id of cluster) states[id] = state;
+      }
+
+      const failovers = (): Array<Record<string, unknown>> =>
+        webhookEventsProService.dispatchClusterFailover.mock.calls.map(([event]) => event);
+
+      const otlpFailovers = (): unknown[][] =>
+        otelEvents.dispatch.mock.calls.filter(([type]) => type === WebhookEventType.CLUSTER_FAILOVER);
+
+      beforeEach(() => {
+        states = {};
+        slotsFailed = '0';
+        configs = {};
+        const registry = (service as any).connectionRegistry;
+        registry.getConfig.mockImplementation((id: string) => configs[id] ?? null);
+        registry.list = jest.fn(() =>
+          [...CLUSTER_A, ...CLUSTER_X].map((id) => ({
+            id: `conn-${id}`,
+            host: `10.0.0.${id.charCodeAt(0)}`,
+            port: 6379,
+            ...((configs[`conn-${id}`] as object | undefined) ?? {}),
+          })),
+        );
+        identity = new ClusterIdentityService(registry);
+        (service as any).clusterIdentity = identity;
+      });
+
+      it('sends one cluster.failover when every connection of the cluster sees the state fail', async () => {
+        await pollCluster(CLUSTER_A);
+        setState(CLUSTER_A, 'fail');
+
+        await pollCluster(CLUSTER_A);
+
+        expect(failovers()).toHaveLength(1);
+        expect(failovers()[0]).toMatchObject({ clusterState: 'fail', previousState: 'ok', connectionId: 'conn-a' });
+      });
+
+      it('sends one cluster.failover when every connection sees the state recover', async () => {
+        await pollCluster(CLUSTER_A);
+        setState(CLUSTER_A, 'fail');
+        await pollCluster(CLUSTER_A);
+        setState(CLUSTER_A, 'ok');
+
+        await pollCluster(CLUSTER_A);
+
+        expect(failovers()).toHaveLength(2);
+        expect(failovers()[1]).toMatchObject({ clusterState: 'ok', previousState: 'fail' });
+      });
+
+      it('reports a second outage and its recovery within a minute of the first', async () => {
+        await pollCluster(CLUSTER_A);
+        for (const state of ['fail', 'ok', 'fail', 'ok']) {
+          setState(CLUSTER_A, state);
+          await pollCluster(CLUSTER_A);
+        }
+
+        expect(failovers().map((event) => event.clusterState)).toEqual(['fail', 'ok', 'fail', 'ok']);
+        expect(otlpFailovers()).toHaveLength(2);
+      });
+
+      it('reports one outage and one recovery when a second node sees both late', async () => {
+        await pollCluster(CLUSTER_A);
+        for (const [id, state] of [['a', 'fail'], ['a', 'ok'], ['b', 'fail'], ['b', 'ok']]) {
+          states[id] = state;
+          await pollCluster(CLUSTER_A, [id]);
+        }
+
+        expect(failovers().map((event) => event.clusterState)).toEqual(['fail', 'ok']);
+        expect(otlpFailovers()).toHaveLength(1);
+      });
+
+      it('reports a second outage seen first by a node that was not the first to recover', async () => {
+        await pollCluster(CLUSTER_A);
+        for (const state of ['fail', 'ok']) {
+          setState(CLUSTER_A, state);
+          await pollCluster(CLUSTER_A);
+        }
+        setState(CLUSTER_A, 'fail');
+
+        await pollCluster(CLUSTER_A, ['c', 'b', 'a']);
+
+        expect(failovers().map((event) => event.clusterState)).toEqual(['fail', 'ok', 'fail']);
+      });
+
+      it('names the other connections of the cluster for their scoped webhooks', async () => {
+        await pollCluster(CLUSTER_A);
+        await pollCluster(CLUSTER_X);
+        setState(CLUSTER_A, 'fail');
+
+        await pollCluster(CLUSTER_A);
+
+        expect(failovers()[0]).toMatchObject({
+          connectionId: 'conn-a',
+          alsoScopedTo: [
+            { connectionId: 'conn-b', instance: { host: '10.0.0.98', port: 6379 } },
+            { connectionId: 'conn-c', instance: { host: '10.0.0.99', port: 6379 } },
+          ],
+        });
+      });
+
+      it('sends one cluster.failover per cluster when two clusters fail', async () => {
+        await pollCluster(CLUSTER_A);
+        await pollCluster(CLUSTER_X);
+        setState([...CLUSTER_A, ...CLUSTER_X], 'fail');
+
+        await pollCluster(CLUSTER_A);
+        await pollCluster(CLUSTER_X);
+
+        expect(failovers().map((event) => event.connectionId)).toEqual(['conn-a', 'conn-x']);
+      });
+
+      it('still raises the cluster state anomaly on every connection', async () => {
+        await pollCluster(CLUSTER_A);
+        setState(CLUSTER_A, 'fail');
+
+        await pollCluster(CLUSTER_A);
+
+        const raisedOn = storage.saveAnomalyEvent.mock.calls
+          .map(([event]) => event)
+          .filter((event) => event.metricType === MetricType.CLUSTER_STATE)
+          .map((event) => event.connectionId);
+        expect(raisedOn).toEqual(['conn-a', 'conn-b', 'conn-c']);
+      });
+
+      it('sends nothing when the failure was already reported for the cluster', async () => {
+        await pollCluster(CLUSTER_A);
+        identity.claimFailover(identity.clusterKeyOf('conn-a'), clusterStateSignature('fail'), Date.now());
+        setState(CLUSTER_A, 'fail');
+
+        await pollCluster(CLUSTER_A);
+
+        expect(failovers()).toHaveLength(0);
+        expect(otlpFailovers()).toHaveLength(0);
+      });
+
+      it('reports the recovery the Prometheus poller sighted first', async () => {
+        await pollCluster(CLUSTER_A);
+        setState(CLUSTER_A, 'fail');
+        await pollCluster(CLUSTER_A);
+        identity.claimFailover(identity.clusterKeyOf('conn-a'), recoverySightingSignature(), Date.now());
+        setState(CLUSTER_A, 'ok');
+
+        await pollCluster(CLUSTER_A);
+
+        expect(failovers().map((event) => event.clusterState)).toEqual(['fail', 'ok']);
+      });
+
+      it('names the state change as the reason of the outage webhook', async () => {
+        await pollCluster(CLUSTER_A);
+        setState(CLUSTER_A, 'fail');
+
+        await pollCluster(CLUSTER_A);
+
+        expect(failovers()[0].reasons).toEqual(['cluster_state']);
+      });
+
+      it('names failed slots as a second reason of the outage webhook', async () => {
+        await pollCluster(CLUSTER_A);
+        setState(CLUSTER_A, 'fail');
+        slotsFailed = '128';
+
+        await pollCluster(CLUSTER_A);
+
+        expect(failovers()[0].reasons).toEqual(['cluster_state', 'slot_failures']);
+      });
+
+      it('gives the recovery webhook no reasons', async () => {
+        await pollCluster(CLUSTER_A);
+        for (const state of ['fail', 'ok']) {
+          setState(CLUSTER_A, state);
+          await pollCluster(CLUSTER_A);
+        }
+
+        expect(failovers()[1].reasons).toBeUndefined();
+      });
+
+      it('keeps the topology read of a connection that was removed meanwhile to itself', async () => {
+        (service as any).connectionRegistry.isRegisteredClient.mockReturnValue(false);
+
+        await poll(clusterCtx('a', CLUSTER_A));
+
+        expect(identity.clusterKeyOf('conn-a')).toBe('conn-a');
+      });
+
+      it('forgets the cluster of a connection that no longer runs in cluster mode', async () => {
+        const ctx = clusterCtx('a', CLUSTER_A);
+        await poll(ctx);
+        (ctx.client.getInfoParsed as jest.Mock).mockResolvedValue({
+          server: { redis_version: '8.0.0' },
+          replication: { role: 'master' },
+          clients: { connected_clients: '10', blocked_clients: '0' },
+          memory: { used_memory: '1000000' },
+          stats: { instantaneous_ops_per_sec: '100', cluster_enabled: '0' },
+        });
+
+        await poll(ctx);
+
+        expect(identity.clusterKeyOf('conn-a')).toBe('conn-a');
+      });
+
+      it('sends nothing when the Prometheus poller already reported the outage', async () => {
+        await pollCluster(CLUSTER_A);
+        identity.claimFailover(identity.clusterKeyOf('conn-a'), outageSignature(), Date.now());
+        setState(CLUSTER_A, 'fail');
+        slotsFailed = '128';
+
+        await pollCluster(CLUSTER_A);
+
+        expect(failovers()).toHaveLength(0);
+        expect(otlpFailovers()).toHaveLength(0);
+      });
+
+      it('names the slot failures in the OTLP record of the outage it reports', async () => {
+        await pollCluster(CLUSTER_A);
+        setState(CLUSTER_A, 'fail');
+        slotsFailed = '128';
+
+        await pollCluster(CLUSTER_A);
+
+        expect(otlpFailovers()).toEqual([
+          [
+            WebhookEventType.CLUSTER_FAILOVER,
+            { clusterState: 'fail', slotsFailed: 128, knownNodes: 3, reasons: 'cluster_state,slot_failures' },
+            'conn-a',
+          ],
+        ]);
+      });
+
+      it('files the event under the seed when an auto-registered member sees it first', async () => {
+        configs['conn-a'] = { host: '10.9.9.9', port: 7000 };
+        for (const id of ['conn-b', 'conn-c']) {
+          configs[id] = {
+            host: id,
+            port: 6379,
+            membership: { seedId: 'conn-a', nodeId: id, origin: 'auto', source: 'cluster' },
+          };
+        }
+        await pollCluster(CLUSTER_A);
+        setState(CLUSTER_A, 'fail');
+
+        await pollCluster(CLUSTER_A, ['b', 'c', 'a']);
+
+        expect(failovers()).toHaveLength(1);
+        expect(failovers()[0]).toMatchObject({
+          connectionId: 'conn-a',
+          instance: { host: '10.9.9.9', port: 7000 },
+        });
+      });
+
+      it('mirrors the failure it reports to OTLP once, because the Prometheus poller will skip it', async () => {
+        await pollCluster(CLUSTER_A);
+        setState(CLUSTER_A, 'fail');
+
+        await pollCluster(CLUSTER_A);
+
+        expect(otlpFailovers()).toEqual([
+          [
+            WebhookEventType.CLUSTER_FAILOVER,
+            { clusterState: 'fail', slotsFailed: 0, knownNodes: 3, reasons: 'cluster_state' },
+            'conn-a',
+          ],
+        ]);
+      });
+
+      it('does not mirror a recovery to OTLP', async () => {
+        await pollCluster(CLUSTER_A);
+        setState(CLUSTER_A, 'fail');
+        await pollCluster(CLUSTER_A);
+        setState(CLUSTER_A, 'ok');
+
+        await pollCluster(CLUSTER_A);
+
+        expect(otlpFailovers()).toHaveLength(1);
+      });
+
+      it('mirrors the failure to OTLP without a webhook service', async () => {
+        (service as any).webhookEventsProService = undefined;
+        await pollCluster(CLUSTER_A);
+        setState(CLUSTER_A, 'fail');
+
+        await pollCluster(CLUSTER_A);
+
+        expect(otlpFailovers()).toHaveLength(1);
+      });
     });
   });
 

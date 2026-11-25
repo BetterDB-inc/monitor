@@ -273,6 +273,7 @@ import {
   type SlotMigrationReport,
   parseSlotMigrationJobs,
 } from '@app/cluster/cluster-metrics.service';
+import { ClusterIdentityService, clusterStateSignature } from '@app/cluster/cluster-identity.service';
 import { withConfiguredZones, withShardMetadata } from '@app/cluster/shard-metadata';
 import { resolveNodeRef, toClusterNodeRef, type NodeSubject } from '@app/cluster/node-ref';
 import {
@@ -887,6 +888,7 @@ export class AnomalyService
   private replicaFanoutUnreachable = new Map<string, number>();
   private lastReplicationRole = new Map<string, number>();
   private lastClusterState = new Map<string, string>();
+  private clusterStateChangedAt = new Map<string, number>();
   private lastPersistenceState = new Map<string, ConnectionPersistenceState>();
   // Per-connection set of active duplicate-primary conflict signatures, so each
   // distinct conflict is alerted once rather than on every poll tick.
@@ -1310,6 +1312,8 @@ export class AnomalyService
     private readonly shardLoad?: ShardLoadService,
     @Optional()
     private readonly clusterMetrics?: ClusterMetricsService,
+    @Optional()
+    private readonly clusterIdentity?: ClusterIdentityService,
   ) {
     super(connectionRegistry);
     this.correlator = new Correlator(this.correlationIntervalMs, (anomaly) =>
@@ -1588,6 +1592,7 @@ export class AnomalyService
     this.clientEvictionLimit.delete(connectionId);
     this.lastReplicationRole.delete(connectionId);
     this.lastClusterState.delete(connectionId);
+    this.clusterStateChangedAt.delete(connectionId);
     this.lastPersistenceState.delete(connectionId);
     this.activeTopologyConflicts.delete(connectionId);
     this.closeConnectionEventsOnRemoval(connectionId);
@@ -1877,6 +1882,7 @@ export class AnomalyService
       }
       if (live && info['cluster_enabled'] !== '1') {
         this.forgetClusterKey(ctx.connectionId);
+        this.clusterIdentity?.forget(ctx.connectionId);
         this.clusterNodeViews.forget(ctx.connectionId);
         this.connectionRegistry.noteObservedNodeId(ctx.connectionId, undefined);
         this.connectionRegistry.noteOutsideCluster(ctx.connectionId, true);
@@ -2352,27 +2358,8 @@ export class AnomalyService
                 );
                 await this.addAnomaly(clusterEvent, ctx);
 
-                // cluster.failover is mirrored to OTLP once from
-                // PrometheusService, the always-loaded core detector, so a
-                // single failover yields one OTLP record. Emitting here too
-                // would double-count it (and also on recovery, which is not a
-                // failover). The webhook below is unchanged.
-                if (this.webhookEventsProService) {
-                  this.webhookEventsProService
-                    .dispatchClusterFailover({
-                      clusterState,
-                      previousState: lastState,
-                      slotsAssigned: parseInt(clusterInfo.cluster_slots_assigned) || 0,
-                      slotsFailed: parseInt(clusterInfo.cluster_slots_fail) || 0,
-                      knownNodes: parseInt(clusterInfo.cluster_known_nodes) || 0,
-                      timestamp: Date.now(),
-                      instance: { host: ctx.host, port: ctx.port },
-                      connectionId: ctx.connectionId,
-                    })
-                    .catch((err) => {
-                      this.logger.error('Failed to dispatch cluster.failover webhook', err);
-                    });
-                }
+                this.reportClusterStateChange(ctx, lastState, clusterState, clusterInfo);
+                this.clusterStateChangedAt.set(ctx.connectionId, Date.now());
               }
             }
             this.lastClusterState.set(ctx.connectionId, clusterState);
@@ -2455,7 +2442,7 @@ export class AnomalyService
         }
 
         if (nodes) {
-          this.rememberClusterKey(ctx.connectionId, nodes);
+          this.rememberClusterKey(ctx.connectionId, nodes, this.readIsCurrent(ctx, membershipAtRead));
           if (!isRaft) await this.detectTopologyDivergence(ctx, timestamp, nodes, shards);
           // Orphaned keys in unowned slots after a persistence load
           // (valkey#539): unreachable data silently holding memory. NOT a
@@ -10183,7 +10170,62 @@ export class AnomalyService
     this.announceSaved(event, event);
   }
 
-  private rememberClusterKey(connectionId: string, nodes: ClusterNode[]): void {
+  private reportClusterStateChange(
+    ctx: ConnectionContext,
+    lastState: string,
+    clusterState: string,
+    clusterInfo: Record<string, string>,
+  ): void {
+    const identity = this.clusterIdentity;
+    const signature = clusterStateSignature(clusterState);
+    const stateChangedAt = this.clusterStateChangedAt.get(ctx.connectionId);
+    if (
+      identity &&
+      !identity.claimFailover(identity.clusterKeyOf(ctx.connectionId), signature, Date.now(), stateChangedAt)
+    ) {
+      return;
+    }
+    const filedUnder = identity?.eventConnectionOf(ctx.connectionId) ?? ctx.connectionId;
+    const filedConfig = filedUnder === ctx.connectionId ? ctx : this.connectionRegistry.getConfig(filedUnder);
+    const slotsFailed = parseInt(clusterInfo.cluster_slots_fail) || 0;
+    const knownNodes = parseInt(clusterInfo.cluster_known_nodes) || 0;
+    const outageReasons = slotsFailed > 0 ? ['cluster_state', 'slot_failures'] : ['cluster_state'];
+    if (identity && clusterState === 'fail') {
+      try {
+        this.otelEvents?.dispatch(
+          WebhookEventType.CLUSTER_FAILOVER,
+          {
+            clusterState,
+            slotsFailed,
+            knownNodes,
+            reasons: outageReasons.join(','),
+          },
+          filedUnder,
+        );
+      } catch (err) {
+        this.logger.error('Failed to dispatch cluster.failover OTLP event', err);
+      }
+    }
+    this.webhookEventsProService
+      ?.dispatchClusterFailover({
+        clusterState,
+        previousState: lastState,
+        reasons: clusterState === 'fail' ? outageReasons : undefined,
+        slotsAssigned: parseInt(clusterInfo.cluster_slots_assigned) || 0,
+        slotsFailed,
+        knownNodes,
+        timestamp: Date.now(),
+        instance: { host: filedConfig?.host ?? ctx.host, port: filedConfig?.port ?? ctx.port },
+        connectionId: filedUnder,
+        alsoScopedTo: identity?.otherClusterConnections(ctx.connectionId),
+      })
+      .catch((err) => {
+        this.logger.error('Failed to dispatch cluster.failover webhook', err);
+      });
+  }
+
+  private rememberClusterKey(connectionId: string, nodes: ClusterNode[], readIsCurrent: boolean): void {
+    if (readIsCurrent) this.clusterIdentity?.observe(connectionId, nodes);
     const clusterKey = this.clusterKeyOfNodes(nodes);
     if (!clusterKey) {
       this.forgetClusterKey(connectionId);
@@ -10223,7 +10265,7 @@ export class AnomalyService
         this.infoTimeoutMs,
         'CLUSTER NODES timed out',
       );
-      this.rememberClusterKey(ctx.connectionId, nodes);
+      this.rememberClusterKey(ctx.connectionId, nodes, this.readIsCurrent(ctx, membershipAtRead));
       this.rememberClusterNodes(
         ctx.connectionId,
         nodes,

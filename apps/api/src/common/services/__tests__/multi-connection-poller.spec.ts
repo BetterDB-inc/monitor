@@ -451,6 +451,25 @@ describe('MultiConnectionPoller slow lane', () => {
     expect(poller.started).toEqual(['slow', 'ok', 'slow', 'ok']);
   });
 
+  it('does not wait again for a connection whose poll ended as the tick gave up on it', async () => {
+    const { poller } = build();
+    let release!: () => void;
+    poller.next('slow', () => new Promise<void>((resolve) => (release = resolve)), never);
+    const clockBehindTheTimer = jest.spyOn(performance, 'now').mockReturnValue(0);
+
+    await poller.tickNow();
+    release();
+    await flush();
+    clockBehindTheTimer.mockRestore();
+    poller.bound = 2000;
+
+    const waited = await Promise.race([
+      poller.tickNow().then(() => false),
+      flush().then(() => true),
+    ]);
+    expect(waited).toBe(false);
+  });
+
   it('does not wait for a connection whose last poll failed with a timeout', async () => {
     const { poller } = build();
     poller.bound = 2000;
