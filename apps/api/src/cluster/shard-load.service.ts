@@ -5,6 +5,7 @@ import { NodeSlotStats, ShardLoadSample, ShardLoadTracker, SlotLoadRate } from '
 export class ShardLoadService {
   private readonly trackers = new Map<string, ShardLoadTracker>();
   private readonly latest = new Map<string, ShardLoadSample>();
+  private readonly usage = new Map<string, boolean>();
 
   record(
     connectionId: string,
@@ -17,6 +18,7 @@ export class ShardLoadService {
       this.trackers.set(connectionId, tracker);
     }
     const sample = tracker.observe(nodes, timestamp);
+    this.usage.set(connectionId, tracker.tracking);
     if (sample) this.latest.set(connectionId, sample);
     else if (!tracker.tracking) this.latest.delete(connectionId);
     return sample;
@@ -24,6 +26,10 @@ export class ShardLoadService {
 
   getLatest(connectionId: string): ShardLoadSample | null {
     return this.latest.get(connectionId) ?? null;
+  }
+
+  reportsUsage(connectionId: string): boolean | null {
+    return this.usage.get(connectionId) ?? null;
   }
 
   getTopSlots(connectionId: string, nodeId: string, limit: number): SlotLoadRate[] {
@@ -37,5 +43,6 @@ export class ShardLoadService {
   forget(connectionId: string): void {
     this.trackers.delete(connectionId);
     this.latest.delete(connectionId);
+    this.usage.delete(connectionId);
   }
 }

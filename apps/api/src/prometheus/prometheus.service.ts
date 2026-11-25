@@ -2940,6 +2940,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
   }
 
+  get shardLoadStalenessMs(): number {
+    return this.stalenessMs;
+  }
+
   collectsClusterSlotStats(connectionId: string, client: DatabasePort): boolean {
     return (
       this.slotStatsTopN > 0 &&

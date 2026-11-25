@@ -61,6 +61,24 @@ describe('ShardLoadService', () => {
     expect(service.getLatest('conn-a')).toBeNull();
   });
 
+  it('says whether the last reading carried the usage counters', () => {
+    const service = new ShardLoadService();
+    expect(service.reportsUsage('conn-a')).toBeNull();
+
+    service.record('conn-a', reading({ 0: 0 }), 0);
+    expect(service.reportsUsage('conn-a')).toBe(true);
+
+    service.record(
+      'conn-a',
+      [{ nodeId: 'n1', address: '10.0.0.1:6379', stats: { 0: { key_count: 1 } } }],
+      1_000,
+    );
+    expect(service.reportsUsage('conn-a')).toBe(false);
+
+    service.forget('conn-a');
+    expect(service.reportsUsage('conn-a')).toBeNull();
+  });
+
   it('forgets a connection', () => {
     const service = new ShardLoadService();
     service.record('conn-a', reading({ 0: 0 }), 0);

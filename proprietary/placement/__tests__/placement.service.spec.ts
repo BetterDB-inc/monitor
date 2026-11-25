@@ -17,7 +17,7 @@ function primaries(): PlacementPrimaryRead[] {
 }
 
 const sample: ShardLoadSample = {
-  timestamp: 7,
+  timestamp: Date.now(),
   settling: false,
   shards: ['a', 'b', 'c'].map((nodeId, index) => ({
     nodeId,
@@ -57,8 +57,11 @@ async function setup(options: Setup = {}) {
   };
   const env = { BETTERDB_SLOT_MIGRATION: 'true', STORAGE_TYPE: 'sqlite', ...options.env };
   const config = { get: jest.fn((key: string) => env[key as keyof typeof env]) };
-  const prometheus = { collectsClusterSlotStats: jest.fn(() => true) };
-  const shardLoad = { getLatest: jest.fn(() => sample) };
+  const prometheus = { collectsClusterSlotStats: jest.fn(() => true), shardLoadStalenessMs: 90_000 };
+  const shardLoad = {
+    getLatest: jest.fn((): ShardLoadSample | null => sample),
+    reportsUsage: jest.fn((): boolean | null => true),
+  };
   const clusterMetrics = { usesClusterWideSlotStats: jest.fn(async () => true) };
   const service = new PlacementService(
     storage,
@@ -89,6 +92,21 @@ describe('PlacementService', () => {
     expect(status.effectiveMode).toBe('recommend');
     expect(status.balance?.shards[0]).toMatchObject({ shardId: 'a', ratio: 3, overTrigger: true });
     expect(status.support.issues).toEqual([]);
+  });
+
+  it('leaves the balance out once the latest sample is older than the staleness bound', async () => {
+    const { service, shardLoad } = await setup();
+    shardLoad.getLatest.mockReturnValue({ ...sample, timestamp: Date.now() - 90_001 });
+    expect((await service.getStatus('seed')).balance).toBeNull();
+  });
+
+  it('counts slot stats as off when the readings carry no usage counters', async () => {
+    const { service, storage, shardLoad } = await setup();
+    await storage.savePlacementPolicy({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+    shardLoad.reportsUsage.mockReturnValue(false);
+    const status = await service.getStatus('seed');
+    expect(status.effectiveMode).toBe('observe');
+    expect(status.support.modes.recommend.blockedBy).toBe('slot_stats_off');
   });
 
   it('answers for a member with its seed', async () => {

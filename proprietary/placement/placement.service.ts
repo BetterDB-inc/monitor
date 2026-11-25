@@ -14,6 +14,7 @@ import { ConnectionRegistry } from '@app/connections/connection-registry.service
 import { dialsDataNodes } from '@app/connections/data-node-reach';
 import { PrometheusService } from '@app/prometheus/prometheus.service';
 import { ShardLoadService } from '@app/cluster/shard-load.service';
+import type { ShardLoadSample } from '@app/cluster/shard-load';
 import { ClusterMetricsService } from '@app/cluster/cluster-metrics.service';
 import { WORKSPACE_CONFIG, type WorkspaceConfig } from '@app/auth/workspace-config';
 import { isManagedProviderBuild } from '@app/monitor/provider-detector';
@@ -61,7 +62,7 @@ export class PlacementService {
       effectiveMode: effectiveModeOf(mode, support),
       selectableModes,
       support,
-      balance: placementBalance(this.shardLoad?.getLatest(seedId) ?? null),
+      balance: placementBalance(this.freshSample(seedId)),
     };
   }
 
@@ -113,6 +114,12 @@ export class PlacementService {
     const config = this.registry.getConfig(connectionId);
     if (!config) throw new NotFoundException(`Connection ${connectionId} not found`);
     return config.membership?.seedId ?? connectionId;
+  }
+
+  private freshSample(seedId: string): ShardLoadSample | null {
+    const sample = this.shardLoad?.getLatest(seedId) ?? null;
+    if (!sample) return null;
+    return Date.now() - sample.timestamp <= this.prometheus.shardLoadStalenessMs ? sample : null;
   }
 
   private async readableMode(connectionId: string): Promise<PlacementMode | null> {
@@ -178,7 +185,9 @@ export class PlacementService {
       clusterEnabled,
       managedProvider: managedPlacementProvider(config?.host, managedBuild?.serverInfo),
       clusterWideView: clusterWide !== false,
-      slotStats: this.prometheus.collectsClusterSlotStats(seedId, client),
+      slotStats:
+        this.prometheus.collectsClusterSlotStats(seedId, client) &&
+        this.shardLoad?.reportsUsage(seedId) !== false,
       dialsDataNodes: dialed,
       primaries,
       aclDenied: this.aclDenied.has(seedId),
