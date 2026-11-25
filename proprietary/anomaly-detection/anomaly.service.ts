@@ -9805,6 +9805,9 @@ export class AnomalyService
       // Until the shard is observed again, the adopting connection answers for it.
       state.observers.add(connectionId);
       this.primaryReplicaState.set(key, state);
+      if (event.nodeAddr && !this.primaryReplicaNodeKeys.has(state)) {
+        this.primaryReplicaNodeKeys.set(state, topologyStateKey(connectionId, event.nodeAddr));
+      }
     }
   }
 

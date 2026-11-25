@@ -26249,6 +26249,54 @@ describe('AnomalyService', () => {
             expect([...(service as any).primaryReplicaEvents.values()].flat().map((e: any) => e.id)).toEqual(raised);
           });
 
+          it('keeps an alert picked up after a restart open until its primary is read', async () => {
+            const MINUTE = 60_000;
+            jest.spyOn(service as any, 'getIntervalMs').mockReturnValue(MINUTE);
+            (service as any).connectionClusterKeys.set('conn-1', 'cluster:1');
+            const many = primaries(6 * TOPOLOGY_TARGET_LIMIT + 16);
+            const members = new Set(many.map((t) => t.addr));
+            const sorted = [...many].sort((a, b) => (a.addr < b.addr ? -1 : 1));
+            const lane = TOPOLOGY_TARGET_LIMIT / 4;
+            const crowd = new Set(sorted.slice(0, lane).map((t) => t.addr));
+            const lone = sorted[lane + 7 * (TOPOLOGY_TARGET_LIMIT - lane)];
+            const clients = ownClients(many);
+            const readAt: number[] = [];
+            clients.get(lone.nodeId!)!.info = jest.fn().mockImplementation(async (section?: string) => {
+              if (section === 'replication') readAt.push(Date.now());
+              return ['# Replication', 'role:master', 'master_repl_offset:1000', 'connected_slaves:0'].join('\r\n');
+            });
+            clients.get(lone.nodeId!)!.call = jest
+              .fn()
+              .mockResolvedValue(`${lone.nodeId} ${lone.addr}@16379 myself,master - 0 0 1 connected 100-110\n`);
+            jest
+              .spyOn(service as any, 'needsEveryPoll')
+              .mockImplementation((_id: unknown, addr: unknown) => crowd.has(addr as string));
+            const shardKey = (service as any).clusterShardReplicaKey('cluster:1', {
+              id: lone.nodeId,
+              slots: [[100, 110]],
+            });
+            const stored = {
+              id: 'stored-1',
+              timestamp: T0 - MINUTE,
+              metricType: MetricType.PRIMARY_WITHOUT_REPLICAS,
+              severity: AnomalySeverity.CRITICAL,
+              baseline: 1,
+              dedupeKey: `${shardKey}@${lone.nodeId}`,
+              nodeAddr: lone.addr,
+            };
+            (service as any).adoptPrimaryReplicaEvents('conn-1', [stored], T0);
+            const tracked = () =>
+              [...(service as any).primaryReplicaEvents.values()].flat().map((e: any) => e.id);
+
+            for (let i = 0; i <= 6; i++) {
+              jest.spyOn(Date, 'now').mockReturnValue(T0 + i * MINUTE);
+              await (service as any).detectTopologyAnomalies(mockCtx, { targets: many, members });
+            }
+
+            expect(readAt).toEqual([]);
+            expect(tracked()).toEqual(['stored-1']);
+          });
+
           describe('for a primary read on every poll', () => {
             const many = primaries(6 * TOPOLOGY_TARGET_LIMIT + 16);
             let urgent = true;
