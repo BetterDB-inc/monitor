@@ -32,7 +32,6 @@ export interface SettingsView {
   tokenSet: boolean;
   dashboardUrl: string | null;
   source: 'secret' | 'env' | 'none';
-  editable: boolean;
 }
 
 export class ApiError extends Error {
@@ -75,6 +74,4 @@ export const api = {
   disable: (namespace: string, instance: string) =>
     request<InstanceView>(pluginFetch, instancePath(namespace, instance, 'disable'), { method: 'POST' }),
   settings: () => request<SettingsView>(pluginFetch, '/api/settings'),
-  saveSettings: (input: { url?: string; token?: string }) =>
-    request<SettingsView>(pluginFetch, '/api/settings', { method: 'PUT', body: JSON.stringify(input) }),
 };

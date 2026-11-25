@@ -92,10 +92,13 @@ tests:
           path: rules[1].resourceNames
           value: [RELEASE-NAME-betterdb-openeverest-settings]
       - equal:
+          path: rules[1].verbs
+          value: [get, list, watch]
+      - equal:
           path: rules[2]
           value:
             apiGroups: [""]
-            resources: [configmaps, secrets]
+            resources: [configmaps]
             verbs: [create]
 
   - it: narrows reads to Roles in watchNamespaces and strips them from the ClusterRole

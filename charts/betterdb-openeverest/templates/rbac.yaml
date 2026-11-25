@@ -87,9 +87,9 @@ subjects:
 ---
 {{- /*
 The plugin's own state, in its own namespace: the opt-in ConfigMap it creates
-and updates, and the settings Secret the settings panel writes. `create` cannot
-be limited by resourceNames, so it is granted on the two resource types; every
-other verb is pinned to the two names.
+and updates, and the settings Secret it reads (never writes: the URL and token
+come from the Helm release). `create` cannot be limited by resourceNames, so
+it is granted on configmaps; every other verb is pinned by name.
 */}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -106,9 +106,9 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     resourceNames: [{{ include "betterdb-openeverest.settingsSecretName" . | quote }}]
-    verbs: ["get", "list", "watch", "update", "patch"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: [""]
-    resources: ["configmaps", "secrets"]
+    resources: ["configmaps"]
     verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

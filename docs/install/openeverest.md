@@ -36,19 +36,12 @@ helm install betterdb-openeverest oci://ghcr.io/betterdb/charts/betterdb-openeve
 ```
 
 The URL and token come from Helm values, or from `betterdb.existingSecret` (a Secret with keys
-`url` and `token`) for anything that rotates. OpenEverest's **Settings → BetterDB** panel shows
-them read-only by default. Editing there is opt-in:
-
-```bash
---set plugin.allowSettingsEdit=true
-```
-
-It is off by default because the backend is a plain ClusterIP Service: without the flag, no
-request can repoint where the agents stream to, whatever headers it carries. With the flag on, the
-backend accepts a change only after OpenEverest confirms the caller's session
-(`GET /v1/clusters/{cluster}/plugin-context` with the forwarded token), and the chart's
-NetworkPolicy (`networkPolicy.enabled`, on by default) admits only everest-server pods to the
-backend. The policy needs a CNI that enforces NetworkPolicy; kind's default CNI does not.
+`url` and `token`) for anything that rotates; a change to the Secret is picked up without a
+restart. OpenEverest's **Settings → BetterDB** panel shows them read-only and has no way to change
+them: the backend is a plain ClusterIP Service, so no request can repoint where the agents stream
+to, whatever headers it carries. The chart's NetworkPolicy (`networkPolicy.enabled`, on by
+default) additionally admits only everest-server pods to the backend; it needs a CNI that enforces
+NetworkPolicy, which kind's default CNI does not.
 
 Then reload the OpenEverest UI, open a Valkey instance and pick the **BetterDB** tab:
 

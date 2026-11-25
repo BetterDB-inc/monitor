@@ -11,8 +11,7 @@ const OFF: InstanceView['status'] = { state: 'off', secretName: null, tls: false
 
 class FakeBackend implements PluginBackend {
   enabled = new Set<string>();
-  settingsState: SettingsView = { url: '', tokenSet: false, dashboardUrl: null, source: 'none', editable: false };
-  updates: Array<{ url?: string; token?: string; authorization: string }> = [];
+  settingsState: SettingsView = { url: '', tokenSet: false, dashboardUrl: null, source: 'none' };
 
   constructor(private readonly everest: EverestClient) {}
 
@@ -39,12 +38,6 @@ class FakeBackend implements PluginBackend {
     return this.settingsState;
   }
 
-  async updateSettings(input: { url?: string; token?: string }, authorization: string): Promise<SettingsView> {
-    if (!this.settingsState.editable) throw new HttpError(403, 'settings are managed by the Helm release');
-    if (!(await this.everest.checkSession('main', authorization))) throw new HttpError(401, 'OpenEverest did not accept the session token');
-    this.updates.push({ ...input, authorization });
-    return this.settingsState;
-  }
 }
 
 describe('plugin server', () => {
@@ -76,7 +69,6 @@ describe('plugin server', () => {
     everestStatus = 200;
     everestCalls.length = 0;
     backend.enabled.clear();
-    backend.updates.length = 0;
   });
 
   it('answers the probes and reports a missing bundle', async () => {
@@ -157,64 +149,17 @@ describe('plugin server', () => {
     expect(await res.json()).toEqual({ error: expect.stringContaining('503') });
   });
 
-  it('serves settings on GET and refuses PUT with 403 while editing is off, whatever the header', async () => {
+  it('serves settings on GET and has no way to change them', async () => {
     expect(await (await fetch(`${base}/api/settings`)).json()).toEqual(backend.settingsState);
 
-    const res = await fetch(`${base}/api/settings`, {
-      method: 'PUT',
-      headers: { Authorization: 'Bearer forged', 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: 'wss://attacker.example/agent/ws', token: 'x' }),
-    });
-
-    expect(res.status).toBe(403);
-    expect(backend.updates).toHaveLength(0);
-    expect(everestCalls).toHaveLength(0);
-  });
-
-  describe('with editing enabled', () => {
-    beforeEach(() => {
-      backend.settingsState = { ...backend.settingsState, editable: true };
-    });
-
-    afterEach(() => {
-      backend.settingsState = { ...backend.settingsState, editable: false };
-    });
-
-    it('rejects a PUT without a header before asking OpenEverest', async () => {
-      const res = await fetch(`${base}/api/settings`, { method: 'PUT', body: '{}' });
-      expect(res.status).toBe(401);
-      expect(everestCalls).toHaveLength(0);
-    });
-
-    it('rejects a PUT whose session OpenEverest does not accept, so a forged header from another pod fails', async () => {
-      everestStatus = 401;
-
+    for (const method of ['PUT', 'POST', 'PATCH', 'DELETE']) {
       const res = await fetch(`${base}/api/settings`, {
-        method: 'PUT',
-        headers: { Authorization: 'Bearer forged', 'Content-Type': 'application/json' },
+        method,
+        headers: { Authorization: 'Bearer user-jwt', 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: 'wss://attacker.example/agent/ws', token: 'x' }),
       });
-
-      expect(res.status).toBe(401);
-      expect(backend.updates).toHaveLength(0);
-      expect(everestCalls).toEqual([{ url: 'http://everest.test/v1/clusters/main/plugin-context', authorization: 'Bearer forged' }]);
-    });
-
-    it('validates the body and writes settings for a session OpenEverest accepts', async () => {
-      const bad = await fetch(`${base}/api/settings`, {
-        method: 'PUT',
-        headers: { Authorization: 'Bearer x', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: 'https://not-a-websocket' }),
-      });
-      expect(bad.status).toBe(400);
-
-      const ok = await fetch(`${base}/api/settings`, {
-        method: 'PUT',
-        headers: { Authorization: 'Bearer user-jwt', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: 'wss://acme.app.betterdb.com/agent/ws', token: ' tok ' }),
-      });
-      expect(ok.status).toBe(200);
-      expect(backend.updates).toEqual([{ url: 'wss://acme.app.betterdb.com/agent/ws', token: 'tok', authorization: 'Bearer user-jwt' }]);
-    });
+      expect(res.status).toBe(405);
+    }
+    expect(everestCalls).toHaveLength(0);
   });
 });

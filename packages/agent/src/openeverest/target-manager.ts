@@ -136,45 +136,7 @@ export class TargetManager implements PluginBackend {
       tokenSet: Boolean(current?.token),
       dashboardUrl: current ? dashboardUrlFor(current.url) : null,
       source,
-      editable: this.options.config.allowSettingsEdit,
     };
-  }
-
-  async updateSettings(input: { url?: string; token?: string }, authorization: string): Promise<SettingsView> {
-    const { kube, config, everest } = this.options;
-    if (!config.allowSettingsEdit) {
-      throw new HttpError(403, 'settings are managed by the Helm release (plugin.allowSettingsEdit is off)');
-    }
-    if (!(await everest.checkSession(config.localCluster, authorization))) {
-      throw new HttpError(401, 'OpenEverest did not accept the session token');
-    }
-    // Persist the effective pair, not just the field that changed: a Secret
-    // holding only a URL would otherwise read back as "no token" and the
-    // informer would fall back to the environment, undoing the change.
-    const current = this.currentSettings();
-    const merged: CloudSettings = {
-      url: input.url !== undefined ? input.url : current?.url ?? '',
-      token: input.token ? input.token : current?.token ?? '',
-    };
-    if (!merged.url && !merged.token) return this.settings();
-    const stringData: Record<string, string> = { url: merged.url, token: merged.token };
-
-    const path = `/api/v1/namespaces/${encodeURIComponent(kube.namespace)}/secrets`;
-    try {
-      await kube.mergePatch(`${path}/${encodeURIComponent(config.settingsSecret)}`, { stringData });
-    } catch (err) {
-      if (!(err instanceof KubeApiError) || err.status !== 404) throw err;
-      await kube.post(path, {
-        apiVersion: 'v1',
-        kind: 'Secret',
-        metadata: { name: config.settingsSecret, labels: { 'app.kubernetes.io/managed-by': 'betterdb-openeverest' } },
-        type: 'Opaque',
-        stringData,
-      });
-    }
-    // The informer delivers the change; apply it now too so the response is current.
-    this.applySettings(merged.url && merged.token ? merged : null, true);
-    return this.settings();
   }
 
   // --- internals ---
@@ -198,8 +160,7 @@ export class TargetManager implements PluginBackend {
       this.applySettings(null, true);
       return;
     }
-    // A Secret without a token inherits the environment's, the same merge
-    // updateSettings() writes.
+    // A Secret without a token inherits the environment's.
     const fallback = this.options.config.fallbackSettings;
     const url = decodeSecretValue(secret, 'url')?.trim() || fallback?.url || '';
     const token = decodeSecretValue(secret, 'token')?.trim() || fallback?.token || '';

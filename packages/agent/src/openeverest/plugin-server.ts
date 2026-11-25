@@ -11,7 +11,8 @@ import type { TargetStatus } from './instance-target';
 // prefix stripped, so routes here are bare: /main.js for the UI bundle,
 // /healthz for the probes and /api/... for the tab and the settings panel.
 // The proxy checks the user's JWT (and the `use` permission on the plugin)
-// for POST/PUT/DELETE, but not for GET, so nothing sensitive is served on GET.
+// for POST/PUT/DELETE, but not for GET, so nothing sensitive is served on GET,
+// and nothing here changes where the agents stream to.
 
 export interface SettingsView {
   /** BetterDB WebSocket URL the agents dial. */
@@ -21,8 +22,6 @@ export interface SettingsView {
   dashboardUrl: string | null;
   /** Where the settings came from: the Secret, env fallback, or nowhere yet. */
   source: 'secret' | 'env' | 'none';
-  /** Whether PUT /api/settings is accepted at all (chart value plugin.allowSettingsEdit). */
-  editable: boolean;
 }
 
 export interface InstanceView {
@@ -47,8 +46,6 @@ export interface PluginBackend {
   disable(ref: InstanceRef, authorization: string): Promise<InstanceView>;
   status(ref: InstanceRef): InstanceView;
   settings(): SettingsView;
-  /** Rejects with 403 when editing is off and 401 when OpenEverest does not accept the session. */
-  updateSettings(input: { url?: string; token?: string }, authorization: string): Promise<SettingsView>;
 }
 
 export interface PluginServerOptions {
@@ -161,23 +158,9 @@ async function route(
       sendJson(res, 200, backend.settings());
       return;
     }
-    if (method === 'PUT') {
-      if (!backend.settings().editable) {
-        throw new HttpError(403, 'settings are managed by the Helm release (plugin.allowSettingsEdit is off)');
-      }
-      // The proxy checked this session for a PUT, but a request straight to
-      // the Service did not pass the proxy; the backend verifies it again.
-      const authorization = req.headers.authorization;
-      if (!authorization) throw new HttpError(401, 'missing auth token');
-      const body = await readJson(req);
-      const url = typeof body.url === 'string' ? body.url.trim() : undefined;
-      const token = typeof body.token === 'string' ? body.token.trim() : undefined;
-      if (url !== undefined && url !== '' && !/^wss?:\/\//.test(url)) {
-        throw new HttpError(400, 'url must start with wss:// (or ws:// for an in-cluster Monitor)');
-      }
-      sendJson(res, 200, await backend.updateSettings({ url, token }, authorization));
-      return;
-    }
+    // Settings are read-only here by design: the URL and token come from the
+    // Helm release (values or existingSecret). A backend any pod can reach
+    // must not be able to repoint every agent.
     throw new HttpError(405, 'method not allowed');
   }
 

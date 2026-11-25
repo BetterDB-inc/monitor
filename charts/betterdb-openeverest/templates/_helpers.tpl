@@ -57,8 +57,7 @@ the panel. Bring-your-own existingSecret replaces the chart-managed one.
 
 {{/*
 Whether the chart renders the settings Secret: only with inline values (url
-or token). With nothing set the backend creates it on the first save from
-the settings panel, so a helm upgrade never clobbers what the panel wrote.
+or token); with existingSecret the user's Secret is read instead.
 */}}
 {{- define "betterdb-openeverest.createSettingsSecret" -}}
 {{- if and (not .Values.betterdb.existingSecret) (or .Values.betterdb.url .Values.betterdb.token) -}}

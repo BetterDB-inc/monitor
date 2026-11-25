@@ -142,7 +142,6 @@ function config(overrides: Partial<OpenEverestConfig> = {}): OpenEverestConfig {
     targetsConfigMap: 'targets',
     watchNamespaces: [],
     localCluster: 'main',
-    allowSettingsEdit: true,
     rediscoverIntervalMs: 60_000,
     ...overrides,
   };
@@ -151,7 +150,6 @@ function config(overrides: Partial<OpenEverestConfig> = {}): OpenEverestConfig {
 function build(kube: FakeKube, overrides: Partial<OpenEverestConfig> = {}, everestStatus = 200) {
   const everest = {
     checkConnectionAccess: jest.fn(async () => (everestStatus === 200 ? { ok: true } : { ok: false, status: everestStatus, reason: `status ${everestStatus}` })),
-    checkSession: jest.fn(async () => true),
   };
   const logs: string[] = [];
   const manager = new TargetManager({ config: config(overrides), kube: kube as never, everest: everest as never, log: (m) => logs.push(m), maxBackoffMs: 1 });
@@ -282,18 +280,6 @@ describe('TargetManager cluster id', () => {
 });
 
 describe('TargetManager settings', () => {
-  it('writes the merged URL and token when only the URL changes over env fallback', async () => {
-    const kube = new FakeKube();
-    const { manager } = build(kube, { fallbackSettings: { url: 'wss://old/agent/ws', token: 'env-token' } });
-    await manager.start();
-
-    const view = await manager.updateSettings({ url: 'wss://new/agent/ws' }, 'Bearer x');
-
-    expect(kube.patches[0].body).toEqual({ stringData: { url: 'wss://new/agent/ws', token: 'env-token' } });
-    expect(view).toMatchObject({ url: 'wss://new/agent/ws', tokenSet: true, source: 'secret' });
-    await manager.stop();
-  });
-
   it('treats a Secret without a token as inheriting the environment token', async () => {
     const kube = new FakeKube();
     kube.objects.set(SECRETS, [{ metadata: { name: 'settings', namespace: 'everest-system', resourceVersion: '1' }, stringData: { url: 'wss://from-secret/agent/ws' } }]);
@@ -304,13 +290,5 @@ describe('TargetManager settings', () => {
 
     expect(manager.settings()).toMatchObject({ url: 'wss://from-secret/agent/ws', tokenSet: true, source: 'secret' });
     await manager.stop();
-  });
-
-  it('refuses edits when the chart keeps settings read-only', async () => {
-    const kube = new FakeKube();
-    const { manager } = build(kube, { allowSettingsEdit: false });
-
-    await expect(manager.updateSettings({ url: 'wss://x/agent/ws' }, 'Bearer x')).rejects.toMatchObject({ status: 403 });
-    expect(kube.patches).toHaveLength(0);
   });
 });

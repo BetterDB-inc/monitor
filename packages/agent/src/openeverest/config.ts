@@ -29,13 +29,6 @@ export interface OpenEverestConfig {
   cloudCa?: string;
   /** How often each instance re-runs node discovery, to follow scaling and failover. */
   rediscoverIntervalMs: number;
-  /**
-   * Whether the settings panel may change the URL and token (PUT /api/settings).
-   * Off by default: the backend is reachable by any pod in the cluster, and a
-   * repointed URL would send every instance's telemetry elsewhere. With it on,
-   * a change still needs a session OpenEverest accepts.
-   */
-  allowSettingsEdit: boolean;
   /** Fallback BetterDB settings when the Secret is absent (local development). */
   fallbackSettings?: { url: string; token: string };
 }
@@ -57,7 +50,6 @@ export function loadOpenEverestConfig(env: NodeJS.ProcessEnv = process.env): Ope
     targetsConfigMap: env.BETTERDB_TARGETS_CONFIGMAP || 'betterdb-openeverest-targets',
     watchNamespaces,
     localCluster: env.OPENEVEREST_CLUSTER_NAME || 'main',
-    allowSettingsEdit: env.PLUGIN_ALLOW_SETTINGS_EDIT === 'true',
     cloudCa: caFile ? readFileSync(caFile, 'utf8') : undefined,
     rediscoverIntervalMs: parseInt(env.BETTERDB_REDISCOVER_INTERVAL_MS || '60000', 10),
     fallbackSettings: url && token ? { url, token } : undefined,
