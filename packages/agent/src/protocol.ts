@@ -4,6 +4,7 @@ export type {
   AgentResponseMessage,
   AgentErrorMessage,
   AgentHelloMessage,
+  AgentWelcomeMessage,
   AgentPingMessage,
   AgentPongMessage,
   AgentMessage,

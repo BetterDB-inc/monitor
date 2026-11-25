@@ -77,6 +77,22 @@ export interface AgentHelloMessage {
   readOnly?: boolean;
 }
 
+/**
+ * Cloud → Agent, right after the hello was accepted and the connection
+ * registered. Lets a multi-target agent tell that the server understood its
+ * identity: a server from before this message registers every node under
+ * the token's id, and the agent reports it rather than fight itself.
+ * Older servers never send it; older agents ignore it.
+ */
+export interface AgentWelcomeMessage {
+  type: 'welcome';
+  serverVersion: string;
+  /** The server derived the connection id from hello.identity. */
+  identity: boolean;
+  /** The server enforces read-only on this connection. */
+  readOnly: boolean;
+}
+
 // Bidirectional heartbeat
 export interface AgentPingMessage {
   type: 'ping';
@@ -93,6 +109,7 @@ export type AgentMessage =
   | AgentResponseMessage
   | AgentErrorMessage
   | AgentHelloMessage
+  | AgentWelcomeMessage
   | AgentPingMessage
   | AgentPongMessage;
 

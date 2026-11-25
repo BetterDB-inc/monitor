@@ -6,7 +6,7 @@ import { createHash } from 'crypto';
 import { AgentTokensService } from './agent-tokens.service';
 import { AgentDatabaseAdapter } from './agent-database-adapter';
 import { ConnectionRegistry } from '../../apps/api/src/connections/connection-registry.service';
-import type { AgentHelloMessage, AgentConnectionInfo, AgentIdentity } from '@betterdb/shared';
+import type { AgentHelloMessage, AgentConnectionInfo, AgentIdentity, AgentWelcomeMessage } from '@betterdb/shared';
 
 const LIVENESS_CHECK_MS = 5000;
 
@@ -96,6 +96,8 @@ function isPong(data: RawData): boolean {
 interface AgentConnection {
   id: string;
   tokenId: string;
+  /** Holds one of the token's connection slots until registration settles (see MAX_CONNECTIONS_PER_TOKEN). */
+  reserved: boolean;
   name: string;
   ws: WebSocket;
   adapter: AgentDatabaseAdapter;
@@ -111,6 +113,9 @@ export class AgentGateway {
   private wss: WebSocketServer;
   private agents = new Map<string, AgentConnection>();
   private claims = new Map<string, Promise<void>>();
+  // Slots taken by hellos whose registration has not settled yet, per token,
+  // so a burst of concurrent hellos cannot pass the cap together.
+  private reservations = new Map<string, number>();
 
   constructor(
     private readonly tokenService: AgentTokensService,
@@ -154,6 +159,7 @@ export class AgentGateway {
     const agent: AgentConnection = {
       id: connectionId,
       tokenId,
+      reserved: false,
       name: tokenName,
       ws,
       adapter: null as any, // Will be set after hello
@@ -184,11 +190,16 @@ export class AgentGateway {
               return;
             }
             hello.identity = identity;
-            if (this.connectionsForToken(tokenId) >= MAX_CONNECTIONS_PER_TOKEN) {
+            // A reconnecting node replaces its own entry, so that one does not
+            // count; the slot is reserved here, synchronously, and released
+            // when registration settles or the socket closes.
+            const id = agentConnectionId(tokenId, tokenName, identity);
+            if (this.connectionsForToken(tokenId, id) >= MAX_CONNECTIONS_PER_TOKEN) {
               this.logger.warn(`Agent ${connectionId}: token ${tokenName} already has ${MAX_CONNECTIONS_PER_TOKEN} connections, turning this one away`);
               ws.close(4005, 'Too many connections for this token');
               return;
             }
+            this.reserve(agent);
           }
           agent.agentHello = hello;
           agent.id = agentConnectionId(tokenId, tokenName, hello.identity);
@@ -219,6 +230,7 @@ export class AgentGateway {
 
     ws.on('close', () => {
       clearTimeout(helloTimeout);
+      this.release(agent);
       this.unregisterAgent(connectionId, ws);
     });
 
@@ -227,10 +239,26 @@ export class AgentGateway {
     });
   }
 
-  private connectionsForToken(tokenId: string): number {
-    let count = 0;
-    for (const agent of this.agents.values()) if (agent.tokenId === tokenId) count++;
+  /** Registered connections plus unsettled reservations for a token, minus the id a newcomer will replace. */
+  private connectionsForToken(tokenId: string, replacingId?: string): number {
+    let count = this.reservations.get(tokenId) ?? 0;
+    for (const agent of this.agents.values()) {
+      if (agent.tokenId === tokenId && agent.id !== replacingId) count++;
+    }
     return count;
+  }
+
+  private reserve(agent: AgentConnection): void {
+    agent.reserved = true;
+    this.reservations.set(agent.tokenId, (this.reservations.get(agent.tokenId) ?? 0) + 1);
+  }
+
+  private release(agent: AgentConnection): void {
+    if (!agent.reserved) return;
+    agent.reserved = false;
+    const left = (this.reservations.get(agent.tokenId) ?? 1) - 1;
+    if (left > 0) this.reservations.set(agent.tokenId, left);
+    else this.reservations.delete(agent.tokenId);
   }
 
   private queueRegistration(agent: AgentConnection): void {
@@ -244,6 +272,15 @@ export class AgentGateway {
   }
 
   private async registerAgent(agent: AgentConnection): Promise<void> {
+    try {
+      await this.doRegister(agent);
+    } finally {
+      // Registered (now counted in this.agents) or refused: the slot is no longer a reservation.
+      this.release(agent);
+    }
+  }
+
+  private async doRegister(agent: AgentConnection): Promise<void> {
     if (agent.ws.readyState !== WebSocket.OPEN) return;
 
     const hello = agent.agentHello!;
@@ -285,6 +322,15 @@ export class AgentGateway {
     }
 
     this.agents.set(agent.id, agent);
+
+    // Tell the agent its hello was understood (identity, read-only); see AgentWelcomeMessage.
+    const welcome: AgentWelcomeMessage = {
+      type: 'welcome',
+      serverVersion: process.env.APP_VERSION || process.env.npm_package_version || 'unknown',
+      identity: hello.identity !== undefined,
+      readOnly: hello.readOnly === true,
+    };
+    agent.ws.send(JSON.stringify(welcome));
 
     // Start heartbeat
     agent.pingTimer = setInterval(() => {

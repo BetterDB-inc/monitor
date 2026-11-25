@@ -20,7 +20,7 @@ class FakeSocket extends EventEmitter {
 
   closesAfterPong = false;
 
-  constructor(private readonly answersPings: boolean) {
+  constructor(public answersPings: boolean) {
     super();
   }
 
@@ -500,20 +500,67 @@ describe('AgentGateway identified agents', () => {
     expect(registry.list()).toHaveLength(0);
   });
 
-  it('caps identified connections per token', async () => {
+  it('caps identified connections per token, counting hellos whose registration is still pending', async () => {
     const registry = buildRegistry();
     const gateway = new AgentGateway({} as never, registry);
-    for (let i = 0; i < MAX_CONNECTIONS_PER_TOKEN; i++) connectIdentified(gateway, TOKEN_ID, `n${i}`);
-    await jest.advanceTimersByTimeAsync(0);
-    expect(gateway.getConnectedAgents()).toHaveLength(MAX_CONNECTIONS_PER_TOKEN);
-
-    const extra = connectIdentified(gateway, TOKEN_ID, 'one-too-many');
+    // All at once, before any registration settles: the cap must hold anyway.
+    const sockets = Array.from({ length: MAX_CONNECTIONS_PER_TOKEN + 3 }, (_, i) => connectIdentified(gateway, TOKEN_ID, `n${i}`));
     const otherToken = connectIdentified(gateway, 'tok-other', 'other-n0');
     await jest.advanceTimersByTimeAsync(0);
 
-    expect(extra.closes).toEqual([{ code: 4005, reason: expect.stringContaining('Too many') }]);
+    const refused = sockets.filter((s) => s.closes.some((c) => c.code === 4005));
+    expect(refused).toHaveLength(3);
     expect(otherToken.closes).toHaveLength(0);
     expect(gateway.getConnectedAgents()).toHaveLength(MAX_CONNECTIONS_PER_TOKEN + 1);
+  });
+
+  it('lets a node reconnect at the cap, since it replaces its own entry', async () => {
+    const registry = buildRegistry();
+    const gateway = new AgentGateway({} as never, registry);
+    const first = Array.from({ length: MAX_CONNECTIONS_PER_TOKEN }, (_, i) => connectIdentified(gateway, TOKEN_ID, `n${i}`));
+    await jest.advanceTimersByTimeAsync(0);
+    expect(gateway.getConnectedAgents()).toHaveLength(MAX_CONNECTIONS_PER_TOKEN);
+
+    // n0's socket went silent; its replacement must not be turned away as a 513th.
+    first[0].answersPings = false;
+    const again = connectIdentified(gateway, TOKEN_ID, 'n0');
+    await jest.advanceTimersByTimeAsync(CHECK_MS);
+
+    expect(again.closes).toHaveLength(0);
+    expect(first[0].terminated).toBe(true);
+    expect(gateway.getConnectedAgents()).toHaveLength(MAX_CONNECTIONS_PER_TOKEN);
+  });
+
+  it('frees a reserved slot when the socket closes before registration finishes', async () => {
+    const registry = buildRegistry();
+    const gateway = new AgentGateway({} as never, registry);
+    const sockets = Array.from({ length: MAX_CONNECTIONS_PER_TOKEN }, (_, i) => connectIdentified(gateway, TOKEN_ID, `n${i}`));
+    // Drop one before its registration settled.
+    sockets[0].drop();
+    await jest.advanceTimersByTimeAsync(0);
+
+    const next = connectIdentified(gateway, TOKEN_ID, 'late');
+    await jest.advanceTimersByTimeAsync(0);
+
+    expect(next.closes).toHaveLength(0);
+    expect(gateway.getConnectedAgents()).toHaveLength(MAX_CONNECTIONS_PER_TOKEN);
+  });
+
+  it('welcomes a registered agent, saying whether its identity was understood', async () => {
+    const registry = buildRegistry();
+    const gateway = new AgentGateway({} as never, registry);
+    const identified = connectIdentified(gateway, TOKEN_ID, 'n1');
+    const plain = new FakeSocket(true);
+    (gateway as unknown as { onConnection: (ws: WebSocket, id: string, name: string) => void }).onConnection(
+      plain as unknown as WebSocket, 'tok-plain', 'Agent',
+    );
+    plain.hello();
+    await jest.advanceTimersByTimeAsync(0);
+
+    const welcome = (socket: FakeSocket) => socket.sent.find((m) => m.type === 'welcome') as unknown as { identity: boolean; readOnly: boolean; serverVersion: string };
+    expect(welcome(identified)).toMatchObject({ identity: true, readOnly: true });
+    expect(welcome(plain)).toMatchObject({ identity: false, readOnly: false });
+    expect(typeof welcome(plain).serverVersion).toBe('string');
   });
 
   it('lets a restarted agent on a new token of the same name take over the same node id', async () => {
