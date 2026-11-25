@@ -295,13 +295,15 @@ replica_ip="$(kubectl -n "$DB_NAMESPACE" get pod "$replica_pod" -o jsonpath='{.s
 kubectl -n "$DB_NAMESPACE" delete pod failover --ignore-not-found >/dev/null 2>&1 || true
 kubectl -n "$DB_NAMESPACE" run failover --rm -i --restart=Never --image=valkey/valkey:9.0 --quiet \
   --overrides="{\"spec\":{\"containers\":[{\"name\":\"failover\",\"image\":\"valkey/valkey:9.0\",\"command\":[\"sh\",\"-c\",\"valkey-cli --tls --insecure --cert /conn/tls.crt --key /conn/tls.key -h $replica_ip -p 6379 -a \$PASSWORD --no-auth-warning CLUSTER FAILOVER\"],\"env\":[{\"name\":\"PASSWORD\",\"valueFrom\":{\"secretKeyRef\":{\"name\":\"$INSTANCE-conn\",\"key\":\"password\"}}}],\"volumeMounts\":[{\"name\":\"conn\",\"mountPath\":\"/conn\"}]}],\"volumes\":[{\"name\":\"conn\",\"secret\":{\"secretName\":\"$INSTANCE-conn\"}}]}}" \
-  | grep -q OK || die "CLUSTER FAILOVER on $replica_pod failed"
+  >/dev/null 2>&1 || true
+# kubectl run -i can miss a short-lived container's output, so the reply is
+# not checked here: the role change below is the proof the failover happened.
 # Rediscovery picks the new roles up on its next interval.
 for _ in $(seq 1 48); do
   [ "$(node_role "$replica_pod")" = "primary" ] && [ "$(node_role "$old_primary")" = "replica" ] && break
   sleep 5
 done
-[ "$(node_role "$old_primary")" = "replica" ] || die "the plugin never saw $old_primary demoted"
+[ "$(node_role "$old_primary")" = "replica" ] || die "the plugin never saw $old_primary demoted (did CLUSTER FAILOVER on $replica_pod run?)"
 for _ in $(seq 1 24); do
   plugin status | tail -n +2 | grep -q '"state":"monitoring"' && break
   sleep 5
