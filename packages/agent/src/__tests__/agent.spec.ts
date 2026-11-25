@@ -166,10 +166,33 @@ describe('Agent.stop', () => {
     const agent = new Agent({ ...IAM_CONFIG, authMode: 'password', valkeyPassword: 'p', valkeyTls: false });
 
     await expect(agent.start()).rejects.toThrow('ECONNREFUSED');
+    // The failed start() already drops the client; stop() disconnects again,
+    // which is harmless.
+    expect(mockDisconnect).toHaveBeenCalled();
     await agent.stop();
 
-    expect(mockDisconnect).toHaveBeenCalledTimes(1);
     expect(mockQuit).not.toHaveBeenCalled();
+  });
+
+  it('gives up on a node that accepts the connection but never answers, and stop() interrupts the wait', async () => {
+    jest.useFakeTimers();
+    try {
+      mockConnect.mockReturnValueOnce(new Promise(() => {}));
+      const silent = new Agent({ ...IAM_CONFIG, authMode: 'password', valkeyPassword: 'p', valkeyTls: false });
+      const started = silent.start();
+      const outcome = expect(started).rejects.toThrow(/connect timed out/);
+      await jest.advanceTimersByTimeAsync(15_000);
+      await outcome;
+
+      mockConnect.mockReturnValueOnce(new Promise(() => {}));
+      const stopping = new Agent({ ...IAM_CONFIG, authMode: 'password', valkeyPassword: 'p', valkeyTls: false });
+      const pending = stopping.start();
+      const stoppedOutcome = expect(pending).rejects.toThrow(/stopped during connect/);
+      await stopping.stop();
+      await stoppedOutcome;
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('quits and then disconnects a connected client', async () => {

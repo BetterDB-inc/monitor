@@ -43,12 +43,25 @@ export interface AgentConfig {
   clusterReplica?: boolean;
 }
 
+async function boundedQuit(client: Valkey): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<void>((resolve) => { timer = setTimeout(resolve, QUIT_TIMEOUT_MS); });
+  await Promise.race([client.quit().then(() => undefined, () => undefined), deadline]);
+  clearTimeout(timer);
+}
+
 /** The first Monitor release that understands identified (multi-target) agents. */
 export const MIN_MONITOR_VERSION = '0.57.0';
 export const LEGACY_SERVER_MESSAGE =
   `BetterDB server too old: identified agents need Monitor ${MIN_MONITOR_VERSION} or later, or BetterDB Cloud`;
 // How long after the hello a server that understands identities has to say so.
 const WELCOME_TIMEOUT_MS = 15_000;
+// A node that accepts the connection but never answers INFO must not hang
+// start() (and whoever awaits it) forever.
+const STARTUP_TIMEOUT_MS = 15_000;
+// quit() waits for the pending queue; during an outage that can be minutes,
+// so stop() gives it this long before disconnecting outright.
+const QUIT_TIMEOUT_MS = 2_000;
 
 export class Agent {
   private client: Valkey | null = null;
@@ -257,10 +270,10 @@ export class Agent {
       this.client = await this.createValkeyClient('BetterDB-Agent');
       this.attachClientHandlers(this.client);
       this.executor = new CommandExecutor(this.client, this.executorOptions());
-      await this.client.connect();
+      await this.withStartupDeadline(this.client.connect(), 'connect');
       this.valkeyConnected = true;
 
-      await this.detectCapabilities();
+      await this.withStartupDeadline(this.detectCapabilities(), 'capability detection');
       console.log(`${this.tag} Detected ${this.valkeyType} ${this.valkeyVersion}`);
       // Mark fully started only after capability detection finishes. Error/close
       // handlers gate their reconnect path on this.started, so any disconnect
@@ -273,8 +286,21 @@ export class Agent {
       // Agent is single-use: a failed start() is not recoverable on the same
       // instance. Callers should discard this instance and create a new one.
       this.shuttingDown = true;
+      try { this.client?.disconnect(); } catch { /* ignore */ }
       throw err;
     }
+  }
+
+  /**
+   * Bounds a startup step: it fails after STARTUP_TIMEOUT_MS, and at once when
+   * stop() is called meanwhile, so a silent node cannot hold start() open.
+   */
+  private withStartupDeadline<T>(step: Promise<T>, what: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`${what} timed out after ${STARTUP_TIMEOUT_MS}ms`)), STARTUP_TIMEOUT_MS);
+      const stopped = this.shutdownSignal.then(() => { throw new Error(`agent stopped during ${what}`); });
+      Promise.race([step, stopped]).then(resolve, reject).finally(() => clearTimeout(timer));
+    });
   }
 
   async stop(): Promise<void> {
@@ -305,14 +331,15 @@ export class Agent {
         this.reconnectLoopPromise = null;
       }
     }
-    // Quit politely when connected, then disconnect regardless: a client that
-    // never connected or is mid-reconnect would otherwise keep retrying forever.
+    // Quit politely when connected, for a bounded time, then disconnect
+    // regardless: a client that never connected or is mid-reconnect would
+    // otherwise keep retrying forever, and quit() on one waits for its queue.
     if (this.cliClient) {
-      await this.cliClient.quit().catch(() => {});
+      if (this.cliClient.status === 'ready') await boundedQuit(this.cliClient);
       try { this.cliClient.disconnect(); } catch { /* ignore */ }
     }
     if (this.client) {
-      if (this.valkeyConnected) await this.client.quit().catch(() => {});
+      if (this.valkeyConnected) await boundedQuit(this.client);
       try { this.client.disconnect(); } catch { /* ignore */ }
     }
     console.log(`${this.tag} Stopped`);
