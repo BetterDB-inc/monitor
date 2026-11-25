@@ -68,7 +68,7 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function keysInSlotRefusal(error: unknown): string | undefined {
+export function keysInSlotRefusal(error: unknown): string | undefined {
   const message = messageOf(error);
   if (/^NOPERM/i.test(message)) return 'the monitoring user may not run CLUSTER GETKEYSINSLOT';
   if (/unknown (sub)?command/i.test(message)) {
