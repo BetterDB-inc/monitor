@@ -242,6 +242,20 @@ describe('managedPlacementProvider', () => {
     process.env.MONITOR_PROVIDER_OVERRIDE = 'self-hosted';
     expect(managedPlacementProvider('10.0.0.1', undefined)).toBeNull();
   });
+
+  it.each([
+    ['clustercfg.prod.abc123.use1.cache.amazonaws.com', undefined],
+    ['myname.redis.cache.windows.net', undefined],
+    ['10.0.0.1', { redis_build_id: 'redislabs-abc' }],
+  ])('takes a self-hosted override over what %s looks like', (host, server) => {
+    process.env.MONITOR_PROVIDER_OVERRIDE = 'self-hosted';
+    expect(managedPlacementProvider(host, server)).toBeNull();
+  });
+
+  it('takes an override naming a provider over the host', () => {
+    process.env.MONITOR_PROVIDER_OVERRIDE = 'upstash';
+    expect(managedPlacementProvider('myname.redis.cache.windows.net', undefined)).toBe('Upstash');
+  });
 });
 
 describe('migrateSlotsListed', () => {

@@ -74,8 +74,7 @@ export function managedPlacementProvider(
   server: Record<string, string | undefined> | undefined,
 ): string | null {
   const override = readProviderOverride();
-  const overrideName = override ? PROVIDER_NAMES[override] : undefined;
-  if (overrideName) return overrideName;
+  if (override) return PROVIDER_NAMES[override] ?? null;
   const fromHost = matchByHost(host);
   const hostName = fromHost ? PROVIDER_NAMES[fromHost] : undefined;
   if (hostName) return hostName;

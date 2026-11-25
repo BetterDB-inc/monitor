@@ -888,7 +888,7 @@ When one slot carries the load (`key_level`), the explanation also advises movin
 | Reason | Meaning | Blocks |
 | --- | --- | --- |
 | `not_cluster` | The connection is not in cluster mode. Nothing else is checked. | Recommend and up |
-| `provider_managed` | A managed service (by host name, a Redis Cloud build, or `MONITOR_PROVIDER_OVERRIDE`). Slot moves go through the provider's resharding. | Approve and up |
+| `provider_managed` | A managed service (by host name, a Redis Cloud build, or `MONITOR_PROVIDER_OVERRIDE`). Slot moves go through the provider's resharding. When `MONITOR_PROVIDER_OVERRIDE` is set it decides alone: `self-hosted` clears this reason whatever the host name or build says. | Approve and up |
 | `per_node_connections` | The cluster's nodes are registered one by one, so no connection sees the whole cluster. | Recommend and up |
 | `slot_stats_off` | Per-slot load is not collected: `METRICS_SLOT_STATS_TOP_N` is `0`, or `CLUSTER SLOT-STATS` is unavailable. | Recommend and up |
 | `not_dialed` | The monitor reaches the cluster through an agent or OTLP and cannot open node connections. | Recommend and up |
