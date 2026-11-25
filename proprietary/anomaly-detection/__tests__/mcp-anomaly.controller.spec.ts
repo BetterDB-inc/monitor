@@ -195,12 +195,28 @@ describe('McpAnomalyController', () => {
   });
 
   it('topology disagreements returns the summary of the instance', () => {
-    const summary = { status: 'ok', coverage: { nodes: 500, answered: 12, complete: false }, disagreements: [], shards: [] };
+    const summary = {
+      status: 'ok',
+      coverage: { nodes: 500, answered: 12, complete: false },
+      disagreements: [],
+      shards: [],
+      fullCheck: { state: 'none' },
+    };
     svc.getTopologyDisagreements.mockReturnValue(summary);
 
     expect(controller.getTopologyDisagreements('inst1', 'all')).toBe(summary);
     expect(controller.getTopologyDisagreements('inst1')).toEqual({ ...summary, shardsListed: 'disputed' });
     expect(svc.getTopologyDisagreements).toHaveBeenCalledWith('inst1');
+  });
+
+  it('topology disagreements carries the last full check and offers no way to start one', () => {
+    const report = { status: 'ok', disagreements: [], shards: [], fullCheck: { state: 'done', asked: 500, total: 500 } };
+    svc.getTopologyDisagreements.mockReturnValue(report);
+
+    expect(controller.getTopologyDisagreements('inst1')).toMatchObject({ fullCheck: { state: 'done', total: 500 } });
+    expect(Object.getOwnPropertyNames(McpAnomalyController.prototype).filter((name) => /fullcheck/i.test(name))).toEqual(
+      [],
+    );
   });
 
   it('topology disagreements returns 404 for an unregistered instance', () => {

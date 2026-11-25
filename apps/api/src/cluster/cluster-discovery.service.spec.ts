@@ -1339,6 +1339,7 @@ describe('ClusterDiscoveryService', () => {
       state: 'healthy' as const,
       flags: ['master'],
     });
+    const viewed = { id: 'node2-id-def456', address: '192.168.1.11:6379@16379', hostname: 'node-2.example' };
 
     it('sends the work to the node on a socket of its own that never resends, and closes it', async () => {
       const client = onceClient();
@@ -1386,6 +1387,117 @@ describe('ClusterDiscoveryService', () => {
       await expect(
         service.onNodeClientOnce(node('nope'), 'test-connection', 2_000, jest.fn()),
       ).rejects.toThrow('Invalid node address: nope');
+    });
+
+    it('closes the socket when the caller gives up while the node does not answer', async () => {
+      const client = onceClient();
+      client.call.mockReturnValue(new Promise(() => undefined));
+      const gaveUp = new AbortController();
+
+      const read = service.onNodeClientOnce(viewed, 'test-connection', 2_000, (own) => own.call('CLUSTER', 'NODES'), gaveUp.signal);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(client.disconnect).not.toHaveBeenCalled();
+      gaveUp.abort();
+
+      await expect(read).rejects.toThrow('given up');
+      expect(client.disconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it('closes the socket when the caller gives up while it is still dialling', async () => {
+      const client = onceClient();
+      client.connect.mockReturnValue(new Promise(() => undefined));
+      const gaveUp = new AbortController();
+
+      const read = service.onNodeClientOnce(viewed, 'test-connection', 2_000, (own) => own.call('PING'), gaveUp.signal);
+      await new Promise((resolve) => setImmediate(resolve));
+      gaveUp.abort();
+
+      await expect(read).rejects.toThrow('given up');
+      expect(client.call).not.toHaveBeenCalled();
+      expect(client.disconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it('sends nothing on a socket whose dial ends after the caller gave up', async () => {
+      const client = onceClient();
+      let dialled: () => void = () => undefined;
+      client.connect.mockReturnValue(new Promise<void>((resolve) => (dialled = resolve)));
+      const gaveUp = new AbortController();
+
+      const read = service.onNodeClientOnce(viewed, 'test-connection', 2_000, (own) => own.call('PING'), gaveUp.signal);
+      await new Promise((resolve) => setImmediate(resolve));
+      gaveUp.abort();
+      dialled();
+
+      await expect(read).rejects.toThrow('given up');
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(client.call).not.toHaveBeenCalled();
+    });
+
+    it('opens no socket for a caller that has already given up', async () => {
+      jest.mocked(Valkey).mockClear();
+      const gaveUp = new AbortController();
+      gaveUp.abort();
+
+      await expect(
+        service.onNodeClientOnce(viewed, 'test-connection', 2_000, (own) => own.call('PING'), gaveUp.signal),
+      ).rejects.toThrow('given up');
+      expect(jest.mocked(Valkey)).not.toHaveBeenCalled();
+    });
+
+    it('leaves nothing in the shared pool', async () => {
+      onceClient();
+      const before = service.getConnectionPoolSize();
+
+      await service.onNodeClientOnce(viewed, 'test-connection', 2_000, (own) => own.call('PING'));
+
+      expect(service.getConnectionPoolSize()).toBe(before);
+      expect(service.getActiveConnections()).toEqual([]);
+    });
+
+    it('checks the node certificate against the node, not the seed', async () => {
+      mockDbClient.getClient.mockReturnValue({
+        options: { host: 'seed.example', port: 7001, tls: { servername: 'seed.example', ca: 'ca-pem' } },
+      });
+      onceClient();
+
+      await service.onNodeClientOnce(viewed, 'test-connection', 2_000, (own) => own.call('PING'));
+
+      expect(jest.mocked(Valkey)).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          tls: expect.objectContaining({ ca: 'ca-pem', servername: 'node-2.example' }),
+        }),
+      );
+    });
+
+    it('closes the socket when the work gives up', async () => {
+      const client = onceClient();
+
+      await expect(
+        service.onNodeClientOnce(viewed, 'test-connection', 2_000, () => Promise.reject(new Error('deadline'))),
+      ).rejects.toThrow('deadline');
+      expect(client.disconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it('closes the socket when the node cannot be dialed, without running the work', async () => {
+      const client = onceClient();
+      client.connect.mockRejectedValue(new Error('connect ETIMEDOUT'));
+      const work = jest.fn();
+
+      await expect(service.onNodeClientOnce(viewed, 'test-connection', 2_000, work)).rejects.toThrow(
+        'connect ETIMEDOUT',
+      );
+      expect(work).not.toHaveBeenCalled();
+      expect(client.disconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses a node of a connection reached through the agent', async () => {
+      mockConnectionRegistry.getConfig.mockReturnValue({ id: 'test-connection', host: 'agent', port: 0 });
+      const work = jest.fn();
+
+      await expect(service.onNodeClientOnce(viewed, 'test-connection', 2_000, work)).rejects.toThrow(
+        'cannot dial node2-id-def456 directly',
+      );
+      expect(work).not.toHaveBeenCalled();
     });
   });
 
