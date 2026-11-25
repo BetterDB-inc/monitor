@@ -41,6 +41,8 @@ OE_ADMIN_PASSWORD="${OE_ADMIN_PASSWORD:-e2e-admin-password}"
 DB_NAMESPACE="${DB_NAMESPACE:-databases}"
 MONITOR_NAMESPACE="betterdb"
 INSTANCE="${INSTANCE:-orders}"
+BULK_NAMESPACE="${BULK_NAMESPACE:-bulk}"
+BULK_COUNT="${BULK_COUNT:-7}"
 NUM_SHARDS="${NUM_SHARDS:-3}"
 REPLICAS_PER_SHARD="${REPLICAS_PER_SHARD:-1}"
 MONITOR_IMAGE="betterdb/monitor:e2e"
@@ -343,6 +345,57 @@ done
 wait_for_agents 0
 targets_data="$(kubectl -n "$OE_NAMESPACE" get configmap betterdb-openeverest-targets -o jsonpath='{.data}')" || die "could not read the targets ConfigMap"
 case "$targets_data" in *"$INSTANCE"*) die "the ConfigMap still lists $INSTANCE" ;; esac
+
+log "Enabling $BULK_COUNT instances in $BULK_NAMESPACE, deleting the namespace, and checking every opt-in goes"
+# Deleting a namespace fires all the DELETED events at once; every opt-in
+# removal must land in the one ConfigMap, not just the first few.
+kubectl create namespace "$BULK_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+for i in $(seq 1 "$BULK_COUNT"); do
+  kubectl apply -f - >/dev/null <<EOF
+apiVersion: core.openeverest.io/v1alpha1
+kind: Instance
+metadata:
+  name: bulk$i
+  namespace: $BULK_NAMESPACE
+spec:
+  providerRef:
+    name: valkey
+  version: "9.0"
+  topology:
+    type: replication
+  components:
+    engine:
+      type: valkey
+      replicas: 0
+      resources:
+        requests: {cpu: 50m, memory: 64Mi}
+        limits: {memory: 256Mi}
+      storage:
+        size: 1Gi
+EOF
+done
+for i in $(seq 1 "$BULK_COUNT"); do
+  kubectl -n "$BULK_NAMESPACE" wait instance/"bulk$i" --for=jsonpath='{.status.connectionSecretRef.name}' --timeout="$TIMEOUT" >/dev/null \
+    || die "bulk$i never published its connection details"
+done
+for i in $(seq 1 "$BULK_COUNT"); do
+  node scripts/e2e/plugin-action.mjs "$EVEREST" "$OE_ADMIN_PASSWORD" "$BULK_NAMESPACE" "bulk$i" on | grep -q '"enabled":true' || die "enabling bulk$i failed"
+done
+bulk_listed() {
+  local data
+  data="$(kubectl -n "$OE_NAMESPACE" get configmap betterdb-openeverest-targets -o jsonpath='{.data}')" || die "could not read the targets ConfigMap"
+  # grep finds nothing once every opt-in is gone; that is a count of 0, not a failure.
+  { printf '%s' "$data" | grep -o "__${BULK_NAMESPACE}__bulk[0-9]*" || true; } | wc -l | tr -d ' '
+}
+[ "$(bulk_listed)" = "$BULK_COUNT" ] || die "expected $BULK_COUNT bulk opt-ins in the ConfigMap, found $(bulk_listed)"
+kubectl delete namespace "$BULK_NAMESPACE" --wait=false >/dev/null
+for _ in $(seq 1 60); do
+  [ "$(bulk_listed)" = "0" ] && break
+  sleep 5
+done
+left="$(bulk_listed)"
+[ "$left" = "0" ] || die "$left bulk opt-ins outlived their deleted instances"
+echo "all $BULK_COUNT opt-ins removed with the namespace"
 
 log "PASS: $expected_nodes nodes of $DB_NAMESPACE/$INSTANCE streamed read-only and were removed on disable"
 if [ -z "${KEEP:-}" ]; then teardown; fi
