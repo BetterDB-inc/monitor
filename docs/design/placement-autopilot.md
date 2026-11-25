@@ -19,7 +19,7 @@ Hot shard detection (#694), the rebalance planner and running a plan from the An
 | Mode | Plans computed | Shown | Runs |
 | --- | --- | --- | --- |
 | Observe | No plan table (only the balance read-out) | Per-shard load and imbalance, `key_level` explanations, hash-tag advice | Nothing |
-| Recommend | Yes | Plan, projected per-shard load after the move, why the policy would or would not allow it | Nothing. Commands stay copyable, as today |
+| Recommend | Yes | Plan, projected per-shard load after the move, why the policy would or would not allow it | Nothing on its own. Commands stay copyable, and the #695 run button stays, as today |
 | Approve | Yes, as pending **actions** | As Recommend, plus Approve / Reject | On explicit approval (UI or MCP), by a signed-in admin |
 | Auto | Yes | As Approve | Without approval, only when every policy rule allows it |
 
@@ -90,7 +90,7 @@ Blocked means no migration job starts (acceptance criterion 4).
 | Blocker | Source of truth |
 | --- | --- |
 | `unhealthy_node` | Fresh `CLUSTER NODES` (as `recheckFailure` does): any slot-owning primary failing, or any node flagged `fail` / `pfail` |
-| `migration_running` | `CLUSTER GETSLOTMIGRATIONS` on every primary, legacy `MIGRATING` / `IMPORTING` markers, our own open action (the cluster lock, 3.3) |
+| `migration_running` | `CLUSTER GETSLOTMIGRATIONS` on every primary, legacy `MIGRATING` / `IMPORTING` markers, another open action of ours (the cluster lock, 3.3). The action that holds the lock, and the jobs of its own steps, don't block its next step |
 | `cluster_state` | Fresh `CLUSTER INFO` `cluster_state` not `ok`, or an open `cluster_state` event |
 | `topology_divergence` | Open `topology_divergence` event (#690/#693): nodes disagree on who owns slots |
 | `slot_migration_stuck` | Open `slot_migration_stuck` event |
@@ -107,7 +107,7 @@ Blocked means no migration job starts (acceptance criterion 4).
 | `failover` | Open `failover_churn`, `replication_role`, `lagging_promotion`, a `NODE_FAILOVER` match | A config epoch change in the controller's `CLUSTER NODES` history in the last 5 min |
 | `fork` | Open `persistence_child` / `fork_memory_risk`, plus live `INFO persistence` (`rdb_bgsave_in_progress`, `aof_rewrite_in_progress`) | `INFO persistence` alone. An atomic migration snapshots the source, so a running fork stacks a second one |
 | `replication_divergence` | Open `replication_divergence` on a replica | `INFO replication` on the primary: every replica `online`, offset within 1 s of the primary's writes |
-| `latency` | Open `command_p99` regression, plus the pre-move PING baseline (10 PINGs from the node socket, p50 over `abortLatencyMs`) | PING baseline alone |
+| `latency` | Open `command_p99` regression, plus the pre-move PING baseline (10 PINGs from the node socket, p50 over the 50 ms floor of `abortLatencyMs`; the 3× part is relative to this baseline, so it can't judge it) | PING baseline alone |
 | `incident` | An incident whose recovery is `active`, `recovering`, `degraded` or `unknown`, counting only signals other than `hot_shard`, `reshard_shard_skew`, `slot_migration`, `placement_action` and `placement_rollback`. On the source it also skips the hot-source symptoms exempted below, so an incident of only exempt signals doesn't block | — |
 
 **Per-slot, per-action and other rules:**
@@ -159,7 +159,7 @@ proposed ──approve──▶ approved ──CAS + lock──▶ running ─�
 Step states: `planned → sending → running → done | failed | cancelled`.
 
 - **Every transition is a compare-and-set** on the stored state (`UPDATE … SET state = 'running' WHERE id = ? AND state = 'approved'`). Two API instances on one database can't both start an action. **My call.**
-- **No owner: any instance advances any action.** Each instance's controller tick reads the open actions of its clusters and tries the next transition (follow a job, send the next step, verify, end) through the compare-and-set; the one whose write lands does the work. While one instance is up, an action can't stay `running` with its lock held; with none up, nothing else starts either, and the restart recovery below picks it up. Sending a step is `planned → sending` by compare-and-set, then the command, so only the winner sends it. Cancels likewise (`cancel_requested_at` by compare-and-set). The guard runs on every instance that sees a running step; a duplicate PING is harmless and only one cancel wins. **My call**, over a heartbeat: no lease timing to tune, no takeover race, and it reuses the compare-and-set and restart recovery phase 3 needs anyway.
+- **No owner: any instance advances any action.** Each instance's controller tick reads the open actions of its clusters and tries the next transition (follow a job, send the next step, verify, end) through the compare-and-set; the one whose write lands does the work. While one instance is up, an action can't stay `running` with its lock held; with none up, nothing else starts either, and the restart recovery below picks it up. Sending a step is `planned → sending` by compare-and-set, then the command, so only the winner sends it. A step left in `sending` for over 30 s, longer than the 2 s command timeout, has lost its sender: any instance takes it over by compare-and-set on its `sending_at` and settles it as after a restart (below). A slow sender whose reply lands after that finds its `sending → running` write refused and does nothing, since the taker has adopted the job. Cancels likewise (`cancel_requested_at` by compare-and-set). The guard runs on every instance that sees a running step; a duplicate PING is harmless and only one cancel wins. **My call**, over a heartbeat: no lease to renew, a takeover is one compare-and-set, and it reuses the compare-and-set and restart recovery phase 3 needs anyway.
 - **Write-ahead.** Before a step's `CLUSTER MIGRATESLOTS` is sent, the step is written as `sending` with `jobsBefore` (jobs already listed on the source); then the command goes out, and the reply moves it to `running`. The cancel fields (`cancelRequestedAt`, `cancelAcceptedAt`, `failedBeforeCancel`) are written as they happen.
 - **After a restart**, for each step in `sending` or `running`, the controller reads `CLUSTER GETSLOTMIGRATIONS` on the source and adopts a job not in `jobsBefore` whose source, target and ranges match (`matchesJob` rules). If none: ranges now on the target = `done`; still on the source = `failed`, "no job found after a restart". The budget counts `sending` steps, so a crash can't undercount it. While the process is down the guard is too; Valkey ends the job on its own.
 - **Before each step**, the controller re-checks that the source still owns the step's ranges (`recheckFailure`), re-runs the gate on fresh reads, and re-projects from the steps done. A step whose ranges moved under it is dropped.
