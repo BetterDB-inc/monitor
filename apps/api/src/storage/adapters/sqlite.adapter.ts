@@ -1934,22 +1934,23 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   private ensurePlacementPolicies(existedBefore: boolean): void {
-    if (!this.db) return;
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS placement_policies (
-        connection_id TEXT PRIMARY KEY,
-        mode TEXT NOT NULL,
-        updated_at INTEGER NOT NULL
-      );
-    `);
-    if (existedBefore || !this.tableExists('connections')) return;
-    this.ensureConnectionsSchema();
-    this.db
-      .prepare(
+    const db = this.db;
+    if (!db) return;
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS placement_policies (
+          connection_id TEXT PRIMARY KEY,
+          mode TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+      `);
+      if (existedBefore || !this.tableExists('connections')) return;
+      this.ensureConnectionsSchema();
+      db.prepare(
         `INSERT OR IGNORE INTO placement_policies (connection_id, mode, updated_at)
          SELECT id, 'recommend', ? FROM connections WHERE membership IS NULL`,
-      )
-      .run(Date.now());
+      ).run(Date.now());
+    })();
   }
 
   private createSchema(): void {

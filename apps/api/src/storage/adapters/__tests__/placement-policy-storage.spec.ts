@@ -136,6 +136,34 @@ describe('sqlite placement policy upgrade', () => {
     await upgraded.close();
   });
 
+  it('seeds again after a start that failed before the seed landed', async () => {
+    const filepath = tempDbPath();
+    const first = new SqliteAdapter({ filepath });
+    await first.initialize();
+    await first.saveConnection(connection('old-a'));
+    await first.close();
+
+    const Database = await loadBetterSqlite3();
+    const raw = new Database(filepath);
+    raw.exec('DROP TABLE placement_policies');
+    raw.close();
+
+    const failing = new SqliteAdapter({ filepath });
+    const prepare = jest
+      .spyOn(failing as unknown as { ensureConnectionsSchema: () => void }, 'ensureConnectionsSchema')
+      .mockImplementationOnce(() => {
+        throw new Error('disk full');
+      });
+    await expect(failing.initialize()).rejects.toThrow('disk full');
+    prepare.mockRestore();
+    await failing.close();
+
+    const upgraded = new SqliteAdapter({ filepath });
+    await upgraded.initialize();
+    expect((await upgraded.getPlacementPolicy('old-a'))?.mode).toBe('recommend');
+    await upgraded.close();
+  });
+
   it('leaves a fresh database without policies', async () => {
     const storage = new SqliteAdapter({ filepath: tempDbPath() });
     await storage.initialize();
@@ -180,6 +208,9 @@ const postgresReachable = adapters.some(([name]) => name === 'PostgresAdapter');
   };
 
   it('puts clusters that existed before the table on recommend, once', async () => {
+    await pool.query(
+      'CREATE TABLE IF NOT EXISTS public.placement_policies (connection_id TEXT PRIMARY KEY, mode TEXT NOT NULL, updated_at BIGINT NOT NULL)',
+    );
     const first = await open();
     await first.saveConnection(connection('old-seed'));
     await first.saveConnection(member('old-node', 'old-seed'));

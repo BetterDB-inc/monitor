@@ -532,9 +532,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         });
         try {
           await this.migrateConnectionId();
-          const placementPoliciesExisted = await this.tableExists('placement_policies');
           await this.createSchema();
-          await this.ensurePlacementPolicies(placementPoliciesExisted);
+          await this.ensurePlacementPolicies();
           if (!(await this.hasAnomalyKindColumn())) await this.addAnomalyKindColumn();
           await this.ensureOtelIngestedIndex();
           await this.migrateLogSourceKeys();
@@ -1631,28 +1630,37 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
   }
 
-  private async tableExists(name: string): Promise<boolean> {
-    if (!this.pool) return false;
-    const result = await this.pool.query('SELECT to_regclass($1) AS oid', [name]);
-    return result.rows[0]?.oid != null;
-  }
-
-  private async ensurePlacementPolicies(existedBefore: boolean): Promise<void> {
+  private async ensurePlacementPolicies(): Promise<void> {
     if (!this.pool) return;
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS placement_policies (
-        connection_id TEXT PRIMARY KEY,
-        mode TEXT NOT NULL,
-        updated_at BIGINT NOT NULL
-      )
-    `);
-    if (existedBefore) return;
-    await this.pool.query(
-      `INSERT INTO placement_policies (connection_id, mode, updated_at)
-       SELECT id, 'recommend', $1 FROM connections WHERE membership IS NULL
-       ON CONFLICT (connection_id) DO NOTHING`,
-      [Date.now()],
-    );
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const existed = await client.query(
+        `SELECT 1 FROM information_schema.tables
+         WHERE table_schema = current_schema() AND table_name = 'placement_policies'`,
+      );
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS placement_policies (
+          connection_id TEXT PRIMARY KEY,
+          mode TEXT NOT NULL,
+          updated_at BIGINT NOT NULL
+        )
+      `);
+      if (existed.rowCount === 0) {
+        await client.query(
+          `INSERT INTO placement_policies (connection_id, mode, updated_at)
+           SELECT id, 'recommend', $1 FROM connections WHERE membership IS NULL
+           ON CONFLICT (connection_id) DO NOTHING`,
+          [Date.now()],
+        );
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   private async createSchema(): Promise<void> {
