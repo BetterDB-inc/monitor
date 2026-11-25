@@ -85,7 +85,10 @@ export interface FanoutCoverage {
   notDialed: number;
   reason: FanoutCoverageReason | null;
   tunnelled: boolean;
+  /** Most primaries the connection reads per poll. */
   targetLimit: number;
+  /** How long the connection takes to read every primary once. */
+  sweepMs: number;
   timeoutMs: number;
   timestamp: number;
   /** Server-side age when the entry was read. */

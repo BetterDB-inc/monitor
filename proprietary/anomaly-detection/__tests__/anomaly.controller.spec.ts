@@ -115,6 +115,7 @@ describe('AnomalyController fan-out coverage', () => {
     notDialed: 0,
     reason: null,
     targetLimit: 64,
+    sweepMs: 10_000,
     timeoutMs: 2_000,
     timestamp: 1_000,
   };

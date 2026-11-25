@@ -135,6 +135,7 @@ describe('AnomalyService', () => {
       clearNodeSignals: jest.fn(),
       updateActiveIncidents: jest.fn(),
       updateFanoutCoverage: jest.fn(),
+      updateFanoutSweep: jest.fn(),
     };
 
     anomalyWebhookSink = {
@@ -25061,6 +25062,7 @@ describe('AnomalyService', () => {
                 reason: 'no_sentinel_credentials',
                 tunnelled: false,
                 targetLimit: TOPOLOGY_TARGET_LIMIT,
+                sweepMs: (service as any).getIntervalMs(),
                 timeoutMs: 2_000,
                 timestamp: T0,
                 ageMs: 0,
@@ -25179,6 +25181,7 @@ describe('AnomalyService', () => {
             reason: null,
             tunnelled: false,
             targetLimit: TOPOLOGY_TARGET_LIMIT,
+            sweepMs: (service as any).getIntervalMs(),
             timeoutMs: 2_000,
             timestamp: T0,
             ageMs: 0,
@@ -25445,6 +25448,26 @@ describe('AnomalyService', () => {
             skipped: 0,
             reason: null,
           });
+        });
+
+        it('reports how long reading every primary once takes', async () => {
+          discovery();
+          const interval = (service as any).getIntervalMs();
+
+          await poll(primaries(TOPOLOGY_TARGET_LIMIT + 3), 1, T0);
+
+          expect(latest().sweepMs).toBe(2 * interval);
+          expect(prometheusService.updateFanoutSweep).toHaveBeenLastCalledWith('conn-1', 2 * interval);
+        });
+
+        it('stops exporting the sweep of a connection with no primary to read', async () => {
+          discovery();
+          await poll(primaries(TOPOLOGY_TARGET_LIMIT + 3), 1, T0);
+
+          await poll([], 1, T0 + 10_000);
+
+          expect(latest()).toMatchObject({ reason: 'no_targets', sweepMs: (service as any).getIntervalMs() });
+          expect(prometheusService.updateFanoutSweep).toHaveBeenLastCalledWith('conn-1', null);
         });
 
         it('keeps the signals of a primary it does not read this poll', async () => {

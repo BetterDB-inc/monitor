@@ -18,6 +18,7 @@ function coverage(overrides: Partial<FanoutCoverage>): FanoutCoverage {
     reason: null,
     tunnelled: false,
     targetLimit: 64,
+    sweepMs: 10_000,
     timeoutMs: 2000,
     timestamp: NOW,
     ageMs: 0,
@@ -108,7 +109,7 @@ describe('FanoutCoverageNotice', () => {
     expect(screen.getByRole('alert')).not.toHaveTextContent('not been read yet');
   });
 
-  it('counts the primaries checked, unreachable, refused and past the cap', () => {
+  it('counts the primaries checked, unreachable, refused and not read yet', () => {
     render(
       <FanoutCoverageNotice
         coverage={coverage({ checked: 3, unreachable: 2, authFailed: 1, skipped: 1, targetLimit: 32, timeoutMs: 5000 })}
@@ -116,25 +117,66 @@ describe('FanoutCoverageNotice', () => {
     );
 
     expect(screen.getByRole('alert')).toHaveTextContent(
-      '3 of 7 primaries checked (2 unreachable, 1 refused the credentials, 1 past the 32-primary cap)',
+      '3 of 7 primaries checked (2 unreachable, 1 refused the credentials, 1 not read yet)',
     );
     expect(screen.getByRole('alert')).toHaveTextContent('within 5 seconds');
     expect(screen.getByRole('alert')).toHaveTextContent('WRONGPASS, NOAUTH or NOPERM');
-    expect(screen.getByRole('alert')).toHaveTextContent('register one of them');
   });
 
-  it('tells a Sentinel past the cap to add another Sentinel, not a primary', () => {
-    render(<FanoutCoverageNotice coverage={coverage({ topology: 'sentinel', checked: 64, skipped: 6 })} />);
+  it.each(['cluster', 'sentinel'] as const)(
+    'does not ask for another connection to reach the %s primaries it has not read yet',
+    (topology) => {
+      render(
+        <FanoutCoverageNotice coverage={coverage({ topology, checked: 64, skipped: 6, sweepMs: 20_000 })} />,
+      );
 
-    expect(screen.getByRole('alert')).toHaveTextContent('add another Sentinel of this deployment');
-    expect(screen.getByRole('alert')).not.toHaveTextContent('register one of them');
+      expect(screen.getByRole('alert')).toHaveTextContent('64 of 70 primaries checked (6 not read yet)');
+      expect(screen.getByRole('alert')).toHaveTextContent('64 primaries per poll');
+      expect(screen.getByRole('alert')).toHaveTextContent('about every 20 seconds');
+      expect(screen.getByRole('alert')).not.toHaveTextContent('add another Sentinel');
+      expect(screen.getByRole('alert')).not.toHaveTextContent('register one of them');
+      expect(screen.getByRole('alert')).not.toHaveTextContent('cap');
+    },
+  );
+
+  it('does not warn about primaries the first sweep has not reached yet', () => {
+    render(<FanoutCoverageNotice coverage={coverage({ checked: 64, skipped: 6, sweepMs: 20_000 })} />);
+
+    expect(screen.getByRole('alert')).not.toHaveClass('border-yellow-500');
+    expect(screen.getByRole('alert')).not.toHaveTextContent('are not evaluated');
+  });
+
+  it('still warns when a primary is unreachable during the first sweep', () => {
+    render(
+      <FanoutCoverageNotice coverage={coverage({ checked: 63, unreachable: 1, skipped: 6, sweepMs: 20_000 })} />,
+    );
+
+    expect(screen.getByRole('alert')).toHaveClass('border-yellow-500');
+    expect(screen.getByRole('alert')).toHaveTextContent('are not evaluated');
+  });
+
+  it('says how often each primary is checked once it reads them in rotation', () => {
+    render(<FanoutCoverageNotice coverage={coverage({ checked: 70, sweepMs: 20_000 })} />);
+
+    expect(screen.getByRole('alert')).toHaveTextContent('70 primaries checked in rotation');
+    expect(screen.getByRole('alert')).toHaveTextContent('64 primaries per poll');
+    expect(screen.getByRole('alert')).toHaveTextContent('about every 20 seconds');
+    expect(screen.getByRole('alert')).not.toHaveClass('border-yellow-500');
+  });
+
+  it('says how often each primary is checked next to the ones it cannot reach', () => {
+    render(<FanoutCoverageNotice coverage={coverage({ checked: 68, unreachable: 2, sweepMs: 20_000 })} />);
+
+    expect(screen.getByRole('alert')).toHaveTextContent('68 of 70 primaries checked (2 unreachable)');
+    expect(screen.getByRole('alert')).toHaveTextContent('about every 20 seconds');
   });
 
   it('leaves out the gap it does not have', () => {
     render(<FanoutCoverageNotice coverage={coverage({ checked: 3, unreachable: 2 })} />);
 
     expect(screen.getByRole('alert')).toHaveTextContent('3 of 5 primaries checked (2 unreachable)');
-    expect(screen.getByRole('alert')).not.toHaveTextContent('past the');
+    expect(screen.getByRole('alert')).not.toHaveTextContent('not read yet');
+    expect(screen.getByRole('alert')).not.toHaveTextContent('per poll');
     expect(screen.getByRole('alert')).not.toHaveTextContent('refused');
   });
 

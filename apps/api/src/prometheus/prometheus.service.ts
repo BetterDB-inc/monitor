@@ -489,6 +489,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private retryAmplificationState: Gauge;
   private anomalyFanoutPrimaries: Gauge;
   private anomalyFanoutGap: Gauge;
+  private anomalyFanoutSweep: Gauge;
   // Reason exported under betterdb_anomaly_fanout_gap, by connection label.
   private fanoutGapReasons = new Map<string, string>();
   private incidentActive: Gauge;
@@ -1404,8 +1405,12 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     );
     this.anomalyFanoutPrimaries = this.createGauge(
       'anomaly_fanout_primaries',
-      'Primaries the anomaly fan-out checked, could not reach, was refused by, skipped past its cap, or does not dial, in the latest cycle',
+      'Primaries the anomaly fan-out checked, could not reach, was refused by, has not read yet, or does not dial, in the latest cycle',
       ['state'],
+    );
+    this.anomalyFanoutSweep = this.createGauge(
+      'anomaly_fanout_sweep_seconds',
+      'Seconds the anomaly fan-out of a connection takes to read every primary once',
     );
     this.anomalyFanoutGap = this.createGauge(
       'anomaly_fanout_gap',
@@ -4298,6 +4303,23 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       this.anomalyFanoutPrimaries.labels(connLabel, fanoutState).set(coverage[key]);
     }
     this.setFanoutGap(connLabel, coverage.reason ?? null);
+  }
+
+  /**
+   * How long the anomaly fan-out of a connection takes to read every primary
+   * once. `null` removes the series: the connection reads no primaries.
+   */
+  updateFanoutSweep(connectionId: string, sweepMs: number | null): void {
+    const connLabel = this.getConnectionLabel(connectionId);
+    if (connLabel === null) {
+      return;
+    }
+    if (sweepMs === null) {
+      this.anomalyFanoutSweep.remove(connLabel);
+      return;
+    }
+    this.getConnectionState(connectionId).signalConnLabel = connLabel;
+    this.anomalyFanoutSweep.labels(connLabel).set(sweepMs / 1000);
   }
 
   /**

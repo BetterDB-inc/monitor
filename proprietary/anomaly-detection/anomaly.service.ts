@@ -12785,25 +12785,34 @@ export class AnomalyService
     topology: FanoutCoverage['topology'],
     coverage: Pick<FanoutCoverage, FanoutCount | 'reason'>,
   ): void {
+    const reading = coverage.reason === null;
+    const sweepMs = reading ? this.nodeReadIntervalMs(ctx.connectionId) : this.getIntervalMs();
     this.fanoutCoverage.set(ctx.connectionId, {
       connectionId: ctx.connectionId,
       topology,
       ...coverage,
       tunnelled: !!this.connectionRegistry.getConfig(ctx.connectionId)?.sshTunnel?.enabled,
       targetLimit: TOPOLOGY_TARGET_LIMIT,
+      sweepMs,
       timeoutMs: AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
       timestamp: Date.now(),
     });
     this.fanoutCoverageWithdrawn.delete(ctx.connectionId);
-    this.publishFanoutCoverage(ctx.connectionId, coverage.reason === 'not_applicable' ? null : coverage);
+    this.publishFanoutCoverage(
+      ctx.connectionId,
+      coverage.reason === 'not_applicable' ? null : coverage,
+      reading ? sweepMs : null,
+    );
   }
 
   private publishFanoutCoverage(
     connectionId: string,
     coverage: Pick<FanoutCoverage, FanoutCount | 'reason'> | null,
+    sweepMs: number | null = null,
   ): void {
     try {
       this.prometheusService.updateFanoutCoverage(connectionId, coverage);
+      this.prometheusService.updateFanoutSweep(connectionId, sweepMs);
     } catch (err) {
       this.logger.debug(
         `Failed to update fan-out coverage gauges for ${connectionId}: ${err instanceof Error ? err.message : err}`,
