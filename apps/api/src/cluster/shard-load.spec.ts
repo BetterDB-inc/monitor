@@ -394,6 +394,28 @@ describe('ShardLoadTracker', () => {
     expect(tracker.slotsOf('n1').map((slot) => slot.slot)).toEqual([0]);
   });
 
+  it('gives the median key count of every slot it saw in the last reading', () => {
+    const tracker = new ShardLoadTracker();
+    const withKeys = (nodeId: string, keys: Record<number, number>): NodeSlotStats => {
+      const reading = node(
+        nodeId,
+        Object.fromEntries(Object.keys(keys).map((s) => [s, [0, 0, 0]])),
+      );
+      for (const [slot, count] of Object.entries(keys)) reading.stats[slot].key_count = count;
+      return reading;
+    };
+
+    expect(tracker.medianKeyCount()).toBeNull();
+    tracker.observe([withKeys('n1', { 0: 10, 1: 900 }), withKeys('n2', { 2: 30 })], 0);
+    expect(tracker.medianKeyCount()).toBe(30);
+
+    tracker.observe([withKeys('n1', { 0: 10, 1: 900 }), withKeys('n2', { 2: 30, 3: 50 })], 1_000);
+    expect(tracker.medianKeyCount()).toBe(40);
+
+    tracker.observe([withKeys('n1', { 0: 10 })], 2_000);
+    expect(tracker.medianKeyCount()).toBe(10);
+  });
+
   it('separates a shard under skewed write load from an evenly loaded cluster', () => {
     const readings = (perShardCpu: number[], step: number) =>
       perShardCpu.map((cpu, i) => node(`n${i + 1}`, { [i]: [cpu * step, cpu * step, 0] }));
