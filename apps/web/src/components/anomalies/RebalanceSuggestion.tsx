@@ -39,6 +39,7 @@ const COPIED_FOR_MS = 2000;
 interface Props {
   connectionId: string | undefined;
   mode?: PlacementMode;
+  runnable?: boolean;
 }
 
 const percent = (share: number) => `${Math.round(share * 100)}%`;
@@ -462,7 +463,9 @@ function NoPlan({ verdict, shard }: { verdict: RebalanceNoPlan; shard: HotShardD
   );
 }
 
-export function RebalanceSuggestion({ connectionId, mode }: Props) {
+const heldBack = (plan: RebalancePlan): RebalancePlan => ({ ...plan, execution: undefined });
+
+export function RebalanceSuggestion({ connectionId, mode, runnable = true }: Props) {
   const shards = useOpenHotShards(connectionId, { keepOnError: true }).filter(
     (shard) => shard.rebalance && (mode !== 'observe' || shard.rebalance.kind !== 'plan'),
   );
@@ -495,7 +498,7 @@ export function RebalanceSuggestion({ connectionId, mode }: Props) {
             </CardHeader>
             <CardContent className="text-sm">
               {verdict.kind === 'plan' ? (
-                <Plan plan={verdict} onRun={setConfirmed} />
+                <Plan plan={runnable ? verdict : heldBack(verdict)} onRun={setConfirmed} />
               ) : (
                 <NoPlan verdict={verdict} shard={shard} />
               )}

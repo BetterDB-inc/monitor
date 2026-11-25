@@ -120,7 +120,8 @@ async function show(
     events = [EVENT] as unknown[],
     connected = true,
     mode,
-  }: { events?: unknown[]; connected?: boolean; mode?: PlacementMode } = {},
+    runnable,
+  }: { events?: unknown[]; connected?: boolean; mode?: PlacementMode; runnable?: boolean } = {},
 ): Promise<QueryClient> {
   getAnomalyEvents.mockResolvedValue(events);
   if (hotShards instanceof Error) getHotShards.mockRejectedValue(hotShards);
@@ -128,7 +129,11 @@ async function show(
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <RebalanceSuggestion connectionId={connected ? 'conn-1' : undefined} mode={mode} />
+      <RebalanceSuggestion
+        connectionId={connected ? 'conn-1' : undefined}
+        mode={mode}
+        runnable={runnable}
+      />
     </QueryClientProvider>,
   );
   await act(async () => {
@@ -653,6 +658,15 @@ describe('RebalanceSuggestion', () => {
     const region = await panel();
     expect(within(region).getByRole('table')).toBeInTheDocument();
     expect(within(region).getByRole('button', { name: 'Run this plan' })).toBeInTheDocument();
+  });
+
+  it('shows the plan without its run button when running is held back', async () => {
+    await show([hotShard(plan({ execution: { available: true } }))], { runnable: false });
+
+    const region = await panel();
+    expect(within(region).getByRole('table')).toBeInTheDocument();
+    expect(region).toHaveTextContent('BetterDB does not run it.');
+    expect(within(region).queryByRole('button', { name: 'Run this plan' })).toBeNull();
   });
 
   it('says several slots are the load when no single one is', async () => {

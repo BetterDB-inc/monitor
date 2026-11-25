@@ -112,7 +112,7 @@ const INCIDENT_POLL_MS = 30_000;
 
 export function AnomalyDashboard() {
   const { currentConnection } = useConnection();
-  const { status: placement } = usePlacement(
+  const { status: placement, error: placementError } = usePlacement(
     currentConnection?.id,
     currentConnection?.capabilities?.clusterEnabled === true,
   );
@@ -340,7 +340,8 @@ export function AnomalyDashboard() {
       <RebalanceRuns connectionId={currentConnection?.id} />
       <RebalanceSuggestion
         connectionId={currentConnection?.id}
-        mode={placement?.effectiveMode ?? 'observe'}
+        mode={placement ? placement.effectiveMode : placementError ? undefined : 'observe'}
+        runnable={placement !== undefined}
       />
       <FanoutCoverageNotice
         coverage={fanoutCoverage?.find((c) => c.connectionId === currentConnection?.id)}

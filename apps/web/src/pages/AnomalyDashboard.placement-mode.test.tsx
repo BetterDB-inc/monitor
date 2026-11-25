@@ -5,7 +5,9 @@ import { MemoryRouter } from 'react-router-dom';
 import type { PlacementMode, PlacementStatus } from '@betterdb/shared';
 
 const { placement } = vi.hoisted(() => ({
-  placement: { current: { status: undefined } as { status?: Partial<PlacementStatus> } },
+  placement: {
+    current: { status: undefined } as { status?: Partial<PlacementStatus>; error?: Error | null },
+  },
 }));
 
 vi.mock('../hooks/useConnection', () => ({
@@ -20,8 +22,10 @@ vi.mock('../hooks/usePlacement', () => ({
   usePlacement: () => placement.current,
 }));
 vi.mock('../components/anomalies/RebalanceSuggestion', () => ({
-  RebalanceSuggestion: ({ mode }: { mode?: PlacementMode }) => (
-    <p>Suggestions in {mode ?? 'no'} mode</p>
+  RebalanceSuggestion: ({ mode, runnable }: { mode?: PlacementMode; runnable?: boolean }) => (
+    <p>
+      Suggestions in {mode ?? 'no'} mode{runnable === false ? ', not runnable' : ''}
+    </p>
   ),
 }));
 vi.mock('../api/metrics', async (importOriginal) => {
@@ -64,12 +68,18 @@ function renderDashboard() {
 
 describe('AnomalyDashboard placement mode', () => {
   beforeEach(() => {
-    placement.current = { status: undefined };
+    placement.current = { status: undefined, error: null };
   });
 
   it('holds the plans back until the placement status is read', async () => {
     renderDashboard();
-    expect(await screen.findByText('Suggestions in observe mode')).toBeInTheDocument();
+    expect(await screen.findByText('Suggestions in observe mode, not runnable')).toBeInTheDocument();
+  });
+
+  it('shows the plans without a run button when the placement status cannot be read', async () => {
+    placement.current = { status: undefined, error: new Error('boom') };
+    renderDashboard();
+    expect(await screen.findByText('Suggestions in no mode, not runnable')).toBeInTheDocument();
   });
 
   it('shows the suggestions in the mode the cluster runs in', async () => {

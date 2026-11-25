@@ -881,7 +881,7 @@ Each cluster has a placement mode, shown with its support and the load of every 
 | Approve | Not available yet. |
 | Auto | Not available yet. |
 
-New connections start in Observe. Clusters that existed before the upgrade start in Recommend, so their plans and run button stay. With in-memory storage no mode is kept across a restart: a cluster without a stored mode runs in Recommend, as it did before, until an admin picks another mode. A plan without a run button is still advice: in Observe the panel on the Anomalies page shows only the hot shards without a plan, with their explanation.
+New connections start in Observe. Clusters that existed before the upgrade start in Recommend, so their plans and run button stay. With in-memory storage no mode is kept across a restart: a cluster without a stored mode runs in Recommend, as it did before, until an admin picks another mode. A plan without a run button is still advice: in Observe the panel on the Anomalies page shows only the hot shards without a plan, with their explanation. Until the placement status has loaded, the Anomalies page shows no plan; when it cannot be read, plans are shown without the run button.
 
 When one slot carries the load (`key_level`), the explanation also advises moving that slot to a shard of its own (Isolate). This is advice only: BetterDB does not run it.
 
