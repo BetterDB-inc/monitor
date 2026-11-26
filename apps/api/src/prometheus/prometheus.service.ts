@@ -105,6 +105,8 @@ const STORAGE_REFRESH_WARN_INTERVAL_MS = 5 * 60_000;
  * is answering at all.
  */
 const DEMOTED_NODE_READ_TIMEOUT_MS = 2_000;
+const TOPOLOGY_READS = 'prometheus';
+
 // Least of the pass left for the slot-stats fan-out to start at all, or half
 // the pass when that is shorter, so a short poll interval still collects.
 const SLOT_STATS_MIN_BUDGET_MS = 1_000;
@@ -2793,14 +2795,18 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       // load and during rolling upgrades (valkey#4340). Diff the topology too.
       let topology: TopologySnapshot | null = null;
       let topologyDiff: TopologyDiff | null = null;
+      const hasTurn =
+        this.clusterIdentity?.takeTopologyRead(connectionId, TOPOLOGY_READS, Date.now()) ?? true;
       try {
-        const nodes = await client.getClusterNodes();
-        if (this.isSuperseded(connectionId, epoch)) {
-          return;
+        if (hasTurn || state.previousTopology === null) {
+          const nodes = await client.getClusterNodes();
+          if (this.isSuperseded(connectionId, epoch)) {
+            return;
+          }
+          this.clusterIdentity?.observe(connectionId, nodes);
+          topology = snapshotTopology(nodes);
+          topologyDiff = diffClusterTopology(state.previousTopology, topology);
         }
-        this.clusterIdentity?.observe(connectionId, nodes);
-        topology = snapshotTopology(nodes);
-        topologyDiff = diffClusterTopology(state.previousTopology, topology);
       } catch (err) {
         // CLUSTER NODES can be denied or fail independently of CLUSTER INFO.
         // Losing the topology signal must not take metric scraping down with
