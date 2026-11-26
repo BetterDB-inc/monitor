@@ -30,6 +30,8 @@ interface ReadTurns {
   readonly passPolls: number;
   readonly granted: Map<string, number>;
   readonly urgent: Set<string>;
+  readonly readerReadAt?: number;
+  readonly readerEveryMs?: number;
 }
 
 interface HeldClaim {
@@ -221,14 +223,29 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
     return !heldByAnother;
   }
 
-  takeTopologyRead(connectionId: string, schedule: string, now: number, urgent = false): boolean {
+  takeTopologyRead(
+    connectionId: string,
+    schedule: string,
+    now: number,
+    urgent = false,
+    readerEveryMs = 0,
+  ): boolean {
     const clusterKey = this.clusterKeyOf(connectionId);
     const reader = this.readers.get(clusterKey);
     if (!reader || !this.stillReads(reader, clusterKey, now)) return true;
     const turnsKey = `${clusterKey}|${schedule}`;
     if (reader.connectionId === connectionId) {
-      this.readTurns.set(turnsKey, this.nextTurns(this.readTurns.get(turnsKey), connectionId, now));
-      return true;
+      const held = this.readTurns.get(turnsKey);
+      const turns = this.nextTurns(held, connectionId, now);
+      const readAt = held?.readerReadAt;
+      const reads =
+        urgent || turns.passPolls === 1 || readAt === undefined || now - readAt >= readerEveryMs;
+      this.readTurns.set(turnsKey, {
+        ...turns,
+        readerReadAt: reads ? now : readAt,
+        readerEveryMs,
+      });
+      return reads;
     }
     const turns = this.readTurns.get(turnsKey);
     if (!turns || now - turns.polledAt > READER_POLL_GRACE_MS || turns.passPolls === 1) return true;
@@ -245,6 +262,13 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
     if (!urgent) return turns.passPolls;
     const urgentPolls = Math.max(1, Math.ceil(turns.urgent.size / URGENT_READS_PER_POLL));
     return Math.min(turns.passPolls, urgentPolls);
+  }
+
+  readerReadEveryMs(connectionId: string, schedule: string): number {
+    const clusterKey = this.clusterKeyOf(connectionId);
+    if (this.readers.get(clusterKey)?.connectionId !== connectionId) return 0;
+    const turns = this.readTurns.get(`${clusterKey}|${schedule}`);
+    return !turns || turns.passPolls === 1 ? 0 : (turns.readerEveryMs ?? 0);
   }
 
   isReader(connectionId: string): boolean {
