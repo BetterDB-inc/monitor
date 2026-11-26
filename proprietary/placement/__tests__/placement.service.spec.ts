@@ -6,6 +6,7 @@ import {
 } from '@betterdb/shared';
 import { MemoryAdapter } from '@app/storage/adapters/memory.adapter';
 import type { ShardLoadSample } from '@app/cluster/shard-load';
+import { SustainHistory } from '@app/cluster/sustain-history';
 import {
   PlacementService,
   PlacementModeError,
@@ -38,6 +39,8 @@ const sample: ShardLoadSample = {
     slotCount: 5461,
     measuredSlots: 5461,
     cpuUsecPerSecond: index === 0 ? 900_000 : 300_000,
+    sustainCpuUsecPerSecond: index === 0 ? 900_000 : 300_000,
+    baselineCpuUsecPerSecond: 300_000,
     networkBytesInPerSecond: 0,
     networkBytesOutPerSecond: 0,
     cpuShare: null,
@@ -79,6 +82,8 @@ async function setup(options: Setup = {}) {
   const shardLoad = {
     getLatest: jest.fn((): ShardLoadSample | null => sample),
     reportsUsage: jest.fn((): boolean | null => true),
+    setSustainMinutes: jest.fn(),
+    sustainHistory: jest.fn((): SustainHistory | undefined => undefined),
   };
   const clusterMetrics = { usesClusterWideSlotStats: jest.fn(async () => true) };
   const service = new PlacementService(
@@ -110,6 +115,63 @@ describe('PlacementService', () => {
     expect(status.effectiveMode).toBe('recommend');
     expect(status.balance?.shards[0]).toMatchObject({ shardId: 'a', ratio: 3, overTrigger: true });
     expect(status.support.issues).toEqual([]);
+  });
+
+  it('reads the sustained trigger of each shard from its load history', async () => {
+    const { service, shardLoad } = await setup();
+    const history = new SustainHistory();
+    const now = Date.now();
+    for (let at = now - 30 * 60_000; at <= now; at += 5_000) {
+      history.record({ ...sample, timestamp: at });
+    }
+    shardLoad.sustainHistory.mockReturnValue(history);
+
+    const shards = (await service.getStatus('seed')).balance?.shards;
+
+    expect(shards?.find((each) => each.shardId === 'a')).toMatchObject({
+      sustainRatio: 3,
+      baselineRatio: 1,
+      trigger: 'over',
+      warmUntil: null,
+    });
+    expect(shards?.find((each) => each.shardId === 'b')).toMatchObject({ trigger: 'under' });
+  });
+
+  it('shows a shard as warming up while its load history is short', async () => {
+    const { service, shardLoad } = await setup();
+    const history = new SustainHistory();
+    const now = Date.now();
+    history.record({ ...sample, timestamp: now - 60_000 });
+    history.record({ ...sample, timestamp: now });
+    shardLoad.sustainHistory.mockReturnValue(history);
+
+    const row = (await service.getStatus('seed')).balance?.shards[0];
+
+    expect(row?.trigger).toBe('short_history');
+    expect(row?.warmUntil).toBeGreaterThanOrEqual(now + 23 * 60_000);
+  });
+
+  it('hands the sustain minutes of the policy to the load tracker', async () => {
+    const { service, shardLoad } = await setup();
+    await service.getStatus('seed');
+    expect(shardLoad.setSustainMinutes).toHaveBeenLastCalledWith('seed', 30);
+
+    await service.setSettings('seed', { ...DEFAULT_PLACEMENT_SETTINGS, sustainMinutes: 45 }, 0);
+    expect(shardLoad.setSustainMinutes).toHaveBeenLastCalledWith('seed', 45);
+  });
+
+  it('keeps the saved sustain minutes when an older read finishes after the save', async () => {
+    const { service, shardLoad, storage } = await setup();
+    const before = await storage.getPlacementPolicy('seed');
+    let finish: (policy: PlacementPolicy | null) => void = () => undefined;
+    jest
+      .spyOn(storage, 'getPlacementPolicy')
+      .mockImplementationOnce(() => new Promise((done) => (finish = done)));
+    const slow = service.settingsOf('seed', { fresh: true });
+    await service.setSettings('seed', { ...DEFAULT_PLACEMENT_SETTINGS, sustainMinutes: 45 }, 0);
+    finish(before);
+    await slow;
+    expect(shardLoad.setSustainMinutes).toHaveBeenLastCalledWith('seed', 45);
   });
 
   it('leaves the balance out once the latest sample is older than the staleness bound', async () => {

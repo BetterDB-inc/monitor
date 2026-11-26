@@ -89,6 +89,11 @@ function balance(overrides: Partial<PlacementBalance> = {}): PlacementBalance {
         networkShare: 0.5,
         ratio: 3.1,
         overTrigger: true,
+        sustainCpuUsecPerSecond: 900_000,
+        sustainRatio: 3,
+        baselineRatio: 1.5,
+        trigger: 'over',
+        warmUntil: null,
       },
       {
         shardId: 'b2',
@@ -99,6 +104,11 @@ function balance(overrides: Partial<PlacementBalance> = {}): PlacementBalance {
         networkShare: 0.25,
         ratio: 1,
         overTrigger: false,
+        sustainCpuUsecPerSecond: 300_000,
+        sustainRatio: 1,
+        baselineRatio: 1,
+        trigger: 'short_history',
+        warmUntil: new Date(2026, 10, 26, 14, 30).getTime(),
       },
       {
         shardId: 'c3',
@@ -109,6 +119,11 @@ function balance(overrides: Partial<PlacementBalance> = {}): PlacementBalance {
         networkShare: null,
         ratio: null,
         overTrigger: false,
+        sustainCpuUsecPerSecond: 0,
+        sustainRatio: null,
+        baselineRatio: null,
+        trigger: 'short_history',
+        warmUntil: null,
       },
     ],
     ...overrides,
@@ -395,8 +410,21 @@ describe('PlacementCard', () => {
     expect(rows[1]).not.toHaveTextContent('Over the trigger');
     expect(rows[2]).toHaveTextContent('No slots');
     expect(region).toHaveTextContent(
-      'A shard over 2x the median load is a hot shard; a slot move aims to bring it under 1.25x.',
+      'A shard over 2x the median load is a hot shard; a slot move aims to bring it under 1.25x. The trigger for slot moves fires only when the sustained load stays over 2x for 30 minutes.',
     );
+  });
+
+  it('shows the sustained load of each shard, and when a short history is long enough', async () => {
+    await show(status());
+
+    const bars = within(await card()).getByRole('list', { name: 'Load against the median' });
+    const rows = within(bars).getAllByRole('listitem');
+    expect(rows[0]).toHaveTextContent('Sustained');
+    expect(rows[0]).toHaveTextContent('Sustained 3x the median, 1.5x over 6 hours');
+    expect(rows[1]).toHaveTextContent(
+      `Warming up until ${new Date(2026, 10, 26, 14, 30).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`,
+    );
+    expect(rows[2]).not.toHaveTextContent('Sustained');
   });
 
   it('says when the load is settling after slots moved', async () => {

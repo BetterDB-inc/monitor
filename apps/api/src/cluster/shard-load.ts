@@ -3,6 +3,8 @@ import { SlotStats } from '../common/types/metrics.types';
 
 export const SHARD_LOAD_SMOOTHING_MS = 30_000;
 export const SHARD_LOAD_SETTLE_SAMPLES = 2;
+export const SHARD_LOAD_SUSTAIN_MINUTES = 30;
+export const SHARD_LOAD_BASELINE_MS = 6 * 60 * 60_000;
 
 export interface NodeSlotStats {
   nodeId: string;
@@ -24,6 +26,8 @@ export interface ShardLoad {
   slotCount: number;
   measuredSlots: number;
   cpuUsecPerSecond: number;
+  sustainCpuUsecPerSecond: number;
+  baselineCpuUsecPerSecond: number;
   networkBytesInPerSecond: number;
   networkBytesOutPerSecond: number;
   cpuShare: number | null;
@@ -54,6 +58,9 @@ export class ShardLoadTracker {
   private readonly cpuRate = new Float64Array(CLUSTER_TOTAL_SLOTS);
   private readonly bytesInRate = new Float64Array(CLUSTER_TOTAL_SLOTS);
   private readonly bytesOutRate = new Float64Array(CLUSTER_TOTAL_SLOTS);
+  private readonly sustainRate = new Float64Array(CLUSTER_TOTAL_SLOTS);
+  private readonly baselineRate = new Float64Array(CLUSTER_TOTAL_SLOTS);
+  private readonly warmSince = new Float64Array(CLUSTER_TOTAL_SLOTS).fill(NaN);
   private readonly keyCount = new Float64Array(CLUSTER_TOTAL_SLOTS);
   private readonly seen = new Uint8Array(CLUSTER_TOTAL_SLOTS);
   private readonly measured = new Uint8Array(CLUSTER_TOTAL_SLOTS);
@@ -63,9 +70,20 @@ export class ShardLoadTracker {
   private settledShares = new Map<string, Pick<ShardLoad, 'cpuShare' | 'networkShare'>>();
   private lastTimestamp: number | null = null;
   private settleRemaining = 0;
+  private sustainTimeConstantMs = (SHARD_LOAD_SUSTAIN_MINUTES * 60_000) / 3;
 
   get tracking(): boolean {
     return this.lastTimestamp !== null;
+  }
+
+  setSustainMinutes(minutes: number): void {
+    if (Number.isFinite(minutes) && minutes > 0)
+      this.sustainTimeConstantMs = (minutes * 60_000) / 3;
+  }
+
+  sustainWarmSince(slot: number): number | null {
+    const since = this.warmSince[slot];
+    return Number.isNaN(since) ? null : since;
   }
 
   observe(nodes: readonly NodeSlotStats[], timestamp: number): ShardLoadSample | null {
@@ -78,6 +96,8 @@ export class ShardLoadTracker {
 
     const elapsedMs = previous === null ? 0 : timestamp - previous;
     const weight = 1 - Math.exp(-elapsedMs / SHARD_LOAD_SMOOTHING_MS);
+    const sustainWeight = 1 - Math.exp(-elapsedMs / this.sustainTimeConstantMs);
+    const baselineWeight = 1 - Math.exp(-elapsedMs / SHARD_LOAD_BASELINE_MS);
     const slotsByNode = new Map<string, number[]>();
     let ownershipChanged = false;
     let unmeasured = false;
@@ -101,17 +121,17 @@ export class ShardLoadTracker {
           bytesOut < this.lastBytesOut[slot];
         if (moved && previous !== null) ownershipChanged = true;
 
+        if (wentBack && !moved) this.clearHistory(slot);
         if (previous === null || !this.seen[slot] || moved || wentBack) {
           this.clearRates(slot);
           if (previous !== null) unmeasured = true;
         } else {
           const seconds = elapsedMs / 1000;
-          this.cpuRate[slot] = this.smooth(
-            slot,
-            this.cpuRate[slot],
-            (cpu - this.lastCpu[slot]) / seconds,
-            weight,
-          );
+          const cpuRate = (cpu - this.lastCpu[slot]) / seconds;
+          if (Number.isNaN(this.warmSince[slot])) this.warmSince[slot] = timestamp;
+          this.sustainRate[slot] += sustainWeight * (cpuRate - this.sustainRate[slot]);
+          this.baselineRate[slot] += baselineWeight * (cpuRate - this.baselineRate[slot]);
+          this.cpuRate[slot] = this.smooth(slot, this.cpuRate[slot], cpuRate, weight);
           this.bytesInRate[slot] = this.smooth(
             slot,
             this.bytesInRate[slot],
@@ -140,6 +160,7 @@ export class ShardLoadTracker {
       this.seen[slot] = 0;
       this.owner[slot] = undefined;
       this.clearRates(slot);
+      this.clearHistory(slot);
       ownershipChanged = true;
     }
 
@@ -204,9 +225,18 @@ export class ShardLoadTracker {
     this.bytesOutRate[slot] = 0;
   }
 
+  private clearHistory(slot: number): void {
+    this.sustainRate[slot] = 0;
+    this.baselineRate[slot] = 0;
+    this.warmSince[slot] = NaN;
+  }
+
   private reset(): void {
     this.seen.fill(0);
     this.measured.fill(0);
+    this.sustainRate.fill(0);
+    this.baselineRate.fill(0);
+    this.warmSince.fill(NaN);
     this.owner.fill(undefined);
     this.slotsByNode = new Map();
     this.settledShares = new Map();
@@ -224,12 +254,16 @@ export class ShardLoadTracker {
         slotCount: slots.length,
         measuredSlots: 0,
         cpuUsecPerSecond: 0,
+        sustainCpuUsecPerSecond: 0,
+        baselineCpuUsecPerSecond: 0,
         networkBytesInPerSecond: 0,
         networkBytesOutPerSecond: 0,
         cpuShare: null,
         networkShare: null,
       };
       for (const slot of slots) {
+        shard.sustainCpuUsecPerSecond += this.sustainRate[slot];
+        shard.baselineCpuUsecPerSecond += this.baselineRate[slot];
         if (!this.measured[slot]) continue;
         shard.measuredSlots += 1;
         shard.cpuUsecPerSecond += this.cpuRate[slot];

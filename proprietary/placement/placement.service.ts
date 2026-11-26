@@ -21,6 +21,7 @@ import {
   type PlacementStatus,
   type PlacementSupport,
   type PlacementSupportReason,
+  type PlacementTriggerRead,
 } from '@betterdb/shared';
 import type { StoragePort } from '@app/common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
@@ -51,6 +52,7 @@ import {
   type PlacementPrimaryRead,
 } from './placement-support';
 import { placementBalance } from './placement-balance';
+import { PlacementTriggers } from './placement-trigger';
 
 const SUPPORT_CACHE_MS = 30_000;
 const POLICY_CACHE_MS = 30_000;
@@ -116,6 +118,7 @@ export class PlacementService implements OnModuleInit {
   private readonly supportCache = new Map<string, { at: number; support: PlacementSupport }>();
   private readonly supportReads = new Map<string, Promise<PlacementSupport>>();
   private readonly aclDenied = new Map<string, string | null>();
+  private readonly triggers = new PlacementTriggers();
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -144,7 +147,9 @@ export class PlacementService implements OnModuleInit {
       effectiveMode: effectiveModeOf(mode, support),
       selectableModes,
       support,
-      balance: placementBalance(this.freshSample(seedId), settings),
+      balance: placementBalance(this.freshSample(seedId), settings, (shardId) =>
+        this.triggerOf(seedId, shardId, settings),
+      ),
       settings,
       policyVersion: version,
       policyInvalid: invalid,
@@ -172,6 +177,7 @@ export class PlacementService implements OnModuleInit {
     if (!saved) throw new PlacementPolicyConflictError();
     this.advancePolicy(seedId);
     this.policyCache.set(seedId, { at: Date.now(), policy: saved });
+    this.shardLoad?.setSustainMinutes(seedId, saved.settings.sustainMinutes);
     return this.getStatus(seedId);
   }
 
@@ -221,9 +227,21 @@ export class PlacementService implements OnModuleInit {
     const policy = await this.storage.getPlacementPolicy(seedId);
     if ((this.policyGeneration.get(seedId) ?? 0) === generation) {
       this.policyCache.set(seedId, { at: Date.now(), policy });
+      this.shardLoad?.setSustainMinutes(seedId, settingsReadOf(policy).settings.sustainMinutes);
     }
     this.warnInvalid(seedId, policy);
     return policy;
+  }
+
+  triggerOf(
+    seedId: string,
+    shardId: string,
+    settings: PlacementSettings,
+    now = Date.now(),
+  ): PlacementTriggerRead | null {
+    const history = this.shardLoad?.sustainHistory(seedId);
+    if (!history) return null;
+    return this.triggers.read(seedId, shardId, history.entries(shardId), settings, now);
   }
 
   private warnInvalid(seedId: string, policy: PlacementPolicy | null): void {
@@ -393,6 +411,9 @@ export class PlacementService implements OnModuleInit {
       for (const seedId of cache.keys()) {
         if (!this.registry.getConfig(seedId)) cache.delete(seedId);
       }
+    }
+    for (const seedId of this.triggers.seeds()) {
+      if (!this.registry.getConfig(seedId)) this.triggers.forget(seedId);
     }
   }
 

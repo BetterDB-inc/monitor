@@ -1,5 +1,10 @@
 import { SlotStats } from '../common/types/metrics.types';
-import { NodeSlotStats, SHARD_LOAD_SMOOTHING_MS, ShardLoadTracker } from './shard-load';
+import {
+  NodeSlotStats,
+  SHARD_LOAD_BASELINE_MS,
+  SHARD_LOAD_SMOOTHING_MS,
+  ShardLoadTracker,
+} from './shard-load';
 
 type Counters = [cpuUsec: number, bytesIn: number, bytesOut: number];
 
@@ -430,5 +435,105 @@ describe('ShardLoadTracker', () => {
 
     expect(shardOf(skewedSample, 'n1').cpuShare).toBeCloseTo(0.818, 2);
     expect(shardOf(uniformSample, 'n1').cpuShare).toBeCloseTo(0.333, 2);
+  });
+});
+
+describe('ShardLoadTracker sustain and baseline', () => {
+  const CORE = 1_000_000;
+  const STEP_MS = 5_000;
+
+  function run(
+    tracker: ShardLoadTracker,
+    from: number,
+    to: number,
+    reading: (seconds: number) => NodeSlotStats[],
+  ) {
+    let sample: ReturnType<ShardLoadTracker['observe']> = null;
+    for (let at = from; at <= to; at += STEP_MS) {
+      sample = tracker.observe(reading(at / 1000), at) ?? sample;
+    }
+    return sample;
+  }
+
+  const oneCore =
+    (nodeId: string, offset = 0) =>
+    (seconds: number) => [node(nodeId, { 0: [offset + CORE * seconds, 0, 0] })];
+
+  it('brings a constant one core slot within 5% on the sustain average after 3 time constants', () => {
+    const tracker = new ShardLoadTracker();
+    const timeConstant = (30 * 60_000) / 3;
+
+    const early = run(tracker, 0, timeConstant, oneCore('n1'));
+    expect(shardOf(early, 'n1').sustainCpuUsecPerSecond).toBeGreaterThan(0.6 * CORE);
+    expect(shardOf(early, 'n1').sustainCpuUsecPerSecond).toBeLessThan(0.7 * CORE);
+    expect(shardOf(early, 'n1').cpuUsecPerSecond).toBeCloseTo(CORE);
+
+    const settled = run(tracker, timeConstant + STEP_MS, 3 * timeConstant, oneCore('n1'));
+    expect(shardOf(settled, 'n1').sustainCpuUsecPerSecond).toBeGreaterThan(0.95 * CORE);
+    expect(tracker.sustainWarmSince(0)).toBe(STEP_MS);
+  });
+
+  it('follows the sustain minutes it is given', () => {
+    const tracker = new ShardLoadTracker();
+    tracker.setSustainMinutes(60);
+
+    const sample = run(tracker, 0, 10 * 60_000, oneCore('n1'));
+
+    const expected = CORE * (1 - Math.exp(-(10 * 60_000) / (20 * 60_000)));
+    expect(shardOf(sample, 'n1').sustainCpuUsecPerSecond).toBeCloseTo(expected, -3);
+  });
+
+  it('keeps the baseline on a 6 hour time constant', () => {
+    const tracker = new ShardLoadTracker();
+
+    const sample = run(tracker, 0, 30 * 60_000, oneCore('n1'));
+
+    const expected = CORE * (1 - Math.exp(-(30 * 60_000) / SHARD_LOAD_BASELINE_MS));
+    expect(SHARD_LOAD_BASELINE_MS).toBe(6 * 60 * 60_000);
+    expect(shardOf(sample, 'n1').baselineCpuUsecPerSecond).toBeCloseTo(expected, -3);
+  });
+
+  it('carries the sustain and baseline of a moved slot to its new owner and clears its fast rate', () => {
+    const tracker = new ShardLoadTracker();
+    const before = (seconds: number) => [
+      node('n1', { 0: [CORE * seconds, 0, 0], 1: [0, 0, 0] }),
+      node('n2', { 2: [0, 0, 0] }),
+    ];
+    const carried = run(tracker, 0, 30 * 60_000, before);
+    const sustain = shardOf(carried, 'n1').sustainCpuUsecPerSecond;
+    const baseline = shardOf(carried, 'n1').baselineCpuUsecPerSecond;
+
+    const moved = tracker.observe(
+      [node('n1', { 1: [0, 0, 0] }), node('n2', { 0: [10, 0, 0], 2: [0, 0, 0] })],
+      30 * 60_000 + STEP_MS,
+    );
+
+    expect(shardOf(moved, 'n2').sustainCpuUsecPerSecond).toBeCloseTo(sustain);
+    expect(shardOf(moved, 'n2').baselineCpuUsecPerSecond).toBeCloseTo(baseline);
+    expect(shardOf(moved, 'n2').cpuUsecPerSecond).toBe(0);
+    expect(shardOf(moved, 'n1').sustainCpuUsecPerSecond).toBe(0);
+    expect(tracker.sustainWarmSince(0)).toBe(STEP_MS);
+  });
+
+  it('clears the sustain, baseline and warm-up of a slot whose counters went back', () => {
+    const tracker = new ShardLoadTracker();
+    run(tracker, 0, 30 * 60_000, oneCore('n1', 10 * CORE));
+
+    const restarted = tracker.observe([node('n1', { 0: [5, 0, 0] })], 30 * 60_000 + STEP_MS);
+
+    expect(shardOf(restarted, 'n1').sustainCpuUsecPerSecond).toBe(0);
+    expect(shardOf(restarted, 'n1').baselineCpuUsecPerSecond).toBe(0);
+    expect(tracker.sustainWarmSince(0)).toBeNull();
+  });
+
+  it('clears every warm-up when it starts over', () => {
+    const tracker = new ShardLoadTracker();
+    run(tracker, 0, 60_000, oneCore('n1'));
+    tracker.observe(
+      [{ nodeId: 'n1', address: '10.0.0.1:6379', stats: { 0: { key_count: 4 } } }],
+      65_000,
+    );
+
+    expect(tracker.sustainWarmSince(0)).toBeNull();
   });
 });

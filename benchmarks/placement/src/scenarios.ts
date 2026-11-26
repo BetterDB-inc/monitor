@@ -14,6 +14,7 @@ import {
   judgePlacementSupport,
 } from './product';
 import { simulate } from './simulate';
+import { type PeakCase, runPeaks } from './sustain';
 
 export interface Check {
   name: string;
@@ -364,6 +365,74 @@ export function runB8Case(entry: SupportCase): ScenarioResult {
   ]);
 }
 
+export interface B3Case extends PeakCase {
+  variant: string;
+  maxFiresPerDay: number;
+}
+
+export const B3_CASES: B3Case[] = [
+  {
+    variant: 'daily 20-min peak at 3x, 5 s poll',
+    peakMinutes: 20,
+    peakFactor: 3,
+    pollSeconds: 5,
+    days: 7,
+    maxFiresPerDay: 0,
+  },
+  {
+    variant: 'daily 20-min peak at 3x, 15 s poll',
+    peakMinutes: 20,
+    peakFactor: 3,
+    pollSeconds: 15,
+    days: 7,
+    maxFiresPerDay: 0,
+  },
+  {
+    variant: 'daily 2-h peak at 3x, 15 s poll',
+    peakMinutes: 120,
+    peakFactor: 3,
+    pollSeconds: 15,
+    days: 7,
+    maxFiresPerDay: 1,
+  },
+];
+
+export function runB3Case(entry: B3Case): ScenarioResult {
+  const run = runPeaks(entry);
+  const total = run.firesByDay.reduce((sum, fires) => sum + fires, 0);
+  const worstDay = Math.max(...run.firesByDay);
+  const checks = [
+    check(
+      entry.maxFiresPerDay === 0
+        ? 'the trigger never fires'
+        : 'the trigger fires at most once a day',
+      worstDay <= entry.maxFiresPerDay,
+      `fires per day ${run.firesByDay.join(', ')} over ${run.samples} samples (40 min before to 40 min after each peak, the rest of each day skipped); highest over share ${run.peakOverShare.toFixed(2)}`,
+    ),
+    check(
+      'no other shard fires',
+      run.otherShardFires === 0,
+      `${run.otherShardFires} fires elsewhere`,
+    ),
+  ];
+  if (entry.maxFiresPerDay > 0) {
+    checks.push(
+      check(
+        'the long peak fires every day',
+        run.firesByDay.every((fires) => fires === 1),
+        `${total} fires in ${entry.days} days`,
+      ),
+    );
+  }
+  return result('B3', entry.variant, checks);
+}
+
 export async function runAll(): Promise<ScenarioResult[]> {
-  return [runB2(), await runB2HashTag(false), await runB2HashTag(true), ...B8_CASES.map(runB8Case)];
+  return [
+    runB2(),
+    await runB2HashTag(false),
+    await runB2HashTag(true),
+    ...B3_CASES.map(runB3Case),
+    ...B8_CASES.map(runB8Case),
+  ];
 }

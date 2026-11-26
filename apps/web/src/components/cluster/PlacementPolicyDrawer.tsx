@@ -43,7 +43,7 @@ const NUMBER_FIELDS: { field: NumberField; label: string; hint: string; step: st
   {
     field: 'sustainMinutes',
     label: 'Sustain (minutes)',
-    hint: 'Not applied yet. How long a shard must stay hot before slots move off it.',
+    hint: 'How long the sustained load of a shard must stay over the trigger before slots move off it.',
     step: '1',
   },
   {
@@ -88,7 +88,7 @@ const OPTIONAL_FIELDS: { field: OptionalNumberField; label: string; hint: string
   {
     field: 'maxCpuShare',
     label: 'CPU share limit',
-    hint: 'Not applied yet. A share (0 to 1) of the slot CPU of the cluster that also makes a shard hot. Empty for none.',
+    hint: 'A share (0 to 1) of the sustained slot CPU of the cluster that also counts as over the trigger. Empty for none.',
   },
   {
     field: 'maxNetworkShare',

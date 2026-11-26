@@ -5,6 +5,7 @@ import { ownerOf } from '../src/model';
 import { checkPin } from '../src/product';
 import {
   B2_HOT_SLOT,
+  B3_CASES,
   B8_CASES,
   b2Model,
   b2TagModel,
@@ -12,14 +13,17 @@ import {
   runAll,
   runB8Case,
 } from '../src/scenarios';
+import { runPeaks } from '../src/sustain';
 import { simulate } from '../src/simulate';
+
+const everyScenario = runAll();
 
 test('the product files match the pin', () => {
   assert.doesNotThrow(() => checkPin());
 });
 
 test('every scenario passes', async () => {
-  const failed = (await runAll())
+  const failed = (await everyScenario)
     .filter((scenario) => !scenario.pass)
     .map(
       (scenario) =>
@@ -59,7 +63,7 @@ test('the hot slot is the one the model loads', () => {
 });
 
 test('the hash-tag variants run with and without LFU', async () => {
-  const variants = (await runAll())
+  const variants = (await everyScenario)
     .filter((scenario) => scenario.id === 'B2')
     .map((scenario) => scenario.variant);
   assert.deepEqual(variants, ['single hot key', 'hash tag, no LFU', 'hash tag, LFU']);
@@ -137,4 +141,10 @@ test('the tags are kept when the frequency read fails, as in the service', async
     read.hashTags.tags.map((tag) => [tag.slot, tag.tag]),
     [[7, 'cart']],
   );
+});
+
+test('a daily 20-min peak never fires the trigger and a 2-h peak fires once a day', () => {
+  const [short, , long] = B3_CASES;
+  assert.deepEqual(runPeaks({ ...short, days: 2 }).firesByDay, [0, 0]);
+  assert.deepEqual(runPeaks({ ...long, days: 2 }).firesByDay, [1, 1]);
 });

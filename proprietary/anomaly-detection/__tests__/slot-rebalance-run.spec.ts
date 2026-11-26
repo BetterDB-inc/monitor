@@ -468,6 +468,8 @@ describe('slot rebalance run', () => {
         slotCount: 100,
         measuredSlots: 100,
         cpuUsecPerSecond,
+        sustainCpuUsecPerSecond: cpuUsecPerSecond,
+        baselineCpuUsecPerSecond: cpuUsecPerSecond,
         networkBytesInPerSecond: 0,
         networkBytesOutPerSecond: 0,
         cpuShare: null,
