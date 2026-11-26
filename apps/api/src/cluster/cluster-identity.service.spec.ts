@@ -968,23 +968,6 @@ describe('ClusterIdentityService', () => {
       expect(service.topologyReadPolls(SEED, CHECKS, false, 500)).toBe(1);
     });
 
-    it('tells the interval the reader of a cluster read in turns reads at', () => {
-      clusterOf(11);
-      service.claimReader(SEED, NOW);
-      service.takeTopologyRead(SEED, CHECKS, NOW, false, 5000);
-
-      expect(service.readerReadEveryMs(SEED, CHECKS)).toBe(5000);
-      expect(service.readerReadEveryMs('node-01', CHECKS)).toBe(0);
-    });
-
-    it('tells no interval for the reader of a cluster of nine connections', () => {
-      clusterOf(8);
-      service.claimReader(SEED, NOW);
-      service.takeTopologyRead(SEED, CHECKS, NOW, false, 5000);
-
-      expect(service.readerReadEveryMs(SEED, CHECKS)).toBe(0);
-    });
-
     it('lets eight other connections read on a poll of the reader in a larger cluster', () => {
       const members = clusterOf(11);
       service.claimReader(SEED, NOW);

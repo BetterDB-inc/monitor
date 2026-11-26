@@ -261,7 +261,7 @@ The Valkey/Redis client connects to `127.0.0.1:<local-forwarded-port>` through t
 | `ANOMALY_TOPOLOGY_DIVERGENCE_NODES_PER_ZONE` | No | `1` | Nodes asked for their view per availability zone |
 | `ANOMALY_TOPOLOGY_DIVERGENCE_RANDOM_NODES` | No | `3` | Nodes asked among those without a zone, and the smallest sample |
 | `ANOMALY_TOPOLOGY_DIVERGENCE_MIN_POLLS` | No | `3` | Rounds in a row a disagreement must hold before it is raised, and rounds of agreement before it is closed |
-| `ANOMALY_TOPOLOGY_DIVERGENCE_INTERVAL_MS` | No | `5000` | Time between rounds (milliseconds), never shorter than the poll interval |
+| `ANOMALY_TOPOLOGY_DIVERGENCE_INTERVAL_MS` | No | `5000` | Time between rounds (milliseconds), never shorter than the poll interval. A round runs on the poll nearest to it |
 | `BETTERDB_SLOT_MIGRATION` | No | `false` | Let admins run a suggested slot rebalance on Valkey 9.0+ clusters from the Anomalies page ([Running a plan](anomaly-detection.md#running-a-plan)). A warning is logged at startup when it is `true` |
 
 ### Monitor Health Gate

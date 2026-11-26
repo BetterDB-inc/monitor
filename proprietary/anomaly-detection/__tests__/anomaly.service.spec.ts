@@ -33721,6 +33721,27 @@ describe('AnomalyService', () => {
       expect([...rounds]).toEqual([0, 4950, 9900]);
     });
 
+    it('runs a divergence round every five seconds in a small cluster when its polls come a little early', async () => {
+      grow(3);
+      (service as any).clusterDiscovery = {
+        retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+        releaseConnection: jest.fn().mockResolvedValue(undefined),
+        getNodeConnection: jest.fn().mockRejectedValue(new Error('ECONNREFUSED')),
+      };
+      await pollAll();
+      const clusterKey = (service as any).connectionClusterKeys.get(SEED);
+      const roundAt = (): number => (service as any).topologyDivergence.lastRound(clusterKey)?.at;
+      const first = roundAt();
+      const rounds = new Set<number>();
+
+      for (let n = 1; n <= 10; n += 1) {
+        await pollAfter(990);
+        rounds.add(roundAt() - first);
+      }
+
+      expect([...rounds]).toEqual([0, 4950, 9900]);
+    });
+
     describe('with divergence rounds at an interval of their own', () => {
       let setIntervalMs: number;
       const roundsEvery = async (intervalMs: number, polls: number): Promise<number[]> => {

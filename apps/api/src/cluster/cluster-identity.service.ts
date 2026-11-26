@@ -273,13 +273,6 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
     return Math.min(turns.passPolls, urgentPolls);
   }
 
-  readerReadEveryMs(connectionId: string, schedule: string): number {
-    const clusterKey = this.clusterKeyOf(connectionId);
-    if (this.readers.get(clusterKey)?.connectionId !== connectionId) return 0;
-    const turns = this.readTurns.get(`${clusterKey}|${schedule}`);
-    return !turns || turns.passPolls === 1 ? 0 : (turns.readerEveryMs ?? 0);
-  }
-
   isReader(connectionId: string): boolean {
     return this.readers.get(this.clusterKeyOf(connectionId))?.connectionId === connectionId;
   }

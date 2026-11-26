@@ -7821,7 +7821,7 @@ export class AnomalyService
       ),
       at: timestamp,
       intervalMs: this.divergenceIntervalMs(),
-      earlyByMs: this.divergenceEarlyByMs(ctx.connectionId),
+      earlyByMs: this.pollJitterMs(),
       nodesPerZone: settings.nodesPerZone,
       randomNodes: settings.randomNodes,
       canRead: canDial,
@@ -10340,16 +10340,12 @@ export class AnomalyService
       connectionId,
       timestamp,
       this.divergenceIntervalMs(),
-      this.divergenceEarlyByMs(connectionId),
+      this.pollJitterMs(),
     );
   }
 
   private divergenceIntervalMs(): number {
     return Math.max(this.topologyDivergenceSettings.intervalMs, this.getIntervalMs());
-  }
-
-  private divergenceEarlyByMs(connectionId: string): number {
-    return this.readsAtReaderInterval(connectionId) ? this.pollJitterMs() : 0;
   }
 
   private readerTopologyReadEveryMs(): number {
@@ -10362,10 +10358,6 @@ export class AnomalyService
 
   private pollJitterMs(): number {
     return this.getIntervalMs() / 2;
-  }
-
-  private readsAtReaderInterval(connectionId: string): boolean {
-    return (this.clusterIdentity?.readerReadEveryMs(connectionId, AnomalyService.TOPOLOGY_READS) ?? 0) > 0;
   }
 
   private hasOwnNodeFinding(connectionId: string): boolean {

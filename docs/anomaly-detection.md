@@ -548,7 +548,7 @@ The 5 second threshold of [primary without replicas](#primary_without_replicas) 
 
 **Reading sooner.** A connection is put ahead of the others on the next poll of the reader while its own line shows a slot that is migrating or importing, while it counts keys in slots its node does not own, and while a reshard skew finding on it is waiting or open. At most four connections go ahead per poll. When more ask, they take turns among themselves, and the other four turns of the poll go on down the list. A reshard counts as running until two polls after such a connection last showed a slot on the move, or two rounds of their turns when more than four ask. A slot that starts to move on a node not yet put ahead is first seen on that node's turn.
 
-**The reader.** Between two reads the reader sends no `CLUSTER NODES` and no `CLUSTER SHARDS` either, and the checks that run once per cluster wait for its next read, as do the checks on its own line and the hot shard check. So a finding of those checks is raised up to 5 seconds later than in a small cluster. The reader reads at once in the same cases as any other connection: another role in `INFO`, a shard left without a synced replica, a slot on the move on its own line, keys in slots its node does not own, a reshard skew finding on it. The other connections keep their turns on every poll of the reader. The rounds of [topology divergence](#topology_divergence) run on the reader's reads; when `ANOMALY_TOPOLOGY_DIVERGENCE_INTERVAL_MS` is below 5 seconds, the reader reads at that interval instead. A poll that comes up to half a poll interval early still counts.
+**The reader.** Between two reads the reader sends no `CLUSTER NODES` and no `CLUSTER SHARDS` either, and the checks that run once per cluster wait for its next read, as do the checks on its own line and the hot shard check. So a finding of those checks is raised up to 5 seconds later than in a small cluster, and a condition that comes and goes between two reads, such as a failover and failback on another shard within a few seconds, is not seen by them at all. The reader reads at once in the same cases as any other connection: another role in `INFO`, a shard left without a synced replica, a slot on the move on its own line, keys in slots its node does not own, a reshard skew finding on it. The other connections keep their turns on every poll of the reader. The rounds of [topology divergence](#topology_divergence) run on the reader's reads, and the reader also reads on the poll a round is due on, so the rounds keep the interval that is set: every 7 seconds when `ANOMALY_TOPOLOGY_DIVERGENCE_INTERVAL_MS` is 7000, with a read in between. The 5 seconds count from the reader's last read that succeeded, whatever it was taken for; a read that fails is tried again on the next poll. A poll that comes up to half a poll interval early still counts.
 
 **What comes later.** A finding on a node that is in none of these cases is first seen when its connection has a turn, so up to one pass late: about a minute with 500 connections and a 1 second interval. A check that needs several readings in a row counts the readings, not the polls. Reshard skew, for example, needs three: the first can take a pass, the next two follow on the next polls because the connection is put ahead.
 
@@ -1030,7 +1030,7 @@ BetterDB never cancels or restarts a migration.
 **Source**: `CLUSTER NODES` on a sample of nodes, each on that node's own connection
 **Detection method**: State-based detector (not z-score based). It runs on gossip clusters only, not under Raft.
 
-**Which nodes are asked.** One round runs every 5 seconds for each cluster, however many connections watch it. The node the connection points at always takes part. On top of that:
+**Which nodes are asked.** One round runs every 5 seconds for each cluster, however many connections watch it. A round runs on the poll nearest to that interval, so a poll that comes a few milliseconds early does not push it to the next one; with a poll interval of 2 seconds that is every 4 seconds. The node the connection points at always takes part. On top of that:
 
 - When the nodes report availability zones (Valkey 9.1+ `availability-zone`, or zones configured on the connection), one node is asked per zone, so a zone that is cut off is always on one side of the comparison.
 - Nodes without a zone share a quota of 3. When the zones give fewer than 3 nodes in total, more are added until there are 3.
@@ -1137,7 +1137,8 @@ ANOMALY_TOPOLOGY_DIVERGENCE_RANDOM_NODES=3
 # Rounds in a row a disagreement must hold before it is raised, and
 # rounds of agreement before it is closed (default: 3)
 ANOMALY_TOPOLOGY_DIVERGENCE_MIN_POLLS=3
-# Time between rounds in milliseconds, never shorter than the poll interval (default: 5000)
+# Time between rounds in milliseconds, never shorter than the poll interval;
+# a round runs on the poll nearest to it (default: 5000)
 ANOMALY_TOPOLOGY_DIVERGENCE_INTERVAL_MS=5000
 
 # Persistence-child stall detection thresholds (seconds)
