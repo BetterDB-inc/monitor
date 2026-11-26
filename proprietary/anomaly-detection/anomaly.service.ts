@@ -2556,10 +2556,8 @@ export class AnomalyService
           await this.detectOrphanedSlotKeys(ctx, timestamp, nodes);
           await this.detectReshardPressure(info, ctx, timestamp, nodes, cpuUtilizationSample);
         }
-        if (nodes || !readsTopology) {
-          await this.detectSlotMigrations(ctx, timestamp);
-          await this.followRebalanceRunsOnPoll(ctx.connectionId, timestamp, nodes);
-        }
+        if (nodes || !readsTopology) await this.detectSlotMigrations(ctx, timestamp);
+        await this.followRebalanceRunsOnPoll(ctx.connectionId, timestamp, nodes);
         if (nodes) {
           // A slot-owning primary with no synced replica (#714). Runs in both
           // topology modes, and is not held back during a rolling update: that

@@ -33791,6 +33791,16 @@ describe('AnomalyService', () => {
 
         expect(readsOf(SEED)).toBe(0);
       });
+
+      it('follows the run with nodes it asks for itself on a poll its read fails', async () => {
+        await startRun(true);
+        (ctxs[SEED].client.getClusterNodes as jest.Mock).mockRejectedValueOnce(new Error('CLUSTERDOWN'));
+
+        await pollAfter(1000);
+
+        expect(readSlotMigrations).toHaveBeenCalledTimes(1);
+        expect(discoverNodesIsolated.mock.calls.map(([connectionId]) => connectionId)).toEqual([SEED]);
+      });
     });
 
     it('reads the topology on the reader on the poll INFO shows another role', async () => {
