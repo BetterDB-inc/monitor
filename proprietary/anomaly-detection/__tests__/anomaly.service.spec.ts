@@ -33984,6 +33984,49 @@ describe('AnomalyService', () => {
       expect(splitBrainAlerts()).toHaveLength(2);
     });
 
+    it('keeps the split-brain alert of the other half when two halves join while an alert is stored', async () => {
+      const halves = [SEED, 'conn-c'];
+      delete configs['conn-b'];
+      configs['conn-c'] = { id: 'conn-c' };
+      const left = [NODE_A, NODE_B];
+      const right = [NODE_C, cnode('nodeXXXXXXXX', '10.0.0.7', ['master'])];
+      const half: Record<string, ClusterNode[]> = { [SEED]: left, 'conn-c': right };
+      const splitBrainAlerts = (): AnomalyEvent[] =>
+        eventsOf(MetricType.CLUSTER_TOPOLOGY).filter((e) => e.message.includes('split-brain'));
+      const twinOf = (connectionId: string, id: string, host: string): ClusterNode => {
+        const [from] = (connectionId === SEED ? NODE_A : NODE_C).slots[0];
+        return cnode(id, host, ['master'], { slots: [[from, from + 100]], configEpoch: 9 });
+      };
+      views = half;
+      await pollAll(halves);
+      const keyOf = (id: string): string => (service as any).clusterIdentity.clusterKeyOf(id);
+      const [kept, joined] = [...halves].sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
+      const keptTwin = twinOf(kept, 'nodeSSSSSSSS', '10.0.0.13');
+      const joinedTwin = twinOf(joined, 'nodeTTTTTTTT', '10.0.0.14');
+      views = { ...half, [kept]: [...half[kept], keptTwin] };
+      await pollAfter(1000, [kept]);
+      const raisedInTheKeptHalf = splitBrainAlerts().length;
+      views = { ...views, [joined]: [...half[joined], joinedTwin] };
+      now += 1000;
+      const store = (service as any).addLatchedAnomaly.bind(service);
+      let seenWhole = false;
+      jest.spyOn(service as any, 'addLatchedAnomaly').mockImplementation(async (...args: unknown[]) => {
+        await store(...args);
+        if (seenWhole) return;
+        seenWhole = true;
+        views = {};
+        topology = [...left, ...right, keptTwin, joinedTwin];
+        await poll(ctxs[kept]);
+      });
+
+      await poll(ctxs[joined]);
+      await pollAfter(1000, halves);
+
+      expect(seenWhole).toBe(true);
+      expect(raisedInTheKeptHalf).toBe(1);
+      expect(splitBrainAlerts()).toHaveLength(2);
+    });
+
     it('raises no second split-brain alert when the metrics read sees two halves join before the reader polls', async () => {
       const halves = [SEED, 'conn-c'];
       delete configs['conn-b'];

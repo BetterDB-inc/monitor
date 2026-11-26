@@ -6702,6 +6702,7 @@ export class AnomalyService
       const conflicts = detectDuplicatePrimaries(nodes);
 
       const active = this.connectionClaims(this.activeTopologyConflicts, scope, () => new Set<string>());
+      const activeAtStart = [...active];
       const currentSignatures = new Set(conflicts.map((c) => conflictSignature(c)));
 
       for (const conflict of conflicts) {
@@ -6747,7 +6748,7 @@ export class AnomalyService
       // conflict alerts again. (A CLUSTER NODES observation gap is handled at the
       // poll level, which clears this set so a missed heal re-alerts.)
       const stillActive = this.liveScopeState(active);
-      for (const signature of stillActive) {
+      for (const signature of activeAtStart) {
         if (!currentSignatures.has(signature)) stillActive.delete(signature);
       }
     } catch (topologyErr) {
