@@ -525,7 +525,32 @@ A cluster can have several connections: the seed and the nodes registered from i
 
 **Connections that cannot reach other nodes.** A connection that cannot dial the other nodes, one that reads through an agent for example, cannot ask a replica for its own line. It reports the slot state of its own node only, whether it is the reader or not. The replicas are asked as long as one connection of the cluster can dial them, because that connection reads first.
 
-Everything else stays per connection or per node: the cluster state, hot shards, slot migrations, topology divergence and the per-node checks above.
+Everything else stays per connection or per node: the cluster state, hot shards, slot migrations and the per-node checks above. The [topology divergence](#topology_divergence) rounds run on the reader as well when it can dial the other nodes, and its events are filed under the connection that runs the rounds, as before.
+
+## Topology reads in a cluster with many connections
+
+`CLUSTER NODES` answers with one line per node. Read on every connection on every poll, it grows with the square of the cluster. So in a cluster with more than nine connections it is read in turns:
+
+- The reader reads `CLUSTER NODES` and `CLUSTER SHARDS` on every poll.
+- Of the other connections, eight read on each poll of the reader, in the order of their ids. With 500 connections and a poll interval of 1 second, a connection has its turn about once a minute.
+
+Every connection reads on every poll, as before, in a cluster with nine connections or fewer, while a cluster has no reader, while its reader has not read for 60 seconds, and while its reader has not polled for more than 15 seconds. With a poll interval above 15 seconds the turns are therefore never used.
+
+**A poll without a turn.** The connection sends no `CLUSTER NODES` and no `CLUSTER SHARDS`. The checks that judge the node's own line (primary without replicas, reshard pressure, keys in slots the node does not own) and the hot shard check do not run on that poll: they never run on a line that was read earlier. The checks on `INFO` and the slot migration check run on every poll. The checks on other primaries go on from the view a connection of the cluster read last, for as long as it is at most 30 seconds old, or three poll intervals when that is longer.
+
+**Reading outside a turn.** A connection reads on that same poll, whoever has the turn, when
+
+- `INFO` shows another role than at its last read, so a promoted or demoted node is read at once
+- its shard is expected to have replicas and `INFO` shows none in sync
+- a primary without replicas warning for its shard is waiting its time or open
+
+The 5 second threshold of [primary without replicas](#primary_without_replicas) holds on every node this way, also on one that is far from its turn.
+
+**Reading sooner.** A connection is put ahead of the others on the next poll of the reader while its own line shows a slot that is migrating or importing, while it counts keys in slots its node does not own, and while a reshard skew finding on it is waiting or open. At most four connections go ahead per poll. When more ask, they take turns among themselves, and the other four turns of the poll go on down the list.
+
+**What comes later.** A finding on a node that is in none of these cases is first seen when its connection has a turn, so up to one pass late: about a minute with 500 connections and a 1 second interval. A check that needs several readings in a row counts the readings, not the polls. Reshard skew, for example, needs three: the first can take a pass, the next two follow on the next polls because the connection is put ahead.
+
+**Metrics and the failover webhook.** The Prometheus cluster metrics and the `cluster.failover` webhook read `CLUSTER NODES` on the same schedule, with turns of their own. A connection always reads on its first poll. While anomaly detection does not run, a cluster has no reader and every connection reads on every poll. A promotion is reported once: a connection that sees it later, on its turn, does not send it again, for ten minutes after the last connection saw it.
 
 ## Failing node on cluster events
 
@@ -1035,7 +1060,7 @@ In the web app the same summary is on the **Disagreements** tab of the Cluster p
 
 **When it closes.** The event closes after the views agree for 3 rounds in a row. A round in which the disagreement shows again starts that count over. A round in which the nodes of one side do not answer, or fewer than two views could be read, is neither agreement nor disagreement: the count is kept as it is and the event stays open. When that lasts 5 minutes the event is closed. A membership disagreement is held in the same way while a node that lacked the member gives no view, also when another node that lacked it has learned it meanwhile: what the silent node would say is not known, so such a gap can keep the event open for those 5 minutes. That hold is not applied for a silent node that every answering view that lists it flags `fail` or `fail?`. Such a node is taken for dead, and the disagreement is judged by the views that answered. An event that is resolved by hand is raised again while the views still differ. The event of a connection that is removed is closed. After a restart the open event is picked up instead of raised a second time.
 
-**What it costs.** Each round sends one `CLUSTER NODES` to at most 11 other nodes, in parallel, with 2 seconds each. The reply has one line per node of the cluster, so it grows with the cluster. A node that does not answer is asked less often, down to once every 8 rounds. A node that is registered as its own connection is not asked in a round for which that connection has polled since the round before; when it has not, the node is asked like any other. The round runs inside the poll of the connection that samples the cluster, so a node that hangs can hold that poll for about 4 seconds (2 to connect, 2 to answer) until it is backed off. A round that counts a failure flag disagreement also reads `cluster-node-timeout` at most once in 5 minutes, and one that confirms a slot owner dispute asks up to 3 owners for their migrations. A connection that reaches the cluster through an agent never runs the rounds, because the monitor cannot dial the other nodes there. When another connection that can dial them watches the same cluster, that one samples it, and the view of the agent connection is used like that of any registered connection. When only agent connections watch a cluster it is not sampled, and the report says `insufficient_views`.
+**What it costs.** Each round sends one `CLUSTER NODES` to at most 11 other nodes, in parallel, with 2 seconds each. The reply has one line per node of the cluster, so it grows with the cluster. A node that does not answer is asked less often, down to once every 8 rounds. A node that is registered as its own connection is not asked in a round for which that connection has read `CLUSTER NODES` itself since the round before; when it has not, in a large cluster because it waits for [its turn](#topology-reads-in-a-cluster-with-many-connections), the node is asked like any other. The round runs inside the poll of the connection that samples the cluster, the reader of the cluster when it can dial the other nodes, so a node that hangs can hold that poll for about 4 seconds (2 to connect, 2 to answer) until it is backed off. A round that counts a failure flag disagreement also reads `cluster-node-timeout` at most once in 5 minutes, and one that confirms a slot owner dispute asks up to 3 owners for their migrations. A connection that reaches the cluster through an agent never runs the rounds, because the monitor cannot dial the other nodes there. When another connection that can dial them watches the same cluster, that one samples it, and the view of the agent connection is used like that of any registered connection. When only agent connections watch a cluster it is not sampled, and the report says `insufficient_views`.
 
 **What it cannot see.**
 
