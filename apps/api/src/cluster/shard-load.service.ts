@@ -40,6 +40,10 @@ export class ShardLoadService {
     return this.trackers.get(connectionId)?.slotsOf(nodeId) ?? [];
   }
 
+  getMedianKeyCount(connectionId: string): number | null {
+    return this.trackers.get(connectionId)?.medianKeyCount() ?? null;
+  }
+
   forget(connectionId: string): void {
     this.trackers.delete(connectionId);
     this.latest.delete(connectionId);

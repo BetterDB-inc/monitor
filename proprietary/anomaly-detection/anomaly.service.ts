@@ -93,6 +93,7 @@ import {
   HOT_SHARD_HOLD_MS,
   HOT_SHARD_RAISE_FACTOR,
   HOT_SHARD_TOP_SLOTS,
+  HotShardAdvice,
   HotShardDetail,
   ServedHotShardDetail,
   HotShardFinding,
@@ -110,8 +111,18 @@ import {
   describeMissingKeys,
   hotKeysAfterRead,
   hotKeysUnavailable,
+  readSlotNames,
   sampleHotKeys,
 } from './hot-shard-keys';
+import {
+  type DatedHashTags,
+  type HashTagRead,
+  describeHashTags,
+  hashTagAdvice,
+  hashTagsAfterRead,
+  hashTagsOfNames,
+  hashTagsUnavailable,
+} from './hash-tag-advisor';
 import {
   REBALANCE_REFRESH_MS,
   isTransientNoPlan,
@@ -596,6 +607,12 @@ interface FanoutGap {
 type FanoutCount = 'checked' | 'unreachable' | 'authFailed' | 'skipped' | 'notDialed';
 type SlotMigrationState = 'running' | 'none' | 'unknown';
 
+interface HotShardKeyEntry {
+  detail: HotShardKeyDetail;
+  hashTags: DatedHashTags;
+  checkedAt: number;
+}
+
 const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 /** Coverage as recorded; its age and staleness are worked out when it is read. */
@@ -967,10 +984,7 @@ export class AnomalyService
     { timestamp: number; report: SlotMigrationReport }
   >();
   private refusedRebalancePlans = new WeakMap<RebalancePlan, RebalanceExecutionBlocker>();
-  private hotShardKeys = new Map<
-    string,
-    Map<string, { detail: HotShardKeyDetail; checkedAt: number }>
-  >();
+  private hotShardKeys = new Map<string, Map<string, HotShardKeyEntry>>();
   private hotKeyNoteLogged = new Map<string, string>();
   // Full-resync failure loop (valkey#1836): per-connection window/cycle state
   // folded from INFO replication on the polled replica itself.
@@ -6763,8 +6777,8 @@ export class AnomalyService
         const judgedAt = this.hotShardJudgedAt.get(connectionId);
         if (judgedAt === undefined) this.hotShardJudgedAt.set(connectionId, timestamp);
         else if (timestamp - judgedAt > HOT_SHARD_BLIND_MS && this.tracksHotShards(connectionId)) {
-          await this.applyHotShardGate(ctx, timestamp, timestamp, [], new Map(), selfId);
-          this.rememberHotShards(connectionId, timestamp, [], new Map());
+          await this.applyHotShardGate(ctx, timestamp, timestamp, [], new Map(), new Map(), selfId);
+          this.rememberHotShards(connectionId, timestamp, [], new Map(), new Map());
         }
         return;
       }
@@ -6807,8 +6821,16 @@ export class AnomalyService
       await this.refreshHotShardKeys(ctx, timestamp, sample.timestamp, findings, topSlots);
       const judged = await this.withoutHotShardsResolvedSince(connectionId, findings, open);
       await this.refreshRebalance(ctx, timestamp, sample, judged, nodes ?? [], slots);
-      await this.applyHotShardGate(ctx, timestamp, sample.timestamp, judged, topSlots, selfId);
-      this.rememberHotShards(connectionId, sample.timestamp, judged, topSlots);
+      await this.applyHotShardGate(
+        ctx,
+        timestamp,
+        sample.timestamp,
+        judged,
+        topSlots,
+        slots,
+        selfId,
+      );
+      this.rememberHotShards(connectionId, sample.timestamp, judged, topSlots, slots);
     } catch (err) {
       this.logger.warn(
         `Hot shard check failed for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
@@ -6919,8 +6941,8 @@ export class AnomalyService
     const connectionId = ctx.connectionId;
     const eventIds = this.hotShardEventIds.get(connectionId);
     const known = this.hotShardKeys.get(connectionId);
-    const kept = new Map<string, { detail: HotShardKeyDetail; checkedAt: number }>();
-    const due: Array<{ signature: string; shardId: string; last?: HotShardKeyDetail }> = [];
+    const kept = new Map<string, HotShardKeyEntry>();
+    const due: Array<{ signature: string; shardId: string; last?: HotShardKeyEntry }> = [];
     for (const finding of findings) {
       const signature = hotShardSignature(finding.shardId);
       const wanted =
@@ -6928,7 +6950,7 @@ export class AnomalyService
       if (!wanted) continue;
       const last = known?.get(signature);
       if (last && timestamp - last.checkedAt < HOT_KEY_REFRESH_MS) kept.set(signature, last);
-      else due.push({ signature, shardId: finding.shardId, last: last?.detail });
+      else due.push({ signature, shardId: finding.shardId, last });
     }
     const reads = await Promise.all(
       due.map(({ shardId }) =>
@@ -6936,9 +6958,11 @@ export class AnomalyService
       ),
     );
     for (const [index, { signature, last }] of due.entries()) {
-      this.logHotKeySource(ctx, reads[index]);
+      const { keys, hashTags } = reads[index];
+      this.logHotKeySource(ctx, keys);
       kept.set(signature, {
-        detail: hotKeysAfterRead(last, reads[index], timestamp),
+        detail: hotKeysAfterRead(last?.detail, keys, timestamp),
+        hashTags: hashTagsAfterRead(last?.hashTags, hashTags, timestamp),
         checkedAt: timestamp,
       });
     }
@@ -7311,22 +7335,46 @@ export class AnomalyService
     connectionId: string,
     shardId: string,
     topSlots: HotShardSlot[],
-  ): Promise<HotKeyRead> {
+  ): Promise<{ keys: HotKeyRead; hashTags: HashTagRead }> {
+    const unavailable = (note: string) => ({
+      keys: hotKeysUnavailable(note),
+      hashTags: hashTagsUnavailable(note),
+    });
     if (!this.clusterDiscovery || !this.dialsDataNodes(connectionId)) {
-      return hotKeysUnavailable('the monitor does not connect to the cluster nodes directly');
+      return unavailable('the monitor does not connect to the cluster nodes directly');
     }
     const slots = topSlots.slice(0, HOT_KEY_SLOTS).map((slot) => slot.slot);
     const timedOut = 'reading the keys from the hot primary timed out';
+    let hashTags: HashTagRead | undefined;
     try {
-      return await this.readShard(connectionId, shardId, timedOut, (client) =>
-        sampleHotKeys(client, slots),
-      );
+      return await this.readShard(connectionId, shardId, timedOut, async (client) => {
+        const read = await readSlotNames(client, slots);
+        if (read.note !== undefined) return unavailable(read.note);
+        hashTags = hashTagsOfNames(read.names);
+        return { keys: await sampleHotKeys(client, slots, read.names), hashTags };
+      });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
-      return hotKeysUnavailable(
+      const read = unavailable(
         reason === timedOut ? timedOut : `reading the keys from the hot primary failed: ${reason}`,
       );
+      return hashTags ? { ...read, hashTags } : read;
     }
+  }
+
+  private hotShardAdvice(
+    connectionId: string,
+    signature: string,
+    slots: readonly SlotLoadRate[],
+    medianKeyCount: number | null,
+  ): HotShardAdvice {
+    const read = this.hotShardKeys.get(connectionId)?.get(signature)?.hashTags;
+    const advice = hashTagAdvice(
+      read?.read ?? hashTagsUnavailable('the keys have not been read yet'),
+      slots,
+      medianKeyCount,
+    );
+    return { hashTags: read ? { ...advice, sampledAt: read.readAt } : advice };
   }
 
   private logHotKeySource(ctx: ConnectionContext, read: HotKeyRead): void {
@@ -7355,6 +7403,7 @@ export class AnomalyService
     sampledAt: number,
     findings: HotShardFinding[],
     topSlots: ReadonlyMap<string, HotShardSlot[]>,
+    slots: ReadonlyMap<string, SlotLoadRate[]>,
     selfId: string | undefined,
   ): Promise<void> {
     const nodeAddrOf = (finding: HotShardFinding) =>
@@ -7378,6 +7427,7 @@ export class AnomalyService
           finding,
           signature,
           topSlots.get(finding.shardId) ?? [],
+          slots.get(finding.shardId) ?? [],
           nodeAddrOf(finding),
         ),
     });
@@ -7403,6 +7453,7 @@ export class AnomalyService
     finding: HotShardFinding,
     signature: string,
     topSlots: HotShardSlot[],
+    slots: readonly SlotLoadRate[],
     nodeAddr: string | undefined,
   ): AnomalyEvent {
     const since = this.hotShardFirstSeen.get(ctx.connectionId)?.get(signature) ?? sampledAt;
@@ -7414,6 +7465,12 @@ export class AnomalyService
     sinceBySignature.set(signature, since);
     const keys = this.hotShardKeys.get(ctx.connectionId)?.get(signature)?.detail;
     const rebalance = this.hotShardRebalance.get(ctx.connectionId)?.get(signature)?.verdict;
+    const advice = this.hotShardAdvice(
+      ctx.connectionId,
+      signature,
+      slots,
+      this.shardLoad?.getMedianKeyCount(ctx.connectionId) ?? null,
+    );
     return {
       id: randomUUID(),
       timestamp,
@@ -7434,7 +7491,9 @@ export class AnomalyService
           this.canCaptureMissingKeys(ctx.connectionId, keys)
             ? describeMissingKeys(keys?.keyNote)
             : '',
-        ) + describeNoPlan(rebalance, keys?.topKeys ?? []),
+        ) +
+        describeNoPlan(rebalance, keys?.topKeys ?? []) +
+        describeHashTags(advice.hashTags),
       resolved: false,
       connectionId: ctx.connectionId,
       ...(nodeAddr ? { nodeAddr } : {}),
@@ -7447,6 +7506,7 @@ export class AnomalyService
     sampledAt: number,
     findings: HotShardFinding[],
     topSlots: ReadonlyMap<string, HotShardSlot[]>,
+    slots: ReadonlyMap<string, SlotLoadRate[]>,
   ): void {
     const eventIds = this.hotShardEventIds.get(connectionId);
     const since = this.hotShardSince.get(connectionId);
@@ -7457,6 +7517,8 @@ export class AnomalyService
       this.hotShardKeys.delete(connectionId);
       this.hotShardRebalance.delete(connectionId);
     }
+    const medianKeyCount =
+      findings.length > 0 ? (this.shardLoad?.getMedianKeyCount(connectionId) ?? null) : null;
     for (const finding of findings) {
       const signature = hotShardSignature(finding.shardId);
       const eventId = eventIds?.get(signature);
@@ -7475,6 +7537,12 @@ export class AnomalyService
         network: finding.network,
         topSlots: topSlots.get(finding.shardId) ?? [],
         ...read,
+        advice: this.hotShardAdvice(
+          connectionId,
+          signature,
+          slots.get(finding.shardId) ?? [],
+          medianKeyCount,
+        ),
         ...(rebalance?.has(signature) ? { rebalance: rebalance.get(signature)!.verdict } : {}),
       });
     }

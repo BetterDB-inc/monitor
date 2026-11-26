@@ -1,9 +1,9 @@
 import { checkPin, writePin } from './product';
 import { runAll } from './scenarios';
 
-function run(): number {
+async function run(): Promise<number> {
   const pin = checkPin();
-  const results = runAll();
+  const results = await runAll();
   console.log(`Product pinned at ${pin.commit}\n`);
   for (const scenario of results) {
     console.log(`${scenario.pass ? 'PASS' : 'FAIL'}  ${scenario.id}  ${scenario.variant}`);
@@ -21,7 +21,9 @@ if (command === 'pin') {
   if (!args[0]) throw new Error('usage: pnpm bench pin <commit>');
   console.log(`Pinned ${writePin(args[0]).commit}`);
 } else if (command === 'run') {
-  process.exitCode = run();
+  void run().then((code) => {
+    process.exitCode = code;
+  });
 } else {
   throw new Error(`unknown command ${command}; use run or pin <commit>`);
 }

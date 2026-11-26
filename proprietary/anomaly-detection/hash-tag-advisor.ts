@@ -1,0 +1,174 @@
+import { displayKeyName } from '@betterdb/shared';
+import { listed } from './rebalance-planner';
+
+export const HASH_TAG_MIN_SHARE = 0.5;
+export const HASH_TAG_MIN_KEYS = 2;
+export const KEY_COUNT_OUTLIER_FACTOR = 20;
+export const KEY_COUNT_OUTLIERS = 10;
+export const KEY_COUNT_OUTLIER_MIN_KEYS = 1000;
+
+const MESSAGE_ITEMS = 3;
+const OPEN_BRACE = 0x7b;
+const CLOSE_BRACE = 0x7d;
+
+export interface HashTagShare {
+  slot: number;
+  tag: string;
+  share: number;
+  keysSampled: number;
+  keysWithTag: number;
+}
+
+export interface HashTagRead {
+  tags: HashTagShare[];
+  slotsSampled: number;
+  note?: string;
+}
+
+export interface KeyCountOutlier {
+  slot: number;
+  keyCount: number;
+  ratio: number | null;
+}
+
+export interface SlotKeyCount {
+  slot: number;
+  keyCount: number;
+}
+
+export interface HashTagAdvice extends HashTagRead {
+  keyCountOutliers: KeyCountOutlier[];
+  keyCountOutlierFactor: number;
+  medianKeyCount: number | null;
+  sampledAt?: number;
+}
+
+export interface DatedHashTags {
+  read: HashTagRead;
+  readAt: number;
+}
+
+export function hashTagsUnavailable(note: string): HashTagRead {
+  return { tags: [], slotsSampled: 0, note };
+}
+
+function hashTagBytes(name: Buffer | string): Buffer | null {
+  const bytes = typeof name === 'string' ? Buffer.from(name) : name;
+  const open = bytes.indexOf(OPEN_BRACE);
+  if (open < 0) return null;
+  const close = bytes.indexOf(CLOSE_BRACE, open + 1);
+  if (close <= open + 1) return null;
+  return bytes.subarray(open + 1, close);
+}
+
+export function judgeSlotTag(
+  slot: number,
+  names: ReadonlyArray<Buffer | string>,
+): HashTagShare | null {
+  if (names.length === 0) return null;
+  const counts = new Map<string, number>();
+  for (const name of names) {
+    const tag = hashTagBytes(name)?.toString('hex');
+    if (tag !== undefined) counts.set(tag, (counts.get(tag) ?? 0) + 1);
+  }
+  let best: [string, number] | undefined;
+  for (const entry of [...counts].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+    if (!best || entry[1] > best[1]) best = entry;
+  }
+  if (!best || best[1] < HASH_TAG_MIN_KEYS || best[1] / names.length < HASH_TAG_MIN_SHARE) {
+    return null;
+  }
+  return {
+    slot,
+    tag: Buffer.from(best[0], 'hex').toString('utf8'),
+    share: best[1] / names.length,
+    keysSampled: names.length,
+    keysWithTag: best[1],
+  };
+}
+
+export function hashTagsOfNames(names: ReadonlyMap<number, ReadonlyArray<Buffer>>): HashTagRead {
+  const tags: HashTagShare[] = [];
+  for (const [slot, slotNames] of names) {
+    const shared = judgeSlotTag(slot, slotNames);
+    if (shared) tags.push(shared);
+  }
+  return { tags, slotsSampled: names.size };
+}
+
+export function hashTagsAfterRead(
+  last: DatedHashTags | undefined,
+  read: HashTagRead,
+  readAt: number,
+): DatedHashTags {
+  if (read.slotsSampled > 0 || !last || last.read.tags.length === 0) return { read, readAt };
+  return last;
+}
+
+function keyCountOutliers(
+  slots: readonly SlotKeyCount[],
+  medianKeyCount: number,
+): KeyCountOutlier[] {
+  const least = Math.max(medianKeyCount * KEY_COUNT_OUTLIER_FACTOR, KEY_COUNT_OUTLIER_MIN_KEYS);
+  return slots
+    .filter((slot) => slot.keyCount >= least)
+    .sort((a, b) => b.keyCount - a.keyCount || a.slot - b.slot)
+    .slice(0, KEY_COUNT_OUTLIERS)
+    .map((slot) => ({
+      slot: slot.slot,
+      keyCount: slot.keyCount,
+      ratio: medianKeyCount > 0 ? slot.keyCount / medianKeyCount : null,
+    }));
+}
+
+export function hashTagAdvice(
+  read: HashTagRead,
+  slots: readonly SlotKeyCount[],
+  medianKeyCount: number | null,
+): HashTagAdvice {
+  const owned = new Set(slots.map((each) => each.slot));
+  return {
+    ...read,
+    tags: read.tags.filter((tag) => owned.has(tag.slot)),
+    keyCountOutliers: medianKeyCount === null ? [] : keyCountOutliers(slots, medianKeyCount),
+    keyCountOutlierFactor: KEY_COUNT_OUTLIER_FACTOR,
+    medianKeyCount,
+  };
+}
+
+function describeTags(tags: readonly HashTagShare[]): string {
+  const shown = tags.slice(0, MESSAGE_ITEMS);
+  if (shown.length === 0) return '';
+  const sentences = shown.map(
+    (each) =>
+      ` ${Math.round(each.share * 100)}% of the sampled keys in slot ${each.slot} ` +
+      `share the hash tag {${displayKeyName(each.tag)}}.`,
+  );
+  const split = shown.length === 1 ? 'that tag' : 'those tags';
+  return `${sentences.join('')} Splitting ${split} in the application spreads them across slots.`;
+}
+
+function describeOutliers(advice: HashTagAdvice): string {
+  const shown = advice.keyCountOutliers.slice(0, MESSAGE_ITEMS);
+  if (shown.length === 0) return '';
+  const times = (ratio: number | null) => `${Math.round(ratio ?? 0)}x`;
+  const emptyMedian = !advice.medianKeyCount;
+  if (shown.length === 1) {
+    const [only] = shown;
+    const against = emptyMedian
+      ? 'while the median slot holds none'
+      : `${times(only.ratio)} the median slot`;
+    return ` Slot ${only.slot} holds ${only.keyCount} keys, ${against}.`;
+  }
+  if (emptyMedian) {
+    const slots = shown.map((each) => `${each.slot} (${each.keyCount} keys)`);
+    return ` Slots ${listed(slots)} are crowded, while the median slot holds none.`;
+  }
+  const slots = shown.map((each) => `${each.slot} (${each.keyCount} keys, ${times(each.ratio)})`);
+  return ` Slots ${listed(slots)} each hold at least ${advice.keyCountOutlierFactor}x the median slot.`;
+}
+
+export function describeHashTags(advice: HashTagAdvice | undefined): string {
+  if (!advice) return '';
+  return describeTags(advice.tags) + describeOutliers(advice);
+}

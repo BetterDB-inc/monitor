@@ -262,6 +262,30 @@ export interface RebalanceNoPlan {
 
 export type RebalanceVerdict = RebalancePlan | RebalanceNoPlan;
 
+export interface HashTagShare {
+  slot: number;
+  tag: string;
+  share: number;
+  keysSampled: number;
+  keysWithTag: number;
+}
+
+export interface KeyCountOutlier {
+  slot: number;
+  keyCount: number;
+  ratio: number | null;
+}
+
+export interface HashTagAdvice {
+  tags: HashTagShare[];
+  slotsSampled: number;
+  note?: string;
+  keyCountOutliers: KeyCountOutlier[];
+  keyCountOutlierFactor: number;
+  medianKeyCount: number | null;
+  sampledAt?: number;
+}
+
 export interface HotShardDetail {
   eventId: string;
   captureAvailable: boolean;
@@ -278,6 +302,7 @@ export interface HotShardDetail {
   keyNote?: string;
   keysSampled: number;
   keysSampledAt?: number;
+  advice?: { hashTags: HashTagAdvice };
   rebalance?: RebalanceVerdict;
 }
 

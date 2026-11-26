@@ -171,6 +171,17 @@ export class ShardLoadTracker {
       .sort((a, b) => a.slot - b.slot);
   }
 
+  medianKeyCount(): number | null {
+    const counts: number[] = [];
+    for (let slot = 0; slot < CLUSTER_TOTAL_SLOTS; slot++) {
+      if (this.seen[slot]) counts.push(this.keyCount[slot]);
+    }
+    if (counts.length === 0) return null;
+    counts.sort((a, b) => a - b);
+    const middle = Math.floor(counts.length / 2);
+    return counts.length % 2 === 1 ? counts[middle] : (counts[middle - 1] + counts[middle]) / 2;
+  }
+
   topSlots(nodeId: string, limit: number): SlotLoadRate[] {
     const network = (rate: SlotLoadRate) =>
       rate.networkBytesInPerSecond + rate.networkBytesOutPerSecond;

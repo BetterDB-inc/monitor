@@ -1,12 +1,24 @@
 import {
+  HOT_KEY_SLOTS,
+  type HashTagAdvice,
+  type HashTagRead,
+  type HotKeyRead,
+  type HotKeyReader,
   type PlacementSupportFacts,
   type RebalanceShard,
   type ShardLoadSample,
+  type ShardLoadTracker,
+  hashTagAdvice,
+  hashTagsOfNames,
+  hashTagsUnavailable,
+  hotKeysUnavailable,
   isAclRefusal,
   isManagedProviderBuild,
   managedPlacementProvider,
   migrateSlotsListed,
   placementPrimaryFacts,
+  readSlotNames,
+  sampleHotKeys,
 } from './product';
 
 export interface PrimaryReply {
@@ -66,4 +78,39 @@ export function supportFacts(install: InstallFacts): PlacementSupportFacts {
     memoryStorage: String(install.env.STORAGE_TYPE ?? 'memory') === 'memory',
     signIn: install.signIn,
   };
+}
+
+export interface HotShardRead {
+  keys: HotKeyRead;
+  hashTags: HashTagRead;
+}
+
+export async function readHotShardKeys(
+  client: HotKeyReader,
+  topSlots: readonly number[],
+): Promise<HotShardRead> {
+  const slots = topSlots.slice(0, HOT_KEY_SLOTS);
+  const unavailable = (note: string): HotShardRead => ({
+    keys: hotKeysUnavailable(note),
+    hashTags: hashTagsUnavailable(note),
+  });
+  let hashTags: HashTagRead | undefined;
+  try {
+    const read = await readSlotNames(client, slots);
+    if (read.note !== undefined) return unavailable(read.note);
+    hashTags = hashTagsOfNames(read.names);
+    return { keys: await sampleHotKeys(client, slots, read.names), hashTags };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    const failed = unavailable(`reading the keys from the hot primary failed: ${reason}`);
+    return hashTags ? { ...failed, hashTags } : failed;
+  }
+}
+
+export function hotShardAdvice(
+  tracker: ShardLoadTracker,
+  shardId: string,
+  read: HotShardRead,
+): HashTagAdvice {
+  return hashTagAdvice(read.hashTags, tracker.slotsOf(shardId), tracker.medianKeyCount());
 }

@@ -1,15 +1,25 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { hotShardAdvice, readHotShardKeys } from '../src/glue';
+import { ownerOf } from '../src/model';
 import { checkPin } from '../src/product';
-import { B2_HOT_SLOT, B8_CASES, b2Model, runAll, runB8Case } from '../src/scenarios';
+import {
+  B2_HOT_SLOT,
+  B8_CASES,
+  b2Model,
+  b2TagModel,
+  readB2Advice,
+  runAll,
+  runB8Case,
+} from '../src/scenarios';
 import { simulate } from '../src/simulate';
 
 test('the product files match the pin', () => {
   assert.doesNotThrow(() => checkPin());
 });
 
-test('every scenario passes', () => {
-  const failed = runAll()
+test('every scenario passes', async () => {
+  const failed = (await runAll())
     .filter((scenario) => !scenario.pass)
     .map(
       (scenario) =>
@@ -46,4 +56,85 @@ test('the hot slot is the one the model loads', () => {
   assert.deepEqual(verdict.kind === 'no_plan' ? verdict.pinnedSlots.map((slot) => slot.slot) : [], [
     B2_HOT_SLOT,
   ]);
+});
+
+test('the hash-tag variants run with and without LFU', async () => {
+  const variants = (await runAll())
+    .filter((scenario) => scenario.id === 'B2')
+    .map((scenario) => scenario.variant);
+  assert.deepEqual(variants, ['single hot key', 'hash tag, no LFU', 'hash tag, LFU']);
+});
+
+test('the names are listed once per top slot and the tags need no LFU', async () => {
+  const { node, advice, keys } = await readB2Advice(b2TagModel(), false);
+  const listed = node.sent.filter((args) => args[0] === 'CLUSTER');
+  assert.equal(listed.length, 3);
+  assert.equal(new Set(listed.map((args) => args[2])).size, 3);
+  assert.equal(keys.keySource, 'unavailable');
+  assert.deepEqual(
+    advice.tags.map((tag) => [tag.slot, tag.tag]),
+    [[B2_HOT_SLOT, '42']],
+  );
+});
+
+test('a hot slot without a shared tag names none', async () => {
+  const { advice } = await readB2Advice(b2Model(), true);
+  assert.deepEqual(advice.tags, []);
+  assert.deepEqual(advice.keyCountOutliers, []);
+});
+
+test('the advice keeps only the tags on slots the shard owns now, as in the service', async () => {
+  const model = b2TagModel();
+  const { tracker } = simulate(model, 10);
+  const read = await readHotShardKeys(
+    {
+      async callBuffer() {
+        return ['{cart}:1', '{cart}:2'].map((name) => Buffer.from(name));
+      },
+      pipeline() {
+        return {
+          call() {},
+          async exec() {
+            return [];
+          },
+        };
+      },
+    },
+    [B2_HOT_SLOT],
+  );
+  const owner = ownerOf(model, B2_HOT_SLOT).nodeId;
+  const other = model.shards.find((shard) => shard.nodeId !== owner)!.nodeId;
+  assert.deepEqual(
+    hotShardAdvice(tracker, owner, read).tags.map((tag) => tag.slot),
+    [B2_HOT_SLOT],
+  );
+  assert.deepEqual(hotShardAdvice(tracker, other, read).tags, []);
+});
+
+test('the tags are kept when the frequency read fails, as in the service', async () => {
+  const read = await readHotShardKeys(
+    {
+      async callBuffer() {
+        return ['{cart}:1', '{cart}:2'].map((name) => Buffer.from(name));
+      },
+      pipeline() {
+        return {
+          call() {},
+          async exec() {
+            throw new Error('CLUSTERDOWN The cluster is down');
+          },
+        };
+      },
+    },
+    [7],
+  );
+  assert.equal(read.keys.keySource, 'unavailable');
+  assert.equal(
+    read.keys.keyNote,
+    'reading the keys from the hot primary failed: CLUSTERDOWN The cluster is down',
+  );
+  assert.deepEqual(
+    read.hashTags.tags.map((tag) => [tag.slot, tag.tag]),
+    [[7, 'cart']],
+  );
 });

@@ -1,6 +1,7 @@
 import type { ServedClusterNodeRef } from '@betterdb/shared';
 import type { ShardLoad, ShardLoadSample, SlotLoadRate } from '@app/cluster/shard-load';
 import { median } from '../latency-regression/regression-detector';
+import type { HashTagAdvice } from './hash-tag-advisor';
 import { type HotShardKey, type HotShardKeyDetail, describeHotKeys } from './hot-shard-keys';
 import type { RebalanceVerdict } from './rebalance-planner';
 
@@ -40,6 +41,10 @@ export interface HotShardSlot {
   shareOfShard: number;
 }
 
+export interface HotShardAdvice {
+  hashTags: HashTagAdvice;
+}
+
 export interface HotShardDetail extends HotShardKeyDetail {
   eventId: string;
   captureAvailable: boolean;
@@ -51,6 +56,7 @@ export interface HotShardDetail extends HotShardKeyDetail {
   cpu: HotShardLoad;
   network: HotShardNetwork;
   topSlots: HotShardSlot[];
+  advice?: HotShardAdvice;
   rebalance?: RebalanceVerdict;
 }
 

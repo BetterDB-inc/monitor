@@ -68,7 +68,7 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function keysInSlotRefusal(error: unknown): string | undefined {
+export function keysInSlotRefusal(error: unknown): string | undefined {
   const message = messageOf(error);
   if (/^NOPERM/i.test(message)) return 'the monitoring user may not run CLUSTER GETKEYSINSLOT';
   if (/unknown (sub)?command/i.test(message)) {
@@ -101,21 +101,45 @@ function hotterFirst(a: RankedKey, b: RankedKey): number {
   return a.key < b.key ? -1 : 1;
 }
 
+export interface SlotNamesRead {
+  names: Map<number, Buffer[]>;
+  note?: string;
+}
+
+function namesInSlot(client: Pick<HotKeyReader, 'callBuffer'>, slot: number): Promise<Buffer[]> {
+  return client.callBuffer('CLUSTER', 'GETKEYSINSLOT', slot, HOT_KEY_NAMES_PER_SLOT) as Promise<
+    Buffer[]
+  >;
+}
+
+export async function readSlotNames(
+  client: Pick<HotKeyReader, 'callBuffer'>,
+  slots: readonly number[],
+): Promise<SlotNamesRead> {
+  const names = new Map<number, Buffer[]>();
+  for (const slot of slots) {
+    try {
+      names.set(slot, await namesInSlot(client, slot));
+    } catch (error) {
+      const note = keysInSlotRefusal(error);
+      if (note === undefined) throw error;
+      return { names, note };
+    }
+  }
+  return { names };
+}
+
 export async function sampleHotKeys(
   client: HotKeyReader,
   slots: readonly number[],
+  known?: ReadonlyMap<number, Buffer[]>,
 ): Promise<HotKeyRead> {
   const read: RankedKey[] = [];
   let probed = false;
   for (const [slotRank, slot] of slots.entries()) {
     let names: Buffer[];
     try {
-      names = (await client.callBuffer(
-        'CLUSTER',
-        'GETKEYSINSLOT',
-        slot,
-        HOT_KEY_NAMES_PER_SLOT,
-      )) as Buffer[];
+      names = known?.get(slot) ?? (await namesInSlot(client, slot));
     } catch (error) {
       const note = keysInSlotRefusal(error);
       if (note === undefined) throw error;

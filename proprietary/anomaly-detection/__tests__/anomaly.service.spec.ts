@@ -1992,6 +1992,7 @@ describe('AnomalyService', () => {
     let shardLoad: ShardLoadService;
     let counters: Map<number, number>;
     let bytesOut: Map<number, number>;
+    let keyCounts: Map<number, number>;
     let owners: number[][];
     let migrating: boolean;
     let evenSlots: boolean;
@@ -2023,7 +2024,7 @@ describe('AnomalyService', () => {
           slots.map((slot) => [
             slot,
             {
-              key_count: 10,
+              key_count: keyCounts.get(slot) ?? 10,
               cpu_usec: counters.get(slot) ?? 0,
               network_bytes_in: 0,
               network_bytes_out: bytesOut.get(slot) ?? 0,
@@ -2065,6 +2066,7 @@ describe('AnomalyService', () => {
       (service as any).shardLoad = shardLoad;
       counters = new Map();
       bytesOut = new Map();
+      keyCounts = new Map();
       owners = [
         [0, 1],
         [10, 11],
@@ -2119,6 +2121,32 @@ describe('AnomalyService', () => {
           `Top slots by CPU: 0 (75% of the shard), 1 (25%).${NO_PLAN_SENTENCE}`,
       });
       expect(hotEvents()[0].nodeAddr).toBeUndefined();
+    });
+
+    it('names a slot of the hot shard holding twenty times the median key count', async () => {
+      keyCounts.set(1, 1500);
+
+      await step(HOT, 6);
+
+      expect(hotEvents()[0].message).toBe(
+        "Hot shard a0000000 at 10.0.0.1:6379: CPU 9.0x the cluster median (82% of the cluster's slot CPU) for 60s. " +
+          `Top slots by CPU: 0 (75% of the shard), 1 (25%).${NO_PLAN_SENTENCE}` +
+          ' Slot 1 holds 1500 keys, 150x the median slot.',
+      );
+      expect(service.getHotShards('conn-a')[0].advice?.hashTags).toMatchObject({
+        keyCountOutliers: [{ slot: 1, keyCount: 1500, ratio: 150 }],
+        keyCountOutlierFactor: 20,
+        medianKeyCount: 10,
+      });
+    });
+
+    it('does not name a slot under a thousand keys as crowded', async () => {
+      keyCounts.set(1, 500);
+
+      await step(HOT, 6);
+
+      expect(hotEvents()[0].message).not.toContain('median slot');
+      expect(service.getHotShards('conn-a')[0].advice?.hashTags.keyCountOutliers).toEqual([]);
     });
 
     it('stamps the address of a hot primary that is not the node the connection points at', async () => {
@@ -2203,6 +2231,17 @@ describe('AnomalyService', () => {
           keyNote: 'the monitor does not connect to the cluster nodes directly',
           keysSampled: 0,
           keysSampledAt: BASE + 6 * STEP_MS,
+          advice: {
+            hashTags: {
+              tags: [],
+              slotsSampled: 0,
+              note: 'the monitor does not connect to the cluster nodes directly',
+              keyCountOutliers: [],
+              keyCountOutlierFactor: 20,
+              medianKeyCount: 10,
+              sampledAt: BASE + 6 * STEP_MS,
+            },
+          },
           eventId: hotEvents()[0].id,
           captureAvailable: false,
           rebalance: {
@@ -2917,6 +2956,188 @@ describe('AnomalyService', () => {
         expect(client.callBuffer.mock.calls.map(([, , slot]) => slot)).toEqual([0, 1, 2]);
       });
 
+      it('names the hash tag of a hot slot without an LFU policy', async () => {
+        keys = {
+          0: [
+            ['{cart}:1', NO_LFU],
+            ['{cart}:2', NO_LFU],
+            ['user:1', NO_LFU],
+          ],
+          1: [['user:2', NO_LFU]],
+        };
+        const client = hotNode();
+        dial(client);
+
+        await step(HOT, 6);
+
+        expect(hotEvents()[0].message).toBe(
+          capture('no LFU policy') +
+            ' 67% of the sampled keys in slot 0 share the hash tag {cart}. ' +
+            'Splitting that tag in the application spreads them across slots.',
+        );
+        expect(service.getHotShards('conn-a')[0].advice).toEqual({
+          hashTags: {
+            tags: [{ slot: 0, tag: 'cart', share: 2 / 3, keysSampled: 3, keysWithTag: 2 }],
+            slotsSampled: 2,
+            keyCountOutliers: [],
+            keyCountOutlierFactor: 20,
+            medianKeyCount: 10,
+            sampledAt: BASE + 6 * STEP_MS,
+          },
+        });
+        expect(client.callBuffer.mock.calls).toEqual([
+          ['CLUSTER', 'GETKEYSINSLOT', 0, 500],
+          ['CLUSTER', 'GETKEYSINSLOT', 1, 500],
+        ]);
+      });
+
+      it('drops the hash tag of a slot that moved off the hot shard', async () => {
+        keys = {
+          0: [
+            ['{cart}:1', NO_LFU],
+            ['{cart}:2', NO_LFU],
+          ],
+          1: [['user:2', NO_LFU]],
+        };
+        owners[0] = [0, 1, 2];
+        dial(hotNode());
+
+        await step(HOT, 6);
+        expect(service.getHotShards('conn-a')[0].advice?.hashTags.tags).toMatchObject([
+          { slot: 0, tag: 'cart' },
+        ]);
+
+        owners = [
+          [1, 2],
+          [10, 11, 0],
+          [20, 21],
+        ];
+        await step(HOT, 4);
+
+        const [shard] = service.getHotShards('conn-a');
+        expect(shard.shardId).toBe('a0000000');
+        expect(shard.advice?.hashTags).toMatchObject({ tags: [], slotsSampled: 3 });
+      });
+
+      it('names the hash tag next to the hot keys when LFU is on', async () => {
+        keys = {
+          0: [
+            ['{cart}:1', 255],
+            ['{cart}:2', 201],
+          ],
+          1: [['user:1', 40]],
+        };
+        dial(hotNode());
+
+        await step(HOT, 6);
+
+        expect(hotEvents()[0].message).toBe(
+          `${RAISED} Hot keys: "{cart}:1" (freq 255), "{cart}:2" (freq 201), "user:1" (freq 40).` +
+            `${NO_PLAN_SENTENCE} 100% of the sampled keys in slot 0 share the hash tag {cart}. ` +
+            'Splitting that tag in the application spreads them across slots.',
+        );
+      });
+
+      it('keeps the last hash tag and its time when a refresh fails', async () => {
+        keys = {
+          0: [
+            ['{cart}:1', 255],
+            ['{cart}:2', 201],
+          ],
+          1: [['user:1', 40]],
+        };
+        const discovery = dial(hotNode());
+        await step(HOT, 6);
+        discovery.getNodeConnection.mockRejectedValue(new Error('ECONNREFUSED'));
+
+        await step(HOT, 20);
+
+        expect(service.getHotShards('conn-a')[0].advice?.hashTags).toMatchObject({
+          tags: [{ slot: 0, tag: 'cart', keysWithTag: 2 }],
+          slotsSampled: 2,
+          sampledAt: BASE + 6 * STEP_MS,
+        });
+        expect(service.getHotShards('conn-a')[0].advice?.hashTags).not.toHaveProperty('note');
+      });
+
+      it('keeps the hash tag when the frequency read fails', async () => {
+        keys = {
+          0: [
+            ['{cart}:1', 255],
+            ['{cart}:2', 201],
+          ],
+          1: [['user:1', 40]],
+        };
+        const client = hotNode();
+        client.pipeline.mockReturnValue({
+          call() {
+            return this;
+          },
+          exec: async () => {
+            throw new Error('CLUSTERDOWN The cluster is down');
+          },
+        });
+        dial(client);
+
+        await step(HOT, 6);
+
+        expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          keySource: 'unavailable',
+          keyNote: 'reading the keys from the hot primary failed: CLUSTERDOWN The cluster is down',
+          advice: {
+            hashTags: { tags: [{ slot: 0, tag: 'cart', keysWithTag: 2 }], slotsSampled: 2 },
+          },
+        });
+      });
+
+      it('keeps the hash tag when the frequency read does not answer', async () => {
+        const budget = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+        (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;
+        try {
+          keys = {
+            0: [
+              ['{cart}:1', 255],
+              ['{cart}:2', 201],
+            ],
+            1: [['user:1', 40]],
+          };
+          const client = hotNode();
+          client.pipeline.mockReturnValue({
+            call() {
+              return this;
+            },
+            exec: () => new Promise(() => undefined),
+          });
+          dial(client);
+
+          await step(HOT, 6);
+
+          expect(service.getHotShards('conn-a')[0]).toMatchObject({
+            keySource: 'unavailable',
+            keyNote: 'reading the keys from the hot primary timed out',
+            advice: { hashTags: { tags: [{ slot: 0, tag: 'cart' }] } },
+          });
+          expect(hotEvents()[0].message).toContain('share the hash tag {cart}');
+        } finally {
+          (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = budget;
+        }
+      });
+
+      it('ends the tag read with a note when the user may not list keys', async () => {
+        const client = hotNode();
+        client.callBuffer.mockRejectedValue(new Error('NOPERM User monitor has no permissions'));
+        dial(client);
+
+        await step(HOT, 6);
+
+        expect(service.getHotShards('conn-a')[0].advice?.hashTags).toMatchObject({
+          tags: [],
+          slotsSampled: 0,
+          note: 'the monitoring user may not run CLUSTER GETKEYSINSLOT',
+        });
+        expect(client.callBuffer).toHaveBeenCalledTimes(1);
+      });
+
       it('raises without key names when the node has no LFU policy, and says so once', async () => {
         const warn = jest.spyOn((service as any).logger, 'warn');
         keys = { 0: [['user:42', NO_LFU]], 1: [['cart:{9}', NO_LFU]] };
@@ -2938,7 +3159,7 @@ describe('AnomalyService', () => {
           keysSampled: 0,
           topKeys: [],
         });
-        expect(client.callBuffer).toHaveBeenCalledTimes(3);
+        expect(client.callBuffer).toHaveBeenCalledTimes(6);
         expect(unavailableWarnings(warn)).toEqual([
           [
             'Hot keys are not available for cluster: maxmemory-policy is not an LFU policy, ' +

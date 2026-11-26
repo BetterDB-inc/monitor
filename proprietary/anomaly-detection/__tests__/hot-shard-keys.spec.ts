@@ -11,6 +11,7 @@ import {
   displayKeyName,
   hotKeysAfterRead,
   hotKeysUnavailable,
+  readSlotNames,
   sampleHotKeys,
 } from '../hot-shard-keys';
 
@@ -64,7 +65,61 @@ const NO_LFU = new Error(
     'Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust.',
 );
 
+describe('readSlotNames', () => {
+  it('lists the names of each slot once', async () => {
+    const client = node({ 12: [['user:1', 40]], 99: [['cart:{9}', 201]] });
+
+    const read = await readSlotNames(client, [12, 99]);
+
+    expect([...read.names].map(([slot, names]) => [slot, names.map(String)])).toEqual([
+      [12, ['user:1']],
+      [99, ['cart:{9}']],
+    ]);
+    expect(read).not.toHaveProperty('note');
+    expect(keysInSlotCalls(client)).toEqual([
+      ['CLUSTER', 'GETKEYSINSLOT', 12, HOT_KEY_NAMES_PER_SLOT],
+      ['CLUSTER', 'GETKEYSINSLOT', 99, HOT_KEY_NAMES_PER_SLOT],
+    ]);
+    expect(objectFreqCalls(client)).toEqual([]);
+  });
+
+  it('stops with a note when the user may not list keys', async () => {
+    const client = node({}, new Error('NOPERM User monitor has no permissions'));
+
+    const read = await readSlotNames(client, [12, 99]);
+
+    expect(read.names.size).toBe(0);
+    expect(read.note).toBe('the monitoring user may not run CLUSTER GETKEYSINSLOT');
+    expect(keysInSlotCalls(client)).toHaveLength(1);
+  });
+
+  it('stops with a note when the server lacks the command', async () => {
+    const client = node({}, new Error("ERR unknown subcommand 'GETKEYSINSLOT'"));
+
+    const read = await readSlotNames(client, [12]);
+
+    expect(read.note).toBe('the server does not support CLUSTER GETKEYSINSLOT');
+  });
+
+  it('lets any other failure through', async () => {
+    await expect(readSlotNames(node({}, new Error('Connection is closed.')), [1])).rejects.toThrow(
+      'Connection is closed.',
+    );
+  });
+});
+
 describe('sampleHotKeys', () => {
+  it('ranks names it was given without listing the slot again', async () => {
+    const client = node({ 12: [['user:1', 40]], 99: [['cart:{9}', 201]] });
+    const { names } = await readSlotNames(client, [12, 99]);
+    client.sent.length = 0;
+
+    const read = await sampleHotKeys(client, [12, 99], names);
+
+    expect(read.topKeys.map((each) => each.key)).toEqual(['cart:{9}', 'user:1']);
+    expect(keysInSlotCalls(client)).toEqual([]);
+  });
+
   it('ranks the keys of the given slots by their LFU counter', async () => {
     const client = node({
       12: [
