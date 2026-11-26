@@ -3545,6 +3545,44 @@ describe('AnomalyService', () => {
         expect(rebalance()).toMatchObject({ kind: 'plan', sourceShardId: 'a0000000' });
       });
 
+      it('keeps a shard excluded after a failover through the node ID of any of its nodes', async () => {
+        spreadLoad();
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue([
+          ...clusterNodes(),
+          {
+            ...clusterNodes()[1],
+            id: 'r0000000',
+            address: '10.0.0.8:6379@16379',
+            flags: ['slave'],
+            master: 'a0000000',
+          },
+        ]);
+        service.setRebalancePolicyResolver(async () => ({
+          ...DEFAULT_REBALANCE_POLICY,
+          excludedShardIds: ['r0000000'],
+        }));
+
+        await step(HOT, 6);
+
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'source_excluded' });
+      });
+
+      it('still holds the suggestion back on a suspect primary while the placement policy cannot be read', async () => {
+        spreadLoad();
+        await step(HOT, 6);
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+
+        service.setRebalancePolicyResolver(async () => {
+          throw new Error('db down');
+        });
+        const nodes = clusterNodes();
+        nodes[2].flags = ['master', 'fail?'];
+        (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(nodes);
+        await step(HOT);
+
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'unhealthy_node' });
+      });
+
       it('keeps the last suggestion while the placement policy cannot be read', async () => {
         spreadLoad();
         await step(HOT, 6);

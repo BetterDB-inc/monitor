@@ -125,6 +125,7 @@ function status(overrides: Partial<PlacementStatus> = {}): PlacementStatus {
     balance: balance(),
     settings: DEFAULT_PLACEMENT_SETTINGS,
     policyVersion: 3,
+    policyInvalid: null,
     ...overrides,
   };
 }
@@ -170,6 +171,34 @@ describe('PlacementCard', () => {
     expect(modeButton(region, 'Approve')).toBeDisabled();
     expect(modeButton(region, 'Auto')).toBeDisabled();
     expect(region).toHaveTextContent('Approve and Auto come in a later release.');
+  });
+
+  it('warns that the stored policy is invalid and lists the problems', async () => {
+    await show(
+      status({
+        policyInvalid: {
+          problems: ['resolveRatio: must be under triggerRatio'],
+          exclusionsReadable: true,
+        },
+      }),
+    );
+
+    const alert = within(await card()).getByRole('alert');
+    expect(alert).toHaveTextContent('The stored placement policy is invalid.');
+    expect(alert).toHaveTextContent('resolveRatio: must be under triggerRatio');
+    expect(alert).toHaveTextContent('the exclusions are kept');
+  });
+
+  it('says no slot moves are suggested while the exclusions cannot be read', async () => {
+    await show(
+      status({
+        policyInvalid: { problems: ['excludedSlots: expected array'], exclusionsReadable: false },
+      }),
+    );
+
+    expect(within(await card()).getByRole('alert')).toHaveTextContent(
+      'no slot moves are suggested until the policy is saved again',
+    );
   });
 
   it('saves the policy from the drawer at the version it read', async () => {

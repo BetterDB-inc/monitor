@@ -120,8 +120,12 @@ function windowsOf(text: string, errors: string[]): PlacementMaintenanceWindow[]
 }
 
 function slotsOf(text: string, errors: string[]): number[] {
-  const slots: number[] = [];
-  for (const part of text.split(/[\s,]+/).filter((each) => each !== '')) {
+  const slots = new Set<number>();
+  const parts = text
+    .replace(/\s*-\s*/g, '-')
+    .split(/[\s,]+/)
+    .filter((each) => each !== '');
+  for (const part of parts) {
     const match = /^(\d+)(?:-(\d+))?$/.exec(part);
     const from = match ? Number(match[1]) : NaN;
     const to = match?.[2] === undefined ? from : Number(match[2]);
@@ -131,9 +135,9 @@ function slotsOf(text: string, errors: string[]): number[] {
       );
       continue;
     }
-    for (let slot = from; slot <= to; slot += 1) slots.push(slot);
+    for (let slot = from; slot <= to; slot += 1) slots.add(slot);
   }
-  return slots;
+  return [...slots];
 }
 
 export function settingsOf(form: PlacementPolicyForm): FormResult {

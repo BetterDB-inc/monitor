@@ -1,4 +1,9 @@
-import { DEFAULT_PLACEMENT_SETTINGS, type DatabaseConnectionConfig } from '@betterdb/shared';
+import { Logger } from '@nestjs/common';
+import {
+  DEFAULT_PLACEMENT_SETTINGS,
+  type DatabaseConnectionConfig,
+  type PlacementPolicy,
+} from '@betterdb/shared';
 import { MemoryAdapter } from '@app/storage/adapters/memory.adapter';
 import type { ShardLoadSample } from '@app/cluster/shard-load';
 import {
@@ -6,6 +11,8 @@ import {
   PlacementModeError,
   PlacementPolicyConflictError,
   PlacementPolicyError,
+  PlacementPolicyUnreadableError,
+  rebalancePolicyOf,
 } from '../placement.service';
 import { DEFAULT_REBALANCE_POLICY } from '../../anomaly-detection/rebalance-planner';
 import type { PlacementPrimaryRead } from '../placement-support';
@@ -289,6 +296,94 @@ describe('PlacementService', () => {
       } finally {
         jest.useRealTimers();
       }
+    });
+
+    it('reads the settings with their version, and fresh past the half-minute cache', async () => {
+      const { service, storage } = await setup();
+      expect(await service.settingsOf('seed')).toEqual({
+        settings: DEFAULT_PLACEMENT_SETTINGS,
+        version: 0,
+        invalid: null,
+      });
+      await storage.savePlacementSettings(
+        { connectionId: 'seed', settings: tighter, updatedAt: 2, modeIfNew: 'observe' },
+        0,
+      );
+
+      expect((await service.settingsOf('seed')).version).toBe(0);
+      expect(await service.settingsOf('seed', { fresh: true })).toEqual({
+        settings: tighter,
+        version: 1,
+        invalid: null,
+      });
+      expect((await service.settingsOf('seed')).version).toBe(1);
+    });
+
+    it('maps the settings the planner uses over the planner defaults', () => {
+      expect(rebalancePolicyOf({ ...tighter, resolveRatio: 1.5 })).toEqual({
+        ...DEFAULT_REBALANCE_POLICY,
+        resolveRatio: 1.5,
+        excludedShardIds: ['c'],
+        excludedSlots: [7],
+      });
+    });
+
+    describe('a stored policy that does not validate', () => {
+      function storedInvalid(exclusionsReadable: boolean): PlacementPolicy {
+        return {
+          connectionId: 'seed',
+          mode: 'recommend',
+          settings: { ...tighter, sustainMinutes: DEFAULT_PLACEMENT_SETTINGS.sustainMinutes },
+          version: 5,
+          updatedAt: 1,
+          invalid: { problems: ['sustainMinutes: Too big'], exclusionsReadable },
+        };
+      }
+
+      afterEach(() => jest.restoreAllMocks());
+
+      it('shows the problem on the status, warns once, and plans with the exclusions it read', async () => {
+        const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+        const { service, anomaly, storage } = await setup();
+        jest.spyOn(storage, 'getPlacementPolicy').mockResolvedValue(storedInvalid(true));
+        service.onModuleInit();
+        const resolve = anomaly.setRebalancePolicyResolver.mock.calls[0][0] as (
+          seedId: string,
+        ) => Promise<unknown>;
+
+        expect(await service.getStatus('seed')).toMatchObject({
+          policyVersion: 5,
+          policyInvalid: { problems: ['sustainMinutes: Too big'], exclusionsReadable: true },
+          settings: { excludedShardIds: ['c'], excludedSlots: [7] },
+        });
+        await service.getStatus('seed');
+        expect(await resolve('seed')).toMatchObject({
+          excludedShardIds: ['c'],
+          excludedSlots: [7],
+        });
+
+        const warnings = warn.mock.calls.filter(([message]) =>
+          String(message).includes('does not validate'),
+        );
+        expect(warnings).toHaveLength(1);
+        expect(String(warnings[0][0])).toContain('version 5');
+      });
+
+      it('plans nothing while its exclusions cannot be read', async () => {
+        jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+        const { service, anomaly, storage } = await setup();
+        jest.spyOn(storage, 'getPlacementPolicy').mockResolvedValue(storedInvalid(false));
+        service.onModuleInit();
+        const resolve = anomaly.setRebalancePolicyResolver.mock.calls[0][0] as (
+          seedId: string,
+        ) => Promise<unknown>;
+
+        await expect(resolve('seed')).rejects.toThrow(PlacementPolicyUnreadableError);
+        expect((await service.getStatus('seed')).policyInvalid).toEqual({
+          problems: ['sustainMinutes: Too big'],
+          exclusionsReadable: false,
+        });
+      });
     });
 
     it('fails the planner read when storage fails and nothing was read before', async () => {

@@ -12,7 +12,7 @@ import {
   parseMembership,
   parseTlsConfig,
   parseNodeAvailabilityZones,
-  placementSettingsOf,
+  readStoredPlacementSettings,
 } from '@betterdb/shared';
 import type {
   StoredScalingReadinessScore,
@@ -159,7 +159,6 @@ import {
   type ClientCaptureSqlRow,
 } from './client-analytics-stats';
 import { openLibsqlDatabase } from './libsql-driver';
-import { parseStoredJson } from './stored-json';
 import { loadBetterSqlite3 } from './better-sqlite3-driver';
 import { WebhookSqliteRepository } from './repositories/webhook.sqlite.repository';
 import { SlowLogSqliteRepository } from './repositories/slowlog.sqlite.repository';
@@ -4737,12 +4736,14 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         }
       | undefined;
     if (!row) return null;
+    const { settings, invalid } = readStoredPlacementSettings(row.policy);
     return {
       connectionId: row.connection_id,
       mode: row.mode,
-      settings: placementSettingsOf(parseStoredJson(row.policy)),
+      settings,
       version: row.version,
       updatedAt: row.updated_at,
+      ...(invalid ? { invalid } : {}),
     };
   }
 

@@ -55,16 +55,30 @@ afterAll(() => {
 });
 
 describe.each([
-  ['memory', async () => {
-    const storage = new MemoryAdapter();
-    await storage.initialize();
-    return storage as StoragePort;
-  }],
-  ['sqlite', async () => {
-    const storage = new SqliteAdapter({ filepath: tempDbPath() });
-    await storage.initialize();
-    return storage as StoragePort;
-  }],
+  [
+    'memory',
+    async () => {
+      const storage = new MemoryAdapter();
+      await storage.initialize();
+      return storage as StoragePort;
+    },
+  ],
+  [
+    'sqlite',
+    async () => {
+      const storage = new SqliteAdapter({ filepath: tempDbPath() });
+      await storage.initialize();
+      return storage as StoragePort;
+    },
+  ],
+  [
+    'libsql',
+    async () => {
+      const storage = new SqliteAdapter({ url: `file:${tempDbPath()}` });
+      await storage.initialize();
+      return storage as StoragePort;
+    },
+  ],
 ])('%s adapter placement policy storage', (_name, make) => {
   let storage: StoragePort;
 
@@ -286,7 +300,7 @@ describe('sqlite placement policy upgrade', () => {
     await upgraded.close();
   });
 
-  it('reads stored settings that no longer validate as the defaults', async () => {
+  async function storedRaw(policy: string) {
     const filepath = tempDbPath();
     const first = new SqliteAdapter({ filepath });
     await first.initialize();
@@ -299,18 +313,29 @@ describe('sqlite placement policy upgrade', () => {
     const Database = await loadBetterSqlite3();
     const raw = new Database(filepath);
     raw
-      .prepare(
-        "UPDATE placement_policies SET policy = '{\"resolveRatio\":9}' WHERE connection_id = 'conn-a'",
-      )
-      .run();
+      .prepare("UPDATE placement_policies SET policy = ? WHERE connection_id = 'conn-a'")
+      .run(policy);
     raw.close();
 
     const again = new SqliteAdapter({ filepath });
     await again.initialize();
-    expect(await again.getPlacementPolicy('conn-a')).toEqual(
-      stored('conn-a', 'recommend', 10, DEFAULT_PLACEMENT_SETTINGS, 1),
-    );
+    const read = await again.getPlacementPolicy('conn-a');
     await again.close();
+    return read;
+  }
+
+  it('reads stored settings that no longer validate with the problem, keeping the exclusions', async () => {
+    expect(await storedRaw(JSON.stringify({ ...tighter, resolveRatio: 9 }))).toEqual({
+      ...stored('conn-a', 'recommend', 10, tighter, 1),
+      invalid: { problems: [expect.stringContaining('resolveRatio')], exclusionsReadable: true },
+    });
+  });
+
+  it('says the exclusions cannot be read from a stored document that is not JSON', async () => {
+    expect(await storedRaw('{"excludedSlots":[7')).toEqual({
+      ...stored('conn-a', 'recommend', 10, DEFAULT_PLACEMENT_SETTINGS, 1),
+      invalid: { problems: [expect.any(String)], exclusionsReadable: false },
+    });
   });
 
   it('leaves a fresh database without policies', async () => {

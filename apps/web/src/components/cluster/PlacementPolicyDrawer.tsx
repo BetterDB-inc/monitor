@@ -25,61 +25,61 @@ const NUMBER_FIELDS: { field: NumberField; label: string; hint: string; step: st
   {
     field: 'triggerRatio',
     label: 'Trigger ratio',
-    hint: 'A shard over this multiple of the median load, sustained, is a hot shard.',
+    hint: 'A shard over this multiple of the median load is marked hot on the card.',
     step: '0.05',
   },
   {
     field: 'resolveRatio',
     label: 'Resolve ratio',
-    hint: 'A slot move aims to bring the hot shard under this multiple of the median.',
+    hint: 'A suggested slot move aims to bring the hot shard under this multiple of the median.',
     step: '0.05',
   },
   {
     field: 'nodeCpuLimitUsecPerSecond',
     label: 'Node CPU limit (µs/s)',
-    hint: 'A move never takes a target node over this CPU time per second.',
+    hint: 'A suggested move never takes a target node over this CPU time per second.',
     step: '1000',
   },
   {
     field: 'sustainMinutes',
     label: 'Sustain (minutes)',
-    hint: 'How long a shard stays hot before slots move off it.',
+    hint: 'Not applied yet. How long a shard must stay hot before slots move off it.',
     step: '1',
   },
   {
     field: 'slotCooldownDays',
     label: 'Slot cooldown (days)',
-    hint: 'A slot that moved does not move again for this long, except for a rollback.',
+    hint: 'Not applied yet. How long a slot that moved stays put, except for a rollback.',
     step: '1',
   },
   {
     field: 'noReturnDays',
     label: 'No return (days)',
-    hint: 'A slot does not go back to a shard it left for this long, except for a rollback.',
+    hint: 'Not applied yet. How long a slot stays away from a shard it left, except for a rollback.',
     step: '1',
   },
   {
     field: 'maxMigrationsPerHour',
     label: 'Moves per hour',
-    hint: 'Each move takes slots from one source to one target.',
+    hint: 'Not applied yet. Each move takes slots from one source to one target.',
     step: '1',
   },
   {
     field: 'abortLatencyMs',
     label: 'Abort latency (ms)',
-    hint: 'A move stops when a node of the source or the target answers slower than this for 5 seconds.',
+    hint: 'Not applied yet. The latency of a source or target node, held for 5 seconds, that stops a move.',
     step: '1',
   },
   {
     field: 'verifyMinutes',
     label: 'Verify (minutes)',
-    hint: 'How long the load is measured after a move to judge it.',
+    hint: 'Not applied yet. How long the load is measured after a move to judge it.',
     step: '1',
   },
   {
     field: 'verifyTolerance',
     label: 'Verify tolerance',
-    hint: 'A move that drops the source CPU by less than this share of the projected drop is ineffective.',
+    hint: 'Not applied yet. A move that drops the source CPU by less than this share of the projected drop counts as ineffective.',
     step: '0.05',
   },
 ];
@@ -88,12 +88,12 @@ const OPTIONAL_FIELDS: { field: OptionalNumberField; label: string; hint: string
   {
     field: 'maxCpuShare',
     label: 'CPU share limit',
-    hint: 'A shard over this share (0 to 1) of the slot CPU of the cluster is hot too. Empty for none.',
+    hint: 'Not applied yet. A share (0 to 1) of the slot CPU of the cluster that also makes a shard hot. Empty for none.',
   },
   {
     field: 'maxNetworkShare',
     label: 'Network share limit',
-    hint: 'A shard over this share of the network traffic gets advice only; no slots move for it. Empty for none.',
+    hint: 'Not applied yet. A share of the network traffic that makes a shard hot for advice only. Empty for none.',
   },
 ];
 
@@ -215,7 +215,7 @@ function PolicyForm({
         <Field
           id="placement-maxBytesPerHour"
           label="GiB moved per hour"
-          hint="An estimate from key counts and the average key size; big keys make it wrong."
+          hint="Not applied yet. An estimate from key counts and the average key size; big keys make it wrong."
         >
           <Input
             id="placement-maxBytesPerHour"
@@ -229,7 +229,7 @@ function PolicyForm({
         <Field
           id="placement-maintenanceWindows"
           label="Maintenance windows"
-          hint="One per line: days, start time (UTC) and minutes, for example Mon,Tue 02:00 120. Empty means any time."
+          hint="Not applied yet. One per line: days, start time (UTC) and minutes, for example Mon,Tue 02:00 120. Empty means any time."
         >
           <textarea
             id="placement-maintenanceWindows"
@@ -244,7 +244,7 @@ function PolicyForm({
         <Field
           id="placement-excludedShardIds"
           label="Excluded shards"
-          hint="Node IDs of primaries that slots never move off or onto, one per line."
+          hint="Shards that slots never move off or onto, one per line. Give the node ID of any node of the shard, primary or replica; the shard stays excluded after a failover."
         >
           <textarea
             id="placement-excludedShardIds"
@@ -325,7 +325,8 @@ export function PlacementPolicyDrawer({
         <SheetHeader>
           <SheetTitle>Placement policy</SheetTitle>
           <SheetDescription>
-            The limits slot moves on this cluster keep to. A saved change applies to the next plan.
+            Resolve ratio, the node CPU limit and the exclusions shape suggested slot moves now. The
+            other limits are checked and saved but do not change anything yet.
           </SheetDescription>
         </SheetHeader>
         {open && (

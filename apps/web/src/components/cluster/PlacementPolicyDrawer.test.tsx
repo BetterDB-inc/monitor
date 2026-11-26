@@ -135,6 +135,15 @@ describe('placement policy form', () => {
     });
   });
 
+  it('reads spaces around a range dash and drops repeated slots', () => {
+    const form = formOf(stored);
+    const result = settingsOf({ ...form, excludedSlots: '100 - 102, 101, 5000 5000' });
+    expect(result).toEqual({
+      ok: true,
+      settings: { ...stored, excludedSlots: [100, 101, 102, 5000] },
+    });
+  });
+
   it('refuses a slot past 16383 and a field that is not a number', () => {
     const form = formOf(stored);
     const result = settingsOf({

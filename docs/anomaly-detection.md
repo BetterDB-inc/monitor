@@ -982,15 +982,30 @@ Each cluster also has a placement policy, stored with its mode on the seed conne
 | `triggerRatio` | 2 | A shard over this multiple of the median load is over the trigger on the card. |
 | `resolveRatio` | 1.25 | A plan aims to bring the hot shard to or under this multiple of the projected median, and no target ends over it. Must be under `triggerRatio`. |
 | `nodeCpuLimitUsecPerSecond` | 800000 | No target ends over this CPU time per second (0.8 of a core). |
-| `excludedShardIds` | none | Primaries (node IDs) that are never a source or a target. A hot shard in the list gets `source_excluded`. |
+| `excludedShardIds` | none | Shards that are never a source or a target, each given by the node ID of any of its nodes (the primary or a replica), so a shard stays excluded after a failover. A hot shard in the list gets `source_excluded`. |
 | `excludedSlots` | none | Slots that never move. |
-| `maxCpuShare`, `maxNetworkShare`, `sustainMinutes`, `slotCooldownDays`, `noReturnDays`, `maxMigrationsPerHour`, `maxBytesPerHour`, `maintenanceWindows`, `abortLatencyMs`, `verifyMinutes`, `verifyTolerance`, `autoRollback` | see the card | Stored and checked now; slot moves start to use them in a later release. |
+| `maxCpuShare` | none | A share (0 to 1) of the slot CPU of the cluster that also makes a shard hot. |
+| `maxNetworkShare` | none | A share of the network traffic that makes a shard hot for advice only. |
+| `sustainMinutes` | 30 | How long a shard must stay hot before slots move off it. |
+| `slotCooldownDays` | 7 | How long a slot that moved stays put, except for a rollback. |
+| `noReturnDays` | 7 | How long a slot stays away from a shard it left, except for a rollback. |
+| `maxMigrationsPerHour` | 4 | Moves per hour; a move takes slots from one source to one target. |
+| `maxBytesPerHour` | 2 GiB | Bytes moved per hour, estimated from key counts and the average key size. |
+| `maintenanceWindows` | none (any time) | Days, a start time (UTC) and a duration in minutes. |
+| `abortLatencyMs` | 50 | The latency of a source or target node, held for 5 seconds, that stops a move. |
+| `verifyMinutes` | 10 | How long the load is measured after a move to judge it. |
+| `verifyTolerance` | 0.5 | A move that drops the source CPU by less than this share of the projected drop counts as ineffective. |
+| `autoRollback` | on | Roll back a move that made the load worse. |
 
-The rebalance suggestion uses the policy as it reads 30 seconds after a save at the latest, and a change makes every suggestion again. When the policy cannot be read, the suggestions made before stay as they are.
+Only `triggerRatio`, `resolveRatio`, `nodeCpuLimitUsecPerSecond`, `excludedShardIds` and `excludedSlots` change anything now. The other fields are checked and stored; slot moves start to use them in a later release.
+
+The rebalance suggestion uses the policy as it reads 30 seconds after a save at the latest, and a change makes every suggestion again. When the policy cannot be read, the suggestions made before stay as they are, but a suggestion is still held back when a primary is unhealthy or the primaries changed since the last load sample.
+
+A stored policy that no longer validates is not replaced by the defaults. Each field that does not validate reads as its default until the policy is saved again, a warning is logged, and the card shows the problems. When the excluded shards or slots cannot be read, no slot moves are suggested until an admin saves the policy again.
 
 **API.** The routes take the connection in `X-Connection-Id` and need the Anomaly Detection feature (Pro).
 
-- `GET /api/anomaly/placement` answers `{ connectionId, mode, effectiveMode, selectableModes, support, balance, settings, policyVersion }`. `settings` is the placement policy and `policyVersion` the number of times it was saved (`0` before the first save). `connectionId` is the seed connection. `support` has `issues` (each with `reason`, `detail`, and `provider` for `provider_managed`) and `modes`, which gives `available` and `blockedBy` for every mode. `balance` lists each shard with its `address`, `slotCount`, `cpuUsecPerSecond`, `cpuShare`, `networkShare`, `ratio` to the median (`null` for a shard without slots) and `overTrigger`, with the `medianCpuUsecPerSecond`, the `triggerRatio` and the `resolveRatio` of the policy; it is `null` until a load sample is in, and again once the latest sample is older than the metrics staleness bound, and `overTrigger` is never set while the load is `settling` or with fewer than 3 shards that own slots.
+- `GET /api/anomaly/placement` answers `{ connectionId, mode, effectiveMode, selectableModes, support, balance, settings, policyVersion, policyInvalid }`. `settings` is the placement policy and `policyVersion` the number of times it was saved (`0` before the first save). `policyInvalid` is `null`, or `{ problems, exclusionsReadable }` when the stored policy does not validate: `problems` lists each field that now reads as its default, and `exclusionsReadable` is `false` when the excluded shards or slots could not be read. `connectionId` is the seed connection. `support` has `issues` (each with `reason`, `detail`, and `provider` for `provider_managed`) and `modes`, which gives `available` and `blockedBy` for every mode. `balance` lists each shard with its `address`, `slotCount`, `cpuUsecPerSecond`, `cpuShare`, `networkShare`, `ratio` to the median (`null` for a shard without slots) and `overTrigger`, with the `medianCpuUsecPerSecond`, the `triggerRatio` and the `resolveRatio` of the policy; it is `null` until a load sample is in, and again once the latest sample is older than the metrics staleness bound, and `overTrigger` is never set while the load is `settling` or with fewer than 3 shards that own slots.
 - `PUT /api/anomaly/placement/mode` with `{ "mode": "observe" }` or `{ "mode": "recommend" }` sets the mode and answers like the `GET`. It needs the admin role. A mode that is not available yet, or one the cluster does not support, answers `400` with the reason in `message`; for a mode the cluster does not support, `blockedBy` names the blocking reason. It is recorded in the activity log as `placement.mode`, with the seed connection as the target.
 - `PUT /api/anomaly/placement/policy` with `{ "policy": { ...every field... }, "version": 3 }` saves the policy and answers like the `GET`. `version` is the `policyVersion` the policy was read at. It needs the admin role. A policy that does not validate answers `400` with each problem in `errors`, for example `resolveRatio` at or over `triggerRatio`, a maintenance window with no duration, or a slot over 16383. When someone saved the policy since it was read, it answers `409` with `reason: "version_conflict"` and saves nothing: read it again and redo the change. It is recorded in the activity log as `placement.policy`, with the seed connection as the target.
 

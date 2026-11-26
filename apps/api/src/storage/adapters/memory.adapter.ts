@@ -99,7 +99,7 @@ import type {
   AppendProposalAuditInput,
 } from '@betterdb/shared';
 import {
-  DEFAULT_PLACEMENT_SETTINGS,
+  defaultPlacementSettings,
   PROPOSAL_DEFAULT_EXPIRY_MS,
   variantPayloadSchemaFor,
   MEMORY_PROPOSAL_DEFAULT_EXPIRY_MS,
@@ -1470,7 +1470,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async getPlacementPolicy(connectionId: string): Promise<PlacementPolicy | null> {
     const policy = this.placementPolicies.get(connectionId);
-    return policy ? { ...policy } : null;
+    return policy ? structuredClone(policy) : null;
   }
 
   async savePlacementMode(write: PlacementModeWrite): Promise<PlacementPolicy> {
@@ -1478,12 +1478,12 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     const policy: PlacementPolicy = {
       connectionId: write.connectionId,
       mode: write.mode,
-      settings: current?.settings ?? DEFAULT_PLACEMENT_SETTINGS,
+      settings: current?.settings ?? defaultPlacementSettings(),
       version: current?.version ?? 0,
       updatedAt: write.updatedAt,
     };
     this.placementPolicies.set(write.connectionId, policy);
-    return { ...policy };
+    return structuredClone(policy);
   }
 
   async savePlacementSettings(
@@ -1495,12 +1495,12 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     const policy: PlacementPolicy = {
       connectionId: write.connectionId,
       mode: current?.mode ?? write.modeIfNew,
-      settings: write.settings,
+      settings: structuredClone(write.settings),
       version: expectedVersion + 1,
       updatedAt: write.updatedAt,
     };
     this.placementPolicies.set(write.connectionId, policy);
-    return { ...policy };
+    return structuredClone(policy);
   }
 
   private kvCacheSnapshots: KvCacheFootprintSnapshot[] = [];

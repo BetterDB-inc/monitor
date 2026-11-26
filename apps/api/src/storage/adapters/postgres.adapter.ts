@@ -7,13 +7,12 @@ import { POSTGRES_LEGACY_ANOMALY_BACKFILL } from './anomaly-kind-backfill';
 import { toIncidentBoundary } from './incident-boundary-row';
 import { otelSpanCap, otelSpanCapCheckInterval, otelSpanLowWaterMark } from '../otel-span-cap';
 import { randomUUID } from 'crypto';
-import { parseStoredJson } from './stored-json';
 import {
   parseSshTunnel,
   parseMembership,
   parseTlsConfig,
   parseNodeAvailabilityZones,
-  placementSettingsOf,
+  readStoredPlacementSettings,
 } from '@betterdb/shared';
 import type {
   StoredScalingReadinessScore,
@@ -4707,12 +4706,14 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   private placementPolicyFromRow(row: Record<string, any>): PlacementPolicy {
+    const { settings, invalid } = readStoredPlacementSettings(row.policy);
     return {
       connectionId: row.connection_id,
       mode: row.mode,
-      settings: placementSettingsOf(parseStoredJson(row.policy)),
+      settings,
       version: Number(row.version),
       updatedAt: Number(row.updated_at),
+      ...(invalid ? { invalid } : {}),
     };
   }
 

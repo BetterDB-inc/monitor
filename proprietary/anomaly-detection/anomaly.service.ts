@@ -37,6 +37,7 @@ import {
   ReplicationRecoveredData,
   WebhookEventType,
   clusterNodeState,
+  excludedPrimaryIds,
   INCIDENT_LOOKBACK_MS,
   type ClusterNodeRef,
   type ServedClusterNodeRef,
@@ -7201,6 +7202,32 @@ export class AnomalyService
     }
   }
 
+  private holdRebalanceOnTopology(
+    connectionId: string,
+    timestamp: number,
+    sample: ShardLoadSample,
+    findings: HotShardFinding[],
+    nodes: ClusterNode[],
+  ): void {
+    const blocker = this.rebalanceTopologyBlocker(sample, nodes);
+    if (!blocker) return;
+    const eventIds = this.hotShardEventIds.get(connectionId);
+    const held = new Map(
+      findings
+        .map((finding) => hotShardSignature(finding.shardId))
+        .filter(
+          (signature) =>
+            eventIds?.has(signature) || this.hotShardRebalance.get(connectionId)?.has(signature),
+        )
+        .map((signature) => [
+          signature,
+          { verdict: noRebalancePlan(blocker), computedAt: timestamp, ownership: '' },
+        ]),
+    );
+    if (held.size > 0) this.hotShardRebalance.set(connectionId, held);
+    else this.hotShardRebalance.delete(connectionId);
+  }
+
   private async refreshRebalance(
     ctx: ConnectionContext,
     timestamp: number,
@@ -7210,12 +7237,17 @@ export class AnomalyService
     slots: ReadonlyMap<string, SlotLoadRate[]>,
   ): Promise<void> {
     const connectionId = ctx.connectionId;
-    let policy: RebalancePolicy;
+    let stored: RebalancePolicy;
     try {
-      policy = await this.rebalancePolicyFor(connectionId);
+      stored = await this.rebalancePolicyFor(connectionId);
     } catch {
+      this.holdRebalanceOnTopology(connectionId, timestamp, sample, findings, nodes);
       return;
     }
+    const policy: RebalancePolicy = {
+      ...stored,
+      excludedShardIds: excludedPrimaryIds(stored.excludedShardIds, nodes),
+    };
     const eventIds = this.hotShardEventIds.get(connectionId);
     const known = this.hotShardRebalance.get(connectionId);
     const unhealthy = this.unhealthySlotOwners(sample, nodes).map(

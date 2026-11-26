@@ -1,6 +1,8 @@
 import {
   DEFAULT_PLACEMENT_SETTINGS,
-  placementSettingsOf,
+  defaultPlacementSettings,
+  excludedPrimaryIds,
+  readStoredPlacementSettings,
   validatePlacementSettings,
   type PlacementSettings,
 } from '@betterdb/shared';
@@ -126,21 +128,94 @@ describe('placement policy settings', () => {
     expect(errorsOf('policy')).not.toEqual([]);
   });
 
-  describe('reading stored settings', () => {
-    it('reads nothing stored as the defaults', () => {
-      expect(placementSettingsOf(null)).toEqual(DEFAULT_PLACEMENT_SETTINGS);
-    });
+  it('hands out the defaults frozen, and fresh copies to change', () => {
+    expect(Object.isFrozen(DEFAULT_PLACEMENT_SETTINGS)).toBe(true);
+    expect(() => DEFAULT_PLACEMENT_SETTINGS.excludedSlots.push(1)).toThrow();
+    const copy = defaultPlacementSettings();
+    copy.excludedSlots.push(1);
+    expect(copy).toEqual({ ...DEFAULT_PLACEMENT_SETTINGS, excludedSlots: [1] });
+    expect(DEFAULT_PLACEMENT_SETTINGS.excludedSlots).toEqual([]);
+  });
 
-    it('fills fields a stored document is missing from the defaults', () => {
-      expect(placementSettingsOf({ sustainMinutes: 45 })).toEqual({
-        ...DEFAULT_PLACEMENT_SETTINGS,
-        sustainMinutes: 45,
+  describe('reading stored settings', () => {
+    const stored = {
+      ...DEFAULT_PLACEMENT_SETTINGS,
+      excludedShardIds: ['n1'],
+      excludedSlots: [5, 6],
+    };
+
+    it('reads nothing stored as the defaults', () => {
+      expect(readStoredPlacementSettings(null)).toEqual({
+        settings: DEFAULT_PLACEMENT_SETTINGS,
+        invalid: null,
       });
     });
 
-    it('reads a stored document that no longer validates as the defaults', () => {
-      expect(placementSettingsOf({ resolveRatio: 3 })).toEqual(DEFAULT_PLACEMENT_SETTINGS);
-      expect(placementSettingsOf('garbage')).toEqual(DEFAULT_PLACEMENT_SETTINGS);
+    it('reads a stored JSON document', () => {
+      expect(readStoredPlacementSettings(JSON.stringify(stored))).toEqual({
+        settings: stored,
+        invalid: null,
+      });
+    });
+
+    it('fills fields a stored document is missing from the defaults', () => {
+      expect(readStoredPlacementSettings({ sustainMinutes: 45 })).toEqual({
+        settings: { ...DEFAULT_PLACEMENT_SETTINGS, sustainMinutes: 45 },
+        invalid: null,
+      });
+    });
+
+    it('keeps the exclusions of a document with another field that no longer validates', () => {
+      const read = readStoredPlacementSettings({ ...stored, sustainMinutes: 5000 });
+      expect(read.settings).toEqual(stored);
+      expect(read.invalid).toEqual({
+        problems: [expect.stringContaining('sustainMinutes')],
+        exclusionsReadable: true,
+      });
+    });
+
+    it('falls back on both ratios when they no longer fit together, and keeps the exclusions', () => {
+      const read = readStoredPlacementSettings({ ...stored, triggerRatio: 1.1 });
+      expect(read.settings).toEqual(stored);
+      expect(read.invalid?.problems).toEqual([expect.stringContaining('resolveRatio')]);
+      expect(read.invalid?.exclusionsReadable).toBe(true);
+    });
+
+    it('says the exclusions cannot be read when one of them does not validate', () => {
+      const read = readStoredPlacementSettings({ ...stored, excludedSlots: [5, 99999] });
+      expect(read.settings.excludedShardIds).toEqual(['n1']);
+      expect(read.invalid).toEqual({
+        problems: [expect.stringContaining('excludedSlots.1')],
+        exclusionsReadable: false,
+      });
+    });
+
+    it('says the exclusions cannot be read from a document that is not JSON or not an object', () => {
+      for (const garbage of ['{not json', '"policy"', '[1]', 7]) {
+        expect(readStoredPlacementSettings(garbage)).toEqual({
+          settings: DEFAULT_PLACEMENT_SETTINGS,
+          invalid: { problems: [expect.any(String)], exclusionsReadable: false },
+        });
+      }
+    });
+  });
+
+  describe('excluded primaries', () => {
+    const nodes = [
+      { id: 'p1', master: '-' },
+      { id: 'r1', master: 'p1' },
+      { id: 'p2', master: '-' },
+      { id: 'old', master: 'p2' },
+    ];
+
+    it('excludes the primary of every node listed, so a failover keeps the shard excluded', () => {
+      expect(excludedPrimaryIds(['p1'], nodes).sort()).toEqual(['p1']);
+      expect(excludedPrimaryIds(['r1'], nodes).sort()).toEqual(['p1', 'r1']);
+      expect(excludedPrimaryIds(['old'], nodes).sort()).toEqual(['old', 'p2']);
+    });
+
+    it('keeps a node it does not see', () => {
+      expect(excludedPrimaryIds(['gone'], nodes)).toEqual(['gone']);
     });
   });
 });

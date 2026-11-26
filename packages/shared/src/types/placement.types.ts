@@ -30,7 +30,7 @@ export interface PlacementSettings {
   autoRollback: boolean;
 }
 
-export const DEFAULT_PLACEMENT_SETTINGS: PlacementSettings = {
+export const DEFAULT_PLACEMENT_SETTINGS: Readonly<PlacementSettings> = Object.freeze({
   triggerRatio: 2,
   maxCpuShare: null,
   maxNetworkShare: null,
@@ -41,14 +41,28 @@ export const DEFAULT_PLACEMENT_SETTINGS: PlacementSettings = {
   noReturnDays: 7,
   maxMigrationsPerHour: 4,
   maxBytesPerHour: 2 * 1024 ** 3,
-  maintenanceWindows: [],
-  excludedShardIds: [],
-  excludedSlots: [],
+  maintenanceWindows: Object.freeze([]) as unknown as PlacementMaintenanceWindow[],
+  excludedShardIds: Object.freeze([]) as unknown as string[],
+  excludedSlots: Object.freeze([]) as unknown as number[],
   abortLatencyMs: 50,
   verifyMinutes: 10,
   verifyTolerance: 0.5,
   autoRollback: true,
-};
+});
+
+export function defaultPlacementSettings(): PlacementSettings {
+  return {
+    ...DEFAULT_PLACEMENT_SETTINGS,
+    maintenanceWindows: [],
+    excludedShardIds: [],
+    excludedSlots: [],
+  };
+}
+
+export interface PlacementPolicyInvalid {
+  problems: string[];
+  exclusionsReadable: boolean;
+}
 
 export interface PlacementPolicy {
   connectionId: string;
@@ -56,6 +70,7 @@ export interface PlacementPolicy {
   settings: PlacementSettings;
   version: number;
   updatedAt: number;
+  invalid?: PlacementPolicyInvalid;
 }
 
 export type PlacementModeWrite = Pick<PlacementPolicy, 'connectionId' | 'mode' | 'updatedAt'>;
@@ -129,4 +144,5 @@ export interface PlacementStatus {
   balance: PlacementBalance | null;
   settings: PlacementSettings;
   policyVersion: number;
+  policyInvalid: PlacementPolicyInvalid | null;
 }

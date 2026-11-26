@@ -2,6 +2,7 @@ import {
   PLACEMENT_MODES,
   type PlacementBalance,
   type PlacementMode,
+  type PlacementPolicyInvalid,
   type PlacementStatus,
 } from '@betterdb/shared';
 import { useState } from 'react';
@@ -144,6 +145,25 @@ function BalanceBars({ balance }: { balance: PlacementBalance | null }) {
   );
 }
 
+function PolicyInvalid({ invalid }: { invalid: PlacementPolicyInvalid | null }) {
+  if (!invalid) return null;
+  return (
+    <div role="alert" className="space-y-1 rounded-md border border-destructive/50 p-3">
+      <p className="font-medium text-destructive">The stored placement policy is invalid.</p>
+      <p className="text-muted-foreground">
+        {invalid.exclusionsReadable
+          ? 'The fields below use their defaults until the policy is saved again; the exclusions are kept.'
+          : 'The excluded shards and slots cannot be read, so no slot moves are suggested until the policy is saved again.'}
+      </p>
+      <ul className="list-disc pl-5 text-muted-foreground">
+        {invalid.problems.map((problem) => (
+          <li key={problem}>{problem}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 export function PlacementCard({ connectionId }: { connectionId: string | undefined }) {
   const { licensed, status, error, setMode, saving, modeError, savePolicy } =
     usePlacement(connectionId);
@@ -176,6 +196,7 @@ export function PlacementCard({ connectionId }: { connectionId: string | undefin
                   {modeError.message}
                 </p>
               )}
+              <PolicyInvalid invalid={status.policyInvalid} />
               <EffectiveMode status={status} />
               <Support status={status} />
               <BalanceBars balance={status.balance} />
