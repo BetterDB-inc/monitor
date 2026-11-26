@@ -132,6 +132,11 @@ import {
   withCommands,
 } from './rebalance-planner';
 import {
+  managedPlacementProvider,
+  type PlacementPrimaryRead,
+} from '../placement/placement-support';
+import { readPlacementPrimaryFacts } from '../placement/placement-primaries';
+import {
   type ConfirmedMove,
   type RebalanceCancelResult,
   type RebalanceRun,
@@ -152,7 +157,7 @@ import {
   startRun,
   withOutcome,
 } from './slot-rebalance-run';
-import { isManagedProviderBuild, isManagedProviderHost } from '@app/monitor/provider-detector';
+import { isManagedProviderBuild } from '@app/monitor/provider-detector';
 import {
   BACKLOG_COVERAGE_CRITICAL_SEC,
   BACKLOG_COVERAGE_WARNING_SEC,
@@ -7112,9 +7117,8 @@ export class AnomalyService
       if (reading) memory.set(shardIds[index], reading);
       if (server) servers.set(shardIds[index], server);
     }
-    const providerManaged =
-      isManagedProviderHost(ctx.host) ||
-      readings.some((info) => isManagedProviderBuild(info?.server));
+    const managedBuild = readings.find((info) => isManagedProviderBuild(info?.server));
+    const providerManaged = managedPlacementProvider(ctx.host, managedBuild?.server) !== null;
     return verdicts.map((verdict) =>
       verdict.kind === 'plan'
         ? withCommands(
@@ -7130,6 +7134,27 @@ export class AnomalyService
           )
         : verdict,
     );
+  }
+
+  async readPlacementPrimaries(connectionId: string): Promise<PlacementPrimaryRead[] | null> {
+    const discovery = this.clusterDiscovery;
+    if (!discovery || !this.dialsDataNodes(connectionId)) return null;
+    let nodes: DiscoveredNode[];
+    try {
+      nodes = await discovery.discoverNodes(connectionId);
+    } catch {
+      return null;
+    }
+    return readPlacementPrimaryFacts(nodes, {
+      info: (nodeId) => this.readShardInfo(connectionId, nodeId),
+      migrateSlotsInfo: (nodeId) =>
+        this.readShard(
+          connectionId,
+          nodeId,
+          'reading COMMAND INFO on the shard timed out',
+          (client) => client.call('COMMAND', 'INFO', 'CLUSTER|MIGRATESLOTS'),
+        ),
+    });
   }
 
   private async readShardInfo(
@@ -11393,9 +11418,10 @@ export class AnomalyService
         }
         this.refusedRebalancePlans.set(plan, 'server_refused');
         if (late) record();
-        if (late || (err instanceof Error && err.name === 'ReplyError')) {
-          return { status: 'refused', message: errorText(err) };
+        if (err instanceof Error && err.name === 'ReplyError') {
+          return { status: 'refused', message: errorText(err), serverReply: true };
         }
+        if (late) return { status: 'refused', message: errorText(err) };
         record();
         return {
           status: 'refused',

@@ -5,6 +5,7 @@ import { AnomalyService } from '../anomaly.service';
 import { AgentTokenGuard } from '@app/common/guards/agent-token.guard';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { LicenseGuard } from '@proprietary/licenses';
+import { PlacementService } from '../../placement/placement.service';
 
 describe('McpAnomalyController', () => {
   let controller: McpAnomalyController;
@@ -17,6 +18,7 @@ describe('McpAnomalyController', () => {
     getReplicationDivergenceHistory: jest.fn(),
   };
   const registry = { get: jest.fn() };
+  const placement = { withPlacementBlocker: jest.fn() };
 
   beforeEach(async () => {
     jest.clearAllMocks();
@@ -27,6 +29,7 @@ describe('McpAnomalyController', () => {
       providers: [
         { provide: AnomalyService, useValue: svc },
         { provide: ConnectionRegistry, useValue: registry },
+        { provide: PlacementService, useValue: placement },
       ],
     })
       .overrideGuard(AgentTokenGuard)
@@ -170,25 +173,23 @@ describe('McpAnomalyController', () => {
     expect(svc.getRetryAmplificationStatus).not.toHaveBeenCalled();
   });
 
-  it('hot shards returns the open hot shards of the instance with their suggestion', () => {
+  it('hot shards returns the open hot shards of the instance marked with the placement mode', async () => {
     const shards = [{ shardId: 'a0000000', rebalance: { kind: 'plan', moves: [] } }];
+    const marked = [{ shardId: 'a0000000', rebalance: { kind: 'plan', moves: [], execution: { available: false, blockedBy: 'observe_mode' } } }];
     svc.getHotShards.mockReturnValue(shards);
+    placement.withPlacementBlocker.mockResolvedValue(marked);
 
-    expect(controller.getHotShards('inst1')).toBe(shards);
+    expect(await controller.getHotShards('inst1')).toBe(marked);
     expect(svc.getHotShards).toHaveBeenCalledWith('inst1');
+    expect(placement.withPlacementBlocker).toHaveBeenCalledWith('inst1', shards);
   });
 
-  it('hot shards returns 404 for an unregistered instance', () => {
+  it('hot shards returns 404 for an unregistered instance', async () => {
     registry.get.mockImplementationOnce(() => {
       throw new NotFoundException('nope');
     });
 
-    let caught: unknown;
-    try {
-      controller.getHotShards('ghost');
-    } catch (error) {
-      caught = error;
-    }
+    const caught = await controller.getHotShards('ghost').catch((error: unknown) => error);
 
     expect((caught as HttpException).getStatus()).toBe(404);
     expect(svc.getHotShards).not.toHaveBeenCalled();

@@ -67,7 +67,7 @@ const PROVIDER_OVERRIDE_ALIASES: Record<string, Provider> = {
   unknown: 'unknown',
 };
 
-function readProviderOverride(): Provider | null {
+export function readProviderOverride(): Provider | null {
   const raw = process.env.MONITOR_PROVIDER_OVERRIDE;
   if (!raw) {
     return null;
@@ -114,7 +114,7 @@ export function isManagedProviderHost(host: string | undefined): boolean {
   return provider !== null && provider !== 'unknown';
 }
 
-function matchByHost(host: string | undefined): Provider | null {
+export function matchByHost(host: string | undefined): Provider | null {
   if (!host) return null;
   const lower = host.toLowerCase();
   for (const { suffix, provider } of HOST_SUFFIXES) {

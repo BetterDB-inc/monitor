@@ -10,6 +10,10 @@ jest.mock('@proprietary/licenses', () => ({
   Feature: { ANOMALY_DETECTION: 'anomaly-detection' },
 }));
 
+const passThrough = {
+  withPlacementBlocker: async (_connectionId: string, shards: unknown) => shards,
+} as never;
+
 describe('AnomalyController time bounds', () => {
   const service = {
     getRecentAnomalies: jest.fn().mockResolvedValue([]),
@@ -19,7 +23,7 @@ describe('AnomalyController time bounds', () => {
     getIncidentTimelines: jest.fn().mockResolvedValue([]),
     getIncidentTimeline: jest.fn().mockResolvedValue({}),
   };
-  const controller = new AnomalyController(service as unknown as AnomalyService);
+  const controller = new AnomalyController(service as unknown as AnomalyService, passThrough);
 
   const routes: Array<[string, (start?: string, end?: string) => Promise<unknown>]> = [
     ['events', async (s, e) => controller.getEvents(undefined, undefined, undefined, s, e)],
@@ -78,7 +82,7 @@ describe('AnomalyController time bounds', () => {
 
 describe('AnomalyController incident limit', () => {
   const service = { getIncidentTimelines: jest.fn().mockResolvedValue([]) };
-  const controller = new AnomalyController(service as unknown as AnomalyService);
+  const controller = new AnomalyController(service as unknown as AnomalyService, passThrough);
 
   beforeEach(() => jest.clearAllMocks());
 
@@ -121,7 +125,7 @@ describe('AnomalyController fan-out coverage', () => {
     timestamp: 1_000,
   };
   const service = { getFanoutCoverage: jest.fn().mockReturnValue([coverage]) };
-  const controller = new AnomalyController(service as unknown as AnomalyService);
+  const controller = new AnomalyController(service as unknown as AnomalyService, passThrough);
 
   beforeEach(() => jest.clearAllMocks());
 
@@ -139,7 +143,7 @@ describe('AnomalyController fan-out coverage', () => {
 
 describe('AnomalyController incident by event', () => {
   const service = { findIncidentIdByEvent: jest.fn() };
-  const controller = new AnomalyController(service as unknown as AnomalyService);
+  const controller = new AnomalyController(service as unknown as AnomalyService, passThrough);
 
   beforeEach(() => jest.clearAllMocks());
 
@@ -177,13 +181,25 @@ describe('AnomalyController hot shards', () => {
     keySource: 'lfu',
   };
   const service = { getHotShards: jest.fn().mockReturnValue([detail]) };
-  const controller = new AnomalyController(service as unknown as AnomalyService);
+  const controller = new AnomalyController(service as unknown as AnomalyService, passThrough);
 
   beforeEach(() => jest.clearAllMocks());
 
-  it('returns the open hot shards of the connection in the header', () => {
-    expect(controller.getHotShards('c1')).toEqual([detail]);
+  it('returns the open hot shards of the connection in the header', async () => {
+    expect(await controller.getHotShards('c1')).toEqual([detail]);
     expect(service.getHotShards).toHaveBeenCalledWith('c1');
+  });
+
+  it('marks the hot shards with the placement mode of the cluster', async () => {
+    const blocked = [{ ...detail, rebalance: { kind: 'plan' } }];
+    const placement = { withPlacementBlocker: jest.fn().mockResolvedValue(blocked) };
+    const withPlacement = new AnomalyController(
+      service as unknown as AnomalyService,
+      placement as never,
+    );
+
+    expect(await withPlacement.getHotShards('c1')).toBe(blocked);
+    expect(placement.withPlacementBlocker).toHaveBeenCalledWith('c1', [detail]);
   });
 
   it('is served at hot-shards and requires the connection header', () => {
@@ -206,7 +222,7 @@ describe('AnomalyController.getTopologyDivergence', () => {
     partialMembership: [],
   };
   const service = { getTopologyDivergence: jest.fn().mockReturnValue(report) };
-  const controller = new AnomalyController(service as unknown as AnomalyService);
+  const controller = new AnomalyController(service as unknown as AnomalyService, passThrough);
 
   beforeEach(() => jest.clearAllMocks());
 
@@ -234,7 +250,7 @@ describe('AnomalyController.getTopologyDisagreements', () => {
     shards: [],
   };
   const service = { getTopologyDisagreements: jest.fn().mockReturnValue(summary) };
-  const controller = new AnomalyController(service as unknown as AnomalyService);
+  const controller = new AnomalyController(service as unknown as AnomalyService, passThrough);
 
   beforeEach(() => jest.clearAllMocks());
 
@@ -276,7 +292,7 @@ describe('AnomalyController.startTopologyFullCheck', () => {
     getTopologyFullCheck: jest.fn().mockReturnValue(fullCheck),
     getTopologyDisagreements: jest.fn(),
   };
-  const controller = new AnomalyController(service as unknown as AnomalyService);
+  const controller = new AnomalyController(service as unknown as AnomalyService, passThrough);
 
   async function refusal(): Promise<HttpException> {
     return controller.startTopologyFullCheck('c1').then(
@@ -386,7 +402,7 @@ describe('AnomalyController.startTopologyFullCheck', () => {
 describe('AnomalyController slot rebalance runs', () => {
   const run = { sourceShardId: 'src', startedBy: { userId: 'u1', email: 'admin@example.com' } };
   const service = { followRebalanceRuns: jest.fn().mockResolvedValue([run]) };
-  const controller = new AnomalyController(service as unknown as AnomalyService);
+  const controller = new AnomalyController(service as unknown as AnomalyService, passThrough);
   const asRole = (role: 'admin' | 'member' | null) =>
     ({ actor: role ? { userId: 'u2', role } : null }) as never;
 
@@ -400,5 +416,37 @@ describe('AnomalyController slot rebalance runs', () => {
       const [listed] = await controller.getRebalanceRuns('c1', asRole(role));
       expect(listed.startedBy).toEqual({ userId: 'u1', email: null });
     }
+  });
+});
+
+describe('AnomalyController rebalance and the placement mode', () => {
+  const moves = { moves: [{ targetShardId: 't1', ranges: [[0, 10]] }] };
+  const admin = { actor: { userId: 'u1', email: 'a@example.com', role: 'admin' } } as never;
+
+  it('answers a plan the placement mode blocks with 403', async () => {
+    const service = { runRebalance: jest.fn() };
+    const placement = {
+      runRebalance: jest.fn().mockResolvedValue({ status: 'blocked', blockedBy: 'observe_mode' }),
+    };
+    const controller = new AnomalyController(
+      service as unknown as AnomalyService,
+      placement as never,
+    );
+    await expect(controller.runRebalance('c1', 'src', moves, admin)).rejects.toMatchObject({
+      response: { blockedBy: 'observe_mode' },
+    });
+    expect(placement.runRebalance).toHaveBeenCalledWith('c1', 'src', moves.moves, {
+      userId: 'u1',
+      email: 'a@example.com',
+    });
+    expect(service.runRebalance).not.toHaveBeenCalled();
+  });
+
+  it('answers a refused run with 502', async () => {
+    const placement = {
+      runRebalance: jest.fn().mockResolvedValue({ status: 'refused', message: 'NOPERM no' }),
+    };
+    const controller = new AnomalyController({} as AnomalyService, placement as never);
+    await expect(controller.runRebalance('c1', 'src', moves, admin)).rejects.toThrow('NOPERM no');
   });
 });

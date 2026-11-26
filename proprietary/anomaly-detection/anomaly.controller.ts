@@ -19,6 +19,7 @@ import {
 } from '@nestjs/common';
 import { ApiHeader, ApiOperation } from '@nestjs/swagger';
 import { AnomalyService } from './anomaly.service';
+import { PlacementService } from '../placement/placement.service';
 import { IncidentTimeline } from './incident-timeline';
 import {
   AnomalyEvent,
@@ -64,7 +65,10 @@ function parseLimit(value: string | undefined, fallback: number): number {
 
 @Controller('anomaly')
 export class AnomalyController {
-  constructor(private readonly anomalyService: AnomalyService) {}
+  constructor(
+    private readonly anomalyService: AnomalyService,
+    private readonly placement: PlacementService,
+  ) {}
 
   @Get('events')
   @UseGuards(LicenseGuard)
@@ -181,8 +185,11 @@ export class AnomalyController {
   @UseGuards(LicenseGuard)
   @RequiresFeature(Feature.ANOMALY_DETECTION)
   @ApiHeader({ name: CONNECTION_ID_HEADER, required: true, description: 'Connection ID of the cluster' })
-  getHotShards(@ConnectionId({ required: true }) connectionId: string): ServedHotShardDetail[] {
-    return this.anomalyService.getHotShards(connectionId);
+  async getHotShards(
+    @ConnectionId({ required: true }) connectionId: string,
+  ): Promise<ServedHotShardDetail[]> {
+    const shards = this.anomalyService.getHotShards(connectionId);
+    return this.placement.withPlacementBlocker(connectionId, shards);
   }
 
   @Post('hot-shards/:shardId/rebalance')
@@ -201,7 +208,7 @@ export class AnomalyController {
       throw new BadRequestException('moves must list each target shard with its slot ranges');
     }
     const actor = request.actor;
-    const result = await this.anomalyService.runRebalance(connectionId, shardId, confirmed, {
+    const result = await this.placement.runRebalance(connectionId, shardId, confirmed, {
       userId: actor?.userId ?? null,
       email: actor?.email ?? null,
     });

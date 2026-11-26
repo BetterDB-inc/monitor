@@ -174,6 +174,7 @@ Clients that load skills from a plugin (Connect Apps and other skill-aware clien
 | `get_anomalies` | Anomaly detection events *(Pro)* |
 | `get_retry_amplification` | Live retry-amplification state, last episode and top clients *(Pro)* |
 | `get_hot_shards` | Open hot shards on a cluster with their top slots, hot keys and a suggested slot rebalance, or the reason none is suggested *(Pro)* |
+| `get_placement_status` | Slot placement mode of a cluster, the reasons it can't take slot moves, and each shard's load against the median *(Pro)* |
 | `get_topology_disagreements` | Where the nodes of a cluster disagree about slot owners, config epochs, failure flags or membership, with the number of views on each side and one line per shard, plus the last check that set out to ask every node when one was run from the Cluster page *(Pro)* |
 | `get_client_activity` | Time-bucketed client activity from persisted snapshots |
 | `get_acl_audit` | ACL audit log entries |

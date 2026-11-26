@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection of the monitor points at that node.
 - `get_cluster_nodes` returns `collected` for each node, with the
   `connectionId` of the connection that collects it.
+- `get_placement_status`: the slot placement mode of a cluster (Observe or
+  Recommend), the reasons it can't take slot moves, such as a managed
+  service or a server before Valkey 9.0, and each shard's CPU against the
+  median shard. Read-only.
 - `get_topology_disagreements`: where the nodes of a cluster disagree about
   slot owners, config epochs, failure flags or membership, with the number
   of views on each side, and one line per shard. Built for large clusters:

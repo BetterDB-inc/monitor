@@ -2945,6 +2945,18 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
   }
 
+  get shardLoadStalenessMs(): number {
+    return this.stalenessMs;
+  }
+
+  collectsClusterSlotStats(connectionId: string, client: DatabasePort): boolean {
+    return (
+      this.slotStatsTopN > 0 &&
+      client.getCapabilities().hasClusterSlotStats &&
+      this.runtimeCapabilityTracker.isAvailable(connectionId, 'canClusterSlotStats')
+    );
+  }
+
   private async readSlotStats(
     client: DatabasePort,
     connectionId: string,
@@ -2958,10 +2970,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     if (this.slotStatsTopN === 0) {
       return;
     }
-    if (
-      !client.getCapabilities().hasClusterSlotStats ||
-      !this.runtimeCapabilityTracker.isAvailable(connectionId, 'canClusterSlotStats')
-    ) {
+    if (!this.collectsClusterSlotStats(connectionId, client)) {
       this.clearSlotSeries(connectionId, connLabel, state);
       return;
     }

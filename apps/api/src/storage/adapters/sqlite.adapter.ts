@@ -23,6 +23,8 @@ import type {
   ReadinessDimension,
   ReadinessDimensionKey,
   ScalingReadinessSettings,
+  PlacementPolicy,
+  PlacementMode,
   KvCacheEngineSample,
   KvCacheFootprintSnapshot,
   KvCacheModelFootprint,
@@ -707,7 +709,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       // the tables don't exist yet and this is a no-op.
       this.migrateConnectionId();
       // Create schema
+      const placementPoliciesExisted = this.tableExists('placement_policies');
       this.createSchema();
+      this.ensurePlacementPolicies(placementPoliciesExisted);
       // Run migrations for existing databases
       this.runMigrations();
       this.ensureLogRunIdUniqueIndexes();
@@ -1922,6 +1926,31 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (hasDatasetVersionColumn && !hasIdColumn) {
       this.db.exec('DROP TABLE cve_advisories');
     }
+  }
+
+  private tableExists(name: string): boolean {
+    if (!this.db) return false;
+    return !!this.db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(name);
+  }
+
+  private ensurePlacementPolicies(existedBefore: boolean): void {
+    const db = this.db;
+    if (!db) return;
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS placement_policies (
+          connection_id TEXT PRIMARY KEY,
+          mode TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+      `);
+      if (existedBefore || !this.tableExists('connections')) return;
+      this.ensureConnectionsSchema();
+      db.prepare(
+        `INSERT OR IGNORE INTO placement_policies (connection_id, mode, updated_at)
+         SELECT id, 'recommend', ? FROM connections WHERE membership IS NULL`,
+      ).run(Date.now());
+    })();
   }
 
   private createSchema(): void {
@@ -4667,6 +4696,29 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return settings;
   }
 
+  async getPlacementPolicy(connectionId: string): Promise<PlacementPolicy | null> {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db
+      .prepare('SELECT connection_id, mode, updated_at FROM placement_policies WHERE connection_id = ?')
+      .get(connectionId) as { connection_id: string; mode: PlacementMode; updated_at: number } | undefined;
+    if (!row) return null;
+    return { connectionId: row.connection_id, mode: row.mode, updatedAt: row.updated_at };
+  }
+
+  async savePlacementPolicy(policy: PlacementPolicy): Promise<PlacementPolicy> {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db
+      .prepare(
+        `INSERT INTO placement_policies (connection_id, mode, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(connection_id) DO UPDATE SET
+           mode = excluded.mode,
+           updated_at = excluded.updated_at`,
+      )
+      .run(policy.connectionId, policy.mode, policy.updatedAt);
+    return policy;
+  }
+
   private kvCacheSnapshotFromRow(r: Record<string, any>): KvCacheFootprintSnapshot {
     return {
       connectionId: r.connection_id,
@@ -6204,6 +6256,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.db) throw new Error('Database not initialized');
 
     this.db.prepare('DELETE FROM connections WHERE id = ?').run(id);
+    this.db.prepare('DELETE FROM placement_policies WHERE connection_id = ?').run(id);
   }
 
   async updateConnection(id: string, updates: Partial<DatabaseConnectionConfig>): Promise<void> {

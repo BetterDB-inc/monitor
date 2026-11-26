@@ -4,6 +4,8 @@ import { AnomalyService } from './anomaly.service';
 import { ANOMALY_EVENT_SINK } from './types';
 import { AnomalyController } from './anomaly.controller';
 import { McpAnomalyController } from './mcp-anomaly.controller';
+import { PlacementService } from '../placement/placement.service';
+import { McpPlacementController, PlacementController } from '../placement/placement.controller';
 import { AgentTokenGuard } from '@app/common/guards/agent-token.guard';
 import { createAgentTokenProviders } from '@app/common/guards/agent-token-providers';
 import { StorageModule } from '@app/storage/storage.module';
@@ -19,9 +21,10 @@ const tokenProviders = createAgentTokenProviders(logger, () => {
 
 @Module({
   imports: [StorageModule, PrometheusModule, SlowLogAnalyticsModule, CommandLogAnalyticsModule, ClusterModule],
-  controllers: [AnomalyController, McpAnomalyController],
+  controllers: [AnomalyController, McpAnomalyController, PlacementController, McpPlacementController],
   providers: [
     AnomalyService,
+    PlacementService,
     AgentTokenGuard,
     ...tokenProviders,
     {

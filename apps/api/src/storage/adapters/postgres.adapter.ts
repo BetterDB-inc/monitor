@@ -21,6 +21,7 @@ import type {
 import type {
   ReadinessDimension,
   ScalingReadinessSettings,
+  PlacementPolicy,
   KvCacheEngineSample,
   KvCacheFootprintSnapshot,
   KvCacheModelFootprint,
@@ -532,6 +533,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         try {
           await this.migrateConnectionId();
           await this.createSchema();
+          await this.ensurePlacementPolicies();
           if (!(await this.hasAnomalyKindColumn())) await this.addAnomalyKindColumn();
           await this.ensureOtelIngestedIndex();
           await this.migrateLogSourceKeys();
@@ -1625,6 +1627,39 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         `[postgres] ${skipped} pending memory proposal(s) left unkeyed during backfill — ` +
           `already duplicates of another pending row, or an unparseable payload.`,
       );
+    }
+  }
+
+  private async ensurePlacementPolicies(): Promise<void> {
+    if (!this.pool) return;
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const existed = await client.query(
+        `SELECT 1 FROM information_schema.tables
+         WHERE table_schema = current_schema() AND table_name = 'placement_policies'`,
+      );
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS placement_policies (
+          connection_id TEXT PRIMARY KEY,
+          mode TEXT NOT NULL,
+          updated_at BIGINT NOT NULL
+        )
+      `);
+      if (existed.rowCount === 0) {
+        await client.query(
+          `INSERT INTO placement_policies (connection_id, mode, updated_at)
+           SELECT id, 'recommend', $1 FROM connections WHERE membership IS NULL
+           ON CONFLICT (connection_id) DO NOTHING`,
+          [Date.now()],
+        );
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
     }
   }
 
@@ -4645,6 +4680,30 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return settings;
   }
 
+  async getPlacementPolicy(connectionId: string): Promise<PlacementPolicy | null> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      'SELECT connection_id, mode, updated_at FROM placement_policies WHERE connection_id = $1',
+      [connectionId],
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return { connectionId: row.connection_id, mode: row.mode, updatedAt: Number(row.updated_at) };
+  }
+
+  async savePlacementPolicy(policy: PlacementPolicy): Promise<PlacementPolicy> {
+    if (!this.pool) throw new Error('Database not initialized');
+    await this.pool.query(
+      `INSERT INTO placement_policies (connection_id, mode, updated_at)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (connection_id) DO UPDATE SET
+         mode = EXCLUDED.mode,
+         updated_at = EXCLUDED.updated_at`,
+      [policy.connectionId, policy.mode, policy.updatedAt],
+    );
+    return policy;
+  }
+
   private kvCacheSnapshotFromRow(r: Record<string, any>): KvCacheFootprintSnapshot {
     const json = <T>(v: unknown): T => (typeof v === 'string' ? JSON.parse(v) : v) as T;
     const nullableNumber = (v: unknown): number | null =>
@@ -6586,6 +6645,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
   async deleteConnection(id: string): Promise<void> {
     if (!this.pool) throw new Error('Database not initialized');
     await this.pool.query('DELETE FROM connections WHERE id = $1', [id]);
+    await this.pool.query('DELETE FROM placement_policies WHERE connection_id = $1', [id]);
   }
 
   async updateConnection(id: string, updates: Partial<DatabaseConnectionConfig>): Promise<void> {

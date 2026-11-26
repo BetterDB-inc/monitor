@@ -1,0 +1,13 @@
+{
+  "commit": "c1b24039",
+  "files": {
+    "apps/api/src/cluster/shard-load.ts": "458ec888d1497b120f571b7e342ea2e9baea01c18e4627940eb5a6458d0c5fba",
+    "apps/api/src/monitor/provider-detector.ts": "3aaed64f0e2351d973cb864b3e058a834d130358fbcb3ad8eb7b93782d34a935",
+    "proprietary/anomaly-detection/hot-shard-detector.ts": "d223c01294797ce7e94a71e63c3c222dff03f3143bcc719930f60143da1eec0f",
+    "proprietary/anomaly-detection/rebalance-planner.ts": "c6d7ffb1b201ec3d4b83b52e6f754dcbf702045ada8189985765107e05647cde",
+    "proprietary/placement/placement-balance.ts": "b2d4e30a19df3ab654c86804e2acd1da2607e1c2499608d960ed2bdb43db7430",
+    "proprietary/placement/placement-primaries.ts": "af1e4c2fe5a86d29a4acb9b7a374a296520f70fe8a4774af678a309af4785c25",
+    "proprietary/placement/placement-support.ts": "7807d67fcc17f44858ce8d5429850f0dec1d55b41c465b9995025f62bca72c77",
+    "proprietary/placement/placement.service.ts": "9864b6d2fb0a0c6fe4312832ed25f5581f5ecf4729b6014e864c00bde13b3378"
+  }
+}

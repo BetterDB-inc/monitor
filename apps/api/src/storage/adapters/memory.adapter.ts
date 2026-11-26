@@ -136,6 +136,7 @@ import type {
   ReadinessDimension,
   ReadinessDimensionKey,
   ScalingReadinessSettings,
+  PlacementPolicy,
   KvCacheEngineSample,
   KvCacheFootprintSnapshot,
   KvCacheSettings,
@@ -1418,6 +1419,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   private scalingReadinessScores: StoredScalingReadinessScore[] = [];
   private scalingReadinessSettings = new Map<string, ScalingReadinessSettings>();
+  private placementPolicies = new Map<string, PlacementPolicy>();
 
   async saveScalingReadinessScore(score: StoredScalingReadinessScore): Promise<void> {
     this.scalingReadinessScores.push({ ...score });
@@ -1461,6 +1463,16 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   ): Promise<ScalingReadinessSettings> {
     this.scalingReadinessSettings.set(settings.connectionId, { ...settings });
     return settings;
+  }
+
+  async getPlacementPolicy(connectionId: string): Promise<PlacementPolicy | null> {
+    const policy = this.placementPolicies.get(connectionId);
+    return policy ? { ...policy } : null;
+  }
+
+  async savePlacementPolicy(policy: PlacementPolicy): Promise<PlacementPolicy> {
+    this.placementPolicies.set(policy.connectionId, { ...policy });
+    return policy;
   }
 
   private kvCacheSnapshots: KvCacheFootprintSnapshot[] = [];
@@ -2161,6 +2173,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async deleteConnection(id: string): Promise<void> {
     this.connections.delete(id);
+    this.placementPolicies.delete(id);
   }
 
   async updateConnection(id: string, updates: Partial<DatabaseConnectionConfig>): Promise<void> {

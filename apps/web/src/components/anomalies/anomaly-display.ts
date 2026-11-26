@@ -177,4 +177,6 @@ export const REBALANCE_BLOCKED: Record<RebalanceExecutionBlocker, string> = {
     'The slots or the nodes changed since this suggestion was made. A new one follows.',
   server_refused:
     'The server refused the last start of this plan. It can run again once the suggestion is made again.',
+  observe_mode:
+    'This cluster is in Observe mode. Switch it to Recommend on the Cluster page to run plans.',
 };
