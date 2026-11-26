@@ -112,6 +112,7 @@ export class PlacementService implements OnModuleInit {
   private readonly logger = new Logger(PlacementService.name);
   private readonly invalidWarned = new Map<string, string>();
   private readonly policyCache = new Map<string, { at: number; policy: PlacementPolicy | null }>();
+  private readonly policyGeneration = new Map<string, number>();
   private readonly supportCache = new Map<string, { at: number; support: PlacementSupport }>();
   private readonly supportReads = new Map<string, Promise<PlacementSupport>>();
   private readonly aclDenied = new Map<string, string | null>();
@@ -169,6 +170,7 @@ export class PlacementService implements OnModuleInit {
       version,
     );
     if (!saved) throw new PlacementPolicyConflictError();
+    this.advancePolicy(seedId);
     this.policyCache.set(seedId, { at: Date.now(), policy: saved });
     return this.getStatus(seedId);
   }
@@ -215,8 +217,11 @@ export class PlacementService implements OnModuleInit {
   }
 
   private async readPolicy(seedId: string): Promise<PlacementPolicy | null> {
+    const generation = this.policyGeneration.get(seedId) ?? 0;
     const policy = await this.storage.getPlacementPolicy(seedId);
-    this.policyCache.set(seedId, { at: Date.now(), policy });
+    if ((this.policyGeneration.get(seedId) ?? 0) === generation) {
+      this.policyCache.set(seedId, { at: Date.now(), policy });
+    }
     this.warnInvalid(seedId, policy);
     return policy;
   }
@@ -240,12 +245,11 @@ export class PlacementService implements OnModuleInit {
   private async cachedPolicy(seedId: string): Promise<PlacementPolicy | null> {
     const cached = this.policyCache.get(seedId);
     if (cached && Date.now() - cached.at < POLICY_CACHE_MS) return cached.policy;
-    try {
-      return await this.readPolicy(seedId);
-    } catch (error) {
-      if (cached) return cached.policy;
-      throw error;
-    }
+    return this.readPolicy(seedId);
+  }
+
+  private advancePolicy(seedId: string): void {
+    this.policyGeneration.set(seedId, (this.policyGeneration.get(seedId) ?? 0) + 1);
   }
 
   async setMode(connectionId: string, mode: PlacementMode): Promise<PlacementStatus> {
@@ -260,6 +264,7 @@ export class PlacementService implements OnModuleInit {
       throw new PlacementModeError(issue?.detail ?? `The ${mode} mode is not supported here`, state.blockedBy);
     }
     await this.storage.savePlacementMode({ connectionId: seedId, mode, updatedAt: Date.now() });
+    this.advancePolicy(seedId);
     this.policyCache.delete(seedId);
     return this.getStatus(seedId);
   }
@@ -382,6 +387,7 @@ export class PlacementService implements OnModuleInit {
       this.supportReads,
       this.aclDenied,
       this.policyCache,
+      this.policyGeneration,
       this.invalidWarned,
     ]) {
       for (const seedId of cache.keys()) {

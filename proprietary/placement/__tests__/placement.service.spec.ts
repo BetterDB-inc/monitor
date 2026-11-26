@@ -333,6 +333,41 @@ describe('PlacementService', () => {
       }
     });
 
+    it('holds the planner when the cached policy is old and the storage cannot be read', async () => {
+      jest.useFakeTimers({ now: 1_000_000 });
+      try {
+        const { service, anomaly, storage } = await setup();
+        service.onModuleInit();
+        const resolve = anomaly.setRebalancePolicyResolver.mock.calls[0][0] as (
+          seedId: string,
+        ) => Promise<unknown>;
+        await resolve('seed');
+        jest.spyOn(storage, 'getPlacementPolicy').mockRejectedValue(new Error('db down'));
+        jest.setSystemTime(1_030_001);
+        await expect(resolve('seed')).rejects.toThrow('db down');
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('keeps a saved policy in the cache when an older read finishes after the save', async () => {
+      const { service, anomaly, storage } = await setup();
+      service.onModuleInit();
+      const resolve = anomaly.setRebalancePolicyResolver.mock.calls[0][0] as (
+        seedId: string,
+      ) => Promise<{ excludedSlots: readonly number[] }>;
+      const before = await storage.getPlacementPolicy('seed');
+      let finish: (policy: PlacementPolicy | null) => void = () => undefined;
+      jest
+        .spyOn(storage, 'getPlacementPolicy')
+        .mockImplementationOnce(() => new Promise((done) => (finish = done)));
+      const slow = service.settingsOf('seed', { fresh: true });
+      await service.setSettings('seed', tighter, 0);
+      finish(before);
+      expect((await slow).version).toBe(0);
+      expect((await resolve('seed')).excludedSlots).toEqual([7]);
+    });
+
     it('reads the settings with their version, and fresh past the half-minute cache', async () => {
       const { service, storage } = await setup();
       expect(await service.settingsOf('seed')).toEqual({
