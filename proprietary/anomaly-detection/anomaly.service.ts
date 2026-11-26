@@ -8413,10 +8413,12 @@ export class AnomalyService
     }
   }
 
-  private reshardReadIntervalMs(key: string, intervalMs: number): number {
+  private reshardReadIntervalMs(key: string, intervalMs: number, readsAhead = false): number {
     const connectionId = connectionOfStateKey(key);
     const readPolls =
-      key === connectionId ? this.ownTopologyReadPolls(connectionId) : this.nodeReadPolls(connectionId, key);
+      key === connectionId
+        ? this.ownTopologyReadPolls(connectionId, readsAhead)
+        : this.nodeReadPolls(connectionId, key);
     return intervalMs * readPolls;
   }
 
@@ -8440,9 +8442,10 @@ export class AnomalyService
     timestamp: number,
     intervalMs: number,
   ): boolean {
-    return entries.some(([key, shard]) =>
-      isReshardActive([shard], timestamp, RESHARD_QUIET_POLLS * this.reshardReadIntervalMs(key, intervalMs)),
-    );
+    return entries.some(([key, shard]) => {
+      const readEveryMs = this.reshardReadIntervalMs(key, intervalMs, true);
+      return isReshardActive([shard], timestamp, RESHARD_QUIET_POLLS * readEveryMs);
+    });
   }
 
   private async readNodeWriteP99(
@@ -10340,8 +10343,10 @@ export class AnomalyService
     return shard.expectedReplicas > 0 && syncedReplicaCount(info) === 0;
   }
 
-  private ownTopologyReadPolls(connectionId: string): number {
-    return this.clusterIdentity?.topologyReadPolls(connectionId, AnomalyService.TOPOLOGY_READS) ?? 1;
+  private ownTopologyReadPolls(connectionId: string, readsAhead: boolean): number {
+    return (
+      this.clusterIdentity?.topologyReadPolls(connectionId, AnomalyService.TOPOLOGY_READS, readsAhead) ?? 1
+    );
   }
 
   private latestClusterNodes(connectionId: string, timestamp: number): readonly ClusterNode[] | undefined {

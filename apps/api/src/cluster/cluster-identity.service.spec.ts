@@ -1015,6 +1015,45 @@ describe('ClusterIdentityService', () => {
       expect(service.topologyReadPolls('node-30', CHECKS)).toBe(5);
     });
 
+    it('takes one poll between the reads of a connection that asks urgently', () => {
+      const members = clusterOf(30);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+      turns(members, NOW, nodeIds(1, 2));
+      readerPolls();
+
+      expect(service.topologyReadPolls('node-01', CHECKS, true)).toBe(1);
+    });
+
+    it('takes as many polls between urgent reads as it takes to give every urgent connection a turn', () => {
+      const members = clusterOf(30);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+      turns(members, NOW, nodeIds(1, 9));
+      readerPolls();
+
+      expect(service.topologyReadPolls('node-01', CHECKS, true)).toBe(3);
+    });
+
+    it('takes no more polls between urgent reads than a full pass takes', () => {
+      const members = clusterOf(12);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+      turns(members, NOW, nodeIds(1, 12));
+      readerPolls();
+
+      expect(service.topologyReadPolls('node-01', CHECKS)).toBe(2);
+      expect(service.topologyReadPolls('node-01', CHECKS, true)).toBe(2);
+    });
+
+    it('takes one poll between urgent reads while every connection reads', () => {
+      clusterOf(8);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+
+      expect(service.topologyReadPolls('node-01', CHECKS, true)).toBe(1);
+    });
+
     it('takes one poll for a full pass on the reader', () => {
       clusterOf(30);
       service.claimReader(SEED, NOW);

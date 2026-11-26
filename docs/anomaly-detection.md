@@ -546,7 +546,7 @@ Every connection reads on every poll, as before, in a cluster with nine connecti
 
 The 5 second threshold of [primary without replicas](#primary_without_replicas) holds on every node this way, also on one that is far from its turn.
 
-**Reading sooner.** A connection is put ahead of the others on the next poll of the reader while its own line shows a slot that is migrating or importing, while it counts keys in slots its node does not own, and while a reshard skew finding on it is waiting or open. At most four connections go ahead per poll. When more ask, they take turns among themselves, and the other four turns of the poll go on down the list.
+**Reading sooner.** A connection is put ahead of the others on the next poll of the reader while its own line shows a slot that is migrating or importing, while it counts keys in slots its node does not own, and while a reshard skew finding on it is waiting or open. At most four connections go ahead per poll. When more ask, they take turns among themselves, and the other four turns of the poll go on down the list. A reshard counts as running until two polls after such a connection last showed a slot on the move, or two rounds of their turns when more than four ask. A slot that starts to move on a node not yet put ahead is first seen on that node's turn.
 
 **What comes later.** A finding on a node that is in none of these cases is first seen when its connection has a turn, so up to one pass late: about a minute with 500 connections and a 1 second interval. A check that needs several readings in a row counts the readings, not the polls. Reshard skew, for example, needs three: the first can take a pass, the next two follow on the next polls because the connection is put ahead.
 

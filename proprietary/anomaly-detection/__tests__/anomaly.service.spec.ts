@@ -33895,6 +33895,21 @@ describe('AnomalyService', () => {
       expect(skews.map((e) => e.connectionId)).toEqual([idOf(30)]);
     });
 
+    it('closes a reshard skew warning three polls after a connection read ahead of its turn stops moving slots', async () => {
+      grow(50);
+      migrating.add(idOf(1));
+      opsPerSec[idOf(30)] = 6000;
+      await pollAll();
+      await pollTimes(30);
+      const skews = () => service.getRecentEvents().filter((e) => e.metricType === MetricType.RESHARD_SHARD_SKEW);
+      expect(skews().map((e) => e.resolved)).toEqual([false]);
+
+      migrating.delete(idOf(1));
+      await pollTimes(3);
+
+      expect(skews().map((e) => e.resolved)).toEqual([true]);
+    });
+
     it('reads the topology on every connection on a poll in a cluster of nine connections', async () => {
       grow(9);
       await pollAll();
