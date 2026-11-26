@@ -826,6 +826,11 @@ describe('ClusterIdentityService', () => {
     const nodeIds = (from: number, to: number): string[] =>
       Array.from({ length: to - from + 1 }, (_, i) => `node-${String(from + i).padStart(2, '0')}`);
 
+    const readerReads = (at: number, urgent = false): boolean => {
+      const reads = service.takeTopologyRead(SEED, CHECKS, at, urgent, 5000);
+      if (reads) service.noteTopologyRead(SEED, CHECKS, at);
+      return reads;
+    };
     const clusterOf = (others: number): string[] => {
       const members = nodeIds(1, others);
       configs = { [SEED]: {}, ...Object.fromEntries(members.map((id) => [id, memberOf(SEED)])) };
@@ -867,6 +872,124 @@ describe('ClusterIdentityService', () => {
 
       expect(readerPolls()).toBe(true);
       expect(readerPolls()).toBe(true);
+    });
+
+    it('lets the reader read five seconds after its last read in a cluster read in turns', () => {
+      clusterOf(11);
+      service.claimReader(SEED, NOW);
+      const reads = [0, 1000, 2000, 3000, 4000, 5000, 6000].filter((after) => readerReads(NOW + after));
+
+      expect(reads).toEqual([0, 5000]);
+    });
+
+    it('gives the other connections their turns on a poll the reader does not read on', () => {
+      const members = clusterOf(11);
+      service.claimReader(SEED, NOW);
+      readerReads(NOW);
+      turns(members);
+
+      expect(service.takeTopologyRead(SEED, CHECKS, NOW + 1000, false, 5000)).toBe(false);
+      expect(turns(members, NOW + 1000)).toEqual([...nodeIds(1, 5), ...nodeIds(9, 11)]);
+    });
+
+    it('lets the reader of a cluster of nine connections read on every poll', () => {
+      clusterOf(8);
+      service.claimReader(SEED, NOW);
+
+      expect(service.takeTopologyRead(SEED, CHECKS, NOW, false, 5000)).toBe(true);
+      expect(service.takeTopologyRead(SEED, CHECKS, NOW + 1000, false, 5000)).toBe(true);
+    });
+
+    it('lets the reader read on a poll it asks urgently on', () => {
+      clusterOf(11);
+      service.claimReader(SEED, NOW);
+      readerReads(NOW);
+
+      expect(service.takeTopologyRead(SEED, CHECKS, NOW + 1000, true, 5000)).toBe(true);
+    });
+
+    it('counts the five seconds from the last read of the reader', () => {
+      clusterOf(11);
+      service.claimReader(SEED, NOW);
+      readerReads(NOW);
+      readerReads(NOW + 2000, true);
+
+      expect(service.takeTopologyRead(SEED, CHECKS, NOW + 5000, false, 5000)).toBe(false);
+      expect(service.takeTopologyRead(SEED, CHECKS, NOW + 7000, false, 5000)).toBe(true);
+    });
+
+    it('lets the reader read again on the next poll when its read did not succeed', () => {
+      clusterOf(11);
+      service.claimReader(SEED, NOW);
+      service.takeTopologyRead(SEED, CHECKS, NOW, false, 5000);
+      service.noteTopologyRead(SEED, CHECKS, NOW);
+      service.takeTopologyRead(SEED, CHECKS, NOW + 5000, false, 5000);
+
+      expect(service.takeTopologyRead(SEED, CHECKS, NOW + 6000, false, 5000)).toBe(true);
+    });
+
+    it('counts the five seconds from a read the reader took without being asked to', () => {
+      clusterOf(11);
+      service.claimReader(SEED, NOW);
+      service.takeTopologyRead(SEED, CHECKS, NOW, false, 5000);
+      service.noteTopologyRead(SEED, CHECKS, NOW);
+      service.takeTopologyRead(SEED, CHECKS, NOW + 2000, false, 5000);
+      service.noteTopologyRead(SEED, CHECKS, NOW + 2000);
+
+      expect(service.takeTopologyRead(SEED, CHECKS, NOW + 5000, false, 5000)).toBe(false);
+      expect(service.takeTopologyRead(SEED, CHECKS, NOW + 7000, false, 5000)).toBe(true);
+    });
+
+    it('keeps no read time for a connection that is not the reader', () => {
+      clusterOf(11);
+      service.claimReader(SEED, NOW);
+      service.takeTopologyRead(SEED, CHECKS, NOW, false, 5000);
+      service.noteTopologyRead(SEED, CHECKS, NOW);
+      service.noteTopologyRead('node-01', CHECKS, NOW + 4000);
+
+      expect(service.takeTopologyRead(SEED, CHECKS, NOW + 5000, false, 5000)).toBe(true);
+    });
+
+    it('lets the reader read on a poll the clock is behind its last read', () => {
+      clusterOf(11);
+      service.claimReader(SEED, NOW);
+      readerReads(NOW);
+
+      expect(service.takeTopologyRead(SEED, CHECKS, NOW - 60_000, false, 5000)).toBe(true);
+    });
+
+    it('lets a reader without an interval read on a poll the clock is behind its last read', () => {
+      clusterOf(11);
+      service.claimReader(SEED, NOW);
+      service.takeTopologyRead(SEED, CHECKS, NOW);
+      service.noteTopologyRead(SEED, CHECKS, NOW);
+
+      expect(service.takeTopologyRead(SEED, CHECKS, NOW - 60_000)).toBe(true);
+    });
+
+    it('takes as many polls between reads of the reader as its interval holds', () => {
+      clusterOf(11);
+      service.claimReader(SEED, NOW);
+      service.takeTopologyRead(SEED, CHECKS, NOW, false, 4750);
+
+      expect(service.topologyReadPolls(SEED, CHECKS, false, 500)).toBe(10);
+      expect(service.topologyReadPolls(SEED, CHECKS, false, 5000)).toBe(1);
+    });
+
+    it('takes one poll between reads of a reader that asks urgently', () => {
+      clusterOf(11);
+      service.claimReader(SEED, NOW);
+      service.takeTopologyRead(SEED, CHECKS, NOW, true, 4750);
+
+      expect(service.topologyReadPolls(SEED, CHECKS, true, 500)).toBe(1);
+    });
+
+    it('takes one poll between reads of the reader of a cluster of nine connections', () => {
+      clusterOf(8);
+      service.claimReader(SEED, NOW);
+      service.takeTopologyRead(SEED, CHECKS, NOW, false, 4750);
+
+      expect(service.topologyReadPolls(SEED, CHECKS, false, 500)).toBe(1);
     });
 
     it('lets eight other connections read on a poll of the reader in a larger cluster', () => {

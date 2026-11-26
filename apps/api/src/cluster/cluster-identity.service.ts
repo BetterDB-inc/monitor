@@ -33,6 +33,8 @@ interface ReadTurns {
   readonly passPolls: number;
   readonly granted: Map<string, number>;
   readonly urgent: Set<string>;
+  readonly readerReadAt?: number;
+  readonly readerEveryMs?: number;
 }
 
 type KeysJoinedListener = (joinedKey: string, clusterKey: string) => void;
@@ -259,14 +261,26 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
     return !heldByAnother;
   }
 
-  takeTopologyRead(connectionId: string, schedule: string, now: number, urgent = false): boolean {
+  takeTopologyRead(
+    connectionId: string,
+    schedule: string,
+    now: number,
+    urgent = false,
+    readerEveryMs = 0,
+  ): boolean {
     const clusterKey = this.clusterKeyOf(connectionId);
     const reader = this.readers.get(clusterKey);
     if (!reader || !this.stillReads(reader, clusterKey, now)) return true;
     const turnsKey = `${clusterKey}|${schedule}`;
     if (reader.connectionId === connectionId) {
-      this.readTurns.set(turnsKey, this.nextTurns(this.readTurns.get(turnsKey), connectionId, now));
-      return true;
+      const held = this.readTurns.get(turnsKey);
+      const turns = this.nextTurns(held, connectionId, now);
+      const readAt = held?.readerReadAt;
+      const everyPoll = urgent || turns.passPolls === 1 || readerEveryMs <= 0;
+      const reads =
+        everyPoll || readAt === undefined || now < readAt || now - readAt >= readerEveryMs;
+      this.readTurns.set(turnsKey, { ...turns, readerReadAt: readAt, readerEveryMs });
+      return reads;
     }
     const turns = this.readTurns.get(turnsKey);
     if (!turns || now - turns.polledAt > READER_POLL_GRACE_MS) return true;
@@ -276,12 +290,25 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
     return turns.granted.delete(connectionId);
   }
 
-  topologyReadPolls(connectionId: string, schedule: string, urgent = false): number {
+  noteTopologyRead(connectionId: string, schedule: string, now: number): void {
+    const clusterKey = this.clusterKeyOf(connectionId);
+    if (this.readers.get(clusterKey)?.connectionId !== connectionId) return;
+    const turnsKey = `${clusterKey}|${schedule}`;
+    const turns = this.readTurns.get(turnsKey);
+    if (turns) this.readTurns.set(turnsKey, { ...turns, readerReadAt: now });
+  }
+
+  topologyReadPolls(connectionId: string, schedule: string, urgent = false, pollMs = 0): number {
     const clusterKey = this.clusterKeyOf(connectionId);
     const readerId = this.readers.get(clusterKey)?.connectionId;
-    if (readerId === connectionId) return 1;
     const turns = this.readTurns.get(`${clusterKey}|${schedule}`);
-    if (!turns || !takesTurns(turns, readerId)) return 1;
+    if (!turns) return 1;
+    if (readerId === connectionId) {
+      const everyMs = turns.readerEveryMs ?? 0;
+      const everyPoll = urgent || turns.passPolls === 1 || everyMs <= 0 || pollMs <= 0;
+      return everyPoll ? 1 : Math.max(1, Math.ceil(everyMs / pollMs));
+    }
+    if (!takesTurns(turns, readerId)) return 1;
     if (!urgent) return turns.passPolls;
     const urgentPolls = Math.max(1, Math.ceil(turns.urgent.size / URGENT_READS_PER_POLL));
     return Math.min(turns.passPolls, urgentPolls);

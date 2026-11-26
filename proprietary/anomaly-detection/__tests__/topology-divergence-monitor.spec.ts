@@ -94,6 +94,29 @@ describe('TopologyDivergenceMonitor', () => {
     expect(asked).toEqual(['b1', 'c1', 'b1', 'c1']);
   });
 
+  it('tells a round is due once the interval has passed since the last round of the anchor', async () => {
+    const { monitor, poll } = harness();
+    await poll('conn-1', 'a1', 0);
+
+    expect(monitor.roundIsDue(CLUSTER, 'conn-1', INTERVAL - 1, INTERVAL)).toBe(false);
+    expect(monitor.roundIsDue(CLUSTER, 'conn-1', INTERVAL, INTERVAL)).toBe(true);
+  });
+
+  it('tells a round is due as early as a poll may come', async () => {
+    const { monitor, poll } = harness();
+    await poll('conn-1', 'a1', 0);
+
+    expect(monitor.roundIsDue(CLUSTER, 'conn-1', INTERVAL - 10, INTERVAL, 10)).toBe(true);
+  });
+
+  it('tells no round is due on a connection that does not run the rounds', async () => {
+    const { monitor, poll } = harness();
+    await poll('conn-1', 'a1', 0);
+
+    expect(monitor.roundIsDue(CLUSTER, 'conn-2', INTERVAL, INTERVAL)).toBe(false);
+    expect(monitor.roundIsDue('another-cluster', 'conn-1', INTERVAL, INTERVAL)).toBe(false);
+  });
+
   it('counts the rounds a disagreement lasts', async () => {
     const { poll, answers } = harness();
     answers.set('b1', viewOf('b1', { c2: failing }));

@@ -35,6 +35,7 @@ export interface DivergencePoll {
   nodes: ClusterNode[];
   at: number;
   intervalMs: number;
+  earlyByMs?: number;
   nodesPerZone: number;
   randomNodes: number;
   canRead: boolean;
@@ -124,7 +125,7 @@ export class TopologyDivergenceMonitor {
     if (!input.canRead) return this.blindRound(state, input, self);
     state.anchor = input.connectionId;
     state.anchorSeenAt = input.at;
-    if (state.running || input.at - state.lastRoundAt < input.intervalMs) return null;
+    if (!this.isDue(state, input.at, input.intervalMs - (input.earlyByMs ?? 0))) return null;
 
     state.running = true;
     try {
@@ -134,6 +135,12 @@ export class TopologyDivergenceMonitor {
     } finally {
       state.running = false;
     }
+  }
+
+  roundIsDue(clusterKey: string, connectionId: string, at: number, intervalMs: number, earlyByMs = 0): boolean {
+    const state = this.clusters.get(clusterKey);
+    if (!state || state.anchor !== connectionId) return false;
+    return this.isDue(state, at, intervalMs - earlyByMs);
   }
 
   lastRound(clusterKey: string): DivergenceRoundResult | undefined {
@@ -172,6 +179,10 @@ export class TopologyDivergenceMonitor {
 
   forgetCluster(clusterKey: string): void {
     this.clusters.delete(clusterKey);
+  }
+
+  private isDue(state: ClusterRounds, at: number, roundEveryMs: number): boolean {
+    return !state.running && at - state.lastRoundAt >= roundEveryMs;
   }
 
   private stateOf(clusterKey: string): ClusterRounds {

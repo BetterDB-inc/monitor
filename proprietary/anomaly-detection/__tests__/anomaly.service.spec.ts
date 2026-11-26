@@ -33686,7 +33686,282 @@ describe('AnomalyService', () => {
       (Date.now as jest.Mock).mockRestore();
     });
 
-    it('reads the topology on the reader and on eight other connections on a poll', async () => {
+    it('reads the topology on the reader every five seconds', async () => {
+      grow(12);
+      await pollAll();
+      await pollAfter(1000);
+      const reads: number[] = [];
+      const shardReads: number[] = [];
+
+      for (let n = 1; n <= 10; n += 1) {
+        forgetReads();
+        await pollAfter(1000);
+        if (readWith('getClusterNodes').includes(SEED)) reads.push(n);
+        if (readWith('getClusterShards').includes(SEED)) shardReads.push(n);
+      }
+
+      expect(reads).toEqual([5, 10]);
+      expect(shardReads).toEqual([5, 10]);
+    });
+
+    it('raises a cluster-wide warning on the next read of the reader', async () => {
+      grow(12);
+      await pollAll();
+      await pollAfter(1000);
+      const conflicts = () =>
+        service.getRecentEvents().filter((e) => e.metricType === MetricType.CLUSTER_TOPOLOGY).length;
+      topology[2] = { ...topology[2], slots: topology[1].slots };
+
+      await pollTimes(4);
+      const beforeTheRead = conflicts();
+      await pollAfter(1000);
+
+      expect(beforeTheRead).toBe(0);
+      expect(conflicts()).toBe(1);
+    });
+
+    it('reads the topology on the reader on every poll while its own line shows a slot on the move', async () => {
+      grow(12);
+      migrating.add(SEED);
+      await pollAll();
+      await pollAfter(1000);
+      forgetReads();
+
+      await pollTimes(3);
+
+      expect(readsOf(SEED)).toBe(3);
+    });
+
+    describe('while the reader follows a slot rebalance run it started', () => {
+      let discoverNodesIsolated: jest.Mock;
+      let readSlotMigrations: jest.Mock;
+      const runState = (): string => (service as any).rebalanceRuns.get(SEED).get(nodeIdOf(0)).state;
+
+      async function startRun(coveredBySeed: boolean): Promise<void> {
+        grow(12);
+        await pollAll();
+        await pollAfter(1000);
+        discoverNodesIsolated = jest.fn().mockResolvedValue([]);
+        (service as any).clusterDiscovery = { ...(service as any).clusterDiscovery, discoverNodesIsolated };
+        readSlotMigrations = jest
+          .fn()
+          .mockResolvedValue({ jobViews: [], finishedJobs: [], failed: [], complete: true, migrations: [] });
+        (service as any).clusterMetrics = {
+          coveredBySeed: () => coveredBySeed,
+          checkSlotMigrations: jest.fn(async () => ({ migrations: [], complete: true })),
+          readSlotMigrations,
+        };
+        const job = { targetShardId: nodeIdOf(1), ranges: [[0, 9]], state: 'starting' };
+        const run = { state: 'running', sourceShardId: nodeIdOf(0), startedAt: now, jobs: [job], jobsBefore: [] };
+        (service as any).rebalanceRuns.set(SEED, new Map([[run.sourceShardId, run]]));
+        forgetReads();
+      }
+
+      it('reads the topology only on the polls it follows the run', async () => {
+        await startRun(true);
+        const reads: number[] = [];
+        const follows: number[] = [];
+
+        for (let n = 1; n <= 12; n += 1) {
+          forgetReads();
+          readSlotMigrations.mockClear();
+          await pollAfter(1000);
+          if (readsOf(SEED) > 0) reads.push(n);
+          if (readSlotMigrations.mock.calls.length > 0) follows.push(n);
+        }
+
+        expect(runState()).toBe('running');
+        expect(follows).toEqual([1, 6, 11]);
+        expect(reads).toEqual(follows);
+        expect(discoverNodesIsolated).not.toHaveBeenCalled();
+      });
+
+      it('reads the topology on the poll the slot migration check reads the jobs of the run', async () => {
+        await startRun(false);
+        (service as any).rebalanceFollowedAt.set(SEED, now);
+
+        await pollAfter(1000);
+
+        expect(readSlotMigrations.mock.calls.filter(([connectionId]) => connectionId === SEED)).toHaveLength(1);
+        expect(readsOf(SEED)).toBe(1);
+        expect(discoverNodesIsolated).not.toHaveBeenCalled();
+
+        forgetReads();
+        await pollAfter(1000);
+
+        expect(readsOf(SEED)).toBe(0);
+      });
+
+      it('follows the run with nodes it asks for itself on a poll its read fails', async () => {
+        await startRun(true);
+        (ctxs[SEED].client.getClusterNodes as jest.Mock).mockRejectedValueOnce(new Error('CLUSTERDOWN'));
+
+        await pollAfter(1000);
+
+        expect(readSlotMigrations).toHaveBeenCalledTimes(1);
+        expect(discoverNodesIsolated.mock.calls.map(([connectionId]) => connectionId)).toEqual([SEED]);
+      });
+    });
+
+    it('reads the topology on the reader on the poll INFO shows another role', async () => {
+      grow(12);
+      await pollAll();
+      await pollAfter(1000);
+      await pollAfter(1000);
+      forgetReads();
+      roles[SEED] = 'slave';
+
+      await pollAfter(1000);
+
+      expect(readsOf(SEED)).toBe(1);
+    });
+
+    it('counts the five seconds from a read the reader takes for another role in INFO', async () => {
+      grow(12);
+      await pollAll();
+      await pollTimes(3);
+      roles[SEED] = 'slave';
+      const reads: number[] = [];
+
+      for (let n = 4; n <= 9; n += 1) {
+        forgetReads();
+        await pollAfter(1000);
+        if (readsOf(SEED) > 0) reads.push(n);
+      }
+
+      expect(reads).toEqual([4, 9]);
+    });
+
+    it('reads the topology on the reader again on the poll after CLUSTER NODES fails', async () => {
+      grow(12);
+      await pollAll();
+      await pollTimes(5);
+      forgetReads();
+      (ctxs[SEED].client.getClusterNodes as jest.Mock).mockRejectedValueOnce(new Error('timeout'));
+      await pollAfter(1000);
+      const failed = readsOf(SEED);
+      forgetReads();
+
+      await pollAfter(1000);
+
+      expect(failed).toBeGreaterThan(0);
+      expect(readsOf(SEED)).toBe(1);
+    });
+
+    it('runs a divergence round on every read of the reader when its polls come a little early', async () => {
+      grow(12);
+      (service as any).clusterDiscovery = {
+        retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+        releaseConnection: jest.fn().mockResolvedValue(undefined),
+        getNodeConnection: jest.fn().mockRejectedValue(new Error('ECONNREFUSED')),
+      };
+      await pollAll();
+      await pollTimes(6, 990);
+      const clusterKey = (service as any).connectionClusterKeys.get(SEED);
+      const roundAt = (): number | undefined => (service as any).topologyDivergence.lastRound(clusterKey)?.at;
+      const first = roundAt() as number;
+      const rounds = new Set<number>();
+
+      for (let n = 1; n <= 10; n += 1) {
+        await pollAfter(990);
+        rounds.add((roundAt() as number) - first);
+      }
+
+      expect([...rounds]).toEqual([0, 4950, 9900]);
+    });
+
+    it('runs a divergence round every five seconds in a small cluster when its polls come a little early', async () => {
+      grow(3);
+      (service as any).clusterDiscovery = {
+        retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+        releaseConnection: jest.fn().mockResolvedValue(undefined),
+        getNodeConnection: jest.fn().mockRejectedValue(new Error('ECONNREFUSED')),
+      };
+      await pollAll();
+      const clusterKey = (service as any).connectionClusterKeys.get(SEED);
+      const roundAt = (): number => (service as any).topologyDivergence.lastRound(clusterKey)?.at;
+      const first = roundAt();
+      const rounds = new Set<number>();
+
+      for (let n = 1; n <= 10; n += 1) {
+        await pollAfter(990);
+        rounds.add(roundAt() - first);
+      }
+
+      expect([...rounds]).toEqual([0, 4950, 9900]);
+    });
+
+    describe('with divergence rounds at an interval of their own', () => {
+      let setIntervalMs: number;
+      const roundsEvery = async (intervalMs: number, polls: number): Promise<number[]> => {
+        (service as any).topologyDivergenceSettings.intervalMs = intervalMs;
+        grow(12);
+        (service as any).clusterDiscovery = {
+          retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+          releaseConnection: jest.fn().mockResolvedValue(undefined),
+          getNodeConnection: jest.fn().mockRejectedValue(new Error('ECONNREFUSED')),
+        };
+        await pollAll();
+        const clusterKey = (service as any).connectionClusterKeys.get(SEED);
+        const roundAt = (): number => (service as any).topologyDivergence.lastRound(clusterKey)?.at;
+        const first = roundAt();
+        const rounds = new Set<number>();
+        for (let n = 1; n <= polls; n += 1) {
+          await pollAfter(1000);
+          rounds.add(roundAt() - first);
+        }
+        return [...rounds];
+      };
+
+      beforeEach(() => {
+        setIntervalMs = (service as any).topologyDivergenceSettings.intervalMs;
+      });
+
+      afterEach(() => {
+        (service as any).topologyDivergenceSettings.intervalMs = setIntervalMs;
+      });
+
+      it('reads the topology every five seconds on a reader that runs no rounds set to every two seconds', async () => {
+        (service as any).topologyDivergenceSettings.intervalMs = 2000;
+        grow(12);
+        await pollAll();
+        await pollAfter(1000);
+        const clusterKey = (service as any).connectionClusterKeys.get(SEED);
+        const reads: number[] = [];
+
+        for (let n = 1; n <= 10; n += 1) {
+          forgetReads();
+          await pollAfter(1000);
+          if (readWith('getClusterNodes').includes(SEED)) reads.push(n);
+        }
+
+        expect((service as any).topologyDivergence.anchorOf(clusterKey)).not.toBe(SEED);
+        expect(reads).toEqual([5, 10]);
+      });
+
+      it('runs a round every seven seconds on the reader when that is the interval', async () => {
+        expect(await roundsEvery(7000, 15)).toEqual([0, 7000, 14000]);
+      });
+
+      it('runs a round every twelve seconds on the reader when that is the interval', async () => {
+        expect(await roundsEvery(12000, 25)).toEqual([0, 12000, 24000]);
+      });
+
+      it('runs a round every three seconds on the reader when that is the interval', async () => {
+        expect(await roundsEvery(3000, 7)).toEqual([0, 3000, 6000]);
+      });
+
+      it('reads the topology twice per round on the reader at an interval of seven seconds', async () => {
+        await roundsEvery(7000, 7);
+        forgetReads();
+
+        await pollTimes(14);
+
+        expect(readsOf(SEED)).toBe(4);
+      });
+    });
+
+    it('reads the topology on eight other connections on a poll the reader does not read on', async () => {
       grow(12);
       await pollAll();
       await pollAfter(1000);
@@ -33694,7 +33969,7 @@ describe('AnomalyService', () => {
 
       await pollAfter(1000);
 
-      const due = [SEED, ...[1, 2, 3, 4, 5, 9, 10, 11].map(idOf)];
+      const due = [1, 2, 3, 4, 5, 9, 10, 11].map(idOf);
       expect(readWith('getClusterNodes')).toEqual(due);
       expect(readWith('getClusterShards')).toEqual(due);
     });
@@ -33790,17 +34065,17 @@ describe('AnomalyService', () => {
         grow(12);
         await pollAll();
         await pollAfter(1000);
+        forgetReads();
         const built = jest.spyOn((service as any).clusterNodeViews, 'nodes');
 
         await pollAfter(1000);
 
-        expect(built).toHaveBeenCalledTimes(3);
+        const waiting = 12 - readWith('getClusterNodes').length;
+        expect(waiting).toBeGreaterThan(0);
+        expect(built).toHaveBeenCalledTimes(waiting);
       });
 
-      it('follows a slot rebalance run it started with the nodes it asks for itself', async () => {
-        grow(12);
-        await pollAll();
-        await pollAfter(1000);
+      const followsRun = (connectionId: string, run: Record<string, unknown> = {}): jest.Mock => {
         const discoverNodesIsolated = jest.fn().mockResolvedValue([]);
         (service as any).clusterDiscovery = { ...(service as any).clusterDiscovery, discoverNodesIsolated };
         (service as any).clusterMetrics = {
@@ -33809,8 +34084,34 @@ describe('AnomalyService', () => {
             .fn()
             .mockResolvedValue({ jobViews: [], finishedJobs: [], failed: [], complete: true, migrations: [] }),
         };
-        const run = { state: 'running', sourceShardId: nodeIdOf(6), startedAt: now, jobs: [], jobsBefore: [] };
-        (service as any).rebalanceRuns.set(WAITING, new Map([[run.sourceShardId, run]]));
+        const sourceShardId = nodeIdOf(ids.indexOf(connectionId));
+        (service as any).rebalanceRuns.set(
+          connectionId,
+          new Map([
+            [sourceShardId, { state: 'running', sourceShardId, startedAt: now, jobs: [], jobsBefore: [], ...run }],
+          ]),
+        );
+        return discoverNodesIsolated;
+      };
+
+      it('reads the topology itself on the poll it follows a slot rebalance run it started', async () => {
+        grow(12);
+        await pollAll();
+        await pollAfter(1000);
+        const discoverNodesIsolated = followsRun(WAITING);
+        forgetReads();
+
+        await pollAfter(1000);
+
+        expect(readsOf(WAITING)).toBe(1);
+        expect(discoverNodesIsolated).not.toHaveBeenCalled();
+      });
+
+      it('follows a slot rebalance run that is being cancelled with the nodes it asks for itself', async () => {
+        grow(12);
+        await pollAll();
+        await pollAfter(1000);
+        const discoverNodesIsolated = followsRun(WAITING, { cancelRequestedAt: now, cancelAcceptedAt: now });
         forgetReads();
 
         await pollAfter(1000);
@@ -34077,6 +34378,28 @@ describe('AnomalyService', () => {
       await pollTimes(3);
 
       expect(skews().map((e) => e.resolved)).toEqual([true]);
+    });
+
+    it('keeps the shard of the reader in the reshard comparison between its reads at half second polls', async () => {
+      const interval = jest.spyOn(service as any, 'getIntervalMs').mockReturnValue(500);
+      try {
+        grow(12);
+        await pollAll();
+        await pollTimes(4, 500);
+        const clusterKey = (service as any).connectionClusterKeys.get(SEED);
+        const compared = (): boolean =>
+          (service as any).freshReshardEntries(clusterKey, now, 500).some(([key]: [string]) => key === SEED);
+        const seen: boolean[] = [];
+
+        for (let n = 0; n < 20; n += 1) {
+          await pollAfter(500);
+          seen.push(compared());
+        }
+
+        expect(seen).not.toContain(false);
+      } finally {
+        interval.mockRestore();
+      }
     });
 
     describe('a reshard first seen on a normal turn', () => {
