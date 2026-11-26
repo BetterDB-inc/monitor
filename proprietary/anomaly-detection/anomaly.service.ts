@@ -9011,6 +9011,12 @@ export class AnomalyService
     };
   }
 
+  private forgetMembershipHistoryOfAnotherReader(scope: string, readerId: string): void {
+    const previous = this.ghostHistoryReaders.get(scope);
+    this.ghostHistoryReaders.set(scope, readerId);
+    if (previous !== undefined && previous !== readerId) this.ghostHistories.delete(scope);
+  }
+
   /**
    * Known false positive: an INTENTIONAL re-add of the same node-id — a host that
    * kept its `nodes.conf` and was brought back without a `CLUSTER RESET`, inside
@@ -9028,12 +9034,6 @@ export class AnomalyService
    * per rejoin, so it needs no dedupe set of its own; the history's minimum
    * absence requirement is the noise gate.
    */
-  private forgetMembershipHistoryOfAnotherReader(scope: string, readerId: string): void {
-    const previous = this.ghostHistoryReaders.get(scope);
-    this.ghostHistoryReaders.set(scope, readerId);
-    if (previous !== undefined && previous !== readerId) this.ghostHistories.delete(scope);
-  }
-
   private async detectForgetRejoin(
     ctx: ConnectionContext,
     scope: string,
