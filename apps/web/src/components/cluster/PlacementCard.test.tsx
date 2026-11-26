@@ -224,6 +224,25 @@ describe('PlacementCard', () => {
     await waitFor(() => expect(screen.queryByLabelText('Trigger ratio')).not.toBeInTheDocument());
   });
 
+  it('drops an open draft when the card switches to a cluster it already read', async () => {
+    get.mockResolvedValue(status());
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(['placement', 'conn-2'], status({ policyVersion: 3 }));
+    const at = (connectionId: string) => (
+      <QueryClientProvider client={client}>
+        <PlacementCard connectionId={connectionId} />
+      </QueryClientProvider>
+    );
+    const { rerender } = render(at('conn-1'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit policy' }));
+    fireEvent.change(screen.getByLabelText('Trigger ratio'), { target: { value: '3' } });
+
+    rerender(at('conn-2'));
+
+    expect(screen.queryByLabelText('Trigger ratio')).not.toBeInTheDocument();
+    expect(setPolicy).not.toHaveBeenCalled();
+  });
+
   it('lets a member view the policy without saving it', async () => {
     canMutate.mockReturnValue(false);
     await show(status());

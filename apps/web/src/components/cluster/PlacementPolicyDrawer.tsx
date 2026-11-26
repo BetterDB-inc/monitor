@@ -141,6 +141,14 @@ function errorsOf(err: unknown): string[] {
   return [err instanceof Error ? err.message : 'Failed to save the placement policy'];
 }
 
+function fieldOfError(error: string): string | null {
+  if (error.startsWith('Maintenance window')) return 'maintenanceWindows';
+  if (error.startsWith('Excluded slots')) return 'excludedSlots';
+  return /^([A-Za-z]+)[.:]/.exec(error)?.[1] ?? null;
+}
+
+const errorId = (index: number) => `placement-error-${index}`;
+
 function PolicyForm({
   settings,
   version,
@@ -159,6 +167,15 @@ function PolicyForm({
   const [errors, setErrors] = useState<string[]>([]);
   const readOnly = !canMutate || saving;
 
+  const invalid = (field: string) => {
+    const ids = errors.flatMap((error, index) =>
+      fieldOfError(error) === field ? [errorId(index)] : [],
+    );
+    return ids.length > 0
+      ? { 'aria-invalid': true as const, 'aria-describedby': ids.join(' ') }
+      : {};
+  };
+
   const update = (change: Partial<PlacementPolicyForm>) =>
     setForm((current) => ({ ...current, ...change }));
 
@@ -166,6 +183,7 @@ function PolicyForm({
     <Field key={field} id={`placement-${field}`} label={label} hint={hint}>
       <Input
         id={`placement-${field}`}
+        {...invalid(field)}
         type="number"
         step={step}
         value={form.numbers[field]}
@@ -201,6 +219,7 @@ function PolicyForm({
           <Field key={field} id={`placement-${field}`} label={label} hint={hint}>
             <Input
               id={`placement-${field}`}
+              {...invalid(field)}
               type="number"
               step="0.05"
               value={form.optional[field]}
@@ -219,6 +238,7 @@ function PolicyForm({
         >
           <Input
             id="placement-maxBytesPerHour"
+            {...invalid('maxBytesPerHour')}
             type="number"
             step="0.5"
             value={form.maxGibPerHour}
@@ -233,6 +253,7 @@ function PolicyForm({
         >
           <textarea
             id="placement-maintenanceWindows"
+            {...invalid('maintenanceWindows')}
             rows={3}
             spellCheck={false}
             className={TEXTAREA}
@@ -248,6 +269,7 @@ function PolicyForm({
         >
           <textarea
             id="placement-excludedShardIds"
+            {...invalid('excludedShardIds')}
             rows={2}
             spellCheck={false}
             className={TEXTAREA}
@@ -263,6 +285,7 @@ function PolicyForm({
         >
           <Input
             id="placement-excludedSlots"
+            {...invalid('excludedSlots')}
             value={form.excludedSlots}
             disabled={readOnly}
             onChange={(event) => update({ excludedSlots: event.target.value })}
@@ -282,8 +305,10 @@ function PolicyForm({
         </div>
         {errors.length > 0 && (
           <ul role="alert" className="list-disc pl-5 text-sm text-destructive">
-            {errors.map((error) => (
-              <li key={error}>{error}</li>
+            {errors.map((error, index) => (
+              <li key={error} id={errorId(index)}>
+                {error}
+              </li>
             ))}
           </ul>
         )}

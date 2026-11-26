@@ -116,6 +116,43 @@ describe('PlacementPolicyDrawer', () => {
     expect(save).not.toHaveBeenCalled();
   });
 
+  it('marks the fields that have errors and points them at the error', async () => {
+    const { save } = open();
+    fireEvent.change(field('Trigger ratio'), { target: { value: '' } });
+    fireEvent.change(field('Excluded slots'), { target: { value: '99999' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await screen.findByRole('alert');
+    for (const name of ['Trigger ratio', 'Excluded slots']) {
+      expect(field(name)).toHaveAttribute('aria-invalid', 'true');
+      const described = field(name).getAttribute('aria-describedby') ?? '';
+      expect(
+        described
+          .split(' ')
+          .map((id) => document.getElementById(id)?.textContent ?? '')
+          .join(' '),
+      ).toMatch(name === 'Trigger ratio' ? /triggerRatio/ : /Excluded slots/);
+    }
+    expect(field('Resolve ratio')).not.toHaveAttribute('aria-invalid');
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it('marks the field the server refuses', async () => {
+    open(
+      vi.fn().mockRejectedValue(
+        new ApiError('Invalid placement policy', 400, {
+          message: 'Invalid placement policy',
+          errors: ['resolveRatio: must be below triggerRatio'],
+        }),
+      ),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await screen.findByRole('alert');
+    expect(field('Resolve ratio')).toHaveAttribute('aria-invalid', 'true');
+    expect(field('Trigger ratio')).not.toHaveAttribute('aria-invalid');
+  });
+
   it('shows the policy read-only to a member', () => {
     canMutate.mockReturnValue(false);
     open();

@@ -165,6 +165,10 @@ function PolicyInvalid({ invalid }: { invalid: PlacementPolicyInvalid | null }) 
 }
 
 export function PlacementCard({ connectionId }: { connectionId: string | undefined }) {
+  return <ClusterPlacementCard key={connectionId ?? ''} connectionId={connectionId} />;
+}
+
+function ClusterPlacementCard({ connectionId }: { connectionId: string | undefined }) {
   const { licensed, status, error, setMode, saving, modeError, savePolicy } =
     usePlacement(connectionId);
   const canMutate = useCanMutate();
