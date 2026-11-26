@@ -546,7 +546,7 @@ Every connection reads on every poll, as before, in a cluster with nine connecti
 - `INFO` shows another role than at its last read, so a promoted or demoted node is read at once
 - its shard is expected to have replicas and `INFO` shows none in sync
 - a primary without replicas warning for its shard is waiting its time or open
-- it holds a shard load sample that is not judged yet, which happens on the connection that reads the slot statistics of every primary, once per sample, so [`hot_shard`](#hot_shard) judges every sample also when that connection is not the reader
+- it holds a shard load sample that is not judged yet, which happens on the connection that reads the slot statistics of every primary, once per sample, so [`hot_shard`](#hot_shard) judges every sample also when that connection is not the reader. A sample is taken every `PROMETHEUS_POLL_INTERVAL_MS`, 5 seconds by default; with that interval at or below `ANOMALY_POLL_INTERVAL_MS` this connection reads on every poll
 
 The 5 second threshold of [primary without replicas](#primary_without_replicas) holds on every node this way, also on one that is far from its turn.
 
