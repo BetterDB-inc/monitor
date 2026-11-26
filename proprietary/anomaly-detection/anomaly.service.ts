@@ -3248,9 +3248,9 @@ export class AnomalyService
     }
   }
 
-  private ownedSlotEventId(scope: string, connectionId: string): string {
+  private ownedSlotEventId(owners: Map<string, string>, connectionId: string): string {
     const id = randomUUID();
-    this.connectionClaims(this.replicaSlotEventOwners, scope, () => new Map<string, string>()).set(id, connectionId);
+    owners.set(id, connectionId);
     return id;
   }
 
@@ -6734,6 +6734,7 @@ export class AnomalyService
       const conflicts = detectDuplicatePrimaries(nodes);
 
       const active = this.connectionClaims(this.activeTopologyConflicts, scope, () => new Set<string>());
+      const activeAtStart = [...active];
       const currentSignatures = new Set(conflicts.map((c) => conflictSignature(c)));
 
       for (const conflict of conflicts) {
@@ -6779,7 +6780,7 @@ export class AnomalyService
       // conflict alerts again. (A CLUSTER NODES observation gap is handled at the
       // poll level, which clears this set so a missed heal re-alerts.)
       const stillActive = this.liveScopeState(active);
-      for (const signature of stillActive) {
+      for (const signature of activeAtStart) {
         if (!currentSignatures.has(signature)) stillActive.delete(signature);
       }
     } catch (topologyErr) {
@@ -9193,6 +9194,7 @@ export class AnomalyService
         : undefined;
       const findings = detectReplicaSlotState(nodes, shards);
       this.claimLegacyReplicaSlotEvents(scope, findings, unseenReplicaIds);
+      const owners = this.connectionClaims(this.replicaSlotEventOwners, scope, () => new Map<string, string>());
       await this.applyTopologyPersistenceGate({
         ctx,
         scope,
@@ -9206,9 +9208,9 @@ export class AnomalyService
         minPersistMs: AnomalyService.REPLICA_SLOT_STATE_MIN_PERSIST_MS,
         metricType: MetricType.REPLICA_SLOT_STATE,
         preserveSignature,
-        ownerOf: (eventId) => this.replicaSlotEventOwners.get(scope)?.get(eventId),
+        ownerOf: (eventId) => this.liveScopeState(owners).get(eventId),
         buildEvent: (a, signature) => ({
-          id: this.ownedSlotEventId(scope, ctx.connectionId),
+          id: this.ownedSlotEventId(this.liveScopeState(owners), ctx.connectionId),
           timestamp,
           metricType: MetricType.REPLICA_SLOT_STATE,
           anomalyType: AnomalyType.SPIKE,

@@ -34812,6 +34812,49 @@ describe('AnomalyService', () => {
       expect(splitBrainAlerts()).toHaveLength(2);
     });
 
+    it('keeps the split-brain alert of the other half when two halves join while an alert is stored', async () => {
+      const halves = [SEED, 'conn-c'];
+      delete configs['conn-b'];
+      configs['conn-c'] = { id: 'conn-c' };
+      const left = [NODE_A, NODE_B];
+      const right = [NODE_C, cnode('nodeXXXXXXXX', '10.0.0.7', ['master'])];
+      const half: Record<string, ClusterNode[]> = { [SEED]: left, 'conn-c': right };
+      const splitBrainAlerts = (): AnomalyEvent[] =>
+        eventsOf(MetricType.CLUSTER_TOPOLOGY).filter((e) => e.message.includes('split-brain'));
+      const twinOf = (connectionId: string, id: string, host: string): ClusterNode => {
+        const [from] = (connectionId === SEED ? NODE_A : NODE_C).slots[0];
+        return cnode(id, host, ['master'], { slots: [[from, from + 100]], configEpoch: 9 });
+      };
+      views = half;
+      await pollAll(halves);
+      const keyOf = (id: string): string => (service as any).clusterIdentity.clusterKeyOf(id);
+      const [kept, joined] = [...halves].sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
+      const keptTwin = twinOf(kept, 'nodeSSSSSSSS', '10.0.0.13');
+      const joinedTwin = twinOf(joined, 'nodeTTTTTTTT', '10.0.0.14');
+      views = { ...half, [kept]: [...half[kept], keptTwin] };
+      await pollAfter(1000, [kept]);
+      const raisedInTheKeptHalf = splitBrainAlerts().length;
+      views = { ...views, [joined]: [...half[joined], joinedTwin] };
+      now += 1000;
+      const store = (service as any).addLatchedAnomaly.bind(service);
+      let seenWhole = false;
+      jest.spyOn(service as any, 'addLatchedAnomaly').mockImplementation(async (...args: unknown[]) => {
+        await store(...args);
+        if (seenWhole) return;
+        seenWhole = true;
+        views = {};
+        topology = [...left, ...right, keptTwin, joinedTwin];
+        await poll(ctxs[kept]);
+      });
+
+      await poll(ctxs[joined]);
+      await pollAfter(1000, halves);
+
+      expect(seenWhole).toBe(true);
+      expect(raisedInTheKeptHalf).toBe(1);
+      expect(splitBrainAlerts()).toHaveLength(2);
+    });
+
     it('raises no second split-brain alert when the metrics read sees two halves join before the reader polls', async () => {
       const halves = [SEED, 'conn-c'];
       delete configs['conn-b'];
@@ -34918,6 +34961,88 @@ describe('AnomalyService', () => {
         await pollAfter(GATE_MS);
 
         expect(slotEvents().map((e) => e.connectionId)).toEqual([SEED]);
+      });
+
+      describe('when two halves turn out to be one cluster while a stored warning is looked up', () => {
+        const halves = [SEED, 'conn-c'];
+        const left = [NODE_A, NODE_B];
+        const right = [NODE_C, cnode('nodeXXXXXXXX', '10.0.0.7', ['master'])];
+        let kept: string;
+        let joined: string;
+        let stuck: ClusterNode[];
+        let raised: AnomalyEvent[];
+        let closedInStorage: Set<string>;
+        let joinsOnLookup: boolean;
+
+        function forgetCachedEvents(): void {
+          (service as any).recentAnomalies = [];
+        }
+
+        beforeEach(async () => {
+          delete configs['conn-b'];
+          configs['conn-c'] = { id: 'conn-c' };
+          const half: Record<string, ClusterNode[]> = { [SEED]: left, 'conn-c': right };
+          views = half;
+          await pollAll(halves);
+          const keyOf = (id: string): string => (service as any).clusterIdentity.clusterKeyOf(id);
+          [kept, joined] = [...halves].sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
+          const primary = joined === SEED ? NODE_A : NODE_C;
+          stuck = [
+            cnode('replicaR1111', '10.0.0.21', ['slave'], { master: primary.id }),
+            cnode('replicaR2222', '10.0.0.22', ['slave'], { master: primary.id }),
+          ];
+          const lines = Object.fromEntries(
+            stuck.map((replica) => [
+              replica.id,
+              `${replica.id} ${replica.address} myself,slave ${primary.id} 0 0 1 connected [42-<-aaaaaaaa]`,
+            ]),
+          );
+          getNodeConnection.mockImplementation(async (nodeId: string) => ({
+            call: jest.fn(async () => lines[nodeId] ?? CLEAN),
+          }));
+          views = { ...half, [joined]: [...half[joined], ...stuck] };
+          await pollAfter(1000, [joined]);
+          await pollAfter(GATE_MS, [joined]);
+          raised = slotEvents();
+          closedInStorage = new Set();
+          joinsOnLookup = true;
+          storage.getAnomalyEvents = jest.fn(async ({ connectionId }: { connectionId: string }) => {
+            if (joinsOnLookup) {
+              joinsOnLookup = false;
+              views = {};
+              topology = [...left, ...right, ...stuck];
+              await poll(ctxs[kept]);
+            }
+            return [...raised, ...slotEvents()]
+              .filter((e) => e.connectionId === connectionId && !closedInStorage.has(e.id))
+              .map((e) => ({ id: e.id, resolved: false }));
+          });
+          forgetCachedEvents();
+        });
+
+        it('raises no second warning for a finding looked up after the join', async () => {
+          now += 1000;
+          await poll(ctxs[joined]);
+
+          expect(raised).toHaveLength(2);
+          expect(joinsOnLookup).toBe(false);
+          expect(slotEvents()).toHaveLength(0);
+        });
+
+        it('raises no third warning for a finding raised again after the join', async () => {
+          raised.forEach((e) => closedInStorage.add(e.id));
+          now += 1000;
+          await poll(ctxs[joined]);
+          const raisedAgain = slotEvents();
+          raised = [...raised, ...raisedAgain];
+          forgetCachedEvents();
+
+          await pollAfter(1000, halves);
+
+          expect(joinsOnLookup).toBe(false);
+          expect(raisedAgain).toHaveLength(2);
+          expect(slotEvents()).toHaveLength(0);
+        });
       });
 
       it('asks the replica through a member that can dial when the seed cannot', async () => {
