@@ -33654,7 +33654,7 @@ describe('AnomalyService', () => {
 
       await pollAfter(GATE_MS);
 
-      expect(stuckReplicaEvents().map((e) => e.connectionId)).toEqual(['conn-b']);
+      expect(stuckReplicaEvents().map((e) => e.connectionId)).toEqual([SEED]);
     });
 
     it('counts how long a finding lasts from when the first reader saw it', async () => {
@@ -33664,7 +33664,7 @@ describe('AnomalyService', () => {
 
       await pollAfter(MINUTE_MS + 1000);
 
-      expect(stuckReplicaEvents().map((e) => e.connectionId)).toEqual(['conn-b']);
+      expect(stuckReplicaEvents().map((e) => e.connectionId)).toEqual([SEED]);
     });
 
     it('does not raise the split-brain alert again when a member fails to read the topology', async () => {
@@ -33697,7 +33697,7 @@ describe('AnomalyService', () => {
       (service as any).onConnectionRemoved(connectionId);
     }
 
-    it('raises a warning under the next reader when the connection that raised it is removed', async () => {
+    it('does not raise a warning again when the seed it was filed under is removed', async () => {
       topology = ORPHANED;
       await pollAll();
       await pollAfter(GATE_MS);
@@ -33706,10 +33706,10 @@ describe('AnomalyService', () => {
       await pollAfter(1000, ['conn-b', 'conn-c']);
       await pollAfter(GATE_MS, ['conn-b', 'conn-c']);
 
-      expect(stuckReplicaEvents().map((e) => e.connectionId).sort()).toEqual([SEED, 'conn-b']);
+      expect(stuckReplicaEvents().map((e) => e.connectionId)).toEqual([SEED]);
     });
 
-    it('raises the split-brain alert under the next reader when the connection that raised it is removed', async () => {
+    it('does not raise the split-brain alert again when the seed it was filed under is removed', async () => {
       topology = SPLIT;
       await pollAll();
       remove(SEED);
@@ -33717,7 +33717,7 @@ describe('AnomalyService', () => {
       await pollAfter(1000, ['conn-b', 'conn-c']);
       await pollAfter(1000, ['conn-b', 'conn-c']);
 
-      expect(eventsOf(MetricType.CLUSTER_TOPOLOGY).map((e) => e.connectionId).sort()).toEqual([SEED, 'conn-b']);
+      expect(eventsOf(MetricType.CLUSTER_TOPOLOGY).map((e) => e.connectionId)).toEqual([SEED]);
     });
 
     it('does not raise a warning again when a connection that did not raise it is removed', async () => {
@@ -33731,17 +33731,18 @@ describe('AnomalyService', () => {
       expect(stuckReplicaEvents()).toHaveLength(1);
     });
 
-    it('does not raise again what the remaining reader raised when an earlier reader is removed', async () => {
+    it('does not raise a warning again when the member that raised it during a seed outage is removed', async () => {
       await pollAll();
       unreadable.add(SEED);
       topology = ORPHANED;
       await pollAfter(MINUTE_MS + 1000);
       await pollAfter(GATE_MS);
-      remove(SEED);
+      remove('conn-b');
 
-      await pollAfter(1000, ['conn-b', 'conn-c']);
+      await pollAfter(1000, [SEED, 'conn-c']);
+      await pollAfter(GATE_MS, [SEED, 'conn-c']);
 
-      expect(stuckReplicaEvents().map((e) => e.connectionId)).toEqual(['conn-b']);
+      expect(stuckReplicaEvents().map((e) => e.connectionId)).toEqual([SEED]);
     });
 
     it('forgets the findings of a cluster once its last connection is removed', async () => {
@@ -33942,6 +33943,32 @@ describe('AnomalyService', () => {
 
         expect(storage.resolveAnomaly).toHaveBeenCalledWith(raised.id, expect.any(Number));
         expect(slotEvents().filter((e) => e.id !== raised.id).map((e) => e.connectionId)).toEqual(['conn-b']);
+      });
+
+      it('files the warning a member raises under the seed', async () => {
+        await pollAll();
+        unreadable.add(SEED);
+        ownLine = STUCK;
+        await pollAfter(MINUTE_MS + 1000);
+
+        await pollAfter(GATE_MS);
+
+        expect(slotEvents().map((e) => e.connectionId)).toEqual([SEED]);
+      });
+
+      it('keeps the warning open when the member that raised it for the seed is removed', async () => {
+        await pollAll();
+        unreadable.add(SEED);
+        ownLine = STUCK;
+        await pollAfter(MINUTE_MS + 1000);
+        await pollAfter(GATE_MS);
+        remove('conn-b');
+
+        await pollAfter(1000, [SEED, 'conn-c']);
+        await pollAfter(GATE_MS, [SEED, 'conn-c']);
+
+        expect(slotEvents().map((e) => e.resolved)).toEqual([false]);
+        expect(storage.resolveAnomaly).not.toHaveBeenCalled();
       });
 
       it('keeps the warning open when a connection that did not raise it is removed', async () => {

@@ -928,7 +928,6 @@ export class AnomalyService
   private reshardSnapshot = new Map<string, ReshardShardSnapshot>();
   private readonly connectionClusterKeys = new Map<string, string>();
   private readonly clusterScopes = new Map<string, string>();
-  private readonly findingFilers = new WeakMap<Set<string>, Map<string, string>>();
   private readonly replicaSlotEventOwners = new Map<string, Map<string, string>>();
   private readonly unmergedSlotEvents = new Set<string>();
   private readonly clusterKeyByNode = new Map<string, string>();
@@ -1641,7 +1640,7 @@ export class AnomalyService
     this.lastPersistenceState.delete(connectionId);
     const scope = this.clusterScopes.get(connectionId) ?? connectionId;
     const endedScope = this.leaveClusterScope(connectionId);
-    const handedOn = endedScope === undefined ? this.releaseFindingsFiledBy(connectionId, scope) : [];
+    const handedOn = endedScope === undefined ? this.releaseSlotEventsOwnedBy(connectionId, scope) : [];
     this.closeConnectionEventsOnRemoval(connectionId, endedScope, handedOn);
     if (endedScope !== undefined) this.forgetClusterScope(endedScope);
     this.unmergedSlotEvents.delete(connectionId);
@@ -2476,13 +2475,14 @@ export class AnomalyService
 
         // Gossip-race detectors only: under Raft, topology is consensus-managed.
         const scope = this.clusterScopes.get(ctx.connectionId) ?? ctx.connectionId;
+        const filed = this.clusterEventContext(ctx);
         if (nodes && readsForCluster) {
-          await this.detectDuplicatePrimaries(ctx, scope, timestamp, nodes);
-          await this.detectStuckReplicas(ctx, scope, timestamp, nodes);
-          await this.detectHostnameStaleness(ctx, scope, timestamp, nodes, shards);
-          await this.detectGhostMembers(ctx, scope, timestamp, nodes);
-          await this.detectForgetRejoin(ctx, scope, timestamp, nodes);
-          await this.detectFailoverChurn(ctx, scope, timestamp, nodes);
+          await this.detectDuplicatePrimaries(filed, scope, timestamp, nodes);
+          await this.detectStuckReplicas(filed, scope, timestamp, nodes);
+          await this.detectHostnameStaleness(filed, scope, timestamp, nodes, shards);
+          await this.detectGhostMembers(filed, scope, timestamp, nodes);
+          await this.detectForgetRejoin(filed, scope, timestamp, nodes);
+          await this.detectFailoverChurn(filed, scope, timestamp, nodes);
         }
         const asksReplicas = this.asksReplicasForOwnLine(ctx.connectionId);
         if (!isRaft && nodes && (readsForCluster || !asksReplicas)) {
@@ -2493,7 +2493,7 @@ export class AnomalyService
           if (asksReplicas) this.takeOverMemberSlotEvents(ctx.connectionId, slotScope);
           const perNodeView = await this.gatherReplicaSlotView(nodes, ctx, slotScope);
           await this.detectReplicaSlotState(
-            ctx,
+            asksReplicas ? filed : ctx,
             slotScope,
             timestamp,
             perNodeView.nodes,
@@ -3193,23 +3193,7 @@ export class AnomalyService
     }
   }
 
-  private releaseFindingsFiledBy(connectionId: string, scope: string): string[] {
-    const alertSets = [
-      this.activeTopologyConflicts,
-      this.activeStuckReplicas,
-      this.activeHostnameStaleness,
-      this.activeGhostMembers,
-    ];
-    for (const byScope of alertSets) {
-      const active = byScope.get(scope);
-      const filers = active && this.findingFilers.get(active);
-      if (!active || !filers) continue;
-      for (const [signature, filer] of [...filers]) {
-        if (filer !== connectionId) continue;
-        active.delete(signature);
-        filers.delete(signature);
-      }
-    }
+  private releaseSlotEventsOwnedBy(connectionId: string, scope: string): string[] {
     const owners = this.replicaSlotEventOwners.get(scope);
     const owned = new Set([...(owners ?? [])].filter(([, owner]) => owner === connectionId).map(([id]) => id));
     if (owned.size === 0) return [];
@@ -3224,20 +3208,6 @@ export class AnomalyService
     if (legacy.length > 0) this.legacyReplicaSlotEvents.set(scope, legacy);
     else this.legacyReplicaSlotEvents.delete(scope);
     return [...owned];
-  }
-
-  private noteFiler(active: Set<string>, signature: string, connectionId: string): void {
-    const filers = this.findingFilers.get(active) ?? new Map<string, string>();
-    filers.set(signature, connectionId);
-    this.findingFilers.set(active, filers);
-  }
-
-  private forgetClearedFilers(active: Set<string>): void {
-    const filers = this.findingFilers.get(active);
-    if (!filers) return;
-    for (const signature of [...filers.keys()]) {
-      if (!active.has(signature)) filers.delete(signature);
-    }
   }
 
   private claimLegacyReplicaSlotEvents(
@@ -6696,7 +6666,6 @@ export class AnomalyService
         const signature = conflictSignature(conflict);
         if (active.has(signature)) continue; // already alerted for this conflict
         active.add(signature);
-        this.noteFiler(active, signature, ctx.connectionId);
 
         const [authoritative, phantom] = conflict.masters;
         const slotLabel =
@@ -6737,7 +6706,6 @@ export class AnomalyService
       for (const signature of active) {
         if (!currentSignatures.has(signature)) active.delete(signature);
       }
-      this.forgetClearedFilers(active);
     } catch (topologyErr) {
       this.logger.debug(
         `Failed to check cluster topology for ${ctx.connectionName}: ${topologyErr instanceof Error ? topologyErr.message : topologyErr}`,
@@ -9453,7 +9421,6 @@ export class AnomalyService
       const eventCtx = contextOf?.(finding) ?? ctx;
       this.logger.warn(`Anomaly detected for ${eventCtx.connectionName}: ${event.message}`);
       active.add(signature);
-      if (params.scope !== undefined) this.noteFiler(active, signature, eventCtx.connectionId);
       if (eventIdsByConn) eventIds.set(signature, event.id);
       await this.addLatchedAnomaly(event, eventCtx, `${connId}:${signature}`, () => {
         activeByConn.get(connId)?.delete(signature);
@@ -9493,7 +9460,6 @@ export class AnomalyService
     for (const sig of active) {
       if (!currentSignatures.has(sig) && !isPreserved(sig)) active.delete(sig);
     }
-    if (params.scope !== undefined) this.forgetClearedFilers(active);
   }
 
   private adoptSlotMigrationEvents(
@@ -10331,6 +10297,19 @@ export class AnomalyService
     return true;
   }
 
+  private clusterEventContext(ctx: ConnectionContext): ConnectionContext {
+    const filedUnder = this.clusterIdentity?.eventConnectionOf(ctx.connectionId) ?? ctx.connectionId;
+    const config = filedUnder === ctx.connectionId ? null : this.connectionRegistry.getConfig(filedUnder);
+    if (!config) return ctx;
+    return {
+      ...ctx,
+      connectionId: filedUnder,
+      connectionName: config.name ?? ctx.connectionName,
+      host: config.host ?? ctx.host,
+      port: config.port ?? ctx.port,
+    };
+  }
+
   private clusterScopeOf(connectionId: string): string {
     return this.clusterIdentity?.clusterKeyOf(connectionId) ?? connectionId;
   }
@@ -10373,11 +10352,7 @@ export class AnomalyService
   private joinedScopeState(kept: unknown, joined: unknown): unknown {
     if (kept === undefined) return joined;
     if (kept instanceof Set && joined instanceof Set) {
-      const keptFilers = this.findingFilers.get(kept);
       joined.forEach((value) => kept.add(value));
-      this.findingFilers.get(joined)?.forEach((filer, signature) => {
-        if (!keptFilers?.has(signature)) this.noteFiler(kept, signature, filer);
-      });
       return kept;
     }
     if (kept instanceof Map && joined instanceof Map) {
