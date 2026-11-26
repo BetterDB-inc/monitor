@@ -397,7 +397,7 @@ export interface FanoutCoverage {
   unreachable: number;
   /** Primaries that refused the credentials (WRONGPASS, NOAUTH, NOPERM). */
   authFailed: number;
-  /** Primaries past the per-connection cap that no other connection checks. */
+  /** Primaries the rotation has not read yet; none once the first sweep ends. */
   skipped: number;
   /** Primaries the topology lists that the connection does not dial (see `reason`). */
   notDialed: number;
@@ -409,8 +409,12 @@ export interface FanoutCoverage {
   reason: FanoutCoverageReason | null;
   /** The connection goes through an SSH tunnel, which the per-node reads do not use. */
   tunnelled: boolean;
-  /** Most primaries one connection checks. */
+  /** Most primaries one connection reads per poll. */
   targetLimit: number;
+  /** How long the connection takes to read every primary once. */
+  sweepMs: number;
+  /** Polls one sweep takes: more than 1 while the primaries are read in rotation. */
+  sweepPolls: number;
   /** Per-primary connect and INFO timeout. */
   timeoutMs: number;
   timestamp: number;

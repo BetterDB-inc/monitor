@@ -473,6 +473,7 @@ import {
   splitHostPort,
   topologyStateKey,
 } from './topology-targets';
+import { ReadRotation } from './read-rotation';
 import {
   ReplicaSample,
   ReplicaView,
@@ -886,6 +887,9 @@ export class AnomalyService
   // connection — so the degraded-detection warning is emitted only on a change,
   // not every ~1s poll.
   private replicaFanoutUnreachable = new Map<string, number>();
+  private readonly replicaSlotRotation = new ReadRotation();
+  private replicaSlotUnreachable = new Map<string, Set<string>>();
+  private legacyReplicaSlotRead = new Map<string, Set<string>>();
   private lastReplicationRole = new Map<string, number>();
   private lastClusterState = new Map<string, string>();
   private clusterStateChangedAt = new Map<string, number>();
@@ -907,6 +911,7 @@ export class AnomalyService
   private reshardSkewFirstSeen = new Map<string, Map<string, number>>();
   private activeReshardSkews = new Map<string, Set<string>>();
   private reshardSkewEventIds = new Map<string, Map<string, string>>();
+  private reshardSkewReads = new Map<string, Map<string, { readAt: number; reads: number }>>();
   private reshardWriteP99 = new Map<string, { readAt: number; value: number | null }>();
   private reshardThinViewLogged = new Set<string>();
   private reshardWatchedSince = new Map<string, number>();
@@ -1071,6 +1076,7 @@ export class AnomalyService
   // outside a cluster by its replication ID. `primaryReplicaPaths` holds the
   // state key each connection or fan-out address last used.
   private primaryReplicaState = new Map<string, ShardReplicaState>();
+  private primaryReplicaNodeKeys = new WeakMap<ShardReplicaState, string>();
   private primaryReplicaEvents = new Map<string, PrimaryReplicaEvent[]>();
   private primaryReplicaPaths = new Map<string, string>();
   private readonly primaryReplicaConfig: PrimaryWithoutReplicasConfig;
@@ -1125,6 +1131,10 @@ export class AnomalyService
   private sentinelMastersFailed = new Set<string>();
   private readonly topologyTargetClaims = new TopologyTargetClaims();
   private topologyBackoff = new Map<string, { failures: number; until: number; auth?: boolean }>();
+  private readonly fanoutRotation = new ReadRotation();
+  private fanoutReadOk = new Set<string>();
+  private fanoutSweepPolls = new Map<string, number>();
+  private fanoutEveryPoll = new Map<string, { picked: Set<string>; steady: Set<string> }>();
   private removedConnectionSweeps = new Map<string, MetricType[]>();
   private readonly persistenceOutbox = new PersistenceOutbox((entry, reason) => {
     this.logger.warn(`Dropped pending ${entry.kind} of anomaly ${entry.id}: ${reason}`);
@@ -1380,6 +1390,15 @@ export class AnomalyService
     return this.settingsService.getCachedSettings().anomalyPollIntervalMs;
   }
 
+  private nodeReadPolls(connectionId: string, key: string): number {
+    if (this.fanoutEveryPoll.get(connectionId)?.steady.has(key)) return 1;
+    return this.fanoutSweepPolls.get(connectionId) ?? 1;
+  }
+
+  private nodeReadIntervalMs(connectionId: string, key: string): number {
+    return this.getIntervalMs() * this.nodeReadPolls(connectionId, key);
+  }
+
   protected supportsExternalConnections(): boolean {
     return true;
   }
@@ -1589,6 +1608,9 @@ export class AnomalyService
     this.lastErrorstatCounts.delete(connectionId);
     this.lastCounterReadings.delete(connectionId);
     this.replicaFanoutUnreachable.delete(connectionId);
+    this.replicaSlotRotation.forget(connectionId);
+    this.replicaSlotUnreachable.delete(connectionId);
+    this.legacyReplicaSlotRead.delete(connectionId);
     this.clientEvictionLimit.delete(connectionId);
     this.lastReplicationRole.delete(connectionId);
     this.lastClusterState.delete(connectionId);
@@ -1631,6 +1653,7 @@ export class AnomalyService
     this.reshardSkewFirstSeen.delete(connectionId);
     this.activeReshardSkews.delete(connectionId);
     this.reshardSkewEventIds.delete(connectionId);
+    this.reshardSkewReads.delete(connectionId);
     this.hotShardFirstSeen.delete(connectionId);
     this.activeHotShards.delete(connectionId);
     this.hotShardEventIds.delete(connectionId);
@@ -1769,6 +1792,12 @@ export class AnomalyService
     for (const key of [...this.topologyBackoff.keys()]) {
       if (isTopologyStateKeyOf(key, connectionId)) this.topologyBackoff.delete(key);
     }
+    for (const key of [...this.fanoutReadOk]) {
+      if (isTopologyStateKeyOf(key, connectionId)) this.fanoutReadOk.delete(key);
+    }
+    this.fanoutRotation.forget(connectionId);
+    this.fanoutSweepPolls.delete(connectionId);
+    this.fanoutEveryPoll.delete(connectionId);
     void this.clusterDiscovery?.releaseConnection(connectionId).catch(() => undefined);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
   }
@@ -2437,7 +2466,9 @@ export class AnomalyService
             timestamp,
             perNodeView.nodes,
             shards,
-            perNodeView.unreachableIds,
+            perNodeView.notReadIds,
+            perNodeView.unseenIds,
+            perNodeView.waitingIds,
           );
         }
 
@@ -3074,13 +3105,16 @@ export class AnomalyService
       }
     }
     if (eventIds.size > 0) this.replicaSlotEventIds.set(connectionId, eventIds);
-    if (legacy.length > 0) this.legacyReplicaSlotEvents.set(connectionId, legacy);
+    if (legacy.length > 0) {
+      this.legacyReplicaSlotEvents.set(connectionId, legacy);
+      this.legacyReplicaSlotRead.delete(connectionId);
+    }
   }
 
   private claimLegacyReplicaSlotEvents(
     connectionId: string,
     findings: ReplicaSlotAnomaly[],
-    unreachableReplicaIds: Set<string>,
+    unseenReplicaIds: Set<string>,
   ): void {
     const legacy = this.legacyReplicaSlotEvents.get(connectionId);
     if (!legacy) return;
@@ -3096,7 +3130,7 @@ export class AnomalyService
       else eventIds.set(signature, event.id);
     }
     if (eventIds.size > 0) this.replicaSlotEventIds.set(connectionId, eventIds);
-    const sawEveryReplica = unreachableReplicaIds.size === 0;
+    const sawEveryReplica = unseenReplicaIds.size === 0;
     if (sawEveryReplica) unclaimed.forEach((event) => this.closeLater(event.id));
     if (sawEveryReplica || unclaimed.length === 0) this.legacyReplicaSlotEvents.delete(connectionId);
     else this.legacyReplicaSlotEvents.set(connectionId, unclaimed);
@@ -4716,7 +4750,7 @@ export class AnomalyService
     state.maxPollGapMs =
       ctx.connectionType === 'external'
         ? observePushCadence(state, timestamp, this.getIntervalMs())
-        : retryAmplificationMaxPollGap(this.getIntervalMs());
+        : retryAmplificationMaxPollGap(nodeAddr ? this.nodeReadIntervalMs(ctx.connectionId, key) : this.getIntervalMs());
 
     const connectionEvents = (nodeAddr ? [] : this.recentEventsOf(ctx.connectionId)).filter((a) => {
       const relativeCpuMove =
@@ -5505,6 +5539,12 @@ export class AnomalyService
 
   private static readonly COB_LIMIT_RECHECK_POLLS = 60;
 
+  private cobLimitRecheckReads(key: string): number {
+    const connectionId = connectionOfStateKey(key);
+    const readPolls = key === connectionId ? 1 : this.nodeReadPolls(connectionId, key);
+    return Math.ceil(AnomalyService.COB_LIMIT_RECHECK_POLLS / readPolls);
+  }
+
   /**
    * Replication output-buffer pressure (valkey-io/valkey#3963). Standalone
    * primaries and primaries with zero replicas (and no pending state) add no
@@ -5568,7 +5608,7 @@ export class AnomalyService
         if (parsed !== null) {
           limit = parsed;
           this.cobLimitCache.set(key, parsed);
-          this.cobLimitRecheck.set(key, AnomalyService.COB_LIMIT_RECHECK_POLLS);
+          this.cobLimitRecheck.set(key, this.cobLimitRecheckReads(key));
         }
       } catch (cobErr) {
         this.logger.debug(
@@ -6612,10 +6652,12 @@ export class AnomalyService
         intervalMs,
       );
       const findings: ReshardSkewFinding[] = [];
+      const readAt = new Map<string, number>();
       const nodeAddrs = new Map<string, string>();
-      const shards = this.freshReshardShards(clusterKey, timestamp, intervalMs);
+      const entries = this.freshReshardEntries(clusterKey, timestamp, intervalMs);
+      const shards = entries.map(([, shard]) => shard);
       const judged = seed !== null || nodeSnapshots.length > 0;
-      const windowOpen = judged && isReshardActive(shards, timestamp, RESHARD_QUIET_POLLS * intervalMs);
+      const windowOpen = judged && this.isReshardActiveAmong(entries, timestamp, intervalMs);
       if (windowOpen) {
         if (shards.length < RESHARD_MIN_PRIMARIES) {
           if (!this.reshardThinViewLogged.has(ctx.connectionId)) {
@@ -6635,12 +6677,16 @@ export class AnomalyService
             this.reshardSnapshot.set(ctx.connectionId, measured);
             view = shards.map((s) => (s.shardId === measured.shardId ? measured : s));
             const finding = evaluateReshardSkew(measured, view);
-            if (finding) findings.push(finding);
+            if (finding) {
+              findings.push(finding);
+              readAt.set(reshardSkewSignature(finding), measured.timestamp);
+            }
           }
           for (const [nodeAddr, snapshot] of nodeSnapshots) {
             const finding = evaluateReshardSkew(snapshot, view);
             if (!finding) continue;
             findings.push(finding);
+            readAt.set(reshardSkewSignature(finding), snapshot.timestamp);
             nodeAddrs.set(finding.shardId, nodeAddr);
           }
         }
@@ -6653,6 +6699,13 @@ export class AnomalyService
         primaries >= RESHARD_MIN_PRIMARIES &&
         (this.reshardWatchedSince.get(ctx.connectionId)! > stallStart ||
           this.reshardPeerSeenSince(ctx.connectionId, clusterKey, stallStart));
+      const reads =
+        this.reshardSkewReads.get(ctx.connectionId) ?? new Map<string, { readAt: number; reads: number }>();
+      this.reshardSkewReads.set(ctx.connectionId, reads);
+      for (const [signature, at] of readAt) {
+        const seen = reads.get(signature);
+        if (seen?.readAt !== at) reads.set(signature, { readAt: at, reads: (seen?.reads ?? 0) + 1 });
+      }
       await this.applyTopologyPersistenceGate({
         ctx,
         timestamp,
@@ -6661,6 +6714,8 @@ export class AnomalyService
         firstSeenByConn: this.reshardSkewFirstSeen,
         activeByConn: this.activeReshardSkews,
         minPersistMs: (RESHARD_PERSIST_POLLS - 1) * intervalMs,
+        isConfirmed: (finding) =>
+          (reads.get(reshardSkewSignature(finding))?.reads ?? 0) >= RESHARD_PERSIST_POLLS,
         eventIdsByConn: this.reshardSkewEventIds,
         metricType: MetricType.RESHARD_SHARD_SKEW,
         preserveSignature: (signature) =>
@@ -6669,6 +6724,10 @@ export class AnomalyService
         buildEvent: (finding) =>
           this.buildReshardSkewEvent(ctx, timestamp, finding, nodeAddrs.get(finding.shardId)),
       });
+      const pending = this.reshardSkewFirstSeen.get(ctx.connectionId);
+      for (const signature of [...reads.keys()]) {
+        if (!pending?.has(signature)) reads.delete(signature);
+      }
     } catch (err) {
       this.logger.warn(
         `Reshard pressure check failed for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
@@ -6792,10 +6851,10 @@ export class AnomalyService
     const clusterKey = this.connectionClusterKeys.get(connectionId);
     if (clusterKey === undefined) return false;
     const intervalMs = this.getIntervalMs();
-    return isReshardActive(
-      this.freshReshardShards(clusterKey, timestamp, intervalMs),
+    return this.isReshardActiveAmong(
+      this.freshReshardEntries(clusterKey, timestamp, intervalMs),
       timestamp,
-      RESHARD_QUIET_POLLS * intervalMs,
+      intervalMs,
     );
   }
 
@@ -7484,7 +7543,7 @@ export class AnomalyService
       if (!key.startsWith(prefix) || snapshot.clusterKey !== clusterKey) continue;
       const age = timestamp - snapshot.timestamp;
       if (age > RESHARD_MARKER_STALL_MS) continue;
-      if (age > RESHARD_STALE_POLLS * intervalMs) {
+      if (age > RESHARD_STALE_POLLS * this.reshardReadIntervalMs(key, intervalMs)) {
         unread.add(reshardSkewSignature(snapshot));
         continue;
       }
@@ -8094,10 +8153,24 @@ export class AnomalyService
     if (!cached || cached.self.id !== nodeId) return null;
     if ((cached.self.migratingSlots?.length ?? 0) + (cached.self.importingSlots?.length ?? 0) > 0) return null;
     const intervalMs = this.getIntervalMs();
-    if (timestamp - cached.readAt >= RESHARD_QUIET_POLLS * intervalMs) return null;
+    if (timestamp - cached.readAt >= RESHARD_QUIET_POLLS * this.nodeReadIntervalMs(connectionId, key)) return null;
     const clusterKey = this.connectionClusterKeys.get(connectionId);
-    const shards = clusterKey ? this.freshReshardShards(clusterKey, timestamp, intervalMs) : [];
-    return isReshardActive(shards, timestamp, RESHARD_QUIET_POLLS * intervalMs) ? null : cached.self;
+    const entries = clusterKey ? this.freshReshardEntries(clusterKey, timestamp, intervalMs) : [];
+    return this.isReshardActiveAmong(entries, timestamp, intervalMs) ? null : cached.self;
+  }
+
+  private sampledNodeSelf(
+    connectionId: string,
+    key: string,
+    nodeId: string,
+    timestamp: number,
+  ): ClusterNode | null {
+    const clusterKey = this.connectionClusterKeys.get(connectionId);
+    const round = clusterKey ? this.topologyDivergence.lastRound(clusterKey) : undefined;
+    const self = round?.selves.get(nodeId);
+    if (!round || !self || timestamp - round.at >= this.getIntervalMs()) return null;
+    this.reshardNodeSelves.set(key, { self, readAt: round.at });
+    return self;
   }
 
   private async readNodeSelf(
@@ -8122,18 +8195,34 @@ export class AnomalyService
     }
   }
 
-  private freshReshardShards(
+  private reshardReadIntervalMs(key: string, intervalMs: number): number {
+    const connectionId = connectionOfStateKey(key);
+    return key === connectionId ? intervalMs : intervalMs * this.nodeReadPolls(connectionId, key);
+  }
+
+  private freshReshardEntries(
     clusterKey: string,
     timestamp: number,
     intervalMs: number,
-  ): ReshardShardSnapshot[] {
-    const shards = new Map<string, ReshardShardSnapshot>();
-    for (const snapshot of this.reshardSnapshot.values()) {
+  ): [string, ReshardShardSnapshot][] {
+    const shards = new Map<string, [string, ReshardShardSnapshot]>();
+    for (const [key, snapshot] of this.reshardSnapshot) {
       if (snapshot.clusterKey !== clusterKey) continue;
-      if (timestamp - snapshot.timestamp > RESHARD_STALE_POLLS * intervalMs) continue;
-      shards.set(snapshot.shardId, snapshot);
+      const readEveryMs = this.reshardReadIntervalMs(key, intervalMs);
+      if (timestamp - snapshot.timestamp > RESHARD_STALE_POLLS * readEveryMs) continue;
+      shards.set(snapshot.shardId, [key, snapshot]);
     }
     return [...shards.values()];
+  }
+
+  private isReshardActiveAmong(
+    entries: [string, ReshardShardSnapshot][],
+    timestamp: number,
+    intervalMs: number,
+  ): boolean {
+    return entries.some(([key, shard]) =>
+      isReshardActive([shard], timestamp, RESHARD_QUIET_POLLS * this.reshardReadIntervalMs(key, intervalMs)),
+    );
   }
 
   private async readNodeWriteP99(
@@ -8798,6 +8887,8 @@ export class AnomalyService
   private static readonly REPLICA_READ_MIN_MS = 50;
   private static readonly REPLICA_READ_TIMED_OUT = 'Reading the replica timed out';
   private static readonly FANOUT_NODE_EVENT_LIMIT = 8;
+  private static readonly REPLICA_SLOT_READ_BUDGET = 8;
+  private static readonly REPLICA_SLOT_PRIORITY_READS = 6;
 
   /**
    * Detects a replica wrongly reporting slot migrating/importing/owned state
@@ -8814,21 +8905,24 @@ export class AnomalyService
     timestamp: number,
     nodes: ClusterNode[],
     shards: ClusterShard[] | undefined,
-    unreachableReplicaIds: Set<string> = new Set(),
+    notReadReplicaIds: Set<string> = new Set(),
+    unseenReplicaIds: Set<string> = notReadReplicaIds,
+    waitingReplicaIds: Set<string> = new Set(),
   ): Promise<void> {
     try {
-      // A replica we couldn't reach this poll is an observation GAP, not a
+      // A replica not read this poll, unreachable or waiting its turn in the
+      // rotation, is an observation GAP, not a
       // recovery: its base gossip line never carries node-local migrating/
       // importing markers, so its finding would vanish and the gate would restart
       // the grace clock and auto-resolve a still-open WARNING. Preserve the prior
-      // state of any signature belonging to an unreachable replica (the signature
+      // state of any signature belonging to such a replica (the signature
       // is `<replicaId>|<reason>|<slots>`, so the node id is the leading field) —
       // mirroring how a failed base CLUSTER NODES fetch skips detectors entirely.
-      const preserveSignature = unreachableReplicaIds.size
-        ? (signature: string) => unreachableReplicaIds.has(signature.split('|')[0])
+      const preserveSignature = notReadReplicaIds.size
+        ? (signature: string) => notReadReplicaIds.has(signature.split('|')[0])
         : undefined;
       const findings = detectReplicaSlotState(nodes, shards);
-      this.claimLegacyReplicaSlotEvents(ctx.connectionId, findings, unreachableReplicaIds);
+      this.claimLegacyReplicaSlotEvents(ctx.connectionId, findings, unseenReplicaIds);
       await this.applyTopologyPersistenceGate({
         ctx,
         timestamp,
@@ -8836,6 +8930,7 @@ export class AnomalyService
         signatureOf: replicaSlotSignature,
         firstSeenByConn: this.replicaSlotFirstSeen,
         activeByConn: this.activeReplicaSlotAnomalies,
+        isConfirmed: (finding) => !waitingReplicaIds.has(finding.replicaId),
         eventIdsByConn: this.replicaSlotEventIds,
         minPersistMs: AnomalyService.REPLICA_SLOT_STATE_MIN_PERSIST_MS,
         metricType: MetricType.REPLICA_SLOT_STATE,
@@ -8887,13 +8982,25 @@ export class AnomalyService
    * a stuck replica requires querying that replica directly. When cluster
    * discovery is unavailable, returns the base view unchanged (degrade: detection
    * then works only when the monitor connects directly to the stuck replica).
+   *
+   * Reads a budget of 8 replicas per poll, in rotation. Up to 6 replicas that
+   * showed slot state are read on every poll until they are clean; any more
+   * keep their state and wait their turn. `notReadIds` are the
+   * replicas with no own line this poll, `unseenIds` the ones not read since
+   * the connection's rows from before dedupe keys were adopted.
    */
   private async gatherReplicaSlotView(
     baseNodes: ClusterNode[],
     ctx: ConnectionContext,
-  ): Promise<{ nodes: ClusterNode[]; unreachableIds: Set<string> }> {
+  ): Promise<{ nodes: ClusterNode[]; notReadIds: Set<string>; unseenIds: Set<string>; waitingIds: Set<string> }> {
+    const unchanged = {
+      nodes: baseNodes,
+      notReadIds: new Set<string>(),
+      unseenIds: new Set<string>(),
+      waitingIds: new Set<string>(),
+    };
     if (!this.clusterDiscovery || !this.dialsDataNodes(ctx.connectionId)) {
-      return { nodes: baseNodes, unreachableIds: new Set() };
+      return unchanged;
     }
 
     // Only fan out to reachable remote replicas. A replica flagged dead/
@@ -8907,10 +9014,19 @@ export class AnomalyService
         !n.flags.includes('myself') &&
         !DEAD_FLAGS.some((flag) => n.flags.includes(flag)),
     );
-    if (remoteReplicas.length === 0) return { nodes: baseNodes, unreachableIds: new Set() };
+    if (remoteReplicas.length === 0) return unchanged;
 
+    const watched = this.replicaSlotWatchedIds(ctx.connectionId);
+    const { due } = this.replicaSlotRotation.pick(
+      ctx.connectionId,
+      remoteReplicas,
+      (r) => r.id,
+      AnomalyService.REPLICA_SLOT_READ_BUDGET,
+      (r) => watched.has(r.id),
+      AnomalyService.REPLICA_SLOT_PRIORITY_READS,
+    );
     const selfViews = await Promise.allSettled(
-      remoteReplicas.map(async (r) => {
+      due.map(async (r) => {
         const client = await this.clusterDiscovery!.getNodeConnection(r.id, ctx.connectionId);
         // Bound the command itself, not just connect(): a blackholed peer (socket
         // established but unresponsive) leaves iovalkey `ready`, so the reused
@@ -8933,17 +9049,24 @@ export class AnomalyService
 
     const merged = baseNodes.map((n) => ({ ...n }));
     const byId = new Map(merged.map((n) => [n.id, n]));
-    const unreachableIds = new Set<string>();
-    // allSettled preserves order, so selfViews[i] corresponds to remoteReplicas[i].
+    const replicaIds = new Set(remoteReplicas.map((r) => r.id));
+    // A replica whose last read failed stays unreachable while it waits its turn.
+    const unreachableIds = new Set(
+      [...(this.replicaSlotUnreachable.get(ctx.connectionId) ?? [])].filter((id) => replicaIds.has(id)),
+    );
+    const read = new Set<string>();
+    // allSettled preserves order, so selfViews[i] corresponds to due[i].
     selfViews.forEach((result, i) => {
       // A rejected self-view is an unreachable replica (connect/command timeout or
       // error). Track its id so detection can PRESERVE that node's prior state
       // instead of reading the absence as recovery, and surface a degraded signal
       // below — the discovery service logs each unique connect error only once.
       if (result.status === 'rejected') {
-        unreachableIds.add(remoteReplicas[i].id);
+        unreachableIds.add(due[i].id);
         return;
       }
+      unreachableIds.delete(due[i].id);
+      read.add(due[i].id);
       if (!result.value) return;
       const target = byId.get(result.value.id);
       if (!target) return;
@@ -8979,7 +9102,31 @@ export class AnomalyService
       }
       this.replicaFanoutUnreachable.set(ctx.connectionId, unreachable);
     }
-    return { nodes: merged, unreachableIds };
+    this.replicaSlotUnreachable.set(ctx.connectionId, unreachableIds);
+    const notReadIds = new Set([...replicaIds].filter((id) => !read.has(id)));
+    const waitingIds = new Set([...notReadIds].filter((id) => !unreachableIds.has(id)));
+    if (!this.legacyReplicaSlotEvents.has(ctx.connectionId)) {
+      this.legacyReplicaSlotRead.delete(ctx.connectionId);
+      return { nodes: merged, notReadIds, unseenIds: notReadIds, waitingIds };
+    }
+    const seen = this.legacyReplicaSlotRead.get(ctx.connectionId) ?? new Set<string>();
+    read.forEach((id) => seen.add(id));
+    this.legacyReplicaSlotRead.set(ctx.connectionId, seen);
+    return {
+      nodes: merged,
+      notReadIds,
+      unseenIds: new Set([...replicaIds].filter((id) => !seen.has(id))),
+      waitingIds,
+    };
+  }
+
+  private replicaSlotWatchedIds(connectionId: string): Set<string> {
+    const signatures = [
+      ...(this.replicaSlotFirstSeen.get(connectionId)?.keys() ?? []),
+      ...(this.activeReplicaSlotAnomalies.get(connectionId) ?? []),
+      ...(this.replicaSlotEventIds.get(connectionId)?.keys() ?? []),
+    ];
+    return new Set(signatures.map((signature) => signature.split('|')[0]));
   }
 
   /**
@@ -9010,6 +9157,7 @@ export class AnomalyService
     // (grace preserved) nor auto-resolved — their prior state is carried forward
     // rather than read as recovery.
     preserveSignature?: (signature: string) => boolean;
+    isConfirmed?: (finding: T) => boolean;
     contextOf?: (finding: T) => ConnectionContext;
     ownerOf?: (eventId: string) => string | undefined;
   }): Promise<void> {
@@ -9025,6 +9173,7 @@ export class AnomalyService
       eventIdsByConn,
       metricType,
       preserveSignature,
+      isConfirmed,
       contextOf,
       ownerOf,
     } = params;
@@ -9050,7 +9199,7 @@ export class AnomalyService
       if (!firstSeen.has(signature)) firstSeen.set(signature, timestamp);
 
       // Persistence gate.
-      if (timestamp - seenAt < minPersistMs) continue;
+      if (timestamp - seenAt < minPersistMs || isConfirmed?.(finding) === false) continue;
 
       // Dedupe — but stay aware of EXTERNAL resolution. For tracked detectors an
       // operator can dismiss the banner (resolve the event) while the condition
@@ -9450,6 +9599,7 @@ export class AnomalyService
     await this.reconcilePrimaryReplicaAlert(key);
     const state = this.primaryReplicaState.get(key) ?? createShardReplicaState(timestamp);
     this.primaryReplicaState.set(key, state);
+    if (nodeAddr) this.primaryReplicaNodeKeys.set(state, topologyStateKey(ctx.connectionId, nodeAddr));
     const primaryId = self ? self.id : info.master_replid;
     if (primaryId) state.primaryId = primaryId;
 
@@ -9620,8 +9770,12 @@ export class AnomalyService
    * TTL: a primary that comes back alone after an outage must still alert.
    */
   private sweepPrimaryReplicaShards(timestamp: number): void {
-    const unobservedMs = Math.max(PRIMARY_REPLICA_UNOBSERVED_MS, 3 * this.getIntervalMs());
     for (const [key, state] of [...this.primaryReplicaState]) {
+      const nodeKey = this.primaryReplicaNodeKeys.get(state);
+      const readEveryMs = nodeKey
+        ? this.nodeReadIntervalMs(connectionOfStateKey(nodeKey), nodeKey)
+        : this.getIntervalMs();
+      const unobservedMs = Math.max(PRIMARY_REPLICA_UNOBSERVED_MS, 3 * readEveryMs);
       const idleMs = timestamp - state.lastSeenAt;
       if (idleMs <= unobservedMs) continue;
       this.closePrimaryReplicaEvents(key);
@@ -9671,6 +9825,9 @@ export class AnomalyService
       // Until the shard is observed again, the adopting connection answers for it.
       state.observers.add(connectionId);
       this.primaryReplicaState.set(key, state);
+      if (event.nodeAddr && !this.primaryReplicaNodeKeys.has(state)) {
+        this.primaryReplicaNodeKeys.set(state, topologyStateKey(connectionId, event.nodeAddr));
+      }
     }
   }
 
@@ -12048,10 +12205,14 @@ export class AnomalyService
     endTime: number,
   ): Promise<ReplicaDivergenceHistory[]> {
     const keys = this.divergenceKeysOf(connectionId);
-    const states = keys.flatMap((key) => {
+    const captured = keys.flatMap((key) => {
       const state = this.divergenceState.get(key);
-      return state ? [state] : [];
+      return state ? [{ key, state }] : [];
     });
+    const states = captured.map(({ state }) => state);
+    const nodeKeys = new Map(
+      captured.filter(({ key }) => key !== connectionId).map(({ key, state }) => [state, key] as const),
+    );
     const stateOf = (replica: string) =>
       states.find((s) => s.replicas.has(replica) || s.observed.has(replica)) ?? states[0];
     const series = new Map<string, DivergenceWindow[]>();
@@ -12109,19 +12270,22 @@ export class AnomalyService
     }
     for (const windows of series.values()) windows.sort((a, b) => a.end - b.end);
     const now = Date.now();
-    const staleAfterMs = divergenceWindowMs(this.getIntervalMs());
+    const staleAfterOf = (state: DivergenceConnectionState | undefined) => {
+      const nodeKey = state && nodeKeys.get(state);
+      return divergenceWindowMs(nodeKey ? this.nodeReadIntervalMs(connectionId, nodeKey) : this.getIntervalMs());
+    };
     const orphaned = new Set(keys.flatMap((key) => [...(this.divergenceOrphans.get(key)?.keys() ?? [])]));
-    const reachesNow = endTime >= now - staleAfterMs;
     return [...series.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([replica, windows]) => {
         const state = stateOf(replica);
+        const staleAfterMs = staleAfterOf(state);
         const observed = replicaObservedLevel(
           state,
           replica,
           now,
           staleAfterMs,
-          reachesNow ? windows[windows.length - 1] : undefined,
+          endTime >= now - staleAfterMs ? windows[windows.length - 1] : undefined,
         );
         const level = observed === 'none' && orphaned.has(replica) ? 'behind' : observed;
         const latest =
@@ -12338,7 +12502,11 @@ export class AnomalyService
       }
 
       const windowsBefore = state.closedWindowCount;
-      const observed = observeDivergence(state, sample, divergenceWindowMs(this.getIntervalMs()));
+      const observed = observeDivergence(
+        state,
+        sample,
+        divergenceWindowMs(nodeAddr ? this.nodeReadIntervalMs(ctx.connectionId, key) : this.getIntervalMs()),
+      );
       const windowClosed = state.closedWindowCount > windowsBefore;
       const samples = windowClosed
         ? await this.sampleReplicas(ctx, replicasToSample(state, observed), !nodeAddr, readPrimary)
@@ -12756,26 +12924,38 @@ export class AnomalyService
     ctx: ConnectionContext,
     topology: FanoutCoverage['topology'],
     coverage: Pick<FanoutCoverage, FanoutCount | 'reason'>,
+    pickedSweepPolls: number | null = null,
   ): void {
+    const reading = coverage.reason === null && pickedSweepPolls !== null;
+    const sweepPolls = reading ? pickedSweepPolls : 1;
+    const sweepMs = this.getIntervalMs() * sweepPolls;
     this.fanoutCoverage.set(ctx.connectionId, {
       connectionId: ctx.connectionId,
       topology,
       ...coverage,
       tunnelled: !!this.connectionRegistry.getConfig(ctx.connectionId)?.sshTunnel?.enabled,
       targetLimit: TOPOLOGY_TARGET_LIMIT,
+      sweepMs,
+      sweepPolls,
       timeoutMs: AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
       timestamp: Date.now(),
     });
     this.fanoutCoverageWithdrawn.delete(ctx.connectionId);
-    this.publishFanoutCoverage(ctx.connectionId, coverage.reason === 'not_applicable' ? null : coverage);
+    this.publishFanoutCoverage(
+      ctx.connectionId,
+      coverage.reason === 'not_applicable' ? null : coverage,
+      reading ? sweepMs : null,
+    );
   }
 
   private publishFanoutCoverage(
     connectionId: string,
     coverage: Pick<FanoutCoverage, FanoutCount | 'reason'> | null,
+    sweepMs: number | null = null,
   ): void {
     try {
       this.prometheusService.updateFanoutCoverage(connectionId, coverage);
+      this.prometheusService.updateFanoutSweep(connectionId, sweepMs);
     } catch (err) {
       this.logger.debug(
         `Failed to update fan-out coverage gauges for ${connectionId}: ${err instanceof Error ? err.message : err}`,
@@ -12871,13 +13051,14 @@ export class AnomalyService
   ): Promise<void> {
     const now = Date.now();
     const staleMs = this.topologyClaimStaleMs();
+    const pickedBefore = this.fanoutEveryPoll.get(ctx.connectionId)?.picked ?? new Set<string>();
+    this.fanoutEveryPoll.delete(ctx.connectionId);
     const reachable = new Set(scope.targets.map((t) => t.addr));
     const claimed = this.topologyTargetClaims.claim(
       ctx.connectionId,
       scope.targets,
       now,
       staleMs,
-      TOPOLOGY_TARGET_LIMIT,
       [...scope.members].filter((addr) => !reachable.has(addr)),
     );
     const claimedAddrs = new Set(claimed.map((t) => t.addr));
@@ -12895,19 +13076,17 @@ export class AnomalyService
     const kept = new Set(
       [...scope.members].filter((addr) => claimedAddrs.has(addr) || !reachable.has(addr)),
     );
-    // Primaries past the target cap that no other connection holds either:
-    // nothing checks them until a connection has room. One held as down is
-    // counted unreachable by its holder, so it is not counted here as well.
-    const skipped = scope.targets.filter(
-      (t) =>
-        !claimedAddrs.has(t.addr) &&
-        !this.topologyTargetClaims.heldByOther(ctx.connectionId, t.addr, now, staleMs),
-    ).length;
     const down = [...kept].filter(
       (addr) =>
         !reachable.has(addr) && !this.topologyTargetClaims.heldByOther(ctx.connectionId, addr, now, staleMs),
     ).length;
-    const coverage = (checked: number, unreachable: number, authFailed: number) => {
+    const coverage = (
+      checked: number,
+      unreachable: number,
+      authFailed: number,
+      skipped = 0,
+      pickedSweepPolls: number | null = null,
+    ) => {
       const notDialed = gap?.notDialed ?? 0;
       const reason =
         gap?.reason ??
@@ -12916,11 +13095,19 @@ export class AnomalyService
           : scope.members.size > 0
             ? 'covered_elsewhere'
             : 'no_targets');
-      this.recordFanoutCoverage(ctx, topology, { checked, unreachable, authFailed, skipped, notDialed, reason });
+      this.recordFanoutCoverage(
+        ctx,
+        topology,
+        { checked, unreachable, authFailed, skipped, notDialed, reason },
+        pickedSweepPolls,
+      );
     };
     const active = new Set([...kept].map((addr) => topologyStateKey(ctx.connectionId, addr)));
     for (const key of this.topologyBackoff.keys()) {
       if (isTopologyStateKeyOf(key, ctx.connectionId) && !active.has(key)) this.topologyBackoff.delete(key);
+    }
+    for (const key of this.fanoutReadOk) {
+      if (isTopologyStateKeyOf(key, ctx.connectionId) && !active.has(key)) this.fanoutReadOk.delete(key);
     }
     void this.clusterDiscovery
       ?.retainAddressConnections(
@@ -12931,10 +13118,11 @@ export class AnomalyService
         ]),
       )
       .catch(() => undefined);
-    const targets = claimed.filter(
+    const readable = claimed.filter(
       (t) => (this.topologyBackoff.get(topologyStateKey(ctx.connectionId, t.addr))?.until ?? 0) <= now,
     );
-    const backedOffTargets = claimed.filter((t) => !targets.includes(t) && !takeovers.has(t.addr));
+    const inRotation = new Set(readable.map((t) => t.addr));
+    const backedOffTargets = claimed.filter((t) => !inRotation.has(t.addr) && !takeovers.has(t.addr));
     const backedOff = backedOffTargets.length;
     // A primary backing off after refusing the credentials still counts as
     // refusing them, not as unreachable.
@@ -12943,9 +13131,9 @@ export class AnomalyService
     ).length;
     // Recorded before the awaits below, so a storage error there cannot leave
     // the previous cycle's counts in place.
-    if (targets.length === 0) coverage(0, backedOff - backedOffAuth + down, backedOffAuth);
+    if (readable.length === 0) coverage(0, backedOff - backedOffAuth + down, backedOffAuth);
     for (const target of claimed) {
-      if (!targets.includes(target)) this.topologyTargetClaims.releaseTarget(ctx.connectionId, target.addr);
+      if (!inRotation.has(target.addr)) this.topologyTargetClaims.releaseTarget(ctx.connectionId, target.addr);
     }
     for (const key of this.divergenceKeysOf(ctx.connectionId)) {
       if (key !== ctx.connectionId && !active.has(key)) {
@@ -12970,10 +13158,11 @@ export class AnomalyService
       }
     }
     this.forgetNodeWriteP99(ctx.connectionId, active);
-    const read = new Set(targets.map((t) => t.addr));
+    // A primary waiting its turn in the rotation keeps its signals and its
+    // reshard view; only one that cannot be read at all loses them.
     for (const addr of kept) {
       const key = topologyStateKey(ctx.connectionId, addr);
-      if (!read.has(addr) && this.reshardSnapshot.has(key)) this.reshardMissedReads.add(key);
+      if (!inRotation.has(addr) && this.reshardSnapshot.has(key)) this.reshardMissedReads.add(key);
     }
     this.closePendingNodeEvents(ctx.connectionId, active);
     for (const nodeAddr of [...(this.adoptedNodeReshardEventIds.get(ctx.connectionId)?.keys() ?? [])]) {
@@ -12982,7 +13171,9 @@ export class AnomalyService
       if (adopted) this.closeLater(adopted);
     }
     for (const addr of kept) {
-      if (!read.has(addr)) this.clearNodeSignals(ctx.connectionId, topologyStateKey(ctx.connectionId, addr));
+      if (inRotation.has(addr)) continue;
+      this.clearNodeSignals(ctx.connectionId, topologyStateKey(ctx.connectionId, addr));
+      this.fanoutReadOk.delete(topologyStateKey(ctx.connectionId, addr));
     }
     try {
       await this.persistPendingDivergenceWindows(ctx);
@@ -12994,19 +13185,20 @@ export class AnomalyService
       // connection of the topology can take the primaries over instead of
       // reporting them covered here.
       this.topologyTargetClaims.release(ctx.connectionId);
-      if (targets.length > 0) {
+      if (readable.length > 0) {
         this.recordFanoutCoverage(ctx, topology, {
           checked: 0,
           unreachable: backedOff - backedOffAuth + down,
           authFailed: backedOffAuth,
-          skipped,
-          notDialed: targets.length,
+          skipped: 0,
+          notDialed: readable.length,
           reason: 'fanout_failed',
         });
       }
       throw err;
     }
-    if (targets.length === 0) {
+    if (readable.length === 0) {
+      this.fanoutSweepPolls.delete(ctx.connectionId);
       if (backedOff === 0 && (this.topologyFanoutUnreachable.get(ctx.connectionId) ?? 0) > 0) {
         this.logger.log(
           `Node fan-out for ${ctx.connectionName}: no reachable primaries left to check.`,
@@ -13014,6 +13206,40 @@ export class AnomalyService
         this.topologyFanoutUnreachable.delete(ctx.connectionId);
       }
       return;
+    }
+
+    const alone = this.primariesWithoutSyncedReplica();
+    const { due: targets, everyPoll, sweepPolls } = this.fanoutRotation.pick(
+      ctx.connectionId,
+      readable,
+      (t) => t.addr,
+      TOPOLOGY_TARGET_LIMIT,
+      (t) =>
+        takeovers.has(t.addr) ||
+        this.needsEveryPoll(ctx.connectionId, t.addr) ||
+        alone.has(t.nodeId ?? '') ||
+        alone.has(this.primaryReplicaPaths.get(`node:${t.addr}`) ?? ''),
+    );
+    // Primaries waiting their turn count as their last read left them: checked,
+    // failed, or not read yet. A takeover is counted by its holder until a read
+    // here succeeds.
+    this.fanoutSweepPolls.set(ctx.connectionId, sweepPolls);
+    const picked = new Set(everyPoll.map((t) => topologyStateKey(ctx.connectionId, t.addr)));
+    this.fanoutEveryPoll.set(ctx.connectionId, {
+      picked,
+      steady: new Set([...picked].filter((key) => pickedBefore.has(key))),
+    });
+    const due = new Set(targets);
+    const waiting = { checked: 0, failed: 0, authFailed: 0, skipped: 0 };
+    for (const target of readable) {
+      if (due.has(target) || takeovers.has(target.addr)) continue;
+      const key = topologyStateKey(ctx.connectionId, target.addr);
+      const backoff = this.topologyBackoff.get(key);
+      if (backoff) {
+        waiting.failed++;
+        if (backoff.auth) waiting.authFailed++;
+      } else if (this.fanoutReadOk.has(key)) waiting.checked++;
+      else waiting.skipped++;
     }
 
     const timestamp = Date.now();
@@ -13040,7 +13266,8 @@ export class AnomalyService
           const cobRead = this.readFanoutCob(client, socket, stateKey, target.addr, info);
           const [self, writeP99, cob] = await Promise.all([
             target.nodeId
-              ? (this.cachedNodeSelf(ctx.connectionId, stateKey, target.nodeId, timestamp) ??
+              ? (this.sampledNodeSelf(ctx.connectionId, stateKey, target.nodeId, timestamp) ??
+                this.cachedNodeSelf(ctx.connectionId, stateKey, target.nodeId, timestamp) ??
                 this.readNodeSelf(client, socket, target.addr, stateKey))
               : Promise.resolve(null),
             target.nodeId ? this.readNodeWriteP99(client, socket, stateKey, target.addr, timestamp) : null,
@@ -13059,8 +13286,8 @@ export class AnomalyService
     );
     const counted = (i: number) => !takeovers.has(targets[i].addr);
     const failed = results.filter((result, i) => result.status === 'rejected' && counted(i)).length;
-    const authFailed = backedOffAuth + refused.filter((r, i) => r && counted(i)).length;
-    const unreachable = backedOff + failed;
+    const authFailed = backedOffAuth + waiting.authFailed + refused.filter((r, i) => r && counted(i)).length;
+    const unreachable = backedOff + waiting.failed + failed;
     // A takeover whose reservation was lost while the read was in flight stays
     // with the connection that now holds the primary: it is neither counted
     // nor checked here.
@@ -13070,12 +13297,15 @@ export class AnomalyService
       if (result.status !== 'fulfilled' || !takeovers.has(addr)) continue;
       if (!this.topologyTargetClaims.confirm(ctx.connectionId, addr, now)) lost.add(addr);
     }
-    const checked = results.filter((result, i) => result.status === 'fulfilled' && !lost.has(targets[i].addr)).length;
+    const checked =
+      waiting.checked +
+      results.filter((result, i) => result.status === 'fulfilled' && !lost.has(targets[i].addr)).length;
     // Recorded as soon as the reads settle: detection below can throw.
-    coverage(checked, unreachable - authFailed + down, authFailed);
+    coverage(checked, unreachable - authFailed + down, authFailed, waiting.skipped, sweepPolls);
     for (const [i, result] of results.entries()) {
       const key = topologyStateKey(ctx.connectionId, targets[i].addr);
       if (result.status === 'rejected') {
+        this.fanoutReadOk.delete(key);
         this.clearNodeSignals(ctx.connectionId, key);
         this.topologyTargetClaims.releaseTarget(ctx.connectionId, targets[i].addr);
         if (targets[i].nodeId) this.reshardMissedReads.add(topologyStateKey(ctx.connectionId, targets[i].addr));
@@ -13086,9 +13316,11 @@ export class AnomalyService
       }
       this.topologyBackoff.delete(key);
       if (lost.has(targets[i].addr)) {
+        this.fanoutReadOk.delete(key);
         this.clearNodeSignals(ctx.connectionId, key);
         continue;
       }
+      this.fanoutReadOk.add(key);
       const target = targets[i];
       const nodeCtx: ConnectionContext = {
         ...ctx,
@@ -13135,6 +13367,49 @@ export class AnomalyService
       }
       this.topologyFanoutUnreachable.set(ctx.connectionId, unreachable);
     }
+  }
+
+  private primariesWithoutSyncedReplica(): Set<string> {
+    const alone = new Set<string>();
+    for (const [key, state] of this.primaryReplicaState) {
+      if (state.zeroSince === null && state.alerted === 'none') continue;
+      alone.add(key);
+      if (state.primaryId) alone.add(state.primaryId);
+    }
+    return alone;
+  }
+
+  private needsEveryPoll(connectionId: string, addr: string): boolean {
+    const key = topologyStateKey(connectionId, addr);
+    const reshard = this.reshardSnapshot.get(key);
+    const skew = reshard ? reshardSkewSignature(reshard) : '';
+    const retry = this.retryAmplificationState.get(key);
+    const backlog = this.backlogCoverage.get(key);
+    const cob = this.cobState.get(key);
+    return (
+      this.topologyBackoff.has(key) ||
+      this.nodeDetectorEventIds(key).length > 0 ||
+      !!this.pendingNodeOpenEvents.get(connectionId)?.has(addr) ||
+      !!this.adoptedNodeReshardEventIds.get(connectionId)?.has(addr) ||
+      this.restoredCobLevel.has(key) ||
+      (!!reshard && reshard.migratingSlots + reshard.importingSlots > 0) ||
+      !!this.reshardSkewFirstSeen.get(connectionId)?.has(skew) ||
+      !!this.reshardSkewEventIds.get(connectionId)?.has(skew) ||
+      [...(this.divergenceState.get(key)?.replicas.values() ?? [])].some(
+        (replica) => replica.level !== 'none' || !!replica.eventId || !!replica.disagreeEventId,
+      ) ||
+      this.divergenceOrphans.has(key) ||
+      (!!retry && (retry.episodeLevel !== 'none' || retry.ackedLevel !== 'none' || !!retry.pending)) ||
+      (!!backlog && (backlog.level !== 'none' || backlog.belowWarning > 0 || backlog.belowCritical > 0)) ||
+      (this.resyncEscalation.get(key)?.pending.size ?? 0) > 0 ||
+      (this.forkMemoryState.get(key)?.ackedLevel ?? 'none') !== 'none' ||
+      (!!cob &&
+        (!!cob.aggregateAlert ||
+          !!cob.inheritedAggregateAlert ||
+          [...cob.replicas.values()].some(
+            (replica) => replica.ackedLevel !== 'none' || replica.softBreachSince !== null,
+          )))
+    );
   }
 
   private async readTargetReplicationInfo(

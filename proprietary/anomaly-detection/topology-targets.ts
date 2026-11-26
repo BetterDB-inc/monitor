@@ -110,7 +110,7 @@ export class TopologyTargetClaims {
   private owners = new Map<string, TargetOwner>();
 
   /**
-   * Claims up to `limit` free targets, and every free `down` address: a
+   * Claims every free target, and every free `down` address: a
    * primary the topology flags as down is not read, but whoever holds it is
    * the one connection that counts it unreachable. A primary held only as
    * down is free to a connection whose topology still reaches it (`fail?` and
@@ -125,11 +125,9 @@ export class TopologyTargetClaims {
     targets: TopologyTarget[],
     now: number,
     staleMs: number,
-    limit = TOPOLOGY_TARGET_LIMIT,
     down: Iterable<string> = [],
   ): TopologyTarget[] {
-    const free = targets.filter((target) => this.isFreeFor(connectionId, target.addr, now, staleMs));
-    const claimed = free.slice(0, limit);
+    const claimed = targets.filter((target) => this.isFreeFor(connectionId, target.addr, now, staleMs));
     const freeDown = [...down].filter((addr) => !this.heldByOther(connectionId, addr, now, staleMs));
     const takeovers = new Set<string>();
     const wanted = new Map<string, boolean>(freeDown.map((addr): [string, boolean] => [addr, true]));
