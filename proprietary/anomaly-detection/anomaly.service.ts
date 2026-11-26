@@ -930,6 +930,7 @@ export class AnomalyService
   private readonly clusterScopes = new Map<string, string>();
   private readonly replicaSlotEventOwners = new Map<string, Map<string, string>>();
   private readonly unmergedSlotEvents = new Set<string>();
+  private readonly slotEventsLoaded = new Set<string>();
   private readonly clusterKeyByNode = new Map<string, string>();
   private readonly clusterViews = new Map<string, ReadonlySet<string>>();
   private readonly clusterNodeViews = new ClusterNodeViews();
@@ -1644,6 +1645,7 @@ export class AnomalyService
     this.closeConnectionEventsOnRemoval(connectionId, endedScope, handedOn);
     if (endedScope !== undefined) this.forgetClusterScope(endedScope);
     this.unmergedSlotEvents.delete(connectionId);
+    this.slotEventsLoaded.delete(connectionId);
     for (const key of this.nodeDetectorKeysOf(connectionId)) this.forgetNodeDetectors(key);
     this.openEventsAdopted.delete(connectionId);
     this.openEventsRetry.delete(connectionId);
@@ -2485,7 +2487,8 @@ export class AnomalyService
           await this.detectFailoverChurn(filed, scope, timestamp, nodes);
         }
         const asksReplicas = this.asksReplicasForOwnLine(ctx.connectionId);
-        if (!isRaft && nodes && (readsForCluster || !asksReplicas)) {
+        const slotEventsKnown = !asksReplicas || !readsForCluster || (await this.loadClusterSlotEvents(ctx));
+        if (!isRaft && nodes && slotEventsKnown && (readsForCluster || !asksReplicas)) {
           // Replica migrating/importing markers are node-local — only the
           // queried node's own line carries them — so aggregate each replica's
           // self-view before detecting (falls back to `nodes` without fan-out).
@@ -2898,7 +2901,9 @@ export class AnomalyService
         rows(MetricType.PARTIAL_MEMBERSHIP),
         this.topologyEventStores.partial,
       );
-      this.adoptReplicaSlotEvents(connectionId, rows(MetricType.REPLICA_SLOT_STATE));
+      if (!this.slotEventsLoaded.has(connectionId)) {
+        this.adoptReplicaSlotEvents(connectionId, rows(MetricType.REPLICA_SLOT_STATE));
+      }
       this.adoptSlotMigrationEvents(
         connectionId,
         rows(MetricType.SLOT_MIGRATION),
@@ -3142,6 +3147,30 @@ export class AnomalyService
     }
     if (this.clusterIdentity && (eventIds.size > 0 || legacy.length > 0)) {
       this.unmergedSlotEvents.add(connectionId);
+    }
+  }
+
+  private async loadClusterSlotEvents(ctx: ConnectionContext): Promise<boolean> {
+    if (!this.clusterIdentity) return true;
+    const readerId = ctx.connectionId;
+    const members = new Set([readerId, ...this.clusterIdentity.clusterConnectionIds(readerId)]);
+    try {
+      for (const member of members) {
+        if (this.openEventsAdopted.has(member) || this.slotEventsLoaded.has(member)) continue;
+        if (!this.asksReplicasForOwnLine(member)) continue;
+        const open = await this.readOpenEvents(member, MetricType.REPLICA_SLOT_STATE);
+        if (!this.connectionRegistry.getConfig(member)) continue;
+        this.adoptReplicaSlotEvents(member, open);
+        this.slotEventsLoaded.add(member);
+      }
+      return true;
+    } catch (err) {
+      this.logger.debug(
+        `Failed to read open replica slot events for the cluster of ${ctx.connectionName}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return false;
     }
   }
 

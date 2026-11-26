@@ -34049,6 +34049,51 @@ describe('AnomalyService', () => {
           expect(slotEvents()).toHaveLength(0);
           expect(closedIds()).toEqual(['row-b', 'row-c']);
         });
+
+        it('does not raise again a warning left under a seed that does not answer', async () => {
+          leaveOpen({ 'conn-a': ['row-a'] });
+          ownLine = STUCK;
+          await pollAll(['conn-b', 'conn-c']);
+
+          await pollAfter(GATE_MS, ['conn-b', 'conn-c']);
+          await (service as any).drainPersistenceOutbox();
+
+          expect(slotEvents()).toHaveLength(0);
+          expect(closedIds()).toEqual([]);
+        });
+
+        it('closes a warning left under a seed that does not answer once the replica is clean', async () => {
+          leaveOpen({ 'conn-a': ['row-a'] });
+          await pollAll(['conn-b', 'conn-c']);
+
+          await pollAfter(1000, ['conn-b', 'conn-c']);
+
+          expect(closedIds()).toEqual(['row-a']);
+        });
+
+        it('takes a warning in once when its connection answers after another one loaded it', async () => {
+          leaveOpen({ 'conn-a': ['row-a'] });
+          await pollAll(['conn-b', 'conn-c']);
+          await pollAfter(1000, ['conn-b', 'conn-c']);
+
+          await pollAfter(1000);
+          await pollAfter(1000);
+
+          expect(closedIds()).toEqual(['row-a']);
+        });
+
+        it('waits with the replica check while the open warnings of the cluster cannot be read', async () => {
+          storage.getAnomalyEvents.mockImplementation(async ({ connectionId }) => {
+            if (connectionId === SEED) throw new Error('storage down');
+            return [];
+          });
+          ownLine = STUCK;
+          await pollAll(['conn-b', 'conn-c']);
+
+          await pollAfter(GATE_MS, ['conn-b', 'conn-c']);
+
+          expect(slotEvents()).toHaveLength(0);
+        });
       });
     });
   });
