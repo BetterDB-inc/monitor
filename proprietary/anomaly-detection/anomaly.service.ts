@@ -946,7 +946,10 @@ export class AnomalyService
   private readonly clusterKeyByNode = new Map<string, string>();
   private readonly clusterViews = new Map<string, ReadonlySet<string>>();
   private readonly clusterNodeViews = new ClusterNodeViews();
-  private readonly ownLineReads = new Map<string, { role: string; movesSlots: boolean }>();
+  private readonly ownLineReads = new Map<
+    string,
+    { role: string; movesSlots: boolean; sawMoveAhead: boolean }
+  >();
   private readonly ownReplicaShards = new Map<string, string>();
   private reshardSkewFirstSeen = new Map<string, Map<string, number>>();
   private activeReshardSkews = new Map<string, Set<string>>();
@@ -2466,7 +2469,8 @@ export class AnomalyService
         // For failover churn the skip also carries the window state — churn
         // evidence must survive a probe blip or a flapping shard could never
         // accumulate enough observations to fire.
-        const readsTopology = this.takesTopologyRead(ctx.connectionId, info, timestamp);
+        const asksAhead = this.hasOwnNodeFinding(ctx.connectionId);
+        const readsTopology = this.takesTopologyRead(ctx.connectionId, info, timestamp, asksAhead);
         const shardsPromise = isRaft || !readsTopology ? undefined : this.safeGetClusterShards(ctx);
         const membershipAtRead = this.savedMembershipOf(ctx.connectionId);
         let nodes: ClusterNode[] | undefined;
@@ -2548,7 +2552,10 @@ export class AnomalyService
           // topology modes, and is not held back during a rolling update: that
           // is when the shard is most often left with a single copy.
           const self = nodes.find((n) => n.flags.includes('myself'));
-          this.ownLineReads.set(ctx.connectionId, { role: info.role, movesSlots: movesSlots(self) });
+          const sawMoveAhead = movesSlots(self)
+            ? asksAhead
+            : !!this.ownLineReads.get(ctx.connectionId)?.sawMoveAhead;
+          this.ownLineReads.set(ctx.connectionId, { role: info.role, movesSlots: movesSlots(self), sawMoveAhead });
           if (self) await this.detectPrimaryWithoutReplicas(info, ctx, timestamp, self);
         }
         if (readsTopology) await this.detectHotShards(ctx, timestamp, nodes);
@@ -8430,9 +8437,11 @@ export class AnomalyService
   private reshardReadIntervalMs(key: string, intervalMs: number, readsAhead = false): number {
     const connectionId = connectionOfStateKey(key);
     const readPolls =
-      key === connectionId
-        ? this.ownTopologyReadPolls(connectionId, readsAhead)
-        : this.nodeReadPolls(connectionId, key);
+      key !== connectionId
+        ? this.nodeReadPolls(connectionId, key)
+        : readsAhead
+          ? this.ownReadAheadPolls(connectionId)
+          : this.ownTopologyReadPolls(connectionId, false);
     return intervalMs * readPolls;
   }
 
@@ -10323,13 +10332,14 @@ export class AnomalyService
     connectionId: string,
     info: Record<string, string>,
     timestamp: number,
+    asksAhead: boolean,
   ): boolean {
     const hasTurn =
       this.clusterIdentity?.takeTopologyRead(
         connectionId,
         AnomalyService.TOPOLOGY_READS,
         timestamp,
-        this.hasOwnNodeFinding(connectionId),
+        asksAhead,
       ) ?? true;
     return (
       hasTurn ||
@@ -10355,6 +10365,12 @@ export class AnomalyService
     if (!shard) return false;
     if (shard.alerted !== 'none' || shard.zeroSince !== null) return true;
     return shard.expectedReplicas > 0 && syncedReplicaCount(info) === 0;
+  }
+
+  private ownReadAheadPolls(connectionId: string): number {
+    const aheadPolls = this.ownTopologyReadPolls(connectionId, true);
+    if (this.ownLineReads.get(connectionId)?.sawMoveAhead) return aheadPolls;
+    return Math.min(this.ownTopologyReadPolls(connectionId, false), aheadPolls + 1);
   }
 
   private ownTopologyReadPolls(connectionId: string, readsAhead: boolean): number {

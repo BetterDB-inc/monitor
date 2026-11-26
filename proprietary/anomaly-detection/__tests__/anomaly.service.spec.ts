@@ -33935,6 +33935,45 @@ describe('AnomalyService', () => {
       expect(skews().map((e) => e.resolved)).toEqual([true]);
     });
 
+    describe('a reshard first seen on a normal turn', () => {
+      const MOVING = idOf(5);
+      const TICK_MS = 1001;
+      const reshardRuns = (): boolean => {
+        const internals = service as any;
+        const intervalMs = internals.getIntervalMs();
+        const entries = internals.freshReshardEntries(internals.connectionClusterKeys.get(SEED), now, intervalMs);
+        return internals.isReshardActiveAmong(entries, now, intervalMs);
+      };
+
+      async function seeTheMoveOnANormalTurn(count: number): Promise<void> {
+        grow(count);
+        await pollAll();
+        await pollTimes(2, TICK_MS);
+        migrating.add(MOVING);
+        forgetReads();
+        while (readsOf(MOVING) === 0) await pollAfter(TICK_MS);
+      }
+
+      it('counts as running until the connection reads again two polls later', async () => {
+        await seeTheMoveOnANormalTurn(30);
+        await pollAfter(TICK_MS);
+        const readsBefore = readsOf(MOVING);
+
+        now += TICK_MS;
+
+        expect(readsBefore).toBe(1);
+        expect(reshardRuns()).toBe(true);
+      });
+
+      it('counts as running for two polls only in a cluster where every connection reads on every poll', async () => {
+        await seeTheMoveOnANormalTurn(9);
+
+        now += 2 * TICK_MS;
+
+        expect(reshardRuns()).toBe(false);
+      });
+    });
+
     it('reads the topology on every connection on a poll in a cluster of nine connections', async () => {
       grow(9);
       await pollAll();
