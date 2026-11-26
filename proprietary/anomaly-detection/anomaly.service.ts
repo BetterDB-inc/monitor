@@ -2533,7 +2533,7 @@ export class AnomalyService
           const slotScope = (): string => (asksReplicas ? liveScope() : ctx.connectionId);
           if (asksReplicas) this.takeOverMemberSlotEvents(ctx.connectionId, slotScope());
           else this.leaveSlotEventsToReader(ctx.connectionId, liveScope(), ownNodeIdOf(nodes));
-          const perNodeView = await this.gatherReplicaSlotView(nodes, ctx, slotScope());
+          const perNodeView = await this.gatherReplicaSlotView(nodes, ctx, slotScope);
           await this.detectReplicaSlotState(
             asksReplicas ? filed : ctx,
             slotScope(),
@@ -9321,7 +9321,7 @@ export class AnomalyService
   private async gatherReplicaSlotView(
     baseNodes: ClusterNode[],
     ctx: ConnectionContext,
-    scope: string,
+    scopeOf: () => string,
   ): Promise<{ nodes: ClusterNode[]; notReadIds: Set<string>; unseenIds: Set<string>; waitingIds: Set<string> }> {
     const unchanged = {
       nodes: baseNodes,
@@ -9346,9 +9346,10 @@ export class AnomalyService
     );
     if (remoteReplicas.length === 0) return unchanged;
 
-    const watched = this.replicaSlotWatchedIds(scope);
+    const askedUnder = scopeOf();
+    const watched = this.replicaSlotWatchedIds(askedUnder);
     const { due } = this.replicaSlotRotation.pick(
-      scope,
+      askedUnder,
       remoteReplicas,
       (r) => r.id,
       AnomalyService.REPLICA_SLOT_READ_BUDGET,
@@ -9377,6 +9378,7 @@ export class AnomalyService
       }),
     );
 
+    const scope = scopeOf();
     const merged = baseNodes.map((n) => ({ ...n }));
     const byId = new Map(merged.map((n) => [n.id, n]));
     const replicaIds = new Set(remoteReplicas.map((r) => r.id));

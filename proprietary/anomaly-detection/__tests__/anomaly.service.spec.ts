@@ -35308,6 +35308,57 @@ describe('AnomalyService', () => {
         });
       });
 
+      describe('when two halves turn out to be one cluster while a replica is asked for its own line', () => {
+        const halves = [SEED, 'conn-c'];
+        const left = [NODE_A, NODE_B];
+        const right = [NODE_C, cnode('nodeXXXXXXXX', '10.0.0.7', ['master'])];
+        const scopeOf = (id: string): string => (service as any).clusterScopes.get(id);
+        let joined: string;
+        let kept: string;
+        let silent: ClusterNode;
+        let joinsOnAsk: boolean;
+
+        beforeEach(async () => {
+          delete configs['conn-b'];
+          configs['conn-c'] = { id: 'conn-c' };
+          const half: Record<string, ClusterNode[]> = { [SEED]: left, 'conn-c': right };
+          views = half;
+          await pollAll(halves);
+          const keyOf = (id: string): string => (service as any).clusterIdentity.clusterKeyOf(id);
+          [kept, joined] = [...halves].sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
+          const primary = joined === SEED ? NODE_A : NODE_C;
+          silent = cnode('replicaR1111', '10.0.0.21', ['slave'], { master: primary.id });
+          views = { ...half, [joined]: [...half[joined], silent] };
+          joinsOnAsk = true;
+          getNodeConnection.mockImplementation(async () => {
+            if (joinsOnAsk) {
+              joinsOnAsk = false;
+              views = {};
+              topology = [...left, ...right, silent];
+              (service as any).clusterIdentity.observe(kept, topology);
+            }
+            throw new Error('ECONNREFUSED');
+          });
+        });
+
+        it('keeps the replica that did not answer under the key the cluster keeps', async () => {
+          const joinedAway = scopeOf(joined);
+          now += 1000;
+
+          await poll(ctxs[joined]);
+
+          expect(joinsOnAsk).toBe(false);
+          expect(scopeOf(joined)).toBe(scopeOf(kept));
+          expect(scopeOf(joined)).not.toBe(joinedAway);
+          expect((service as any).replicaSlotUnreachable.get(scopeOf(kept))).toEqual(new Set([silent.id]));
+          expect((service as any).replicaFanoutUnreachable.get(scopeOf(kept))).toBe(1);
+          const underJoinedAway = ((service as any).clusterScopedState() as Array<Map<string, unknown>>).filter(
+            (state) => state.has(joinedAway),
+          );
+          expect(underJoinedAway).toEqual([]);
+        });
+      });
+
       it('keeps asking the replica through the seed when polls are more than a minute apart', async () => {
         jest.spyOn(service as any, 'getIntervalMs').mockReturnValue(90_000);
         const membersFirst = ['conn-b', 'conn-c', SEED];
