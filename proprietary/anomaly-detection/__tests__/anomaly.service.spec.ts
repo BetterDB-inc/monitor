@@ -33479,6 +33479,8 @@ describe('AnomalyService', () => {
     let ctxs: Record<string, ConnectionContext>;
     let opsPerSec: Record<string, number>;
     let migrating: Set<string>;
+    let roles: Record<string, string>;
+    let replicas: Record<string, string[]>;
 
     function primary(index: number): ClusterNode {
       return {
@@ -33494,6 +33496,13 @@ describe('AnomalyService', () => {
       };
     }
 
+    const replicationOf = (states: string[]): Record<string, string> => ({
+      connected_slaves: String(states.length),
+      ...Object.fromEntries(
+        states.map((state, i) => [`slave${i}`, `ip=10.0.9.${i},port=6379,state=${state},offset=100,lag=0`]),
+      ),
+    });
+
     function memberCtx(index: number): ConnectionContext {
       const connectionId = idOf(index);
       return {
@@ -33505,10 +33514,12 @@ describe('AnomalyService', () => {
           ...dbClient,
           getInfoParsed: jest.fn(async () => ({
             ...memberInfo,
+            server: { role: roles[connectionId] ?? 'master' },
             stats: {
               ...memberInfo.stats,
               instantaneous_ops_per_sec: String(opsPerSec[connectionId] ?? 100),
             },
+            ...(replicas[connectionId] ? { replication: replicationOf(replicas[connectionId]) } : {}),
           })),
           getClusterInfo: jest.fn().mockResolvedValue({ cluster_state: 'ok' }),
           getClusterShards: jest.fn().mockResolvedValue([]),
@@ -33566,11 +33577,20 @@ describe('AnomalyService', () => {
         (ctxs[id].client.getClusterShards as jest.Mock).mockClear();
       });
 
+    const readsOf = (connectionId: string): number =>
+      (ctxs[connectionId].client.getClusterNodes as jest.Mock).mock.calls.length;
+
+    async function pollTimes(times: number, everyMs = 1000): Promise<void> {
+      for (let n = 0; n < times; n += 1) await pollAfter(everyMs);
+    }
+
     beforeEach(() => {
       now = 1_700_000_000_000;
       jest.spyOn(Date, 'now').mockImplementation(() => now);
       opsPerSec = {};
       migrating = new Set();
+      roles = {};
+      replicas = {};
       storage.getLatencyStatsHistory = jest.fn().mockResolvedValue([]);
       const registry = (service as any).connectionRegistry;
       registry.getConfig.mockImplementation((id: string) => configs[id] ?? null);
@@ -33661,6 +33681,162 @@ describe('AnomalyService', () => {
 
         expect(beforeTheViewIsOld).toBe(9);
         expect(readWith('getClusterNodes')).toEqual(ids);
+      });
+    });
+
+    describe('on a connection that never gets a turn', () => {
+      const LONE = idOf(20);
+      const loneEvents = (metricType: MetricType) =>
+        service
+          .getRecentEvents(1000)
+          .filter((e) => e.metricType === metricType && e.connectionId === LONE);
+
+      function withoutTurn(connectionId: string): void {
+        const identity = (service as any).clusterIdentity as ClusterIdentityService;
+        const take = identity.takeTopologyRead.bind(identity);
+        jest
+          .spyOn(identity, 'takeTopologyRead')
+          .mockImplementation((id, ...rest) => (id === connectionId ? false : take(id, ...rest)));
+      }
+
+      beforeEach(() => {
+        dbClient.getClients = jest.fn().mockResolvedValue([]);
+        dbClient.getConfigValue = jest.fn().mockResolvedValue(null);
+      });
+
+      it('reads its own line on the poll its last synced replica is gone', async () => {
+        grow(30);
+        replicas[LONE] = ['online'];
+        await pollAll();
+        await pollAfter(1000);
+        withoutTurn(LONE);
+        forgetReads();
+        await pollAfter(1000);
+        const withReplica = readsOf(LONE);
+
+        replicas[LONE] = [];
+        await pollAfter(1000);
+
+        expect(withReplica).toBe(0);
+        expect(readsOf(LONE)).toBe(1);
+      });
+
+      it('warns that a primary has no synced replica five seconds after the replica is gone', async () => {
+        grow(30);
+        replicas[LONE] = ['online'];
+        await pollAll();
+        await pollAfter(1000);
+        withoutTurn(LONE);
+
+        replicas[LONE] = [];
+        await pollTimes(6);
+
+        expect(loneEvents(MetricType.PRIMARY_WITHOUT_REPLICAS)).toHaveLength(1);
+      });
+
+      it('closes the warning two polls after the replica is back and stops reading its own line', async () => {
+        grow(30);
+        replicas[LONE] = ['online'];
+        await pollAll();
+        await pollAfter(1000);
+        withoutTurn(LONE);
+        replicas[LONE] = [];
+        await pollTimes(6);
+
+        replicas[LONE] = ['online'];
+        await pollTimes(2);
+        forgetReads();
+        await pollAfter(1000);
+
+        expect(loneEvents(MetricType.PRIMARY_WITHOUT_REPLICAS).map((e) => e.resolved)).toEqual([true]);
+        expect(readsOf(LONE)).toBe(0);
+      });
+
+      it('reads its own line on the poll its node is promoted', async () => {
+        grow(30);
+        roles[LONE] = 'slave';
+        topology[20] = { ...primary(20), flags: ['slave'], master: nodeIdOf(1), slots: [] };
+        await pollAll();
+        await pollAfter(1000);
+        withoutTurn(LONE);
+        forgetReads();
+        await pollAfter(1000);
+        const asReplica = readsOf(LONE);
+
+        roles[LONE] = 'master';
+        topology[20] = primary(20);
+        await pollAfter(1000);
+
+        expect(asReplica).toBe(0);
+        expect(readsOf(LONE)).toBe(1);
+      });
+
+      it('keeps checking for slot migrations every thirty seconds', async () => {
+        grow(30);
+        const readSlotMigrations = jest.fn(async (_connectionId: string) => ({
+          jobViews: [],
+          finishedJobs: [],
+          failed: [],
+          migrations: [],
+          complete: true,
+        }));
+        (service as any).clusterMetrics = {
+          coveredBySeed: (id: string) => id !== LONE,
+          checkSlotMigrations: jest.fn(async () => ({ migrations: [], complete: true })),
+          readSlotMigrations,
+        };
+        await pollAll();
+        await pollAfter(1000);
+        withoutTurn(LONE);
+        readSlotMigrations.mockClear();
+
+        await pollTimes(4, 10_000);
+
+        expect(readSlotMigrations.mock.calls.map(([id]) => id)).toEqual([LONE]);
+      });
+    });
+
+    describe('a connection with a finding on its own node', () => {
+      const BUSY = idOf(20);
+
+      it('reads its own line on every poll while that line shows a slot on the move', async () => {
+        grow(30);
+        migrating.add(BUSY);
+        await pollAll();
+        await pollTimes(5);
+        forgetReads();
+
+        await pollTimes(4);
+
+        expect(readsOf(BUSY)).toBe(4);
+      });
+
+      it('reads its own line on every poll while it counts keys in slots it does not own', async () => {
+        grow(30);
+        const client = ctxs[BUSY].client;
+        client.getCapabilities = jest.fn().mockReturnValue({ hasClusterSlotStats: true }) as never;
+        client.getClusterSlotStats = jest.fn().mockResolvedValue({ '2000': { key_count: 400 } });
+        client.getDbSize = jest.fn().mockResolvedValue(900);
+        await pollAll();
+        await pollTimes(5);
+        forgetReads();
+
+        await pollTimes(4);
+
+        expect(readsOf(BUSY)).toBe(4);
+      });
+
+      it('reads its own line on every poll while its reshard skew warning is open', async () => {
+        grow(50);
+        migrating.add(idOf(1));
+        opsPerSec[idOf(30)] = 6000;
+        await pollAll();
+        await pollTimes(30);
+        forgetReads();
+
+        await pollTimes(4);
+
+        expect(readsOf(idOf(30))).toBe(4);
       });
     });
 
