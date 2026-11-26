@@ -33818,6 +33818,56 @@ describe('AnomalyService', () => {
       expect(strayReplicaEvents()).toHaveLength(2);
     });
 
+    describe('with a node only some connections still list', () => {
+      const FORGOTTEN = cnode('forgotJJJJJJ', '10.0.0.7', ['master']);
+      const rejoinEvents = (): AnomalyEvent[] =>
+        service.getRecentEvents().filter((e) => e.message.includes('reintroduced itself'));
+
+      it('does not report a rejoin when the reader moves to a connection that still lists the node', async () => {
+        views = { 'conn-b': [...HEALTHY, FORGOTTEN], 'conn-c': [...HEALTHY, FORGOTTEN] };
+        topology = [...HEALTHY, FORGOTTEN];
+        await pollAll();
+        topology = HEALTHY;
+        await pollAfter(1000);
+        await pollAfter(1000);
+        unreadable.add(SEED);
+
+        await pollAfter(MINUTE_MS + 1000);
+        await pollAfter(1000);
+
+        expect(rejoinEvents()).toHaveLength(0);
+      });
+
+      it('does not report a rejoin when the reader moves back to a connection that still lists the node', async () => {
+        views = { 'conn-b': HEALTHY, 'conn-c': HEALTHY };
+        topology = [...HEALTHY, FORGOTTEN];
+        await pollAll();
+        unreadable.add(SEED);
+        await pollAfter(MINUTE_MS + 1000);
+        await pollAfter(1000);
+        unreadable.delete(SEED);
+
+        await pollAfter(MINUTE_MS);
+        await pollAfter(1000);
+        await pollAfter(1000);
+
+        expect(rejoinEvents()).toHaveLength(0);
+      });
+
+      it('reports a node that comes back while one connection keeps reading', async () => {
+        topology = [...HEALTHY, FORGOTTEN];
+        await pollAll();
+        topology = HEALTHY;
+        await pollAfter(1000);
+        await pollAfter(MINUTE_MS);
+        topology = [...HEALTHY, FORGOTTEN];
+
+        await pollAfter(1000);
+
+        expect(rejoinEvents().map((e) => e.connectionId)).toEqual([SEED]);
+      });
+    });
+
     it('keeps the warnings of a joined half when its connection is removed before it reads the whole cluster', async () => {
       const halves = [SEED, 'conn-c'];
       delete configs['conn-b'];

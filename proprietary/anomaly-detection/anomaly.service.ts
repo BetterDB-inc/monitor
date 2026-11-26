@@ -1009,6 +1009,7 @@ export class AnomalyService
   // membership history, the only way to see a FORGET-then-rejoin — no single
   // snapshot distinguishes a resurrected node from an ordinary member.
   private ghostHistories = new Map<string, GhostMembershipHistory>();
+  private readonly ghostHistoryReaders = new Map<string, string>();
   // Connection-exhaustion / admin-lockout (valkey#3944) state: streak + last
   // level + last counters, one entry per connection.
   private clientLockoutState = new Map<string, ClientLockoutState>();
@@ -2483,6 +2484,7 @@ export class AnomalyService
           await this.detectStuckReplicas(filed, scope, timestamp, nodes);
           await this.detectHostnameStaleness(filed, scope, timestamp, nodes, shards);
           await this.detectGhostMembers(filed, scope, timestamp, nodes);
+          this.forgetMembershipHistoryOfAnotherReader(scope, ctx.connectionId);
           await this.detectForgetRejoin(filed, scope, timestamp, nodes);
           await this.detectFailoverChurn(filed, scope, timestamp, nodes);
         }
@@ -9013,6 +9015,12 @@ export class AnomalyService
    * per rejoin, so it needs no dedupe set of its own; the history's minimum
    * absence requirement is the noise gate.
    */
+  private forgetMembershipHistoryOfAnotherReader(scope: string, readerId: string): void {
+    const previous = this.ghostHistoryReaders.get(scope);
+    this.ghostHistoryReaders.set(scope, readerId);
+    if (previous !== undefined && previous !== readerId) this.ghostHistories.delete(scope);
+  }
+
   private async detectForgetRejoin(
     ctx: ConnectionContext,
     scope: string,
@@ -10432,6 +10440,7 @@ export class AnomalyService
       this.ghostMemberFirstSeen,
       this.activeGhostMembers,
       this.ghostHistories,
+      this.ghostHistoryReaders,
       this.failoverChurnState,
       this.replicaSlotFirstSeen,
       this.activeReplicaSlotAnomalies,
