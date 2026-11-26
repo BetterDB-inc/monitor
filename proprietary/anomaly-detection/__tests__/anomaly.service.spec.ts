@@ -33721,6 +33721,58 @@ describe('AnomalyService', () => {
       expect([...rounds]).toEqual([0, 4950, 9900]);
     });
 
+    describe('with divergence rounds at an interval of their own', () => {
+      let setIntervalMs: number;
+      const roundsEvery = async (intervalMs: number, polls: number): Promise<number[]> => {
+        (service as any).topologyDivergenceSettings.intervalMs = intervalMs;
+        grow(12);
+        (service as any).clusterDiscovery = {
+          retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+          releaseConnection: jest.fn().mockResolvedValue(undefined),
+          getNodeConnection: jest.fn().mockRejectedValue(new Error('ECONNREFUSED')),
+        };
+        await pollAll();
+        const clusterKey = (service as any).connectionClusterKeys.get(SEED);
+        const roundAt = (): number => (service as any).topologyDivergence.lastRound(clusterKey)?.at;
+        const first = roundAt();
+        const rounds = new Set<number>();
+        for (let n = 1; n <= polls; n += 1) {
+          await pollAfter(1000);
+          rounds.add(roundAt() - first);
+        }
+        return [...rounds];
+      };
+
+      beforeEach(() => {
+        setIntervalMs = (service as any).topologyDivergenceSettings.intervalMs;
+      });
+
+      afterEach(() => {
+        (service as any).topologyDivergenceSettings.intervalMs = setIntervalMs;
+      });
+
+      it('runs a round every seven seconds on the reader when that is the interval', async () => {
+        expect(await roundsEvery(7000, 15)).toEqual([0, 7000, 14000]);
+      });
+
+      it('runs a round every twelve seconds on the reader when that is the interval', async () => {
+        expect(await roundsEvery(12000, 25)).toEqual([0, 12000, 24000]);
+      });
+
+      it('runs a round every three seconds on the reader when that is the interval', async () => {
+        expect(await roundsEvery(3000, 7)).toEqual([0, 3000, 6000]);
+      });
+
+      it('reads the topology twice per round on the reader at an interval of seven seconds', async () => {
+        await roundsEvery(7000, 7);
+        forgetReads();
+
+        await pollTimes(14);
+
+        expect(readsOf(SEED)).toBe(4);
+      });
+    });
+
     it('reads the topology on eight other connections on a poll the reader does not read on', async () => {
       grow(12);
       await pollAll();

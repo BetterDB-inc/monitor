@@ -7820,8 +7820,8 @@ export class AnomalyService
         this.connectionRegistry.getNodeAvailabilityZones(ctx.connectionId),
       ),
       at: timestamp,
-      intervalMs: Math.max(settings.intervalMs, this.getIntervalMs()),
-      earlyByMs: this.readsAtReaderInterval(ctx.connectionId) ? this.pollJitterMs() : 0,
+      intervalMs: this.divergenceIntervalMs(),
+      earlyByMs: this.divergenceEarlyByMs(ctx.connectionId),
       nodesPerZone: settings.nodesPerZone,
       randomNodes: settings.randomNodes,
       canRead: canDial,
@@ -10326,8 +10326,30 @@ export class AnomalyService
     return (
       hasTurn ||
       this.ownLineIsDue(connectionId, info) ||
+      this.divergenceRoundIsDue(connectionId, timestamp) ||
       !this.latestClusterNodes(connectionId, timestamp)
     );
+  }
+
+  private divergenceRoundIsDue(connectionId: string, timestamp: number): boolean {
+    const clusterKey = this.connectionClusterKeys.get(connectionId);
+    if (!this.topologyDivergenceSettings.enabled || !clusterKey) return false;
+    if (!this.clusterIdentity?.isReader(connectionId)) return false;
+    return this.topologyDivergence.roundIsDue(
+      clusterKey,
+      connectionId,
+      timestamp,
+      this.divergenceIntervalMs(),
+      this.divergenceEarlyByMs(connectionId),
+    );
+  }
+
+  private divergenceIntervalMs(): number {
+    return Math.max(this.topologyDivergenceSettings.intervalMs, this.getIntervalMs());
+  }
+
+  private divergenceEarlyByMs(connectionId: string): number {
+    return this.readsAtReaderInterval(connectionId) ? this.pollJitterMs() : 0;
   }
 
   private readerTopologyReadEveryMs(): number {
