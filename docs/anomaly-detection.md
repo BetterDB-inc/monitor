@@ -554,7 +554,7 @@ The 5 second threshold of [primary without replicas](#primary_without_replicas) 
 
 **What comes later.** A finding on a node that is in none of these cases is first seen when its connection has a turn, so up to one pass late: about a minute with 500 connections and a 1 second interval. A check that needs several readings in a row counts the readings, not the polls. Reshard skew, for example, needs three: the first can take a pass, the next two follow on the next polls because the connection is put ahead.
 
-**Metrics and the failover webhook.** The Prometheus cluster metrics and the `cluster.failover` webhook read `CLUSTER NODES` on the same schedule, with turns of their own. A connection always reads on its first poll. While anomaly detection does not run, a cluster has no reader and every connection reads on every poll. A promotion is reported once: a connection that sees it later, on its turn, does not send it again, for ten minutes after the last connection saw it.
+**Metrics and the failover webhook.** The Prometheus cluster metrics and the `cluster.failover` webhook read `CLUSTER NODES` on the same schedule, with turns of their own. A connection always reads on its first poll. While anomaly detection does not run, a cluster has no reader and every connection reads on every poll. A promotion is reported once: a connection that sees it later, on its turn, does not send it again, for ten minutes after the last connection saw it. A demotion is timed from the read that shows it, not from the moment it happened: a connection that waits for its turn sees it up to one pass late, so `demotedForMs` of the `cluster.demoted.writes` webhook can be up to one pass too low.
 
 ## Failing node on cluster events
 
