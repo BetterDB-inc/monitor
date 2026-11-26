@@ -7,6 +7,7 @@ import {
   AnomalySeverity,
   MetricType,
   RecommendationValue,
+  SEVERITY_RANK,
   mergeRecommendationValues,
 } from './types';
 import { SequenceRule, fills, leadOf, opensAt } from './sequence-rules';
@@ -71,12 +72,18 @@ export interface IncidentTimeline {
 }
 
 export type RuleStepEvent = Pick<AnomalyEvent, 'metricType' | 'connectionId' | 'nodeAddr' | 'timestamp'> &
-  Partial<Pick<AnomalyEvent, 'anomalyType' | 'retryTrigger'>>;
+  Partial<Pick<AnomalyEvent, 'anomalyType' | 'retryTrigger' | 'severity'>>;
 
 type EventSource = Pick<AnomalyEvent, 'connectionId' | 'nodeAddr'>;
 
 export function sameSource(a: EventSource, b: EventSource): boolean {
   return a.connectionId === b.connectionId && (a.nodeAddr ?? '') === (b.nodeAddr ?? '');
+}
+
+export function sourceMatches(rule: SequenceRule, a: EventSource, b: EventSource): boolean {
+  if (rule.sameConnection) return sameSource(a, b);
+  if (rule.sameConnectionAnyNode) return (a.connectionId ?? '') === (b.connectionId ?? '');
+  return true;
 }
 
 function sourceKey(event: EventSource): string {
@@ -153,12 +160,6 @@ export const RESOLVER_BACKED_METRICS: ReadonlySet<MetricType> = new Set([
   MetricType.SLOT_MIGRATION_STUCK,
 ]);
 
-const SEVERITY_RANK: Record<AnomalySeverity, number> = {
-  [AnomalySeverity.INFO]: 0,
-  [AnomalySeverity.WARNING]: 1,
-  [AnomalySeverity.CRITICAL]: 2,
-};
-
 export function maxSeverity(severities: AnomalySeverity[]): AnomalySeverity {
   return severities.reduce(
     (max, s) => (SEVERITY_RANK[s] > SEVERITY_RANK[max] ? s : max),
@@ -172,7 +173,9 @@ export function mergeRuleSteps(
 ): RuleStepEvent[] {
   const steps = new Map<string, RuleStepEvent>();
   for (const step of [...known, ...seen]) {
-    steps.set(`${step.metricType}\u0000${sourceKey(step)}\u0000${step.timestamp}`, step);
+    // Severity is part of the key: one poll can raise a warning and a critical event of one metric.
+    const key = `${step.metricType}\u0000${sourceKey(step)}\u0000${step.timestamp}`;
+    steps.set(`${key}\u0000${step.severity ?? ''}`, step);
   }
   return [...steps.values()].sort((a, b) => a.timestamp - b.timestamp);
 }
@@ -213,7 +216,7 @@ export function matchSequence<E extends RuleStepEvent>(
       (e) =>
         !matched.includes(e) &&
         fills(rule, step, e) &&
-        (!rule.sameConnection || sameSource(e, first)) &&
+        sourceMatches(rule, e, first) &&
         e.timestamp >= reached - lead &&
         Math.max(reached, e.timestamp) - Math.min(earliest, e.timestamp) <= rule.maxSpanMs,
     );
@@ -239,7 +242,7 @@ export function matchSequence<E extends RuleStepEvent>(
       (e) =>
         !matched.includes(e) &&
         fills(rule, rule.optionalMetrics, e) &&
-        (!rule.sameConnection || sameSource(e, first)) &&
+        sourceMatches(rule, e, first) &&
         Math.abs(e.timestamp - first.timestamp) <= rule.maxSpanMs,
     );
     return [...matched, ...optional];
@@ -254,11 +257,7 @@ export function reachesStep(
   stepIndex: number,
 ): boolean {
   const candidates = earlier
-    .filter(
-      (e) =>
-        e.timestamp <= event.timestamp &&
-        (!rule.sameConnection || sameSource(e, event)),
-    )
+    .filter((e) => e.timestamp <= event.timestamp && sourceMatches(rule, e, event))
     .sort((a, b) => a.timestamp - b.timestamp);
   return candidates.some((first) => {
     const opened = opensAt(rule, first);
@@ -291,7 +290,7 @@ export function matchedBefore(
   rule: SequenceRule,
 ): boolean {
   const pool = earlier.filter(
-    (e) => e.timestamp <= event.timestamp && (!rule.sameConnection || sameSource(e, event)),
+    (e) => e.timestamp <= event.timestamp && sourceMatches(rule, e, event),
   );
   return matchSequence(pool, rule, (matched) => event.timestamp - matched[0].timestamp <= rule.maxSpanMs) !== null;
 }
@@ -308,7 +307,7 @@ export function precedesLeadStep(
       earlier.some(
         (e) =>
           fills(rule, step, e) &&
-          (!rule.sameConnection || sameSource(e, event)) &&
+          sourceMatches(rule, e, event) &&
           e.timestamp <= event.timestamp &&
           event.timestamp - e.timestamp <= lead,
       )
@@ -685,7 +684,7 @@ export class IncidentTimelineBuilder {
         ...(step.nodeAddr ? { nodeAddr: step.nodeAddr } : {}),
         ...(step.anomalyType ? { anomalyType: step.anomalyType } : {}),
         ...(step.retryTrigger ? { retryTrigger: step.retryTrigger } : {}),
-        severity: AnomalySeverity.INFO,
+        severity: step.severity ?? AnomalySeverity.INFO,
         message: '',
         recoveredAt: null,
         recoveryState: 'open',

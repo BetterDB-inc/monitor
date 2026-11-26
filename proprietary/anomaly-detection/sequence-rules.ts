@@ -1,4 +1,11 @@
-import { AnomalyEvent, AnomalyPattern, AnomalyType, MetricType } from './types';
+import {
+  AnomalyEvent,
+  AnomalyPattern,
+  AnomalySeverity,
+  AnomalyType,
+  MetricType,
+  SEVERITY_RANK,
+} from './types';
 
 export type StepDirection = 'rise' | 'drop';
 
@@ -7,9 +14,13 @@ export interface SequenceRule {
   steps: MetricType[][];
   optionalMetrics?: MetricType[];
   directions?: Readonly<Partial<Record<MetricType, StepDirection>>>;
+  /** The lowest severity at which a metric counts. An event of unknown severity does not. */
+  minSeverity?: Readonly<Partial<Record<MetricType, AnomalySeverity>>>;
   maxSpanMs: number;
   leadMs?: Readonly<Record<number, number>>;
   sameConnection?: boolean;
+  /** Same connection, any node: for cluster rules whose steps come from different nodes. */
+  sameConnectionAnyNode?: boolean;
   carriesFirstStep?: (event: StepEvidence) => boolean;
   supersedes?: readonly AnomalyPattern[];
   diagnosis: string;
@@ -17,7 +28,7 @@ export interface SequenceRule {
 }
 
 export type StepEvidence = Pick<AnomalyEvent, 'metricType'> &
-  Partial<Pick<AnomalyEvent, 'anomalyType' | 'retryTrigger'>>;
+  Partial<Pick<AnomalyEvent, 'anomalyType' | 'retryTrigger' | 'severity'>>;
 
 const DIRECTION_OF: Record<AnomalyType, StepDirection> = {
   [AnomalyType.SPIKE]: 'rise',
@@ -27,6 +38,11 @@ const DIRECTION_OF: Record<AnomalyType, StepDirection> = {
 const rules: SequenceRule[] = [];
 
 export function registerSequenceRule(rule: SequenceRule): void {
+  if (rule.sameConnection && rule.sameConnectionAnyNode) {
+    throw new Error(
+      `Sequence rule ${rule.pattern} sets both sameConnection and sameConnectionAnyNode`,
+    );
+  }
   if (rule.steps.length === 0 || rule.steps.some((step) => step.length === 0)) {
     throw new Error(`Sequence rule ${rule.pattern} needs at least one metric in every step`);
   }
@@ -48,6 +64,13 @@ export function registerSequenceRule(rule: SequenceRule): void {
       throw new Error(`Sequence rule ${rule.pattern} sets a direction on ${metric}, which it does not use`);
     }
   }
+  for (const metric of Object.keys(rule.minSeverity ?? {})) {
+    if (!used.has(metric as MetricType)) {
+      throw new Error(
+        `Sequence rule ${rule.pattern} sets a minimum severity on ${metric}, which it does not use`,
+      );
+    }
+  }
   if (rule.carriesFirstStep && rule.steps.length < 2) {
     throw new Error(`Sequence rule ${rule.pattern} needs a second step to carry its first step`);
   }
@@ -64,12 +87,18 @@ export function leadOf(rule: SequenceRule, stepIndex: number): number {
   return rule.leadMs?.[stepIndex] ?? 0;
 }
 
+function severeEnough(rule: SequenceRule, event: StepEvidence): boolean {
+  const minimum = rule.minSeverity?.[event.metricType];
+  if (!minimum) return true;
+  return event.severity !== undefined && SEVERITY_RANK[event.severity] >= SEVERITY_RANK[minimum];
+}
+
 export function fills(
   rule: SequenceRule,
   metrics: readonly MetricType[] | undefined,
   event: StepEvidence,
 ): boolean {
-  if (!metrics?.includes(event.metricType)) return false;
+  if (!metrics?.includes(event.metricType) || !severeEnough(rule, event)) return false;
   const wanted = rule.directions?.[event.metricType];
   return !wanted || event.anomalyType === undefined || DIRECTION_OF[event.anomalyType] === wanted;
 }

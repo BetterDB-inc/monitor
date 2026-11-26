@@ -1,4 +1,4 @@
-import { AnomalyPattern, AnomalyType, MetricType } from '../types';
+import { AnomalyPattern, AnomalySeverity, AnomalyType, MetricType } from '../types';
 
 describe('sequence rule registry', () => {
   let registry: typeof import('../sequence-rules');
@@ -51,6 +51,39 @@ describe('sequence rule registry', () => {
     [{ 1: Number.NaN }],
   ])('rejects a lead of %j', (leadMs) => {
     expect(() => registry.registerSequenceRule({ ...rule, leadMs })).toThrow(/lead/);
+  });
+
+  it('rejects a minimum severity on a metric the rule does not use', () => {
+    expect(() =>
+      registry.registerSequenceRule({
+        ...rule,
+        minSeverity: { [MetricType.INPUT_KBPS]: AnomalySeverity.CRITICAL },
+      }),
+    ).toThrow(/minimum severity on input_kbps/);
+  });
+
+  it.each([
+    [AnomalySeverity.INFO, false],
+    [AnomalySeverity.WARNING, true],
+    [AnomalySeverity.CRITICAL, true],
+    [undefined, false],
+  ])('fills a metric with a warning minimum from a %s event: %s', (severity, expected) => {
+    const minimum = { ...rule, minSeverity: { [MetricType.MEMORY_USED]: AnomalySeverity.WARNING } };
+
+    expect(
+      registry.fills(minimum, [MetricType.MEMORY_USED], {
+        metricType: MetricType.MEMORY_USED,
+        severity,
+      }),
+    ).toBe(expected);
+  });
+
+  it('fills a metric without a minimum from an event of unknown severity', () => {
+    const minimum = { ...rule, minSeverity: { [MetricType.MEMORY_USED]: AnomalySeverity.CRITICAL } };
+
+    expect(
+      registry.fills(minimum, [MetricType.OPS_PER_SEC], { metricType: MetricType.OPS_PER_SEC }),
+    ).toBe(true);
   });
 
   it('rejects a direction on a metric the rule does not use', () => {

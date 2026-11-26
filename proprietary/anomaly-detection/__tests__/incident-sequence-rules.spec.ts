@@ -2,9 +2,14 @@ import { IncidentTimelineBuilder, RecoveryProbe } from '../incident-timeline';
 import {
   BACKLOG_EXHAUSTION_MAX_SPAN_MS,
   DIVERGENCE_UNDER_PRESSURE_MAX_SPAN_MS,
+  HOT_SHARD_LATENCY_LEAD_MS,
+  HOT_SHARD_LATENCY_MAX_SPAN_MS,
+  MEMBERSHIP_FAILOVER_MAX_SPAN_MS,
+  MIGRATION_REDIRECTS_MAX_SPAN_MS,
   RESHARD_DIVERGENCE_PRESSURE_MAX_SPAN_MS,
   RESHARD_UNDER_WRITES_MAX_SPAN_MS,
   RETRY_STORM_MAX_SPAN_MS,
+  SPLIT_BRAIN_MAX_SPAN_MS,
 } from '../incident-sequence-rules';
 import { RESYNC_ESCALATION_WINDOW_MS } from '../recovery-amplification-detector';
 import { SequenceRule, getSequenceRules } from '../sequence-rules';
@@ -27,7 +32,11 @@ function event(
     timestamp: T0 + at,
     metricType,
     anomalyType,
-    severity: AnomalySeverity.WARNING,
+    // A duplicate primary is critical; split_brain takes no cluster_topology event below that.
+    severity:
+      metricType === MetricType.CLUSTER_TOPOLOGY
+        ? AnomalySeverity.CRITICAL
+        : AnomalySeverity.WARNING,
     value: 1,
     baseline: 0,
     stdDev: 0,
@@ -131,6 +140,52 @@ const cases: RuleCase[] = [
     alternatives: [[MetricType.BACKLOG_COVERAGE_RISK], [MetricType.RESYNC_ESCALATION]],
     spanMs: BACKLOG_EXHAUSTION_MAX_SPAN_MS,
     lead: { step: 1, ms: RESYNC_ESCALATION_WINDOW_MS },
+    sameConnection: true,
+    rising: [],
+  },
+  {
+    pattern: AnomalyPattern.SPLIT_BRAIN,
+    steps: [MetricType.TOPOLOGY_DIVERGENCE, MetricType.CLUSTER_TOPOLOGY],
+    alternatives: [
+      [MetricType.TOPOLOGY_DIVERGENCE, MetricType.PARTIAL_MEMBERSHIP],
+      [MetricType.CLUSTER_TOPOLOGY, MetricType.REPLICATION_ROLE],
+    ],
+    optional: MetricType.FAILOVER_CHURN,
+    spanMs: SPLIT_BRAIN_MAX_SPAN_MS,
+    sameConnection: true,
+    rising: [MetricType.ERROR_REPLIES],
+  },
+  {
+    pattern: AnomalyPattern.HOT_SHARD_LATENCY,
+    steps: [MetricType.HOT_SHARD, MetricType.COMMAND_P99],
+    alternatives: [[MetricType.HOT_SHARD], [MetricType.COMMAND_P99, MetricType.RETRY_AMPLIFICATION]],
+    optional: MetricType.CLIENT_SATURATION,
+    spanMs: HOT_SHARD_LATENCY_MAX_SPAN_MS,
+    lead: { step: 1, ms: HOT_SHARD_LATENCY_LEAD_MS },
+    sameConnection: true,
+    rising: [MetricType.COMMAND_P99, MetricType.ERROR_REPLIES],
+  },
+  {
+    pattern: AnomalyPattern.MIGRATION_REDIRECTS,
+    steps: [MetricType.SLOT_MIGRATION, MetricType.ERROR_REPLIES],
+    alternatives: [
+      [MetricType.SLOT_MIGRATION, MetricType.SLOT_MIGRATION_STUCK],
+      [MetricType.ERROR_REPLIES, MetricType.COMMAND_P99],
+    ],
+    optional: MetricType.RETRY_AMPLIFICATION,
+    spanMs: MIGRATION_REDIRECTS_MAX_SPAN_MS,
+    sameConnection: true,
+    rising: [MetricType.ERROR_REPLIES, MetricType.COMMAND_P99],
+  },
+  {
+    pattern: AnomalyPattern.MEMBERSHIP_FAILOVER,
+    steps: [MetricType.PARTIAL_MEMBERSHIP, MetricType.FAILOVER_CHURN],
+    alternatives: [
+      [MetricType.PARTIAL_MEMBERSHIP, MetricType.GHOST_MEMBERSHIP],
+      [MetricType.FAILOVER_CHURN],
+    ],
+    optional: MetricType.TOPOLOGY_DIVERGENCE,
+    spanMs: MEMBERSHIP_FAILOVER_MAX_SPAN_MS,
     sameConnection: true,
     rising: [],
   },
@@ -381,6 +436,113 @@ describe('incident sequence rules', () => {
         AnomalyPattern.TRAFFIC_BURST,
       ]);
     });
+  });
+
+  describe('overlapping split brain and membership failover', () => {
+    const splitBrain = AnomalyPattern.SPLIT_BRAIN;
+    const membership = AnomalyPattern.MEMBERSHIP_FAILOVER;
+
+    it('lists only split_brain when the failovers lead on to two primaries', () => {
+      const events = [
+        event(MetricType.PARTIAL_MEMBERSHIP, 0),
+        event(MetricType.FAILOVER_CHURN, MIN),
+        event(MetricType.CLUSTER_TOPOLOGY, 5 * MIN),
+      ];
+      const incidents = incidentsOf(events, getSequenceRules());
+
+      expect(incidents.flatMap((i) => i.matchedPatterns)).toEqual([splitBrain]);
+      expect(incidents[0].sequenceMatches[0].anomalyIds).toEqual(
+        expect.arrayContaining(events.map((e) => e.id)),
+      );
+    });
+
+    it('keeps membership_failover when split_brain shares none of its steps', () => {
+      const events = [
+        event(MetricType.GHOST_MEMBERSHIP, 0),
+        event(MetricType.FAILOVER_CHURN, MIN),
+        event(MetricType.TOPOLOGY_DIVERGENCE, 2 * MIN),
+        event(MetricType.CLUSTER_TOPOLOGY, 3 * MIN),
+      ];
+      const [incident] = incidentsOf(events, getSequenceRules());
+
+      expect(incident.matchedPatterns.slice().sort()).toEqual([membership, splitBrain].sort());
+    });
+  });
+
+  describe('split_brain and the severity of cluster_topology', () => {
+    const splitBrain = AnomalyPattern.SPLIT_BRAIN;
+    const topology = (at: number, severity: AnomalySeverity) => ({
+      ...event(MetricType.CLUSTER_TOPOLOGY, at),
+      severity,
+    });
+
+    it.each([MetricType.PARTIAL_MEMBERSHIP, MetricType.TOPOLOGY_DIVERGENCE])(
+      'does not match %s followed by a stuck replica warning',
+      (first) => {
+        const events = [event(first, 0), topology(MIN, AnomalySeverity.WARNING)];
+
+        expect(patternsOf(events, splitBrain)).toEqual([]);
+      },
+    );
+
+    it.each([MetricType.PARTIAL_MEMBERSHIP, MetricType.TOPOLOGY_DIVERGENCE])(
+      'matches %s followed by a duplicate primary',
+      (first) => {
+        const events = [event(first, 0), topology(MIN, AnomalySeverity.CRITICAL)];
+
+        expect(patternsOf(events, splitBrain)).toEqual([splitBrain]);
+      },
+    );
+
+    it('takes the duplicate primary as its step when a stuck replica came first', () => {
+      const events = [
+        event(MetricType.PARTIAL_MEMBERSHIP, 0),
+        topology(MIN, AnomalySeverity.WARNING),
+        topology(MIN, AnomalySeverity.CRITICAL),
+      ];
+      const [incident] = incidentsOf(events, [ruleFor(splitBrain)]);
+
+      expect(incident.sequenceMatches[0].anomalyIds).toEqual([events[0].id, events[2].id]);
+    });
+
+    it('does not keep a stuck replica after a quiet gap in the same incident', () => {
+      const events = [
+        event(MetricType.PARTIAL_MEMBERSHIP, 0),
+        topology(5 * MIN, AnomalySeverity.WARNING),
+      ];
+
+      expect(incidentsOf(events, [ruleFor(splitBrain)])).toHaveLength(2);
+    });
+
+    it('leaves membership_failover listed beside a stuck replica', () => {
+      const events = [
+        event(MetricType.PARTIAL_MEMBERSHIP, 0),
+        event(MetricType.FAILOVER_CHURN, MIN),
+        topology(2 * MIN, AnomalySeverity.WARNING),
+      ];
+      const [incident] = incidentsOf(events, getSequenceRules());
+
+      expect(incident.matchedPatterns).toEqual([AnomalyPattern.MEMBERSHIP_FAILOVER]);
+    });
+  });
+
+  it('takes a slot migration that is stuck as the first step of migration_redirects', () => {
+    const events = [
+      event(MetricType.SLOT_MIGRATION_STUCK, 0),
+      event(MetricType.ERROR_REPLIES, 5 * MIN),
+    ];
+
+    expect(patternsOf(events, AnomalyPattern.MIGRATION_REDIRECTS)).toEqual([
+      AnomalyPattern.MIGRATION_REDIRECTS,
+    ]);
+  });
+
+  it('matches a P99 rise raised 8 minutes before the hot shard', () => {
+    const events = [event(MetricType.COMMAND_P99, 0), event(MetricType.HOT_SHARD, 8 * MIN)];
+
+    expect(patternsOf(events, AnomalyPattern.HOT_SHARD_LATENCY)).toEqual([
+      AnomalyPattern.HOT_SHARD_LATENCY,
+    ]);
   });
 
   describe('retry_storm', () => {

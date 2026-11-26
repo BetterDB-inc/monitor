@@ -11,6 +11,8 @@ import {
   Shield,
   HardDrive,
   AlertOctagon,
+  ArrowLeftRight,
+  Flame,
 } from 'lucide-react';
 import type { RebalanceExecutionBlocker } from '../../types/anomaly';
 
@@ -89,6 +91,13 @@ export const PATTERN_CONFIG: Record<
   },
   retry_storm: { icon: AlertTriangle, label: 'Retry Storm', color: 'var(--destructive)' },
   backlog_exhaustion: { icon: Database, label: 'Backlog Exhaustion', color: 'var(--destructive)' },
+  hot_shard_latency: { icon: Flame, label: 'Hot Shard Latency', color: 'var(--chart-warning)' },
+  migration_redirects: {
+    icon: ArrowLeftRight,
+    label: 'Migration Redirects',
+    color: 'var(--chart-warning)',
+  },
+  membership_failover: { icon: Users, label: 'Membership Failover', color: 'var(--destructive)' },
   unknown: { icon: Activity, label: 'Unknown', color: 'var(--muted-foreground)' },
 };
 
