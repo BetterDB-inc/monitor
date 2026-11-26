@@ -1029,6 +1029,69 @@ describe('ClusterIdentityService', () => {
       expect(turns(members, NOW + MINUTE_MS + 1)).toEqual(members);
     });
 
+    describe('records', () => {
+      const turnRecords = (): number => (service as any).readTurns.size;
+
+      it('are dropped once the last connection of the cluster is removed', () => {
+        const members = clusterOf(11);
+        service.claimReader(SEED, NOW);
+        readerPolls();
+
+        [...members, SEED].forEach((id) => service.forget(id));
+
+        expect(turnRecords()).toBe(0);
+      });
+
+      it('are kept when one connection of the cluster is removed', () => {
+        const members = clusterOf(11);
+        service.claimReader(SEED, NOW);
+        readerPolls();
+
+        service.forget('node-01');
+
+        expect(turns(members.slice(1))).toEqual(nodeIds(2, 8));
+      });
+
+      it('are dropped for a key that joined another', () => {
+        service.observe('member-1', view('a', 'b'));
+        service.observe('manual', view('c', 'd'));
+        service.claimReader('member-1', NOW);
+        service.claimReader('manual', NOW);
+        service.takeTopologyRead('member-1', CHECKS, NOW);
+        service.takeTopologyRead('manual', CHECKS, NOW);
+
+        service.observe(SEED, view('a', 'b', 'c', 'd'));
+
+        expect(turnRecords()).toBe(1);
+      });
+    });
+
+    describe('after another connection takes over as reader', () => {
+      let members: string[];
+
+      beforeEach(() => {
+        members = clusterOf(30);
+        members.forEach((id) => service.observe(id, view('a', 'b')));
+        service.claimReader(SEED, NOW);
+        readerPolls();
+        turns(members);
+        service.forget(SEED);
+        delete configs[SEED];
+        service.claimReader('node-01', NOW);
+      });
+
+      it('lets every connection read until the new reader polled', () => {
+        expect(turns(members.slice(1))).toEqual(members.slice(1));
+        expect(service.topologyReadPolls('node-02', CHECKS)).toBe(1);
+      });
+
+      it('goes on with the turns once the new reader polled', () => {
+        service.takeTopologyRead('node-01', CHECKS, NOW);
+
+        expect(turns(members.slice(1))).toEqual(nodeIds(9, 16));
+      });
+    });
+
     it('keeps the turns of two schedules apart', () => {
       const members = clusterOf(11);
       service.claimReader(SEED, NOW);

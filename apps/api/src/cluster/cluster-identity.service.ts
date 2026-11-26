@@ -23,6 +23,7 @@ interface ClusterReader {
 }
 
 interface ReadTurns {
+  readonly readerId: string;
   readonly polledAt: number;
   readonly everyMs?: number;
   readonly poll: number;
@@ -75,8 +76,12 @@ export function promotionSignature(primaryId: string, configEpoch: number): Fail
   return { ...followerSignature(primaryId, configEpoch), renewsOnLaterEpoch: true };
 }
 
-function takesTurns(turns: ReadTurns): boolean {
-  return turns.passPolls > 1 && (turns.everyMs ?? 0) <= READER_POLL_GRACE_MS;
+function takesTurns(turns: ReadTurns, readerId: string | undefined): boolean {
+  return (
+    turns.readerId === readerId &&
+    turns.passPolls > 1 &&
+    (turns.everyMs ?? 0) <= READER_POLL_GRACE_MS
+  );
 }
 
 function turnAfter(ids: readonly string[], last: string | undefined, count: number): string[] {
@@ -168,12 +173,20 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
   }
 
   forget(connectionId: string): void {
+    const clusterKey = this.clusterKeyOf(connectionId);
     const view = this.views.get(connectionId);
     this.views.delete(connectionId);
     this.keyByConnection.delete(connectionId);
     if (view) this.releaseNodes(view);
-    for (const [clusterKey, reader] of this.readers) {
-      if (reader.connectionId === connectionId) this.readers.delete(clusterKey);
+    for (const [readKey, reader] of this.readers) {
+      if (reader.connectionId === connectionId) this.readers.delete(readKey);
+    }
+    if (![...this.keyByConnection.values()].includes(clusterKey)) this.forgetTurns(clusterKey);
+  }
+
+  private forgetTurns(clusterKey: string): void {
+    for (const turnsKey of [...this.readTurns.keys()]) {
+      if (turnsKey.startsWith(`${clusterKey}|`)) this.readTurns.delete(turnsKey);
     }
   }
 
@@ -245,7 +258,8 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
       return true;
     }
     const turns = this.readTurns.get(turnsKey);
-    if (!turns || now - turns.polledAt > READER_POLL_GRACE_MS || !takesTurns(turns)) return true;
+    if (!turns || now - turns.polledAt > READER_POLL_GRACE_MS) return true;
+    if (!takesTurns(turns, reader.connectionId)) return true;
     if (urgent) turns.urgent.add(connectionId);
     else turns.urgent.delete(connectionId);
     return turns.granted.delete(connectionId);
@@ -253,9 +267,10 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
 
   topologyReadPolls(connectionId: string, schedule: string, urgent = false): number {
     const clusterKey = this.clusterKeyOf(connectionId);
-    if (this.readers.get(clusterKey)?.connectionId === connectionId) return 1;
+    const readerId = this.readers.get(clusterKey)?.connectionId;
+    if (readerId === connectionId) return 1;
     const turns = this.readTurns.get(`${clusterKey}|${schedule}`);
-    if (!turns || !takesTurns(turns)) return 1;
+    if (!turns || !takesTurns(turns, readerId)) return 1;
     if (!urgent) return turns.passPolls;
     const urgentPolls = Math.max(1, Math.ceil(turns.urgent.size / URGENT_READS_PER_POLL));
     return Math.min(turns.passPolls, urgentPolls);
@@ -313,7 +328,15 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
       .filter((id) => id !== readerId)
       .sort();
     if (others.length <= MEMBER_READS_PER_POLL) {
-      return { polledAt: now, everyMs, poll, passPolls: 1, granted: new Map(), urgent: new Set() };
+      return {
+        readerId,
+        polledAt: now,
+        everyMs,
+        poll,
+        passPolls: 1,
+        granted: new Map(),
+        urgent: new Set(),
+      };
     }
     const urgent = others.filter((id) => held?.urgent.has(id));
     const first = turnAfter(urgent, held?.lastUrgent, URGENT_READS_PER_POLL);
@@ -325,6 +348,7 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
     );
     [...first, ...turn].forEach((id) => granted.set(id, poll));
     return {
+      readerId,
       polledAt: now,
       everyMs,
       poll,
@@ -381,6 +405,7 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
     const joinedReader = this.readers.get(joinedKey);
     const keptReader = this.readers.get(clusterKey);
     this.readers.delete(joinedKey);
+    this.forgetTurns(joinedKey);
     if (joinedReader && (!keptReader || this.goesBefore(joinedReader, keptReader))) {
       this.readers.set(clusterKey, joinedReader);
     }
