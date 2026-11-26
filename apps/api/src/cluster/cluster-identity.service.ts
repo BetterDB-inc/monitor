@@ -241,11 +241,7 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
       const everyPoll = urgent || turns.passPolls === 1 || readerEveryMs <= 0;
       const reads =
         everyPoll || readAt === undefined || now < readAt || now - readAt >= readerEveryMs;
-      this.readTurns.set(turnsKey, {
-        ...turns,
-        readerReadAt: reads ? now : readAt,
-        readerEveryMs,
-      });
+      this.readTurns.set(turnsKey, { ...turns, readerReadAt: readAt, readerEveryMs });
       return reads;
     }
     const turns = this.readTurns.get(turnsKey);
@@ -253,6 +249,14 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
     if (urgent) turns.urgent.add(connectionId);
     else turns.urgent.delete(connectionId);
     return turns.granted.delete(connectionId);
+  }
+
+  noteTopologyRead(connectionId: string, schedule: string, now: number): void {
+    const clusterKey = this.clusterKeyOf(connectionId);
+    if (this.readers.get(clusterKey)?.connectionId !== connectionId) return;
+    const turnsKey = `${clusterKey}|${schedule}`;
+    const turns = this.readTurns.get(turnsKey);
+    if (turns) this.readTurns.set(turnsKey, { ...turns, readerReadAt: now });
   }
 
   topologyReadPolls(connectionId: string, schedule: string, urgent = false): number {

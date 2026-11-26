@@ -33667,6 +33667,38 @@ describe('AnomalyService', () => {
       expect(readsOf(SEED)).toBe(1);
     });
 
+    it('counts the five seconds from a read the reader takes for another role in INFO', async () => {
+      grow(12);
+      await pollAll();
+      await pollTimes(3);
+      roles[SEED] = 'slave';
+      const reads: number[] = [];
+
+      for (let n = 4; n <= 9; n += 1) {
+        forgetReads();
+        await pollAfter(1000);
+        if (readsOf(SEED) > 0) reads.push(n);
+      }
+
+      expect(reads).toEqual([4, 9]);
+    });
+
+    it('reads the topology on the reader again on the poll after CLUSTER NODES fails', async () => {
+      grow(12);
+      await pollAll();
+      await pollTimes(5);
+      forgetReads();
+      (ctxs[SEED].client.getClusterNodes as jest.Mock).mockRejectedValueOnce(new Error('timeout'));
+      await pollAfter(1000);
+      const failed = readsOf(SEED);
+      forgetReads();
+
+      await pollAfter(1000);
+
+      expect(failed).toBeGreaterThan(0);
+      expect(readsOf(SEED)).toBe(1);
+    });
+
     it('runs a divergence round on every read of the reader when its polls come a little early', async () => {
       grow(12);
       (service as any).clusterDiscovery = {

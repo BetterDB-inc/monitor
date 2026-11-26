@@ -2461,7 +2461,10 @@ export class AnomalyService
         const membershipAtRead = this.savedMembershipOf(ctx.connectionId);
         let nodes: ClusterNode[] | undefined;
         try {
-          if (readsTopology) nodes = await ctx.client.getClusterNodes();
+          if (readsTopology) {
+            nodes = await ctx.client.getClusterNodes();
+            this.clusterIdentity?.noteTopologyRead(ctx.connectionId, AnomalyService.TOPOLOGY_READS, timestamp);
+          }
         } catch (topologyErr) {
           if (this.clusterIdentity?.isReader(ctx.connectionId) ?? true) {
             this.activeTopologyConflicts.delete(this.clusterScopeOf(ctx.connectionId));
