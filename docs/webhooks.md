@@ -689,7 +689,7 @@ Fires once per connection and reason when a footprint collection finds LMCache a
 
 #### latency.regression.detected (Pro)
 
-Fires when a command's P99 latency regresses after an upgrade or degrades for a sustained period. `basis` says how the P99s were measured: `interval` (per-minute `LATENCY HISTOGRAM` deltas, estimated inside factor-2 buckets) or `cumulative` (`INFO latencystats` since server start, used when the connection has no usable histogram data; `+latency|histogram` enables `interval`). `runbook` differs by basis: cumulative findings point to `GET /metrics/latencystats/history`; interval findings point to the stored histograms instead, because that endpoint is cumulative.
+Fires when a command's P99 latency regresses after an upgrade or degrades for a sustained period. `basis` says how the P99s were measured: `interval` (per-minute `LATENCY HISTOGRAM` deltas, estimated inside factor-2 buckets) or `cumulative` (`INFO latencystats` since server start, used when the connection has no usable histogram data; `+latency|histogram` enables `interval`). `runbook` differs by basis: cumulative findings point to `GET /metrics/latencystats/history`; interval findings point to the stored histograms instead, because that endpoint is cumulative. The first step names the `X-Connection-Id` header to send, with the ID of the affected connection (`env-default` in the example).
 
 ```json
 {
@@ -701,7 +701,7 @@ Fires when a command's P99 latency regresses after an upgrade or degrades for a 
   "topologyRefreshCorrelated": false,
   "basis": "interval",
   "prefetchBatchMaxSize": null,
-  "runbook": ["This finding uses per-minute P99s from consecutive LATENCY HISTOGRAM snapshots: compare the bucket deltas of each command before and after the change via GET /latency-analytics/histograms (set startTime, endTime and limit). GET /metrics/latencystats/history is cumulative since server start and can look flat for this regression."],
+  "runbook": ["This finding uses per-minute P99s from consecutive LATENCY HISTOGRAM snapshots: compare the bucket deltas of each command before and after the change via GET /latency-analytics/histograms with the X-Connection-Id header set to env-default (and startTime, endTime, limit). GET /metrics/latencystats/history is cumulative since server start and can look flat for this regression."],
   "message": "Sustained P99 latency degradation: hmget p99 6.0ms (baseline 2.0ms, 3.0x).",
   "timestamp": 1735689600000,
   "instance": { "host": "valkey.example.com", "port": 6379 }

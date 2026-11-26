@@ -850,7 +850,7 @@ describe('upgrade baselines and basis changes', () => {
    * with `basis` over a separate sample set whose old-version P99 is `oldP99Us`, while the new
    * version stays at 4000us.
    */
-  const driveUpgrade = (basis: Basis, oldP99Us: number) => {
+  const driveUpgrade = (basis: Basis, oldP99Us: number, lateOldSamples = 0) => {
     const sim = new Sim();
     const findings: RegressionFinding[] = [];
     const evaluate = (samples: CommandP99Point[], inputBasis: Basis) => {
@@ -881,6 +881,11 @@ describe('upgrade baselines and basis changes', () => {
       serverVersion: '8.1.0',
       capturedAt,
     }));
+    // Slow old-version samples stamped after the window opened (rollback or mixed versions).
+    for (let i = 0; i < lateOldSamples; i++) {
+      sim.now += MINUTE;
+      polled.push({ command: 'hmget', p99Us: 4000, serverVersion: '8.1.0', capturedAt: sim.now });
+    }
     for (let i = 0; i < CONSECUTIVE_REQUIRED + 1; i++) {
       sim.now += MINUTE;
       polled.push({ command: 'hmget', p99Us: 4000, serverVersion: '9.0.0', capturedAt: sim.now });
@@ -897,6 +902,13 @@ describe('upgrade baselines and basis changes', () => {
     const findings = driveUpgrade('cumulative', 1000);
     expect(findings).toHaveLength(1);
     expect(findings[0]).toMatchObject({ basis: 'cumulative', severity: 'critical' });
+  });
+
+  it('keeps old-version samples from after the upgrade out of a rebuilt baseline', () => {
+    // 20 late samples would outnumber the 6 pre-upgrade ones and move the median to 4000us.
+    const findings = driveUpgrade('cumulative', 1000, 20);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].commands[0]).toMatchObject({ baselineP99Us: 1000, currentP99Us: 4000 });
   });
 
   it('still fires against the original baseline when the basis does not change', () => {

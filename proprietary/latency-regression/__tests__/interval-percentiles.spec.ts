@@ -223,6 +223,34 @@ describe('intervalP99 gapped buckets and late resets', () => {
       ),
     ).toBeNull();
   });
+
+  it('returns null for a non-monotone distribution left by a hidden reset', () => {
+    expect(
+      intervalP99(
+        { calls: 100, histogram: { '8192': 50, '65536': 100 } },
+        { calls: 200, histogram: { '8192': 160, '65536': 200 } },
+      ),
+    ).toBeNull();
+  });
+
+  it('returns null when deltas decrease across buckets, even within the interval calls', () => {
+    // Deltas 100 then 90 for 100 calls.
+    expect(
+      intervalP99(
+        { calls: 100, histogram: { '8192': 50, '65536': 100 } },
+        { calls: 200, histogram: { '8192': 150, '65536': 190 } },
+      ),
+    ).toBeNull();
+  });
+
+  it('returns null when a delta exceeds the interval calls', () => {
+    expect(
+      intervalP99(
+        { calls: 100, histogram: { '8192': 50 } },
+        { calls: 200, histogram: { '8192': 160 } },
+      ),
+    ).toBeNull();
+  });
 });
 
 describe('diffSnapshots volumes', () => {
@@ -238,6 +266,12 @@ describe('diffSnapshots volumes', () => {
     const a = snap(T0, { get: { calls: 1000, histogram: { '256': 1000 } } });
     const b = snap(T0 + MINUTE, { get: { calls: 10, histogram: { '256': 10 } } });
     expect(diffSnapshots(a, b).volumes).toEqual([]);
+  });
+
+  it('skips volume when a hidden reset leaves an impossible distribution', () => {
+    const a = snap(T0, { get: { calls: 100, histogram: { '8192': 50, '65536': 100 } } });
+    const b = snap(T0 + MINUTE, { get: { calls: 200, histogram: { '8192': 160, '65536': 200 } } });
+    expect(diffSnapshots(a, b)).toEqual({ points: [], volumes: [] });
   });
 
   it('averages alternating 100 and 0 calls per minute to 50/min', () => {

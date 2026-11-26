@@ -74,11 +74,19 @@ const VOLUME_WINDOW_MS = 10 * 60 * 1000;
 /** Window of cluster|slots / cluster|shards deltas for topology correlation. */
 const CLUSTER_DELTA_WINDOW_MS = 60 * 60 * 1000;
 const CLUSTER_REFRESH_COMMANDS = ['cluster|slots', 'cluster|shards'];
-/** First runbook step. It depends on the basis: the latencystats history is cumulative. */
-const CUMULATIVE_RUNBOOK_STEP =
-  'Compare per-command P99 before/after the change via GET /metrics/latencystats/history.';
-const INTERVAL_RUNBOOK_STEP =
-  'This finding uses per-minute P99s from consecutive LATENCY HISTOGRAM snapshots: compare the bucket deltas of each command before and after the change via GET /latency-analytics/histograms (set startTime, endTime and limit). GET /metrics/latencystats/history is cumulative since server start and can look flat for this regression.';
+
+/**
+ * First runbook step. It depends on the basis, because the latencystats history is cumulative.
+ * Both routes pick the connection from the X-Connection-Id header. Without it the latencystats
+ * route reads the default connection and the histograms route mixes every connection's rows.
+ */
+function firstRunbookStep(basis: RegressionBasis, connectionId: string): string {
+  const header = `with the X-Connection-Id header set to ${connectionId}`;
+  if (basis === 'cumulative') {
+    return `Compare per-command P99 before/after the change via GET /metrics/latencystats/history ${header}.`;
+  }
+  return `This finding uses per-minute P99s from consecutive LATENCY HISTOGRAM snapshots: compare the bucket deltas of each command before and after the change via GET /latency-analytics/histograms ${header} (and startTime, endTime, limit). GET /metrics/latencystats/history is cumulative since server start and can look flat for this regression.`;
+}
 
 /**
  * Commands the detector skips. LATENCY_REGRESSION_IGNORE_COMMANDS replaces the
@@ -376,7 +384,7 @@ export class LatencyRegressionService extends MultiConnectionPoller implements O
     this.logger.warn(`Latency regression on ${ctx.connectionName}: ${finding.message}`);
 
     const prefetchBatchMaxSize = await this.getPrefetchBatchMaxSize(ctx, finding.currentVersion);
-    const runbook = this.buildRunbook(finding, prefetchBatchMaxSize);
+    const runbook = this.buildRunbook(finding, prefetchBatchMaxSize, ctx.connectionId);
     const worst = finding.commands[0];
 
     const event = {
@@ -471,10 +479,12 @@ export class LatencyRegressionService extends MultiConnectionPoller implements O
     }
   }
 
-  private buildRunbook(finding: RegressionFinding, prefetchBatchMaxSize: number | null): string[] {
-    const runbook: string[] = [
-      finding.basis === 'interval' ? INTERVAL_RUNBOOK_STEP : CUMULATIVE_RUNBOOK_STEP,
-    ];
+  private buildRunbook(
+    finding: RegressionFinding,
+    prefetchBatchMaxSize: number | null,
+    connectionId: string,
+  ): string[] {
+    const runbook: string[] = [firstRunbookStep(finding.basis, connectionId)];
     if (parseMajorVersion(finding.currentVersion) >= 9) {
       const current =
         prefetchBatchMaxSize !== null ? `currently ${prefetchBatchMaxSize}` : 'current value unknown';

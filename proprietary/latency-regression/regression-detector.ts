@@ -350,6 +350,7 @@ export class RegressionDetector {
     for (const s of samples) {
       if (parseMajorVersion(s.serverVersion) !== fromMajor) continue;
       if (s.capturedAt < openedAtMs - UPGRADE_BASELINE_LOOKBACK_MS) continue;
+      if (s.capturedAt > openedAtMs) continue; // rebuilds run later; keep the baseline pre-upgrade
       const arr = byCommand.get(s.command) ?? [];
       arr.push(s.p99Us);
       byCommand.set(s.command, arr);

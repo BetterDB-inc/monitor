@@ -309,6 +309,7 @@ describe('LatencyRegressionService', () => {
     const payload = webhook.dispatchLatencyRegressionDetected.mock.calls[0][0];
     expect(payload.basis).toBe('cumulative');
     expect(payload.runbook[0]).toContain('/metrics/latencystats/history');
+    expect(payload.runbook[0]).toContain('X-Connection-Id header set to conn-1');
     expect(storage.getCommandStatsHistory).toHaveBeenCalledWith(
       expect.objectContaining({ command: 'hmget' }),
     );
@@ -515,6 +516,7 @@ describe('LatencyRegressionService', () => {
 
       const payload = webhook.dispatchLatencyRegressionDetected.mock.calls[0][0];
       expect(payload.runbook[0]).toContain('/latency-analytics/histograms');
+      expect(payload.runbook[0]).toContain('X-Connection-Id header set to conn-1');
       expect(payload.runbook[0]).not.toContain('Compare per-command P99 before/after');
     });
 

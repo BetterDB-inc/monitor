@@ -55,9 +55,9 @@ function countAt(series: Cumulative, bucket: number): number {
 
 /**
  * Cumulative distribution of the calls made between two snapshots of one command, or null when
- * any counter went backwards (restart, CONFIG RESETSTAT). Every bucket is checked before any
- * percentile is read, so a reset is caught even when the negative bucket sits above the one
- * that reaches the target.
+ * the counters show a reset (restart, CONFIG RESETSTAT). Every bucket is checked before any
+ * percentile is read, so a reset is caught even when the bad bucket sits above the one that
+ * reaches the target.
  */
 function intervalDistribution(
   before: CommandHistogram,
@@ -71,10 +71,14 @@ function intervalDistribution(
     (a, b) => a - b,
   );
   const series: Cumulative = [];
+  let prevDelta = 0;
   for (const bucket of buckets) {
     const delta = countAt(next, bucket) - countAt(prev, bucket);
-    if (delta < 0) return null; // counters went backwards: reset
+    // A real interval distribution is cumulative: never negative, never decreasing across
+    // buckets, never above the interval's calls. Anything else means a reset hid in between.
+    if (delta < 0 || delta < prevDelta || delta > calls) return null;
     series.push([bucket, delta]);
+    prevDelta = delta;
   }
   return { calls, series };
 }
@@ -116,7 +120,8 @@ export function intervalP99(
 
 /**
  * All commands between two consecutive snapshots of one connection: P99 points for intervals
- * with at least MIN_INTERVAL_CALLS calls, and a volume entry for every interval without a reset.
+ * with at least MIN_INTERVAL_CALLS calls, and a volume entry for every interval without a
+ * detected reset.
  */
 export function diffSnapshots(
   before: StoredLatencyHistogram,
