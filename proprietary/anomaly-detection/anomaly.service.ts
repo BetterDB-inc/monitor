@@ -292,7 +292,7 @@ import {
 } from '@app/cluster/cluster-metrics.service';
 import {
   ClusterIdentityService,
-  READER_GRACE_MS,
+  readerGraceMs,
   clusterStateSignature,
 } from '@app/cluster/cluster-identity.service';
 import { withConfiguredZones, withShardMetadata } from '@app/cluster/shard-metadata';
@@ -10449,7 +10449,12 @@ export class AnomalyService
       this.clusterScopesLeft.delete(connectionId);
       this.moveClusterScope(left, scope);
     }
-    return identity.claimReader(connectionId, timestamp, this.dialsDataNodes(connectionId));
+    return identity.claimReader(
+      connectionId,
+      timestamp,
+      this.dialsDataNodes(connectionId),
+      this.getIntervalMs(),
+    );
   }
 
   private followClusterJoins(): void {
@@ -10467,9 +10472,9 @@ export class AnomalyService
   }
 
   private isScopeRead(scope: string, now: number): boolean {
+    const graceMs = readerGraceMs(this.getIntervalMs());
     return [...this.clusterScopeReadAt].some(
-      ([connectionId, readAt]) =>
-        now - readAt <= READER_GRACE_MS && this.clusterScopeOf(connectionId) === scope,
+      ([connectionId, readAt]) => now - readAt <= graceMs && this.clusterScopeOf(connectionId) === scope,
     );
   }
 

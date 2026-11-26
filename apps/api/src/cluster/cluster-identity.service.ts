@@ -20,6 +20,7 @@ interface ClusterReader {
   readonly connectionId: string;
   readonly readAt: number;
   readonly dials: boolean;
+  readonly graceMs: number;
 }
 
 type KeysJoinedListener = (joinedKey: string, clusterKey: string) => void;
@@ -35,7 +36,8 @@ interface HeldClaim {
 const NOT_LIVE_FLAGS = ['handshake', 'noaddr', 'fail', 'fail?'];
 const STATE_HOLD_MS = 60_000;
 const PROMOTION_HOLD_MS = 10 * 60_000;
-export const READER_GRACE_MS = 60_000;
+const READER_GRACE_MS = 60_000;
+const READER_GRACE_POLLS = 3;
 
 const OUTAGE = 'outage';
 const RECOVERY = 'recovery';
@@ -59,6 +61,10 @@ export function followerSignature(primaryId: string, configEpoch: number): Failo
 
 export function promotionSignature(primaryId: string, configEpoch: number): FailoverSignature {
   return { ...followerSignature(primaryId, configEpoch), renewsOnLaterEpoch: true };
+}
+
+export function readerGraceMs(pollIntervalMs: number): number {
+  return Math.max(READER_GRACE_MS, READER_GRACE_POLLS * pollIntervalMs);
 }
 
 function claimOfBoth(kept: HeldClaim, joined: HeldClaim): HeldClaim {
@@ -190,10 +196,15 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
     return true;
   }
 
-  claimReader(connectionId: string, now: number, dials = true): boolean {
+  claimReader(connectionId: string, now: number, dials = true, pollIntervalMs = 0): boolean {
     const clusterKey = this.clusterKeyOf(connectionId);
     const reader = this.readers.get(clusterKey);
-    const claim: ClusterReader = { connectionId, readAt: now, dials };
+    const claim: ClusterReader = {
+      connectionId,
+      readAt: now,
+      dials,
+      graceMs: readerGraceMs(pollIntervalMs),
+    };
     const heldByAnother =
       reader !== undefined &&
       reader.connectionId !== connectionId &&
@@ -250,7 +261,7 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
 
   private stillReads(reader: ClusterReader, clusterKey: string, now: number): boolean {
     return (
-      now - reader.readAt <= READER_GRACE_MS &&
+      now - reader.readAt <= reader.graceMs &&
       this.connectionRegistry.getConfig(reader.connectionId) !== null &&
       this.clusterKeyOf(reader.connectionId) === clusterKey
     );

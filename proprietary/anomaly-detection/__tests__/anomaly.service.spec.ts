@@ -34087,6 +34087,25 @@ describe('AnomalyService', () => {
       expect(stuckReplicaEvents()).toHaveLength(1);
     });
 
+    it('keeps a warning with its cluster when polls are more than a minute apart', async () => {
+      jest.spyOn(service as any, 'getIntervalMs').mockReturnValue(90_000);
+      const moverFirst = ['conn-c', SEED, 'conn-b'];
+      topology = ORPHANED;
+      await pollAll();
+      await pollAfter(90_000);
+      views = {
+        'conn-c': [
+          cnode('otherXXXXXXX', '10.0.0.3', ['master'], { slots: [[0, 8000]] }),
+          cnode('otherYYYYYYY', '10.0.9.2', ['master'], { slots: [[8001, 16383]] }),
+        ],
+      };
+
+      await pollAfter(90_000, moverFirst);
+      await pollAfter(90_000, moverFirst);
+
+      expect(stuckReplicaEvents()).toHaveLength(1);
+    });
+
     it('keeps a warning with its cluster while its other connections miss reads for less than a minute', async () => {
       topology = ORPHANED;
       await pollAll();
@@ -34309,6 +34328,18 @@ describe('AnomalyService', () => {
           expect(joinsOnRead).toBe(false);
           expect(closedIds()).toEqual(['row-b']);
         });
+      });
+
+      it('keeps asking the replica through the seed when polls are more than a minute apart', async () => {
+        jest.spyOn(service as any, 'getIntervalMs').mockReturnValue(90_000);
+        const membersFirst = ['conn-b', 'conn-c', SEED];
+        await pollAll();
+        getNodeConnection.mockClear();
+
+        await pollAfter(90_000, membersFirst);
+        await pollAfter(90_000, membersFirst);
+
+        expect(replicaReaders()).toEqual([SEED, SEED]);
       });
 
       it('asks the replica through a member that can dial when the seed cannot', async () => {

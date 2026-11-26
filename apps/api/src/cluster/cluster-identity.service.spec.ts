@@ -738,6 +738,30 @@ describe('ClusterIdentityService', () => {
       expect(service.claimReader('member-1', NOW + MINUTE_MS + 1)).toBe(false);
     });
 
+    it('stays the seed for three polls when they are more than 20 seconds apart', () => {
+      readAll(SEED, 'member-1');
+      service.claimReader(SEED, NOW, true, 2 * MINUTE_MS);
+
+      expect(service.claimReader('member-1', NOW + 6 * MINUTE_MS, true, 2 * MINUTE_MS)).toBe(false);
+      expect(service.isReader(SEED)).toBe(true);
+    });
+
+    it('moves to a member once the seed has not read for over three polls of a long interval', () => {
+      readAll(SEED, 'member-1');
+      service.claimReader(SEED, NOW, true, 2 * MINUTE_MS);
+
+      expect(service.claimReader('member-1', NOW + 6 * MINUTE_MS + 1, true, 2 * MINUTE_MS)).toBe(true);
+      expect(service.isReader(SEED)).toBe(false);
+    });
+
+    it('keeps the minute when three polls take less', () => {
+      readAll(SEED, 'member-1');
+      service.claimReader(SEED, NOW, true, 1000);
+
+      expect(service.claimReader('member-1', NOW + MINUTE_MS, true, 1000)).toBe(false);
+      expect(service.claimReader('member-1', NOW + MINUTE_MS + 1, true, 1000)).toBe(true);
+    });
+
     it('goes back to the seed when it reads again', () => {
       readAll(SEED, 'member-1');
       service.claimReader(SEED, NOW);
