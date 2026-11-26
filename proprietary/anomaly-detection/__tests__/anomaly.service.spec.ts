@@ -33970,6 +33970,23 @@ describe('AnomalyService', () => {
         expect(readsOf(BUSY)).toBe(4);
       });
 
+      it('waits its turn again once the warning about keys in slots it does not own is open', async () => {
+        grow(30);
+        const client = ctxs[BUSY].client;
+        client.getCapabilities = jest.fn().mockReturnValue({ hasClusterSlotStats: true }) as never;
+        client.getClusterSlotStats = jest.fn().mockResolvedValue({ '2000': { key_count: 400 } });
+        client.getDbSize = jest.fn().mockResolvedValue(900);
+        await pollAll();
+        await pollTimes(46);
+        const open = service.getRecentEvents(1000).filter((e) => e.metricType === MetricType.ORPHANED_SLOT_KEYS);
+        forgetReads();
+
+        await pollTimes(8);
+
+        expect(open.map((e) => e.resolved)).toEqual([false]);
+        expect(readsOf(BUSY)).toBeLessThanOrEqual(3);
+      });
+
       it('reads its own line on every poll while its reshard skew warning is open', async () => {
         grow(50);
         migrating.add(idOf(1));

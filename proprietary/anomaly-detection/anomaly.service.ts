@@ -10422,9 +10422,15 @@ export class AnomalyService
   private hasOwnNodeFinding(connectionId: string): boolean {
     return (
       !!this.ownLineReads.get(connectionId)?.movesSlots ||
-      !!this.orphanedSlotFirstSeen.get(connectionId)?.size ||
+      this.waitsToWarnOfOrphanedKeys(connectionId) ||
       !!this.reshardSkewFirstSeen.get(connectionId)?.size
     );
+  }
+
+  private waitsToWarnOfOrphanedKeys(connectionId: string): boolean {
+    const open = this.activeOrphanedSlots.get(connectionId);
+    const seen = this.orphanedSlotFirstSeen.get(connectionId);
+    return [...(seen?.keys() ?? [])].some((signature) => !open?.has(signature));
   }
 
   private ownLineIsDue(connectionId: string, info: Record<string, string>): boolean {
