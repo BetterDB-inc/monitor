@@ -352,6 +352,7 @@ Monitor sends one OTLP request per node plus one for the monitor each interval, 
 | `betterdb_retry_amplification_state` | `betterdb.anomaly.retry_amplification_state` | `1` |
 | `betterdb_anomaly_fanout_primaries` | `betterdb.anomaly.fanout_primaries` | `{primary}` |
 | `betterdb_anomaly_fanout_gap` | `betterdb.anomaly.fanout_gap` | `1` |
+| `betterdb_anomaly_fanout_sweep_seconds` | `betterdb.anomaly.fanout_sweep` | `s` |
 | `betterdb_incident_active` | `betterdb.anomaly.incidents_active` | `{incident}` |
 | `betterdb_metric_forecast_time_to_limit_seconds` | `betterdb.forecast.time_to_limit` | `s` |
 | `betterdb_cve_findings` | `betterdb.cve.findings` | `{finding}` |

@@ -57,9 +57,10 @@ function Notice({
 
 /**
  * Notice shown when the per-node fan-out of the selected cluster or Sentinel
- * connection covers none, or only some, of its primaries, when its coverage
- * has stopped being refreshed, or when it could not be loaded. Nothing is
- * rendered while every primary is checked, or when the connection has no
+ * connection covers none, or only some, of its primaries, when it reads them
+ * in rotation over several polls, when its coverage has stopped being
+ * refreshed, or when it could not be loaded. Nothing is rendered while every
+ * primary is checked on every poll, or when the connection has no
  * other primaries to reach (standalone, every primary registered on its own,
  * or claimed by another connection, which reads it or holds it as down).
  */
@@ -211,18 +212,34 @@ function CoverageNotice({ coverage }: { coverage: FanoutCoverage | null | undefi
       return null;
   }
 
-  const { checked, unreachable, authFailed, skipped, targetLimit, timeoutMs } = coverage;
-  if (unreachable + authFailed + skipped === 0) return null;
-
+  const { checked, unreachable, authFailed, skipped, targetLimit, sweepMs, sweepPolls, timeoutMs } = coverage;
   const total = checked + unreachable + authFailed + skipped;
+  const failing = unreachable + authFailed > 0;
+  const rotation =
+    sweepPolls > 1
+      ? `This connection reads ${targetLimit} primaries per poll, in turn, so each is checked about every ${Math.round(sweepMs / 1000)} seconds. `
+      : '';
+  if (!failing && skipped === 0) {
+    if (!rotation) return null;
+    return (
+      <Notice coverage={coverage} title={`${total} primaries checked in rotation`} info>
+        {rotation}
+      </Notice>
+    );
+  }
+
   const gaps = [
     unreachable > 0 ? `${unreachable} unreachable` : null,
     authFailed > 0 ? `${authFailed} refused the credentials` : null,
-    skipped > 0 ? `${skipped} past the ${targetLimit}-primary cap` : null,
+    skipped > 0 ? `${skipped} not read yet` : null,
   ].filter((gap): gap is string => gap !== null);
 
   return (
-    <Notice coverage={coverage} title={`${checked} of ${total} primaries checked (${gaps.join(', ')})`}>
+    <Notice
+      coverage={coverage}
+      title={`${checked} of ${total} primaries checked (${gaps.join(', ')})`}
+      info={!failing}
+    >
       {unreachable > 0 &&
         `Unreachable primaries are flagged down by the topology, in retry backoff, or did not answer within ${timeoutMs / 1000} seconds. `}
       {unreachable > 0 &&
@@ -230,11 +247,9 @@ function CoverageNotice({ coverage }: { coverage: FanoutCoverage | null | undefi
         'This connection goes through an SSH tunnel, but the per-node checks dial the addresses the topology reports directly, outside it; register primaries the monitor cannot reach directly as their own tunnelled connections. '}
       {authFailed > 0 &&
         `Primaries that refused the credentials answered WRONGPASS, NOAUTH or NOPERM: check the ${sentinel ? 'data-node credentials' : 'connection username and password'} and the ACL user's permissions on those nodes. `}
-      {skipped > 0 &&
-        (sentinel
-          ? `Primaries past the cap are checked by no connection; add another Sentinel of this deployment as a connection, with the same data-node credentials, to cover them: each connection checks up to ${targetLimit} primaries no other connection holds. `
-          : `Primaries past the cap are checked by no connection; register one of them as its own connection to cover the rest: each connection checks up to ${targetLimit} primaries no other connection holds. `)}
-      {NOT_CHECKED}
+      {rotation}
+      {skipped > 0 && 'Primaries not read yet are reached before the first round ends. '}
+      {failing && NOT_CHECKED}
     </Notice>
   );
 }

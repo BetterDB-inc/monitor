@@ -294,6 +294,23 @@ describe('PrometheusService anomaly signal gauges', () => {
     });
   });
 
+  describe('updateFanoutSweep', () => {
+    it('exports how long reading every primary once takes', async () => {
+      service.updateFanoutSweep('conn-1', 40_000);
+
+      expect(await series('betterdb_anomaly_fanout_sweep_seconds')).toEqual([{ connection: LABEL, value: 40 }]);
+    });
+
+    it('removes the series of a connection that reads no primaries', async () => {
+      service.updateFanoutSweep('conn-1', 40_000);
+      service.updateFanoutSweep('conn-2', 10_000);
+
+      service.updateFanoutSweep('conn-1', null);
+
+      expect(await series('betterdb_anomaly_fanout_sweep_seconds')).toEqual([{ connection: OTHER_LABEL, value: 10 }]);
+    });
+  });
+
   describe('updateFanoutCoverage', () => {
     const counts = (overrides: Partial<Record<string, number>> = {}) => ({
       checked: 0,
