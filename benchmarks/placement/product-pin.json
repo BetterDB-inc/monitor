@@ -1,5 +1,5 @@
 {
-  "commit": "ebee6848",
+  "commit": "9d540e73",
   "files": {
     "apps/api/src/cluster/shard-load.ts": "c35f4133520681e8e52b509969787d3df5000b2a02280ffcde9f1584597bf0a1",
     "apps/api/src/monitor/provider-detector.ts": "3aaed64f0e2351d973cb864b3e058a834d130358fbcb3ad8eb7b93782d34a935",
@@ -10,6 +10,6 @@
     "proprietary/placement/placement-balance.ts": "343d01ad8583a3e5214d46978d3db405c5977886c31957ba6fd01158c88364c8",
     "proprietary/placement/placement-primaries.ts": "af1e4c2fe5a86d29a4acb9b7a374a296520f70fe8a4774af678a309af4785c25",
     "proprietary/placement/placement-support.ts": "7807d67fcc17f44858ce8d5429850f0dec1d55b41c465b9995025f62bca72c77",
-    "proprietary/placement/placement.service.ts": "6adfbc0ef4c3ee3bd48af608faab319ef9ace35daa832443c46fa7d8f3a4878a"
+    "proprietary/placement/placement.service.ts": "96b8291022a6e5c65164cfe5cfd6fd886d5aa94223d36a37955920e16ed72cc4"
   }
 }
