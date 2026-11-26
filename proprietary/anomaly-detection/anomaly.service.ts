@@ -940,6 +940,7 @@ export class AnomalyService
   private readonly clusterScopes = new Map<string, string>();
   private readonly clusterScopeReadAt = new Map<string, number>();
   private readonly clusterScopesLeft = new Map<string, string>();
+  private clusterScopeMoves = 0;
   private readonly mergedScopeState = new WeakMap<object, object>();
   private stopFollowingClusterJoins: (() => void) | undefined;
   private readonly replicaSlotEventOwners = new Map<string, Map<string, string>>();
@@ -2530,17 +2531,20 @@ export class AnomalyService
           const slotScope = (): string => (asksReplicas ? liveScope() : ctx.connectionId);
           if (asksReplicas) this.takeOverMemberSlotEvents(ctx.connectionId, slotScope());
           else this.leaveSlotEventsToReader(ctx.connectionId, liveScope(), ownNodeIdOf(nodes));
+          const movesAtRead = this.clusterScopeMoves;
           const perNodeView = await this.gatherReplicaSlotView(nodes, ctx, slotScope);
-          await this.detectReplicaSlotState(
-            asksReplicas ? filed : ctx,
-            slotScope(),
-            timestamp,
-            perNodeView.nodes,
-            shards,
-            perNodeView.notReadIds,
-            perNodeView.unseenIds,
-            perNodeView.waitingIds,
-          );
+          if (this.clusterScopeMoves === movesAtRead) {
+            await this.detectReplicaSlotState(
+              asksReplicas ? filed : ctx,
+              slotScope(),
+              timestamp,
+              perNodeView.nodes,
+              shards,
+              perNodeView.notReadIds,
+              perNodeView.unseenIds,
+              perNodeView.waitingIds,
+            );
+          }
         }
 
         if (nodes) {
@@ -10624,10 +10628,17 @@ export class AnomalyService
   }
 
   private moveClusterScope(from: string, to: string): void {
+    this.clusterScopeMoves += 1;
     const kept = this.replicaSlotEventIds.get(to);
     for (const [signature, id] of this.replicaSlotEventIds.get(from) ?? []) {
       const keptId = kept?.get(signature);
       if (keptId !== undefined && keptId !== id) this.closeLater(id);
+    }
+    for (const firstSeen of this.clusterFirstSeenState()) {
+      const keptSeen = firstSeen.get(to);
+      for (const [signature, seenAt] of firstSeen.get(from) ?? []) {
+        if (keptSeen && seenAt < (keptSeen.get(signature) ?? -Infinity)) keptSeen.set(signature, seenAt);
+      }
     }
     const bringsOldRows = (this.legacyReplicaSlotEvents.get(from)?.length ?? 0) > 0;
     for (const state of this.clusterScopedState()) {
@@ -10702,6 +10713,15 @@ export class AnomalyService
       this.legacyReplicaSlotRead,
       this.legacyReplicaSlotEvents,
       this.replicaSlotEventOwners,
+    ];
+  }
+
+  private clusterFirstSeenState(): Array<Map<string, Map<string, number>>> {
+    return [
+      this.stuckReplicaFirstSeen,
+      this.hostnameStalenessFirstSeen,
+      this.ghostMemberFirstSeen,
+      this.replicaSlotFirstSeen,
     ];
   }
 
