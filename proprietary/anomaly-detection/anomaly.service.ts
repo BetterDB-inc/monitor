@@ -6972,11 +6972,7 @@ export class AnomalyService
     const selfId = nodes?.find((node) => node.flags.includes('myself'))?.id;
     try {
       const sample = nodes ? this.shardLoad.getLatest(connectionId) : null;
-      const isNew =
-        sample !== null &&
-        sample.timestamp > (this.hotShardSampleAt.get(connectionId) ?? -Infinity) &&
-        timestamp - sample.timestamp <= HOT_SHARD_BLIND_MS;
-      if (!isNew) {
+      if (!sample || !this.isNewShardLoad(connectionId, sample, timestamp)) {
         const blocked =
           nodes &&
           (this.rebalanceTopologyBlocker(sample, nodes) ??
@@ -10411,13 +10407,25 @@ export class AnomalyService
       hasTurn ||
       !this.ownLineReads.has(connectionId) ||
       this.ownLineIsDue(connectionId, info) ||
-      this.holdsShardLoad(connectionId) ||
+      this.holdsNewShardLoad(connectionId, timestamp) ||
       !this.hasLatestClusterNodes(connectionId, timestamp)
     );
   }
 
-  private holdsShardLoad(connectionId: string): boolean {
-    return !!this.shardLoad?.getLatest(connectionId);
+  private holdsNewShardLoad(connectionId: string, timestamp: number): boolean {
+    return this.isNewShardLoad(connectionId, this.shardLoad?.getLatest(connectionId) ?? null, timestamp);
+  }
+
+  private isNewShardLoad(
+    connectionId: string,
+    sample: { timestamp: number } | null,
+    timestamp: number,
+  ): boolean {
+    return (
+      sample !== null &&
+      sample.timestamp > (this.hotShardSampleAt.get(connectionId) ?? -Infinity) &&
+      timestamp - sample.timestamp <= HOT_SHARD_BLIND_MS
+    );
   }
 
   private hasOwnNodeFinding(connectionId: string): boolean {
