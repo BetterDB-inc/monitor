@@ -30516,6 +30516,53 @@ describe('AnomalyService', () => {
       expect(service.getTopologyDivergence('conn-2').divergences).toHaveLength(1);
     });
 
+    it('raises one event when another connection takes the rounds over while the first still checks migrations', async () => {
+      views.b = { a: { slots: '' }, b: { slots: '0-10922' } };
+      const second: ConnectionContext = {
+        ...mockCtx,
+        connectionId: 'conn-2',
+        connectionName: 'Second',
+        client: clusterClient('b') as any,
+      };
+      for (let i = 0; i < 2; i++) {
+        now += 5_000;
+        await poll(mockCtx);
+        await poll(second);
+      }
+      let release = (): void => undefined;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const connect = discovery.getNodeConnection.getMockImplementation()!;
+      let holds = true;
+      discovery.getNodeConnection.mockImplementation(async (nodeId: string, connectionId: string) => {
+        const client = await connect(nodeId, connectionId);
+        const call = client.call;
+        return {
+          ...client,
+          call: jest.fn(async (...args: string[]) => {
+            if (holds && connectionId === 'conn-1' && args.join(' ') === 'CLUSTER GETSLOTMIGRATIONS') await held;
+            return call(...args);
+          }),
+        };
+      });
+      now += 5_000;
+      const firstPoll = poll(mockCtx);
+      await new Promise((resolve) => setImmediate(resolve));
+      const raisedWhileHeld = divergenceEvents().length;
+
+      now += 20_000;
+      await poll(second);
+      const raisedByTheSecond = divergenceEvents().map((e) => e.connectionId);
+      holds = false;
+      release();
+      await firstPoll;
+
+      expect(raisedWhileHeld).toBe(0);
+      expect(raisedByTheSecond).toEqual(['conn-2']);
+      expect(divergenceEvents().map((e) => e.connectionId)).toEqual(['conn-2']);
+    });
+
     it('leaves the sampling to a connection that can dial when an agent watches the same cluster', async () => {
       views.c = { a: { epoch: 9 } };
       const agent: ConnectionContext = {

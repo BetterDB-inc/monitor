@@ -7917,6 +7917,7 @@ export class AnomalyService
           canDial,
         )
       : [];
+    if (this.topologyDivergenceAnchors.get(clusterKey) !== ctx.connectionId) return;
     const groups = groupDivergences(confirmed);
     const counted = groupDivergences(unclaimed);
     const confirmedPartial = comparable ? partial.filter((finding) => finding.confirmed) : [];
