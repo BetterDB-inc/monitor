@@ -43,13 +43,11 @@ const placementSettingsFields = z.object({
   autoRollback: z.boolean(),
 });
 
+const RATIO_PROBLEM = 'must be below triggerRatio';
+
 export const placementSettingsSchema = placementSettingsFields.superRefine((settings, context) => {
   if (settings.resolveRatio >= settings.triggerRatio) {
-    context.addIssue({
-      code: 'custom',
-      path: ['resolveRatio'],
-      message: 'must be below triggerRatio',
-    });
+    context.addIssue({ code: 'custom', path: ['resolveRatio'], message: RATIO_PROBLEM });
   }
 });
 
@@ -64,10 +62,21 @@ function messagesOf(issues: readonly z.core.$ZodIssue[], prefix: string[] = []):
   });
 }
 
+function ratioProblems(input: unknown): string[] {
+  if (input === null || typeof input !== 'object') return [];
+  const fields = input as Record<string, unknown>;
+  const trigger = placementSettingsFields.shape.triggerRatio.safeParse(fields.triggerRatio);
+  const resolve = placementSettingsFields.shape.resolveRatio.safeParse(fields.resolveRatio);
+  if (!trigger.success || !resolve.success || resolve.data < trigger.data) return [];
+  return [`resolveRatio: ${RATIO_PROBLEM}`];
+}
+
 export function validatePlacementSettings(input: unknown): PlacementSettingsResult {
   const parsed = placementSettingsSchema.safeParse(input);
   if (parsed.success) return { ok: true, settings: parsed.data };
-  return { ok: false, errors: messagesOf(parsed.error.issues) };
+  const errors = messagesOf(parsed.error.issues);
+  const ratio = ratioProblems(input).filter((problem) => !errors.includes(problem));
+  return { ok: false, errors: [...errors, ...ratio] };
 }
 
 export interface StoredPlacementSettings {

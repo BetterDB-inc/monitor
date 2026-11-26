@@ -53,6 +53,15 @@ describe('placement policy settings', () => {
     ]);
   });
 
+  it('reports the ratio problem also when another field has the wrong type', () => {
+    expect(
+      errorsOf(withChange({ resolveRatio: 3, autoRollback: 'true' as unknown as boolean })),
+    ).toEqual([
+      expect.stringContaining('autoRollback'),
+      'resolveRatio: must be below triggerRatio',
+    ]);
+  });
+
   it('refuses a maintenance window with no duration', () => {
     const errors = errorsOf(
       withChange({ maintenanceWindows: [{ days: [1], start: '02:00', durationMinutes: 0 }] }),
