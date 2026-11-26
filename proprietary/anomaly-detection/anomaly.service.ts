@@ -7818,6 +7818,7 @@ export class AnomalyService
       nodesPerZone: settings.nodesPerZone,
       randomNodes: settings.randomNodes,
       canRead: canDial,
+      leads: this.clusterIdentity?.isReader(ctx.connectionId) ?? false,
       readView: (node) => this.readTopologyView(ctx, node),
     });
     if (round) await this.judgeTopologyDivergence(ctx, timestamp, round, canDial);

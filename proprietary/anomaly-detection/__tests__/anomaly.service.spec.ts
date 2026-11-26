@@ -33684,6 +33684,26 @@ describe('AnomalyService', () => {
       });
     });
 
+    it('gives the divergence rounds to the reader when another connection polled first', async () => {
+      grow(12);
+      (service as any).clusterDiscovery = {
+        retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+        releaseConnection: jest.fn().mockResolvedValue(undefined),
+        getNodeConnection: jest.fn().mockRejectedValue(new Error('ECONNREFUSED')),
+      };
+      await poll(ctxs[idOf(5)]);
+      const first = (service as any).topologyDivergence.anchorOf(
+        (service as any).connectionClusterKeys.get(idOf(5)),
+      );
+
+      await pollAll();
+
+      expect(first).toBe(idOf(5));
+      expect(
+        (service as any).topologyDivergence.anchorOf((service as any).connectionClusterKeys.get(SEED)),
+      ).toBe(SEED);
+    });
+
     describe('on a connection that never gets a turn', () => {
       const LONE = idOf(20);
       const loneEvents = (metricType: MetricType) =>
