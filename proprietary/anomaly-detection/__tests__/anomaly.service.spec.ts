@@ -33560,6 +33560,19 @@ describe('AnomalyService', () => {
       expect(events[0].connectionId).toBe(SEED);
     });
 
+    it('links the node on a split-brain alert filed under a seed that has never read', async () => {
+      unreadable.add(SEED);
+      topology = SPLIT;
+      await pollAll();
+
+      await pollAfter(1000);
+      await pollAfter(1000);
+
+      const [event] = eventsOf(MetricType.CLUSTER_TOPOLOGY);
+      expect(event.connectionId).toBe(SEED);
+      expect(event.node).toMatchObject({ nodeId: NODE_A.id, address: '10.0.0.1:6379' });
+    });
+
     it('raises one stuck replica warning for the cluster', async () => {
       topology = ORPHANED;
       await pollAll();
@@ -34133,6 +34146,18 @@ describe('AnomalyService', () => {
         await pollAfter(GATE_MS);
 
         expect(slotEvents().map((e) => e.connectionId)).toEqual([SEED]);
+      });
+
+      it('links the replica on a warning filed under a seed that has never read', async () => {
+        unreadable.add(SEED);
+        ownLine = STUCK;
+        await pollAll();
+
+        await pollAfter(GATE_MS);
+
+        const [event] = slotEvents();
+        expect(event.connectionId).toBe(SEED);
+        expect(event.node).toMatchObject({ nodeId: REPLICA_ID, address: '10.0.0.9:6379', role: 'replica' });
       });
 
       describe('when two halves turn out to be one cluster while a stored warning is looked up', () => {

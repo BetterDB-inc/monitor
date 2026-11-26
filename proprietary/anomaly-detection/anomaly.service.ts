@@ -1178,6 +1178,7 @@ export class AnomalyService
   private correlationTicking = false;
   private outboxDraining = false;
   private readonly anomalyContexts = new WeakMap<AnomalyEvent, ConnectionContext>();
+  private readonly eventReaders = new WeakMap<ConnectionContext, string>();
   private readonly latchHolders = new Map<string, string>();
   private readonly anomalySaveHooks = new WeakMap<AnomalyEvent, () => void>();
   private readonly saveTails = new Map<string, Promise<void>>();
@@ -10225,14 +10226,14 @@ export class AnomalyService
     return this.incidentEventsById.get(anomalyId);
   }
 
-  private stamp(anomaly: AnomalyEvent, connectionId = anomaly.connectionId): void {
+  private stamp(anomaly: AnomalyEvent, connectionId = anomaly.connectionId, readBy = connectionId): void {
     anomaly.scopeId ??= this.correlationScopeOf(connectionId) || undefined;
     anomaly.eventSequence ??= this.nextEventSequence++;
-    this.stampNode(anomaly, connectionId);
+    this.stampNode(anomaly, connectionId, readBy);
   }
 
-  private stampNode(anomaly: AnomalyEvent, connectionId: string | undefined): void {
-    const node = connectionId ? this.nodeInClusterView(anomaly, connectionId) : anomaly.node;
+  private stampNode(anomaly: AnomalyEvent, connectionId: string | undefined, readBy = connectionId): void {
+    const node = connectionId ? this.nodeInClusterView(anomaly, connectionId, readBy) : anomaly.node;
     if (node) anomaly.node = node;
     delete anomaly.nodeSubject;
   }
@@ -10240,8 +10241,9 @@ export class AnomalyService
   private nodeInClusterView(
     anomaly: EventNodeSource & Pick<AnomalyEvent, 'timestamp'>,
     connectionId: string,
+    readBy = connectionId,
   ): ClusterNodeRef | undefined {
-    const view = this.clusterNodeViews.view(this.nodeViewKeyOf(connectionId));
+    const view = this.clusterNodeViews.view(this.nodeViewKeyOf(readBy));
     const staleMs = this.nodeViewStaleMs();
     const roleKnown = !view || Math.abs(anomaly.timestamp - view.readAt) <= staleMs;
     const own = this.clusterNodeViews.ownRole(connectionId);
@@ -10314,8 +10316,9 @@ export class AnomalyService
     ctx?: ConnectionContext,
     onDrop?: () => void,
   ): Promise<void> {
-    this.stamp(anomaly, ctx?.connectionId || anomaly.connectionId);
-    this.addRecentAnomaly(anomaly, ctx?.connectionId || anomaly.connectionId);
+    const filedUnder = ctx?.connectionId || anomaly.connectionId;
+    this.stamp(anomaly, filedUnder, (ctx && this.eventReaders.get(ctx)) ?? filedUnder);
+    this.addRecentAnomaly(anomaly, filedUnder);
     this.rememberIncidentEvent(anomaly);
 
     if (ctx) this.anomalyContexts.set(anomaly, ctx);
@@ -10361,13 +10364,15 @@ export class AnomalyService
     const filedUnder = this.clusterIdentity?.eventConnectionOf(ctx.connectionId) ?? ctx.connectionId;
     const config = filedUnder === ctx.connectionId ? null : this.connectionRegistry.getConfig(filedUnder);
     if (!config) return ctx;
-    return {
+    const filed = {
       ...ctx,
       connectionId: filedUnder,
       connectionName: config.name ?? ctx.connectionName,
       host: config.host ?? ctx.host,
       port: config.port ?? ctx.port,
     };
+    this.eventReaders.set(filed, ctx.connectionId);
+    return filed;
   }
 
   private clusterScopeOf(connectionId: string): string {
