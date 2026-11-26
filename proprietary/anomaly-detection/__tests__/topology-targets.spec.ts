@@ -9,6 +9,7 @@ import {
   sentinelTargets,
   splitHostPort,
   topologyStateKey,
+  withHeldTargets,
 } from '../topology-targets';
 
 const nothingRegistered = () => false;
@@ -93,6 +94,53 @@ describe('topology targets', () => {
 
       expect(first).toHaveLength(TOPOLOGY_TARGET_LIMIT + 5);
       expect(second).toEqual([]);
+    });
+  });
+
+  describe('withHeldTargets', () => {
+    const primaryB = clusterNode('b', '10.0.0.2:6379@16379', ['master']);
+    const primaryC = clusterNode('c', '10.0.0.3:6379@16379', ['master']);
+    const downD = clusterNode('d', '10.0.0.4:6379@16379', ['master', 'fail']);
+    const held = clusterTargets([primaryB, primaryC, downD], nothingRegistered);
+
+    it('keeps a held primary a later view no longer lists', () => {
+      const scope = withHeldTargets(clusterTargets([primaryB], nothingRegistered), held, nothingRegistered);
+
+      expect(scope.targets.map((t) => t.addr)).toEqual(['10.0.0.2:6379', '10.0.0.3:6379']);
+      expect(scope.targets[1]).toEqual({ addr: '10.0.0.3:6379', host: '10.0.0.3', port: 6379, nodeId: 'c' });
+    });
+
+    it('keeps a held down primary a later view no longer lists as a member', () => {
+      const scope = withHeldTargets(clusterTargets([primaryB, primaryC], nothingRegistered), held, nothingRegistered);
+
+      expect(scope.targets.map((t) => t.addr)).toEqual(['10.0.0.2:6379', '10.0.0.3:6379']);
+      expect([...scope.members].sort()).toEqual(['10.0.0.2:6379', '10.0.0.3:6379', '10.0.0.4:6379']);
+    });
+
+    it('takes the state of a primary from the later view when that view lists it', () => {
+      const later = clusterTargets(
+        [primaryB, clusterNode('c', '10.0.0.3:6379@16379', ['master', 'fail']), downD],
+        nothingRegistered,
+      );
+
+      const scope = withHeldTargets(later, held, nothingRegistered);
+
+      expect(scope.targets.map((t) => t.addr)).toEqual(['10.0.0.2:6379']);
+      expect([...scope.members].sort()).toEqual(['10.0.0.2:6379', '10.0.0.3:6379', '10.0.0.4:6379']);
+    });
+
+    it('leaves out a held primary a connection is registered for by now', () => {
+      const registered = (host: string) => host === '10.0.0.3' || host === '10.0.0.4';
+
+      const scope = withHeldTargets(clusterTargets([primaryB], nothingRegistered), held, registered);
+
+      expect([...scope.members]).toEqual(['10.0.0.2:6379']);
+    });
+
+    it('returns the later view as it is when nothing is held', () => {
+      const later = clusterTargets([primaryB], nothingRegistered);
+
+      expect(withHeldTargets(later, undefined, nothingRegistered)).toBe(later);
     });
   });
 

@@ -33670,6 +33670,20 @@ describe('AnomalyService', () => {
         expect(coverageOf(WAITING)).toMatchObject({ reason: 'fanout_failed', notDialed: 1 });
       });
 
+      it('keeps a primary only its own read lists', async () => {
+        grow(12);
+        const others = ctxs[WAITING].client.getClusterNodes as jest.Mock;
+        ctxs[WAITING].client.getClusterNodes = jest.fn(async () => [...(await others()), primary(40)]) as never;
+        await pollAll();
+        await pollAfter(1000);
+        const readsBefore = readsOf(WAITING);
+
+        await pollAfter(1000);
+
+        expect(readsOf(WAITING)).toBe(readsBefore);
+        expect(coverageOf(WAITING)).toMatchObject({ reason: 'fanout_failed', notDialed: 1 });
+      });
+
       it('follows a slot rebalance run it started with the nodes it asks for itself', async () => {
         grow(12);
         await pollAll();

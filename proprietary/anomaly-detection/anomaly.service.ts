@@ -492,6 +492,7 @@ import {
   sentinelTargets,
   splitHostPort,
   topologyStateKey,
+  withHeldTargets,
 } from './topology-targets';
 import { ReadRotation } from './read-rotation';
 import {
@@ -946,6 +947,7 @@ export class AnomalyService
   private readonly clusterKeyByNode = new Map<string, string>();
   private readonly clusterViews = new Map<string, ReadonlySet<string>>();
   private readonly clusterNodeViews = new ClusterNodeViews();
+  private readonly ownTopologyScopes = new Map<string, TopologyScope>();
   private readonly ownLineReads = new Map<
     string,
     { role: string; movesSlots: boolean; sawMoveAhead: boolean }
@@ -1658,6 +1660,7 @@ export class AnomalyService
     this.clientEvictionLimit.delete(connectionId);
     this.lastReplicationRole.delete(connectionId);
     this.ownLineReads.delete(connectionId);
+    this.ownTopologyScopes.delete(connectionId);
     this.ownReplicaShards.delete(connectionId);
     this.lastClusterState.delete(connectionId);
     this.clusterStateChangedAt.delete(connectionId);
@@ -2565,6 +2568,7 @@ export class AnomalyService
           : readsTopology
             ? undefined
             : this.otherPrimariesOfCluster(ctx.connectionId, timestamp);
+        if (nodes && otherPrimaries) this.ownTopologyScopes.set(ctx.connectionId, otherPrimaries);
         if (otherPrimaries && !this.dialsDataNodes(ctx.connectionId)) {
           // The agent reaches only this node; cluster discovery would fail on
           // the seed's raw client for every other primary and count them all
@@ -10395,10 +10399,9 @@ export class AnomalyService
         ? { ...node, flags: node.flags.filter((flag) => flag !== 'myself') }
         : node,
     );
-    return clusterTargets(
-      nodes,
-      (host, port, nodeId) => nodeId === ownNodeId || isRegistered(host, port, nodeId),
-    );
+    const isCovered: RegisteredAddress = (host, port, nodeId) =>
+      nodeId === ownNodeId || isRegistered(host, port, nodeId);
+    return withHeldTargets(clusterTargets(nodes, isCovered), this.ownTopologyScopes.get(connectionId), isCovered);
   }
 
   private readIsCurrent(ctx: ConnectionContext, membershipAtRead: string): boolean {
