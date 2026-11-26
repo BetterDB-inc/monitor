@@ -34381,6 +34381,70 @@ describe('AnomalyService', () => {
         });
       });
 
+      describe('when two halves turn out to be one cluster while one half asks its own replica', () => {
+        const halves = [SEED, 'conn-c'];
+        const left = [NODE_A, NODE_B];
+        const right = [NODE_C, cnode('nodeXXXXXXXX', '10.0.0.7', ['master'])];
+        let joinsOnAsk: boolean;
+
+        const closedIds = (): string[] => storage.resolveAnomaly.mock.calls.map(([id]) => id).sort();
+
+        async function warnInOtherHalfOf(asker: 'kept' | 'joined'): Promise<string> {
+          delete configs['conn-b'];
+          configs['conn-c'] = { id: 'conn-c' };
+          const half: Record<string, ClusterNode[]> = { [SEED]: left, 'conn-c': right };
+          views = half;
+          await pollAll(halves);
+          const keyOf = (id: string): string => (service as any).clusterIdentity.clusterKeyOf(id);
+          const [kept, joined] = [...halves].sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
+          const [asking, warned] = asker === 'kept' ? [kept, joined] : [joined, kept];
+          const primaryOf = (id: string): ClusterNode => (id === SEED ? NODE_A : NODE_C);
+          const stuck = cnode('replicaR1111', '10.0.0.21', ['slave'], { master: primaryOf(warned).id });
+          const clean = cnode('replicaR3333', '10.0.0.23', ['slave'], { master: primaryOf(asking).id });
+          const lineOf = (replica: ClusterNode, primary: ClusterNode): string =>
+            `${replica.id} ${replica.address} myself,slave ${primary.id} 0 0 1 connected`;
+          joinsOnAsk = false;
+          getNodeConnection.mockImplementation(async (nodeId: string) => {
+            if (nodeId === clean.id && joinsOnAsk) {
+              joinsOnAsk = false;
+              views = {};
+              topology = [...left, ...right, stuck, clean];
+              (service as any).clusterIdentity.observe(kept, topology);
+            }
+            return {
+              call: jest.fn(async () =>
+                nodeId === stuck.id
+                  ? `${lineOf(stuck, primaryOf(warned))} [42-<-aaaaaaaa]`
+                  : lineOf(clean, primaryOf(asking)),
+              ),
+            };
+          });
+          views = { [warned]: [...half[warned], stuck], [asking]: [...half[asking], clean] };
+          await pollAfter(1000, [warned]);
+          await pollAfter(GATE_MS, [warned]);
+          joinsOnAsk = true;
+          return asking;
+        }
+
+        it.each(['kept', 'joined'] as const)(
+          'keeps the warning of the other half open when the half that asks has the %s key',
+          async (asker) => {
+            const asking = await warnInOtherHalfOf(asker);
+            const raised = slotEvents().map((e) => e.id);
+            now += 1000;
+
+            await poll(ctxs[asking]);
+            await pollAfter(1000, halves);
+            await (service as any).drainPersistenceOutbox();
+
+            expect(raised).toHaveLength(1);
+            expect(joinsOnAsk).toBe(false);
+            expect(closedIds()).toEqual([]);
+            expect(slotEvents().map((e) => e.id)).toEqual(raised);
+          },
+        );
+      });
+
       it('keeps asking the replica through the seed when polls are more than a minute apart', async () => {
         jest.spyOn(service as any, 'getIntervalMs').mockReturnValue(90_000);
         const membersFirst = ['conn-b', 'conn-c', SEED];
