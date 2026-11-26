@@ -8401,7 +8401,9 @@ export class AnomalyService
 
   private reshardReadIntervalMs(key: string, intervalMs: number): number {
     const connectionId = connectionOfStateKey(key);
-    return key === connectionId ? intervalMs : intervalMs * this.nodeReadPolls(connectionId, key);
+    const readPolls =
+      key === connectionId ? this.ownTopologyReadPolls(connectionId) : this.nodeReadPolls(connectionId, key);
+    return intervalMs * readPolls;
   }
 
   private freshReshardEntries(
@@ -10281,6 +10283,10 @@ export class AnomalyService
       this.clusterIdentity?.takeTopologyRead(connectionId, AnomalyService.TOPOLOGY_READS, timestamp) ??
       true;
     return hasTurn || !this.latestClusterNodes(connectionId, timestamp);
+  }
+
+  private ownTopologyReadPolls(connectionId: string): number {
+    return this.clusterIdentity?.topologyReadPolls(connectionId, AnomalyService.TOPOLOGY_READS) ?? 1;
   }
 
   private latestClusterNodes(connectionId: string, timestamp: number): readonly ClusterNode[] | undefined {

@@ -33477,6 +33477,8 @@ describe('AnomalyService', () => {
     let configs: Record<string, unknown>;
     let hosts: Record<string, string>;
     let ctxs: Record<string, ConnectionContext>;
+    let opsPerSec: Record<string, number>;
+    let migrating: Set<string>;
 
     function primary(index: number): ClusterNode {
       return {
@@ -33501,12 +33503,26 @@ describe('AnomalyService', () => {
         host: hosts[connectionId],
         client: {
           ...dbClient,
-          getInfoParsed: jest.fn().mockResolvedValue(memberInfo),
+          getInfoParsed: jest.fn(async () => ({
+            ...memberInfo,
+            stats: {
+              ...memberInfo.stats,
+              instantaneous_ops_per_sec: String(opsPerSec[connectionId] ?? 100),
+            },
+          })),
           getClusterInfo: jest.fn().mockResolvedValue({ cluster_state: 'ok' }),
           getClusterShards: jest.fn().mockResolvedValue([]),
           getClusterNodes: jest.fn(async () =>
             topology.map((node) =>
-              node.id === nodeIdOf(index) ? { ...node, flags: ['myself', ...node.flags] } : node,
+              node.id === nodeIdOf(index)
+                ? {
+                    ...node,
+                    flags: ['myself', ...node.flags],
+                    migratingSlots: migrating.has(connectionId)
+                      ? [{ slot: index * 100, targetNodeId: nodeIdOf(0) }]
+                      : [],
+                  }
+                : node,
             ),
           ),
         },
@@ -33553,6 +33569,9 @@ describe('AnomalyService', () => {
     beforeEach(() => {
       now = 1_700_000_000_000;
       jest.spyOn(Date, 'now').mockImplementation(() => now);
+      opsPerSec = {};
+      migrating = new Set();
+      storage.getLatencyStatsHistory = jest.fn().mockResolvedValue([]);
       const registry = (service as any).connectionRegistry;
       registry.getConfig.mockImplementation((id: string) => configs[id] ?? null);
       registry.list = jest.fn(() =>
@@ -33643,6 +33662,18 @@ describe('AnomalyService', () => {
         expect(beforeTheViewIsOld).toBe(9);
         expect(readWith('getClusterNodes')).toEqual(ids);
       });
+    });
+
+    it('compares the load of a shard with the cluster during a reshard another connection read some polls ago', async () => {
+      grow(50);
+      migrating.add(idOf(1));
+      opsPerSec[idOf(30)] = 6000;
+
+      await pollAll();
+      for (let n = 0; n < 30; n += 1) await pollAfter(1000);
+
+      const skews = service.getRecentEvents().filter((e) => e.metricType === MetricType.RESHARD_SHARD_SKEW);
+      expect(skews.map((e) => e.connectionId)).toEqual([idOf(30)]);
     });
 
     it('reads the topology on every connection on a poll in a cluster of nine connections', async () => {
