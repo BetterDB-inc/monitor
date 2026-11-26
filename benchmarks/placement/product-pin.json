@@ -1,9 +1,9 @@
 {
-  "commit": "f7804003",
+  "commit": "98ddd497",
   "files": {
-    "apps/api/src/cluster/shard-load.ts": "c2cfaf18a4088b6d01b6ee848055b69e6e394301c7d4197f18ce0936d56d0f5b",
-    "apps/api/src/cluster/sustain-history.ts": "4b64910df07ad5553955c589db0b0ca407e9fd0037cf0ef50a9385c60c8d81dc",
+    "apps/api/src/cluster/shard-load.ts": "9e7a68b45750f9ce64b846f5db27dd0b7cc81d6b9c594a785b88efbdd881c439",
     "apps/api/src/monitor/provider-detector.ts": "3aaed64f0e2351d973cb864b3e058a834d130358fbcb3ad8eb7b93782d34a935",
+    "apps/api/src/prometheus/staleness.ts": "da9f3cccff7370b469e9385c5b7deabdbf33d5ac3e5b1f346b7f2eeaea25e5e2",
     "proprietary/anomaly-detection/hash-tag-advisor.ts": "a1c3c7d6d9a7add396116dc48abc8ffa9961fa901582b2a954846e392ad70eee",
     "proprietary/anomaly-detection/hot-shard-detector.ts": "4a32e7bf3359d06c1963274d5ac55a24b6201f3ca8dc26dc9dbab1812f58d3c8",
     "proprietary/anomaly-detection/hot-shard-keys.ts": "165eefe9930b1a83b1e2ce4babf242010625620495c6d2784d771a3eee24c394",
@@ -11,7 +11,7 @@
     "proprietary/placement/placement-balance.ts": "36a5947e51ea5840b7b0ce44806d92e4258618ea18e8b967f0e54543fcc94a12",
     "proprietary/placement/placement-primaries.ts": "af1e4c2fe5a86d29a4acb9b7a374a296520f70fe8a4774af678a309af4785c25",
     "proprietary/placement/placement-support.ts": "7807d67fcc17f44858ce8d5429850f0dec1d55b41c465b9995025f62bca72c77",
-    "proprietary/placement/placement-trigger.ts": "b85d38f824ade7dfcd765d05f6cf7b80eb2e09ab84f6cad1a4ec1a228c77fb3a",
-    "proprietary/placement/placement.service.ts": "4d7edc5b608694ea98bdac8ec2301c7f2f021241055c383514c2eba821f0aa20"
+    "proprietary/placement/placement-trigger.ts": "8a47cd968e31f8f94e601cfb927f24f6c2914f5d8ddc0d611776e3e0739e8d38",
+    "proprietary/placement/placement.service.ts": "3c84b4a62a08d30820fd0db2b87e2d7aefce6e66b08ac7f103be07e25d2f2ac4"
   }
 }
