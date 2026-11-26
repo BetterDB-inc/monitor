@@ -34379,6 +34379,52 @@ describe('AnomalyService', () => {
       expect(strayReplicaEvents()).toHaveLength(2);
     });
 
+    it('raises one warning per finding when two halves turn out to be one cluster while a warning is stored', async () => {
+      const halves = [SEED, 'conn-c'];
+      delete configs['conn-b'];
+      configs['conn-c'] = { id: 'conn-c' };
+      const left = [NODE_A, NODE_B, ...ORPHANED.slice(HEALTHY.length)];
+      const right = [
+        NODE_C,
+        cnode('nodeXXXXXXXX', '10.0.0.7', ['master']),
+        cnode('replicaHHHHH', '10.0.0.8', ['slave'], { master: 'deadprimIIII' }),
+        cnode('deadprimIIII', '10.0.0.9', ['master', 'fail'], { linkState: 'disconnected' }),
+      ];
+      const late = [
+        cnode('replicaPPPPP', '10.0.0.10', ['slave'], { master: 'deadprimRRRR' }),
+        cnode('replicaQQQQQ', '10.0.0.11', ['slave'], { master: 'deadprimRRRR' }),
+        cnode('deadprimRRRR', '10.0.0.12', ['master', 'fail'], { linkState: 'disconnected' }),
+      ];
+      const half: Record<string, ClusterNode[]> = { [SEED]: left, 'conn-c': right };
+      const lateEvents = (): AnomalyEvent[] =>
+        eventsOf(MetricType.CLUSTER_TOPOLOGY).filter((e) => /replicaP|replicaQ/.test(e.message));
+      views = half;
+      await pollAll(halves);
+      await pollAfter(GATE_MS, halves);
+      const keyOf = (id: string): string => (service as any).clusterIdentity.clusterKeyOf(id);
+      const [kept, joined] = [...halves].sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
+      views = { ...half, [joined]: [...half[joined], ...late] };
+      await pollAfter(1000, [joined]);
+      now += GATE_MS;
+      const store = (service as any).addLatchedAnomaly.bind(service);
+      let seenWhole = false;
+      jest.spyOn(service as any, 'addLatchedAnomaly').mockImplementation(async (...args: unknown[]) => {
+        await store(...args);
+        if (seenWhole) return;
+        seenWhole = true;
+        views = {};
+        topology = [...left, ...right, ...late];
+        await poll(ctxs[kept]);
+      });
+
+      await poll(ctxs[joined]);
+      await pollAfter(1000, halves);
+
+      expect(seenWhole).toBe(true);
+      expect(lateEvents()).toHaveLength(2);
+      expect(eventsOf(MetricType.CLUSTER_TOPOLOGY).filter((e) => /replicaE|replicaH/.test(e.message))).toHaveLength(2);
+    });
+
     it('keeps a warning with its cluster when one connection starts reading another cluster', async () => {
       topology = ORPHANED;
       await pollAll();
