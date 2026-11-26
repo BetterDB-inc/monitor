@@ -22,8 +22,8 @@ The plugin ships as one Helm chart, `betterdb-openeverest`, installed next to Op
   - **BetterDB Cloud**: a workspace. The agent URL is `wss://<workspace>.app.betterdb.com/agent/ws`.
   - **Self-hosted**: a BetterDB Monitor **0.57.0 or later** the cluster can reach over `wss://`
     ([Docker](docker.md) or the [`betterdb-monitor` chart](kubernetes.md)); older Monitors do not
-    understand multi-node agents and the tab reports every node as
-    "BetterDB server too old". The agent URL is
+    understand multi-node agents and never acknowledge a node, so the tab reports every node as
+    "BetterDB did not acknowledge this node" while it keeps reconnecting. The agent URL is
     `wss://<monitor-host>/api/agent/ws`; for a Monitor in the same cluster the Service works
     too, e.g. `ws://betterdb-monitor.betterdb.svc:3001/api/agent/ws`.
 - An **agent token**, created in BetterDB under Connections → Via Agent.

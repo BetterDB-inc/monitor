@@ -17,7 +17,13 @@ jest.mock('iovalkey', () => ({
 }));
 
 jest.mock('../ws-client', () => ({
-  WsClient: jest.fn(() => ({ connect: jest.fn(), close: jest.fn(), send: jest.fn(), isOpen: jest.fn(() => true) })),
+  WsClient: jest.fn(() => ({
+    connect: jest.fn(),
+    close: jest.fn(),
+    dropConnection: jest.fn(),
+    send: jest.fn(),
+    isOpen: jest.fn(() => true),
+  })),
 }));
 
 jest.mock('../command-executor', () => ({
@@ -222,10 +228,11 @@ describe('Agent on the cloud side', () => {
   });
 
   function wsOf(agent: Agent) {
-    return (agent as any).wsClient as { close: jest.Mock; send: jest.Mock; isOpen?: jest.Mock };
+    return (agent as any).wsClient as { close: jest.Mock; dropConnection: jest.Mock; send: jest.Mock; isOpen?: jest.Mock };
   }
 
-  it('gives up on a server that never acknowledges an identified hello, and says so in its status', async () => {
+  it('reconnects when an identified hello is not acknowledged in time, and says so in its status', async () => {
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
     const agent = new Agent({ ...PASSWORD_CONFIG, identity }) as any;
     agent.onWsOpen();
 
@@ -233,8 +240,26 @@ describe('Agent on the cloud side', () => {
     expect(agent.getStatus().cloudError).toBeUndefined();
     await jest.advanceTimersByTimeAsync(1);
 
-    expect(agent.getStatus().cloudError).toMatch(/too old.*0\.57\.0/);
-    expect(wsOf(agent).close).toHaveBeenCalledTimes(1);
+    expect(agent.getStatus().cloudError).toMatch(/did not acknowledge.*0\.57\.0/);
+    expect(wsOf(agent).dropConnection).toHaveBeenCalledTimes(1);
+    expect(wsOf(agent).close).not.toHaveBeenCalled();
+  });
+
+  it('streams again once a reconnect after a late welcome is welcomed', async () => {
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const agent = new Agent({ ...PASSWORD_CONFIG, identity }) as any;
+    agent.onWsOpen();
+    await jest.advanceTimersByTimeAsync(15_000);
+    agent.onWsClose(4000, 'Welcome timeout');
+
+    agent.onWsOpen();
+    await agent.onWsMessage(JSON.stringify({ type: 'welcome', serverVersion: '0.57.0', identity: true, readOnly: true }));
+
+    expect(agent.getStatus().cloudError).toBeUndefined();
+    expect(agent.getStatus().cloudConnected).toBe(true);
+    await jest.advanceTimersByTimeAsync(60_000);
+    expect(wsOf(agent).dropConnection).toHaveBeenCalledTimes(1);
+    expect(wsOf(agent).close).not.toHaveBeenCalled();
   });
 
   it('is content once the server welcomes the identity', async () => {
@@ -254,6 +279,7 @@ describe('Agent on the cloud side', () => {
 
     expect(agent.getStatus().cloudError).toMatch(/too old/);
     expect(wsOf(agent).close).toHaveBeenCalledTimes(1);
+    expect(wsOf(agent).dropConnection).not.toHaveBeenCalled();
   });
 
   it('does not wait for a welcome without an identity (classic single-target agents)', async () => {

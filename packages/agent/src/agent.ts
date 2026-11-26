@@ -56,6 +56,9 @@ export const LEGACY_SERVER_MESSAGE =
   `BetterDB server too old: identified agents need Monitor ${MIN_MONITOR_VERSION} or later, or BetterDB Cloud`;
 // How long after the hello a server that understands identities has to say so.
 const WELCOME_TIMEOUT_MS = 15_000;
+export const NO_WELCOME_MESSAGE =
+  `BetterDB did not acknowledge this node within ${WELCOME_TIMEOUT_MS / 1000} s, reconnecting ` +
+  `(a Monitor older than ${MIN_MONITOR_VERSION} never does)`;
 // A node that accepts the connection but never answers INFO must not hang
 // start() (and whoever awaits it) forever.
 const STARTUP_TIMEOUT_MS = 15_000;
@@ -422,13 +425,21 @@ export class Agent {
     if (this.config.readOnly) hello.readOnly = true;
     this.wsClient.send(JSON.stringify(hello));
     // An identified hello needs the server to say it understood the identity.
-    // A server from before AgentWelcomeMessage never does; it would register
-    // every node of this process under the token's id, with only one of them
-    // streaming, so give up on it instead of reconnecting forever.
+    // A server from before AgentWelcomeMessage never does, but neither does a
+    // busy or restarting Monitor in time, so a missing welcome only drops this
+    // socket and lets the reconnect backoff try again. Giving up for good is
+    // left to a welcome that disowns the identity.
     if (this.config.identity) {
       this.clearWelcomeTimer();
-      this.welcomeTimer = setTimeout(() => this.giveUpOnCloud(LEGACY_SERVER_MESSAGE), WELCOME_TIMEOUT_MS);
+      this.welcomeTimer = setTimeout(() => this.retryWithoutWelcome(), WELCOME_TIMEOUT_MS);
     }
+  }
+
+  private retryWithoutWelcome(): void {
+    this.welcomeTimer = null;
+    this.cloudError = NO_WELCOME_MESSAGE;
+    console.warn(`${this.tag} ${NO_WELCOME_MESSAGE}`);
+    this.wsClient.dropConnection(4000, 'Welcome timeout');
   }
 
   private onWelcome(msg: AgentWelcomeMessage): void {

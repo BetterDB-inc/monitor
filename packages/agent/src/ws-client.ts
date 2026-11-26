@@ -92,6 +92,11 @@ export class WsClient {
     return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
   }
 
+  /** Closes the current socket only; the usual backoff connects again. */
+  dropConnection(code: number, reason: string): void {
+    this.ws?.close(code, reason);
+  }
+
   close(): void {
     this.closed = true;
     this.stopHeartbeat();

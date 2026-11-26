@@ -16,7 +16,7 @@ class MockSocket extends EventEmitter {
 
   send(): void {}
 
-  close(): void {}
+  close(_code?: number, _reason?: string): void {}
 }
 
 jest.mock('ws', () => ({ __esModule: true, default: MockSocket }));
@@ -89,6 +89,22 @@ describe('WsClient reconnects', () => {
     mockSockets[0].emit('open');
 
     mockSockets[0].emit('close', 1006, Buffer.from(''));
+    jest.advanceTimersByTime(1000);
+
+    expect(mockSockets).toHaveLength(2);
+    client.close();
+  });
+
+  it('connects again after a dropped connection, unlike after close()', () => {
+    const client = build();
+    client.connect();
+    mockSockets[0].emit('open');
+    const close = jest.spyOn(mockSockets[0], 'close').mockImplementation((code?: number, reason?: string) => {
+      mockSockets[0].emit('close', code, Buffer.from(reason ?? ''));
+    });
+
+    client.dropConnection(4000, 'Welcome timeout');
+    expect(close).toHaveBeenCalledWith(4000, 'Welcome timeout');
     jest.advanceTimersByTime(1000);
 
     expect(mockSockets).toHaveLength(2);
