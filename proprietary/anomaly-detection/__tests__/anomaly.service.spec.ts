@@ -2498,6 +2498,7 @@ describe('AnomalyService', () => {
       const identity = new ClusterIdentityService((service as any).connectionRegistry);
       jest.spyOn(identity, 'takeTopologyRead').mockImplementation((id) => id !== 'conn-a');
       (service as any).clusterIdentity = identity;
+      (service as any).followClusterJoins();
       const other = {
         ...ctx,
         connectionId: 'conn-b',
@@ -7595,6 +7596,7 @@ describe('AnomalyService', () => {
         );
         identity = new ClusterIdentityService(registry);
         (service as any).clusterIdentity = identity;
+        (service as any).followClusterJoins();
       });
 
       it('sends one cluster.failover when every connection of the cluster sees the state fail', async () => {
@@ -30514,6 +30516,53 @@ describe('AnomalyService', () => {
       expect(service.getTopologyDivergence('conn-2').divergences).toHaveLength(1);
     });
 
+    it('raises one event when another connection takes the rounds over while the first still checks migrations', async () => {
+      views.b = { a: { slots: '' }, b: { slots: '0-10922' } };
+      const second: ConnectionContext = {
+        ...mockCtx,
+        connectionId: 'conn-2',
+        connectionName: 'Second',
+        client: clusterClient('b') as any,
+      };
+      for (let i = 0; i < 2; i++) {
+        now += 5_000;
+        await poll(mockCtx);
+        await poll(second);
+      }
+      let release = (): void => undefined;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const connect = discovery.getNodeConnection.getMockImplementation()!;
+      let holds = true;
+      discovery.getNodeConnection.mockImplementation(async (nodeId: string, connectionId: string) => {
+        const client = await connect(nodeId, connectionId);
+        const call = client.call;
+        return {
+          ...client,
+          call: jest.fn(async (...args: string[]) => {
+            if (holds && connectionId === 'conn-1' && args.join(' ') === 'CLUSTER GETSLOTMIGRATIONS') await held;
+            return call(...args);
+          }),
+        };
+      });
+      now += 5_000;
+      const firstPoll = poll(mockCtx);
+      await new Promise((resolve) => setImmediate(resolve));
+      const raisedWhileHeld = divergenceEvents().length;
+
+      now += 20_000;
+      await poll(second);
+      const raisedByTheSecond = divergenceEvents().map((e) => e.connectionId);
+      holds = false;
+      release();
+      await firstPoll;
+
+      expect(raisedWhileHeld).toBe(0);
+      expect(raisedByTheSecond).toEqual(['conn-2']);
+      expect(divergenceEvents().map((e) => e.connectionId)).toEqual(['conn-2']);
+    });
+
     it('leaves the sampling to a connection that can dial when an agent watches the same cluster', async () => {
       views.c = { a: { epoch: 9 } };
       const agent: ConnectionContext = {
@@ -33602,6 +33651,7 @@ describe('AnomalyService', () => {
         ids.map((id) => ({ id, host: hosts[id], port: 6379, isConnected: true, ...(configs[id] as object) })),
       );
       (service as any).clusterIdentity = new ClusterIdentityService(registry);
+      (service as any).followClusterJoins();
     });
 
     afterEach(() => {
@@ -33851,6 +33901,42 @@ describe('AnomalyService', () => {
         await poll(ctxs[WAITING]);
 
         expect(coverageOf(WAITING)).toMatchObject({ reason: 'fanout_failed', notDialed: 1 });
+      });
+
+      it('keeps a primary only its own read lists', async () => {
+        grow(12);
+        const others = ctxs[WAITING].client.getClusterNodes as jest.Mock;
+        ctxs[WAITING].client.getClusterNodes = jest.fn(async () => [...(await others()), primary(40)]) as never;
+        await pollAll();
+        await pollAfter(1000);
+        const readsBefore = readsOf(WAITING);
+
+        await pollAfter(1000);
+
+        expect(readsOf(WAITING)).toBe(readsBefore);
+        expect(coverageOf(WAITING)).toMatchObject({ reason: 'fanout_failed', notDialed: 1 });
+      });
+
+      it('follows a slot rebalance run it started with the nodes it asks for itself', async () => {
+        grow(12);
+        await pollAll();
+        await pollAfter(1000);
+        const discoverNodesIsolated = jest.fn().mockResolvedValue([]);
+        (service as any).clusterDiscovery = { ...(service as any).clusterDiscovery, discoverNodesIsolated };
+        (service as any).clusterMetrics = {
+          coveredBySeed: () => true,
+          readSlotMigrations: jest
+            .fn()
+            .mockResolvedValue({ jobViews: [], finishedJobs: [], failed: [], complete: true, migrations: [] }),
+        };
+        const run = { state: 'running', sourceShardId: nodeIdOf(6), startedAt: now, jobs: [], jobsBefore: [] };
+        (service as any).rebalanceRuns.set(WAITING, new Map([[run.sourceShardId, run]]));
+        forgetReads();
+
+        await pollAfter(1000);
+
+        expect(readsOf(WAITING)).toBe(0);
+        expect(discoverNodesIsolated.mock.calls.map(([connectionId]) => connectionId)).toEqual([WAITING]);
       });
 
       it('reads the topology itself once no connection read the cluster for thirty seconds', async () => {
@@ -34118,6 +34204,45 @@ describe('AnomalyService', () => {
       }
     });
 
+    describe('a reshard first seen on a normal turn', () => {
+      const MOVING = idOf(5);
+      const TICK_MS = 1001;
+      const reshardRuns = (): boolean => {
+        const internals = service as any;
+        const intervalMs = internals.getIntervalMs();
+        const entries = internals.freshReshardEntries(internals.connectionClusterKeys.get(SEED), now, intervalMs);
+        return internals.isReshardActiveAmong(entries, now, intervalMs);
+      };
+
+      async function seeTheMoveOnANormalTurn(count: number): Promise<void> {
+        grow(count);
+        await pollAll();
+        await pollTimes(2, TICK_MS);
+        migrating.add(MOVING);
+        forgetReads();
+        while (readsOf(MOVING) === 0) await pollAfter(TICK_MS);
+      }
+
+      it('counts as running until the connection reads again two polls later', async () => {
+        await seeTheMoveOnANormalTurn(30);
+        await pollAfter(TICK_MS);
+        const readsBefore = readsOf(MOVING);
+
+        now += TICK_MS;
+
+        expect(readsBefore).toBe(1);
+        expect(reshardRuns()).toBe(true);
+      });
+
+      it('counts as running for two polls only in a cluster where every connection reads on every poll', async () => {
+        await seeTheMoveOnANormalTurn(9);
+
+        now += 2 * TICK_MS;
+
+        expect(reshardRuns()).toBe(false);
+      });
+    });
+
     it('reads the topology on every connection on a poll in a cluster of nine connections', async () => {
       grow(9);
       await pollAll();
@@ -34244,6 +34369,7 @@ describe('AnomalyService', () => {
         MEMBERS.filter((id) => configs[id]).map((id) => ({ id, host: HOSTS[id], port: 6379, ...(configs[id] as object) })),
       );
       (service as any).clusterIdentity = new ClusterIdentityService(registry);
+      (service as any).followClusterJoins();
     });
 
     afterEach(() => {
@@ -34648,6 +34774,73 @@ describe('AnomalyService', () => {
       expect(eventsOf(MetricType.CLUSTER_TOPOLOGY).filter((e) => /replicaE|replicaH/.test(e.message))).toHaveLength(2);
     });
 
+    it('raises one split-brain alert per conflict when two halves turn out to be one cluster while an alert is stored', async () => {
+      const halves = [SEED, 'conn-c'];
+      delete configs['conn-b'];
+      configs['conn-c'] = { id: 'conn-c' };
+      const left = [NODE_A, NODE_B];
+      const right = [NODE_C, cnode('nodeXXXXXXXX', '10.0.0.7', ['master'])];
+      const half: Record<string, ClusterNode[]> = { [SEED]: left, 'conn-c': right };
+      const splitBrainAlerts = (): AnomalyEvent[] =>
+        eventsOf(MetricType.CLUSTER_TOPOLOGY).filter((e) => e.message.includes('split-brain'));
+      views = half;
+      await pollAll(halves);
+      const keyOf = (id: string): string => (service as any).clusterIdentity.clusterKeyOf(id);
+      const [kept, joined] = [...halves].sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
+      const [from] = (joined === SEED ? NODE_A : NODE_C).slots[0];
+      const twins = [
+        cnode('nodeSSSSSSSS', '10.0.0.13', ['master'], { slots: [[from, from + 100]], configEpoch: 9 }),
+        cnode('nodeTTTTTTTT', '10.0.0.14', ['master'], { slots: [[from + 200, from + 300]], configEpoch: 9 }),
+      ];
+      views = { ...half, [joined]: [...half[joined], ...twins] };
+      now += 1000;
+      const store = (service as any).addLatchedAnomaly.bind(service);
+      let seenWhole = false;
+      jest.spyOn(service as any, 'addLatchedAnomaly').mockImplementation(async (...args: unknown[]) => {
+        await store(...args);
+        if (seenWhole) return;
+        seenWhole = true;
+        views = {};
+        topology = [...left, ...right, ...twins];
+        await poll(ctxs[kept]);
+      });
+
+      await poll(ctxs[joined]);
+      await pollAfter(1000, halves);
+
+      expect(seenWhole).toBe(true);
+      expect(splitBrainAlerts()).toHaveLength(2);
+    });
+
+    it('raises no second split-brain alert when the metrics read sees two halves join before the reader polls', async () => {
+      const halves = [SEED, 'conn-c'];
+      delete configs['conn-b'];
+      configs['conn-c'] = { id: 'conn-c' };
+      const left = [NODE_A, NODE_B];
+      const right = [NODE_C, cnode('nodeXXXXXXXX', '10.0.0.7', ['master'])];
+      const half: Record<string, ClusterNode[]> = { [SEED]: left, 'conn-c': right };
+      const splitBrainAlerts = (): AnomalyEvent[] =>
+        eventsOf(MetricType.CLUSTER_TOPOLOGY).filter((e) => e.message.includes('split-brain'));
+      views = half;
+      await pollAll(halves);
+      const identity: ClusterIdentityService = (service as any).clusterIdentity;
+      const [kept, joined] = [...halves].sort((a, b) =>
+        identity.clusterKeyOf(a).localeCompare(identity.clusterKeyOf(b)),
+      );
+      const [from] = (joined === SEED ? NODE_A : NODE_C).slots[0];
+      const twin = cnode('nodeSSSSSSSS', '10.0.0.13', ['master'], { slots: [[from, from + 100]], configEpoch: 9 });
+      views = { ...half, [joined]: [...half[joined], twin] };
+      await pollAfter(1000, halves);
+      views = {};
+      topology = [...left, ...right, twin];
+      identity.observe(kept, topology);
+
+      await pollAfter(MINUTE_MS + 1000, [kept]);
+
+      expect(identity.isReader(kept)).toBe(true);
+      expect(splitBrainAlerts()).toHaveLength(1);
+    });
+
     it('keeps a warning with its cluster when one connection starts reading another cluster', async () => {
       topology = ORPHANED;
       await pollAll();
@@ -34658,6 +34851,28 @@ describe('AnomalyService', () => {
           cnode('otherYYYYYYY', '10.0.9.2', ['master'], { slots: [[8001, 16383]] }),
         ],
       };
+
+      await pollAfter(1000);
+      await pollAfter(GATE_MS);
+      await pollAfter(GATE_MS);
+
+      expect(stuckReplicaEvents()).toHaveLength(1);
+    });
+
+    it('keeps a warning with its cluster while its other connections miss reads for less than a minute', async () => {
+      topology = ORPHANED;
+      await pollAll();
+      await pollAfter(GATE_MS);
+      views = {
+        'conn-c': [
+          cnode('otherXXXXXXX', '10.0.0.3', ['master'], { slots: [[0, 8000]] }),
+          cnode('otherYYYYYYY', '10.0.9.2', ['master'], { slots: [[8001, 16383]] }),
+        ],
+      };
+      await pollAfter(1000);
+      unreadable = new Set([SEED, 'conn-b']);
+      await pollAfter(GATE_MS);
+      unreadable = new Set();
 
       await pollAfter(1000);
       await pollAfter(GATE_MS);
@@ -34827,6 +35042,28 @@ describe('AnomalyService', () => {
         ownLine = `ffffffff 10.0.0.9:6379@16379 myself,slave ${rebuiltA.id} 0 0 1 connected`;
 
         await pollAfter(1000);
+        await pollAfter(1000);
+
+        expect(slotEvents().map((e) => e.resolved)).toEqual([true]);
+      });
+
+      it('closes the warning after the cluster comes back with new node ids while one connection cannot read', async () => {
+        ownLine = STUCK;
+        await pollAll();
+        await pollAfter(GATE_MS);
+        const rebuiltA = cnode('rebuiltAAAAA', '10.0.0.1', ['master'], { slots: [[0, 5460]] });
+        topology = [
+          rebuiltA,
+          cnode('rebuiltBBBBB', '10.0.0.2', ['master'], { slots: [[5461, 10922]] }),
+          cnode('rebuiltCCCCC', '10.0.0.3', ['master'], { slots: [[10923, 16383]] }),
+          cnode('ffffffff', '10.0.0.9', ['slave'], { master: rebuiltA.id }),
+        ];
+        ownLine = `ffffffff 10.0.0.9:6379@16379 myself,slave ${rebuiltA.id} 0 0 1 connected`;
+        unreadable.add('conn-c');
+        await pollAfter(1000);
+        expect(slotEvents().map((e) => e.resolved)).toEqual([false]);
+
+        await pollAfter(MINUTE_MS);
         await pollAfter(1000);
 
         expect(slotEvents().map((e) => e.resolved)).toEqual([true]);

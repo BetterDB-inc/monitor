@@ -1090,6 +1090,50 @@ describe('ClusterIdentityService', () => {
       expect(turns(members, NOW + 15_001)).toEqual(members);
     });
 
+    it('lets every connection read on every poll of a reader that polls over fifteen seconds apart', () => {
+      const members = clusterOf(30);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+      turns(members);
+
+      readerPolls(NOW + 15_001);
+
+      expect(turns(members, NOW + 15_001)).toEqual(members);
+      expect(turns(members, NOW + 15_002)).toEqual(members);
+    });
+
+    it('keeps the turns of a reader that polls fifteen seconds apart', () => {
+      const members = clusterOf(30);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+
+      readerPolls(NOW + 15_000);
+
+      expect(turns(members, NOW + 15_000)).toEqual(nodeIds(1, 16));
+    });
+
+    it('goes back to turns once the reader polls less than fifteen seconds apart again', () => {
+      const members = clusterOf(30);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+      readerPolls(NOW + 20_000);
+      turns(members, NOW + 20_000);
+
+      readerPolls(NOW + 21_000);
+
+      expect(turns(members, NOW + 21_000)).toEqual(nodeIds(9, 24));
+    });
+
+    it('takes one poll for a full pass while the reader polls over fifteen seconds apart', () => {
+      clusterOf(30);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+
+      readerPolls(NOW + 15_001);
+
+      expect(service.topologyReadPolls('node-01', CHECKS)).toBe(1);
+    });
+
     it('lets every connection read until the reader polled for the first time', () => {
       const members = clusterOf(11);
       service.claimReader(SEED, NOW);
@@ -1106,6 +1150,69 @@ describe('ClusterIdentityService', () => {
       readerPolls(NOW + MINUTE_MS + 1);
 
       expect(turns(members, NOW + MINUTE_MS + 1)).toEqual(members);
+    });
+
+    describe('records', () => {
+      const turnRecords = (): number => (service as any).readTurns.size;
+
+      it('are dropped once the last connection of the cluster is removed', () => {
+        const members = clusterOf(11);
+        service.claimReader(SEED, NOW);
+        readerPolls();
+
+        [...members, SEED].forEach((id) => service.forget(id));
+
+        expect(turnRecords()).toBe(0);
+      });
+
+      it('are kept when one connection of the cluster is removed', () => {
+        const members = clusterOf(11);
+        service.claimReader(SEED, NOW);
+        readerPolls();
+
+        service.forget('node-01');
+
+        expect(turns(members.slice(1))).toEqual(nodeIds(2, 8));
+      });
+
+      it('are dropped for a key that joined another', () => {
+        service.observe('member-1', view('a', 'b'));
+        service.observe('manual', view('c', 'd'));
+        service.claimReader('member-1', NOW);
+        service.claimReader('manual', NOW);
+        service.takeTopologyRead('member-1', CHECKS, NOW);
+        service.takeTopologyRead('manual', CHECKS, NOW);
+
+        service.observe(SEED, view('a', 'b', 'c', 'd'));
+
+        expect(turnRecords()).toBe(1);
+      });
+    });
+
+    describe('after another connection takes over as reader', () => {
+      let members: string[];
+
+      beforeEach(() => {
+        members = clusterOf(30);
+        members.forEach((id) => service.observe(id, view('a', 'b')));
+        service.claimReader(SEED, NOW);
+        readerPolls();
+        turns(members);
+        service.forget(SEED);
+        delete configs[SEED];
+        service.claimReader('node-01', NOW);
+      });
+
+      it('lets every connection read until the new reader polled', () => {
+        expect(turns(members.slice(1))).toEqual(members.slice(1));
+        expect(service.topologyReadPolls('node-02', CHECKS)).toBe(1);
+      });
+
+      it('goes on with the turns once the new reader polled', () => {
+        service.takeTopologyRead('node-01', CHECKS, NOW);
+
+        expect(turns(members.slice(1))).toEqual(nodeIds(9, 16));
+      });
     });
 
     it('keeps the turns of two schedules apart', () => {
@@ -1187,22 +1294,65 @@ describe('ClusterIdentityService', () => {
   });
 
   describe('keys joined by a view', () => {
-    it('are the keys of the clusters a view shows to be one', () => {
+    let joins: string[][];
+    let stop: () => void;
+
+    beforeEach(() => {
+      joins = [];
+      stop = service.onKeysJoined((joinedKey, clusterKey) => joins.push([joinedKey, clusterKey]));
+    });
+
+    it('are told to a listener with the key the cluster keeps', () => {
       service.observe('member-1', view('a', 'b'));
-      service.observe('member-2', view('c', 'd'));
-      const keys = ['member-1', 'member-2'].map((id) => service.clusterKeyOf(id));
+      service.observe('manual', view('c', 'd'));
+      const [kept, joined] = [
+        service.clusterKeyOf('member-1'),
+        service.clusterKeyOf('manual'),
+      ].sort();
 
-      const joined = service.observe('member-2', view('a', 'b', 'c', 'd'));
+      service.observe(SEED, view('a', 'b', 'c', 'd'));
 
-      const kept = service.clusterKeyOf('member-2');
-      expect(joined).toEqual(keys.filter((key) => key !== kept));
-      expect(service.clusterKeyOf('member-1')).toBe(kept);
+      expect(joins).toEqual([[joined, kept]]);
+      expect(service.clusterKeyOf(SEED)).toBe(kept);
+    });
+
+    it('are told once the connections have the key the cluster keeps', () => {
+      service.observe('member-1', view('a', 'b'));
+      service.observe('manual', view('c', 'd'));
+      const keysAtJoin: string[] = [];
+      service.onKeysJoined(() =>
+        keysAtJoin.push(service.clusterKeyOf('member-1'), service.clusterKeyOf('manual')),
+      );
+
+      service.observe(SEED, view('a', 'b', 'c', 'd'));
+
+      expect(keysAtJoin).toEqual(Array(2).fill(service.clusterKeyOf(SEED)));
     });
 
     it('are none for a view of one cluster', () => {
       service.observe('member-1', view('a', 'b'));
 
-      expect(service.observe('member-2', view('a', 'b'))).toEqual([]);
+      service.observe('member-2', view('a', 'b'));
+
+      expect(joins).toEqual([]);
+    });
+
+    it('are none for a view that adds nodes no connection read before', () => {
+      service.observe('member-1', view('a', 'b'));
+
+      service.observe('member-1', view('a', 'b', 'c'));
+
+      expect(joins).toEqual([]);
+    });
+
+    it('are not told to a listener that was taken off', () => {
+      service.observe('member-1', view('a', 'b'));
+      service.observe('manual', view('c', 'd'));
+      stop();
+
+      service.observe(SEED, view('a', 'b', 'c', 'd'));
+
+      expect(joins).toEqual([]);
     });
   });
 
