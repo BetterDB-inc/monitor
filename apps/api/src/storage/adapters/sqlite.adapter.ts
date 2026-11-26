@@ -96,6 +96,8 @@ import {
   CaptureTriggerQueryOptions,
   CaptureTriggerPatch,
   CaptureTriggerStatus,
+  StoredRebalanceRun,
+  RebalanceRunQueryOptions,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   VectorIndexSnapshot,
@@ -154,6 +156,7 @@ import { openLibsqlDatabase } from './libsql-driver';
 import { loadBetterSqlite3 } from './better-sqlite3-driver';
 import { WebhookSqliteRepository } from './repositories/webhook.sqlite.repository';
 import { SlowLogSqliteRepository } from './repositories/slowlog.sqlite.repository';
+import { RebalanceRunSqliteRepository } from './repositories/rebalance-run.sqlite.repository';
 import { InvitationSqliteRepository } from './repositories/invitation.sqlite.repository';
 import type { InvitationRepository } from '../../common/interfaces/invitation-repository.interface';
 import { ActivitySqliteRepository } from './repositories/activity.sqlite.repository';
@@ -691,6 +694,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
   private readonly mappers = new RowMappers(SqliteDialect);
   private webhookRepo!: WebhookSqliteRepository;
   private slowlogRepo!: SlowLogSqliteRepository;
+  private rebalanceRunRepo!: RebalanceRunSqliteRepository;
   private invitationRepo!: InvitationSqliteRepository;
   private activityRepo!: ActivitySqliteRepository;
 
@@ -717,6 +721,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       this.ensureLogRunIdUniqueIndexes();
       this.webhookRepo = new WebhookSqliteRepository(this.db, this.mappers);
       this.slowlogRepo = new SlowLogSqliteRepository(this.db, this.mappers);
+      this.rebalanceRunRepo = new RebalanceRunSqliteRepository(this.db);
       this.invitationRepo = new InvitationSqliteRepository(this.db);
       this.activityRepo = new ActivitySqliteRepository(this.db);
       this.ready = true;
@@ -2415,6 +2420,22 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         ON replication_divergence_windows(connection_id, replica_addr, window_start, window_end);
       CREATE INDEX IF NOT EXISTS idx_repl_div_end
         ON replication_divergence_windows(window_end);
+
+      CREATE TABLE IF NOT EXISTS slot_rebalance_runs (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        source_shard_id TEXT NOT NULL,
+        state TEXT NOT NULL,
+        started_at INTEGER NOT NULL,
+        ended_at INTEGER,
+        updated_at INTEGER NOT NULL,
+        payload TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_rebalance_runs_conn_started
+        ON slot_rebalance_runs(connection_id, started_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_rebalance_runs_ended
+        ON slot_rebalance_runs(ended_at);
 
       CREATE TABLE IF NOT EXISTS ai_cache_samples (
         id TEXT PRIMARY KEY,
@@ -5472,6 +5493,22 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
 
     return chunkedSqliteDelete(this.db, 'replication_divergence_windows', 'window_end < ?', [cutoffTimestamp]);
+  }
+
+  // Slot Rebalance Run Methods
+  async saveRebalanceRun(run: StoredRebalanceRun): Promise<void> {
+    if (!this.db) throw new Error('Database not initialized');
+    return this.rebalanceRunRepo.saveRebalanceRun(run);
+  }
+
+  async getRebalanceRuns(options: RebalanceRunQueryOptions): Promise<StoredRebalanceRun[]> {
+    if (!this.db) throw new Error('Database not initialized');
+    return this.rebalanceRunRepo.getRebalanceRuns(options);
+  }
+
+  async pruneOldRebalanceRuns(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+    return this.rebalanceRunRepo.pruneOldRebalanceRuns(cutoffTimestamp, connectionId);
   }
 
   // AI Cache/Memory Sample Methods

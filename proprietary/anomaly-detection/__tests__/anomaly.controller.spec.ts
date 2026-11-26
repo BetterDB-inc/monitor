@@ -419,6 +419,59 @@ describe('AnomalyController slot rebalance runs', () => {
   });
 });
 
+describe('AnomalyController slot rebalance history', () => {
+  const run = { sourceShardId: 'src', startedBy: { userId: 'u1', email: 'admin@example.com' } };
+  const service = {
+    followRebalanceRuns: jest.fn().mockResolvedValue([]),
+    getRebalanceRunHistory: jest.fn().mockResolvedValue([run]),
+  };
+  const controller = new AnomalyController(service as unknown as AnomalyService, passThrough);
+  const admin = { actor: { userId: 'u2', role: 'admin' } } as never;
+  const member = { actor: { userId: 'u3', role: 'member' } } as never;
+
+  beforeEach(() => jest.clearAllMocks());
+
+  it('reads the stored runs of the last 7 days by default', async () => {
+    jest.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000);
+
+    await controller.getRebalanceRuns('c1', admin, 'true');
+
+    expect(service.getRebalanceRunHistory).toHaveBeenCalledWith(
+      'c1',
+      1_700_000_000_000 - 7 * 24 * 60 * 60 * 1000,
+      50,
+    );
+    expect(service.followRebalanceRuns).not.toHaveBeenCalled();
+    jest.restoreAllMocks();
+  });
+
+  it('passes since and limit on', async () => {
+    await controller.getRebalanceRuns('c1', admin, 'true', '100', '5');
+
+    expect(service.getRebalanceRunHistory).toHaveBeenCalledWith('c1', 100, 5);
+  });
+
+  it('refuses a since or limit that is not a number', async () => {
+    await expect(controller.getRebalanceRuns('c1', admin, 'true', 'x')).rejects.toThrow('since');
+    await expect(controller.getRebalanceRuns('c1', admin, 'true', undefined, '0')).rejects.toThrow(
+      'limit',
+    );
+  });
+
+  it('hides the email of the admin from members', async () => {
+    const [listed] = await controller.getRebalanceRuns('c1', member, 'true');
+
+    expect(listed.startedBy).toEqual({ userId: 'u1', email: null });
+  });
+
+  it('lists the live runs unless history is asked for', async () => {
+    await controller.getRebalanceRuns('c1', admin, 'false');
+
+    expect(service.followRebalanceRuns).toHaveBeenCalledWith('c1');
+    expect(service.getRebalanceRunHistory).not.toHaveBeenCalled();
+  });
+});
+
 describe('AnomalyController rebalance and the placement mode', () => {
   const moves = { moves: [{ targetShardId: 't1', ranges: [[0, 10]] }] };
   const admin = { actor: { userId: 'u1', email: 'a@example.com', role: 'admin' } } as never;

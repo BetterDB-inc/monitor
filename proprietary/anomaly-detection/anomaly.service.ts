@@ -167,7 +167,17 @@ import {
   sameMoves,
   startRun,
   withOutcome,
+  REBALANCE_RUN_KEPT_MS,
 } from './slot-rebalance-run';
+import {
+  REBALANCE_ADOPT_LIMIT,
+  REBALANCE_HISTORY_MAX_MS,
+  fromStoredRun,
+  persistedFingerprint,
+  rebalanceRunId,
+  runsToAdopt,
+  toStoredRun,
+} from './rebalance-run-store';
 import { isManagedProviderBuild } from '@app/monitor/provider-detector';
 import {
   BACKLOG_COVERAGE_CRITICAL_SEC,
@@ -1003,6 +1013,11 @@ export class AnomalyService
   private rebalanceRuns = new Map<string, Map<string, RebalanceRun>>();
   private rebalanceStarting = new Set<string>();
   private rebalanceFollowedAt = new Map<string, number>();
+  private rebalanceRunsAdopted = new Set<string>();
+  /** Run id to the fingerprint last handed to storage. */
+  private rebalanceRunSaved = new Map<string, string>();
+  /** Run id to the tail of its chain of saves. */
+  private rebalanceRunSaving = new Map<string, Promise<void>>();
   private cancelsInFlight = new Map<string, { count: number; requestedBefore?: number }>();
   private failuresHeldForCancel = new Map<string, SlotMigrationFinding[]>();
   private slotMigrationReadOnPoll = new Map<
@@ -1722,6 +1737,10 @@ export class AnomalyService
     this.hotShardRebalance.delete(connectionId);
     this.rebalanceRuns.delete(connectionId);
     this.rebalanceFollowedAt.delete(connectionId);
+    this.rebalanceRunsAdopted.delete(connectionId);
+    for (const runId of this.rebalanceRunSaved.keys()) {
+      if (runId.startsWith(`${connectionId}:`)) this.rebalanceRunSaved.delete(runId);
+    }
     this.slotMigrationReadOnPoll.delete(connectionId);
     this.hotKeyNoteLogged.delete(connectionId);
     this.forgetNodeWriteP99(connectionId);
@@ -1969,6 +1988,7 @@ export class AnomalyService
         this.connectionRegistry.noteOutsideCluster(ctx.connectionId, true);
       }
       await this.adoptOpenEvents(ctx, timestamp);
+      await this.adoptRebalanceRuns(ctx.connectionId, timestamp);
       replicationSample = this.replicationStream.observe(ctx.connectionId, info, timestamp);
       if (info.role === 'master' && info.master_replid) {
         this.registeredPrimaryReplids.set(ctx.connectionId, { replid: info.master_replid, seenAt: timestamp });
@@ -2990,6 +3010,42 @@ export class AnomalyService
         `Failed to read open events for ${ctx.connectionName}: ${
           err instanceof Error ? err.message : String(err)
         }`,
+      );
+    }
+  }
+
+  // Apart from adoptOpenEvents, so that each is retried on its own when storage fails.
+  private async adoptRebalanceRuns(connectionId: string, timestamp: number): Promise<void> {
+    if (this.rebalanceRunsAdopted.has(connectionId)) return;
+    if (!this.connectionRegistry.getConfig(connectionId)) return;
+    try {
+      const rows = await this.storage.getRebalanceRuns({
+        connectionId,
+        since: timestamp - REBALANCE_HISTORY_MAX_MS,
+        limit: REBALANCE_ADOPT_LIMIT,
+      });
+      if (!this.connectionRegistry.getConfig(connectionId)) return;
+      const runs = this.rebalanceRuns.get(connectionId) ?? new Map<string, RebalanceRun>();
+      // A run already in memory was started after the stored one it would be replaced by.
+      const adopted = runsToAdopt(rows, timestamp, REBALANCE_RUN_KEPT_MS).filter((run) => {
+        const current = runs.get(run.sourceShardId);
+        return !current || current.startedAt < run.startedAt;
+      });
+      for (const run of adopted) {
+        runs.set(run.sourceShardId, run);
+        this.rebalanceRunSaved.set(rebalanceRunId(connectionId, run), persistedFingerprint(run));
+      }
+      if (adopted.length > 0) {
+        this.rebalanceRuns.set(connectionId, runs);
+        this.rebalanceFollowedAt.delete(connectionId);
+        if (adopted.some((run) => run.state === 'running')) {
+          this.holdRebalance(connectionId, 'migration_running');
+        }
+      }
+      this.rebalanceRunsAdopted.add(connectionId);
+    } catch (err) {
+      this.logger.warn(
+        `Could not read the stored slot rebalance runs of ${connectionId}: ${errorText(err)}`,
       );
     }
   }
@@ -12033,7 +12089,7 @@ export class AnomalyService
       const record = () => {
         const run = startRun(plan, startedBy, Date.now(), jobsBefore);
         const runs = this.rebalanceRuns.get(connectionId) ?? new Map<string, RebalanceRun>();
-        runs.set(plan.sourceShardId, run);
+        this.putRun(connectionId, runs, run);
         this.rebalanceRuns.set(connectionId, runs);
         this.slotMigrationCheckedAt.delete(connectionId);
         this.slotMigrationReadOnPoll.delete(connectionId);
@@ -12079,6 +12135,56 @@ export class AnomalyService
     return (await this.advanceRebalanceRuns(connectionId)).runs.map(runView);
   }
 
+  async getRebalanceRunHistory(
+    connectionId: string,
+    since: number,
+    limit: number,
+  ): Promise<RebalanceRunView[]> {
+    const rows = await this.storage.getRebalanceRuns({ connectionId, since, limit });
+    // A run still in memory can be ahead of its stored row.
+    const live = new Map(
+      [...(this.rebalanceRuns.get(connectionId)?.values() ?? [])].map((run) => [
+        rebalanceRunId(connectionId, run),
+        run,
+      ]),
+    );
+    return rows
+      .map((row) => live.get(row.id) ?? fromStoredRun(row))
+      .filter((run): run is RebalanceRun => run !== null)
+      .map(runView);
+  }
+
+  /** Every change to a run goes through here, so that storage keeps up with memory. */
+  private putRun(connectionId: string, runs: Map<string, RebalanceRun>, run: RebalanceRun): void {
+    const replaced = runs.get(run.sourceShardId);
+    if (replaced && replaced.startedAt !== run.startedAt) {
+      this.rebalanceRunSaved.delete(rebalanceRunId(connectionId, replaced));
+    }
+    runs.set(run.sourceShardId, run);
+    this.saveRun(connectionId, run);
+  }
+
+  // Not awaited: a storage failure must not fail a start or a cancel. The saves of one run are
+  // chained, so that an older state is not written after a newer one.
+  private saveRun(connectionId: string, run: RebalanceRun): void {
+    const id = rebalanceRunId(connectionId, run);
+    const fingerprint = persistedFingerprint(run);
+    if (this.rebalanceRunSaved.get(id) === fingerprint) return;
+    this.rebalanceRunSaved.set(id, fingerprint);
+    const previous = this.rebalanceRunSaving.get(id) ?? Promise.resolve();
+    const next: Promise<void> = previous
+      .then(() => this.storage.saveRebalanceRun(toStoredRun(connectionId, run, Date.now())))
+      .catch((err) => {
+        // Forgotten, so that the next follow of the run saves it again.
+        this.rebalanceRunSaved.delete(id);
+        this.logger.warn(`Could not save the slot rebalance run ${id}: ${errorText(err)}`);
+      })
+      .finally(() => {
+        if (this.rebalanceRunSaving.get(id) === next) this.rebalanceRunSaving.delete(id);
+      });
+    this.rebalanceRunSaving.set(id, next);
+  }
+
   private async followRebalanceRunsOnPoll(
     connectionId: string,
     timestamp: number,
@@ -12105,7 +12211,9 @@ export class AnomalyService
     if (!runs) return { runs: [] };
     const now = Date.now();
     for (const [sourceShardId, run] of runs) {
-      if (!isRunKept(run, now)) runs.delete(sourceShardId);
+      if (isRunKept(run, now)) continue;
+      runs.delete(sourceShardId);
+      this.rebalanceRunSaved.delete(rebalanceRunId(connectionId, run));
     }
     const running = [...runs.values()].filter((run) => run.state === 'running');
     const followed = this.rebalanceFollowedAt.get(connectionId);
@@ -12134,7 +12242,7 @@ export class AnomalyService
         for (const run of running) {
           if (runs.get(run.sourceShardId) !== run) continue;
           const next = followRun(run, report, nodes, Date.now());
-          runs.set(run.sourceShardId, next);
+          this.putRun(connectionId, runs, next);
           if (next.state !== 'running') this.slotMigrationCheckedAt.delete(connectionId);
         }
       } catch (err) {
@@ -12142,7 +12250,9 @@ export class AnomalyService
       }
     }
     const sample = this.shardLoad?.getLatest(connectionId) ?? null;
-    for (const [sourceShardId, run] of runs) runs.set(sourceShardId, withOutcome(run, sample, now));
+    for (const run of runs.values()) {
+      this.putRun(connectionId, runs, withOutcome(run, sample, now));
+    }
     if (runs.size === 0) {
       if (this.rebalanceRuns.get(connectionId) === runs) {
         this.rebalanceRuns.delete(connectionId);
@@ -12194,7 +12304,7 @@ export class AnomalyService
         ? run.failedBeforeCancel
         : report?.failed.map((entry) => entry.jobName),
     };
-    runs.set(sourceShardId, cancelling);
+    this.putRun(connectionId, runs, cancelling);
     const inFlight = this.cancelsInFlight.get(key) ?? {
       count: 0,
       requestedBefore: run.cancelRequestedAt,
@@ -12215,7 +12325,7 @@ export class AnomalyService
       const same = now?.startedAt === run.startedAt && now.cancelAcceptedAt === undefined;
       if (sent && !(err instanceof Error && err.name === 'ReplyError')) {
         if (same && now.state === 'running') {
-          runs.set(sourceShardId, { ...now, cancelAcceptedAt: Date.now() });
+          this.putRun(connectionId, runs, { ...now, cancelAcceptedAt: Date.now() });
         }
         this.slotMigrationCheckedAt.delete(connectionId);
         this.rebalanceFollowedAt.delete(connectionId);
@@ -12227,7 +12337,7 @@ export class AnomalyService
         };
       }
       if (inFlight.count === 1 && same) {
-        runs.set(sourceShardId, { ...now, cancelRequestedAt: inFlight.requestedBefore });
+        this.putRun(connectionId, runs, { ...now, cancelRequestedAt: inFlight.requestedBefore });
       }
       if (sent) return { status: 'refused', message: errorText(err) };
       return {
@@ -12245,7 +12355,7 @@ export class AnomalyService
     this.rebalanceFollowedAt.delete(connectionId);
     if (current && current.state !== 'running') return { status: 'cancelling', run: runView(current) };
     const accepted = { ...(current ?? cancelling), cancelAcceptedAt: Date.now() };
-    if (current) runs.set(sourceShardId, accepted);
+    if (current) this.putRun(connectionId, runs, accepted);
     return { status: 'cancelling', run: runView(accepted) };
   }
 

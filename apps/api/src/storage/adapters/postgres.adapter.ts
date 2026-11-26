@@ -92,6 +92,8 @@ import {
   StoredScheduledCapture,
   ScheduledCaptureQueryOptions,
   ScheduledCapturePatch,
+  StoredRebalanceRun,
+  RebalanceRunQueryOptions,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   ActorSource,
@@ -148,6 +150,7 @@ import {
 } from './client-analytics-stats';
 import { WebhookPostgresRepository } from './repositories/webhook.postgres.repository';
 import { SlowLogPostgresRepository } from './repositories/slowlog.postgres.repository';
+import { RebalanceRunPostgresRepository } from './repositories/rebalance-run.postgres.repository';
 import { InvitationPostgresRepository } from './repositories/invitation.postgres.repository';
 import type { InvitationRepository } from '../../common/interfaces/invitation-repository.interface';
 import { ActivityPostgresRepository } from './repositories/activity.postgres.repository';
@@ -334,6 +337,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
   private readonly mappers = new RowMappers(PostgresDialect);
   private webhookRepo!: WebhookPostgresRepository;
   private slowlogRepo!: SlowLogPostgresRepository;
+  private rebalanceRunRepo!: RebalanceRunPostgresRepository;
   private invitationRepo!: InvitationPostgresRepository;
   private activityRepo!: ActivityPostgresRepository;
 
@@ -507,6 +511,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
       this.webhookRepo = new WebhookPostgresRepository(this.pool, this.mappers);
       this.slowlogRepo = new SlowLogPostgresRepository(this.pool, this.mappers);
+      this.rebalanceRunRepo = new RebalanceRunPostgresRepository(this.pool);
       this.invitationRepo = new InvitationPostgresRepository(this.pool);
       this.activityRepo = new ActivityPostgresRepository(this.pool);
 
@@ -2288,6 +2293,22 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         ON replication_divergence_windows(connection_id, replica_addr, window_start, window_end);
       CREATE INDEX IF NOT EXISTS idx_repl_div_end
         ON replication_divergence_windows(window_end);
+
+      CREATE TABLE IF NOT EXISTS slot_rebalance_runs (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        source_shard_id TEXT NOT NULL,
+        state TEXT NOT NULL,
+        started_at BIGINT NOT NULL,
+        ended_at BIGINT,
+        updated_at BIGINT NOT NULL,
+        payload TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_rebalance_runs_conn_started
+        ON slot_rebalance_runs(connection_id, started_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_rebalance_runs_ended
+        ON slot_rebalance_runs(ended_at);
 
       CREATE TABLE IF NOT EXISTS ai_cache_samples (
         id UUID PRIMARY KEY,
@@ -5474,6 +5495,22 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
 
     return chunkedPostgresDelete(this.pool, 'replication_divergence_windows', 'window_end < $1', [cutoffTimestamp]);
+  }
+
+  // Slot Rebalance Run Methods
+  async saveRebalanceRun(run: StoredRebalanceRun): Promise<void> {
+    if (!this.pool) throw new Error('Database not initialized');
+    return this.rebalanceRunRepo.saveRebalanceRun(run);
+  }
+
+  async getRebalanceRuns(options: RebalanceRunQueryOptions): Promise<StoredRebalanceRun[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    return this.rebalanceRunRepo.getRebalanceRuns(options);
+  }
+
+  async pruneOldRebalanceRuns(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+    return this.rebalanceRunRepo.pruneOldRebalanceRuns(cutoffTimestamp, connectionId);
   }
 
   // AI Cache/Memory Sample Methods

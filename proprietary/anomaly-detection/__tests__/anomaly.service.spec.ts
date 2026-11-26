@@ -118,6 +118,8 @@ describe('AnomalyService', () => {
       resolveAnomaly: jest.fn().mockResolvedValue(true),
       resolveOpenAnomaly: jest.fn().mockResolvedValue(true),
       getAclEntries: jest.fn().mockResolvedValue([]),
+      saveRebalanceRun: jest.fn().mockResolvedValue(undefined),
+      getRebalanceRuns: jest.fn().mockResolvedValue([]),
       initialize: jest.fn().mockResolvedValue(undefined),
       close: jest.fn().mockResolvedValue(undefined),
       isReady: jest.fn().mockReturnValue(true),

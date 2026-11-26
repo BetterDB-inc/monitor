@@ -470,6 +470,28 @@ export interface ReplicationDivergenceWindowQueryOptions {
   limit?: number;
 }
 
+export interface StoredRebalanceRun {
+  /** `${connectionId}:${sourceShardId}:${startedAt}` */
+  id: string;
+  connectionId: string;
+  sourceShardId: string;
+  state: 'running' | 'succeeded' | 'failed' | 'cancelled' | 'unknown';
+  startedAt: number;
+  endedAt: number | null;
+  updatedAt: number;
+  /** JSON of the proprietary rebalance run; opaque to storage. */
+  payload: string;
+}
+
+export interface RebalanceRunQueryOptions {
+  connectionId: string;
+  /** Runs started at or after this time. */
+  since?: number;
+  states?: StoredRebalanceRun['state'][];
+  /** Default 50, at most 500. */
+  limit?: number;
+}
+
 // Memory Snapshot Types
 export interface StoredMemorySnapshot {
   id: string; // UUID
@@ -905,6 +927,13 @@ export interface StoragePort {
     options: ReplicationDivergenceWindowQueryOptions,
   ): Promise<StoredReplicationDivergenceWindow[]>;
   pruneOldReplicationDivergenceWindows(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+
+  /** Upserts by id. A write older (`updatedAt`) than the stored row is ignored. */
+  saveRebalanceRun(run: StoredRebalanceRun): Promise<void>;
+  /** Newest `startedAt` first. */
+  getRebalanceRuns(options: RebalanceRunQueryOptions): Promise<StoredRebalanceRun[]>;
+  /** Deletes runs that ended before the cutoff. A run without `endedAt` is never deleted. */
+  pruneOldRebalanceRuns(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   // AI Cache/Memory Sample Methods (AI Cache & Memory observability) - connectionId required for writes
   saveAiCacheSamples(

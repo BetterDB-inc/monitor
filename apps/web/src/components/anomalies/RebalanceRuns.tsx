@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
+import { ChevronDown, ChevronRight } from 'lucide-react';
 import { ApiError } from '../../api/client';
 import { metricsApi } from '../../api/metrics';
 import { useCanMutate } from '../../hooks/useCanMutate';
@@ -23,6 +24,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '../ui/dialog';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../ui/collapsible';
 
 const RUNNING_POLL_MS = 5000;
 const IDLE_POLL_MS = 30000;
@@ -133,11 +135,86 @@ function CancelRun({ run, connectionId }: { run: RebalanceRun; connectionId: str
   );
 }
 
-interface Props {
-  connectionId: string | undefined;
+function describeHistoryRatio(run: RebalanceRun): string {
+  const projected = `Projected ${formatRatio(run.projectedRatio)} the median for the hot shard`;
+  return run.outcome
+    ? `${projected}; measured ${formatRatio(run.outcome.actualRatio)}.`
+    : `${projected}; not measured.`;
 }
 
-export function RebalanceRuns({ connectionId }: Props) {
+function HistoryEntry({ run }: { run: RebalanceRun }) {
+  const ended =
+    run.endedAt === undefined ? '' : `, ended ${new Date(run.endedAt).toLocaleString()}`;
+  return (
+    <li className="space-y-1 rounded-md border p-3">
+      <p className="flex items-center gap-2 font-medium">
+        Shard {shortShardId(run.sourceShardId)} at {run.sourceAddr}
+        <Badge variant="secondary">{RUN_STATE[run.state]}</Badge>
+      </p>
+      <p>To {run.jobs.map((job) => job.targetAddr).join(', ')}.</p>
+      <p className="text-muted-foreground">
+        Started by {run.startedBy.email ?? 'an admin'} at {new Date(run.startedAt).toLocaleString()}
+        {ended}.
+      </p>
+      <p>{describeHistoryRatio(run)}</p>
+    </li>
+  );
+}
+
+function HistoryList({ connectionId }: { connectionId: string }) {
+  const { data: runs, error } = usePolling<RebalanceRun[]>({
+    fetcher: () => metricsApi.getRebalanceRunHistory(),
+    interval: IDLE_POLL_MS,
+    queryKey: ['slot-rebalance-history', connectionId],
+  });
+  if (!runs) {
+    return error ? (
+      <p role="alert" className="text-destructive">
+        Could not read the slot rebalance history.
+      </p>
+    ) : (
+      <p className="text-muted-foreground">Loading…</p>
+    );
+  }
+  if (runs.length === 0) {
+    return (
+      <p className="text-muted-foreground">No slot rebalance was started in the last 7 days.</p>
+    );
+  }
+  return (
+    <ul className="space-y-2">
+      {runs.map((run) => (
+        <HistoryEntry key={`${run.sourceShardId} ${run.startedAt}`} run={run} />
+      ))}
+    </ul>
+  );
+}
+
+// The list is mounted only while open, so a page that never opens it reads no history.
+function RebalanceHistory({ connectionId }: { connectionId: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Collapsible open={open} onOpenChange={setOpen} className="space-y-2 text-sm">
+      <CollapsibleTrigger asChild>
+        <Button size="sm" variant="ghost">
+          {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+          Slot rebalance history (7 days)
+        </Button>
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <HistoryList connectionId={connectionId} />
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
+interface Props {
+  connectionId: string | undefined;
+  /** Offer the stored history of the connection, which only a cluster has. */
+  showHistory?: boolean;
+}
+
+export function RebalanceRuns({ connectionId, showHistory = false }: Props) {
   const canMutate = useCanMutate();
   const { data: runs, error } = usePolling<RebalanceRun[]>({
     fetcher: () => metricsApi.getRebalanceRuns(),
@@ -191,6 +268,7 @@ export function RebalanceRuns({ connectionId }: Props) {
           </Card>
         );
       })}
+      {showHistory && <RebalanceHistory key={connectionId} connectionId={connectionId} />}
     </>
   );
 }

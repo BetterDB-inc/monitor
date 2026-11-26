@@ -22,6 +22,7 @@ describe('LocalRetentionService', () => {
       pruneOldAnomalyEvents: jest.fn().mockResolvedValue(0),
       pruneOldCorrelatedGroups: jest.fn().mockResolvedValue(0),
       pruneOldIncidentBoundaries: jest.fn().mockResolvedValue(0),
+      pruneOldRebalanceRuns: jest.fn().mockResolvedValue(0),
       pruneOldKeyPatternSnapshots: jest.fn().mockResolvedValue(0),
       pruneOldHotKeys: jest.fn().mockResolvedValue(0),
       pruneOldEntries: jest.fn().mockResolvedValue(0),

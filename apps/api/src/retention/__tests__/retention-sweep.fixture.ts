@@ -710,6 +710,29 @@ export const sweepFixtures: Record<string, SweepFixture> = {
       ),
   },
 
+  // The recent row is a run that is still running and started before the cutoff: the sweep
+  // prunes by the end of a run, so it stays however old its start is.
+  slot_rebalance_runs: {
+    seed: async (storage, { expiredAtMs, recentAtMs }) => {
+      const run = (sourceShardId: string, endedAt: number | null) => ({
+        id: `${CONNECTION_ID}:${sourceShardId}:${expiredAtMs}`,
+        connectionId: CONNECTION_ID,
+        sourceShardId,
+        state: endedAt === null ? ('running' as const) : ('succeeded' as const),
+        startedAt: expiredAtMs,
+        endedAt,
+        updatedAt: endedAt ?? recentAtMs,
+        payload: JSON.stringify({ recentAtMs }),
+      });
+      await storage.saveRebalanceRun(run('ended-shard', expiredAtMs));
+      await storage.saveRebalanceRun(run('running-shard', null));
+    },
+    remainingAtMs: async (storage) =>
+      (await storage.getRebalanceRuns({ connectionId: CONNECTION_ID })).map(
+        (row) => row.endedAt ?? (JSON.parse(row.payload) as { recentAtMs: number }).recentAtMs,
+      ),
+  },
+
   replication_divergence_windows: {
     seed: async (storage, times) => {
       await storage.saveReplicationDivergenceWindows(
