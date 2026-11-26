@@ -9646,16 +9646,20 @@ export class AnomalyService
     );
   }
 
+  private slotMigrationCheckIsDue(connectionId: string, timestamp: number): boolean {
+    if (!this.clusterMetrics || !this.dialsDataNodes(connectionId)) return false;
+    if (this.clusterMetrics.coveredBySeed(connectionId)) return false;
+    const checkedAt = this.slotMigrationCheckedAt.get(connectionId);
+    const every = this.slotMigrationsListed.has(connectionId)
+      ? SLOT_MIGRATION_BUSY_CHECK_MS
+      : SLOT_MIGRATION_IDLE_CHECK_MS;
+    return checkedAt === undefined || timestamp - checkedAt >= every;
+  }
+
   private async detectSlotMigrations(ctx: ConnectionContext, timestamp: number): Promise<void> {
     const connectionId = ctx.connectionId;
     try {
-      if (!this.clusterMetrics || !this.dialsDataNodes(connectionId)) return;
-      if (this.clusterMetrics.coveredBySeed(connectionId)) return;
-      const checkedAt = this.slotMigrationCheckedAt.get(connectionId);
-      const every = this.slotMigrationsListed.has(connectionId)
-        ? SLOT_MIGRATION_BUSY_CHECK_MS
-        : SLOT_MIGRATION_IDLE_CHECK_MS;
-      if (checkedAt !== undefined && timestamp - checkedAt < every) return;
+      if (!this.clusterMetrics || !this.slotMigrationCheckIsDue(connectionId, timestamp)) return;
       this.slotMigrationCheckedAt.set(connectionId, timestamp);
 
       const ownNodeOnly = (this.slotMigrationOwnNodeUntil.get(connectionId) ?? 0) > timestamp;
@@ -10416,10 +10420,17 @@ export class AnomalyService
       !this.ownLineReads.has(connectionId) ||
       this.ownLineIsDue(connectionId, info) ||
       this.divergenceRoundIsDue(connectionId, timestamp) ||
-      this.followsRebalanceRunWithOwnRead(connectionId) ||
+      this.rebalanceFollowIsDue(connectionId, timestamp) ||
       this.holdsNewShardLoad(connectionId, timestamp) ||
       !this.hasLatestClusterNodes(connectionId, timestamp)
     );
+  }
+
+  private rebalanceFollowIsDue(connectionId: string, timestamp: number): boolean {
+    if (!this.followsRebalanceRunWithOwnRead(connectionId)) return false;
+    const followed = this.rebalanceFollowedAt.get(connectionId);
+    if (followed === undefined || Date.now() - followed >= REBALANCE_FOLLOW_MS) return true;
+    return this.slotMigrationCheckIsDue(connectionId, timestamp);
   }
 
   private followsRebalanceRunWithOwnRead(connectionId: string): boolean {
