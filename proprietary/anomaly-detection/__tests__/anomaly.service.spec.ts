@@ -33850,6 +33850,24 @@ describe('AnomalyService', () => {
         (service as any).topologyDivergenceSettings.intervalMs = setIntervalMs;
       });
 
+      it('reads the topology every five seconds on a reader that runs no rounds set to every two seconds', async () => {
+        (service as any).topologyDivergenceSettings.intervalMs = 2000;
+        grow(12);
+        await pollAll();
+        await pollAfter(1000);
+        const clusterKey = (service as any).connectionClusterKeys.get(SEED);
+        const reads: number[] = [];
+
+        for (let n = 1; n <= 10; n += 1) {
+          forgetReads();
+          await pollAfter(1000);
+          if (readWith('getClusterNodes').includes(SEED)) reads.push(n);
+        }
+
+        expect((service as any).topologyDivergence.anchorOf(clusterKey)).not.toBe(SEED);
+        expect(reads).toEqual([5, 10]);
+      });
+
       it('runs a round every seven seconds on the reader when that is the interval', async () => {
         expect(await roundsEvery(7000, 15)).toEqual([0, 7000, 14000]);
       });

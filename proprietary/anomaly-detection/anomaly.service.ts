@@ -10453,11 +10453,7 @@ export class AnomalyService
   }
 
   private readerTopologyReadEveryMs(): number {
-    const { enabled, intervalMs } = this.topologyDivergenceSettings;
-    const everyMs = enabled
-      ? Math.min(AnomalyService.READER_TOPOLOGY_READ_MS, intervalMs)
-      : AnomalyService.READER_TOPOLOGY_READ_MS;
-    return everyMs - this.pollJitterMs();
+    return AnomalyService.READER_TOPOLOGY_READ_MS - this.pollJitterMs();
   }
 
   private pollJitterMs(): number {
