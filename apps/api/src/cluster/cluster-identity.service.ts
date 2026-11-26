@@ -26,6 +26,7 @@ interface ReadTurns {
   readonly polledAt: number;
   readonly poll: number;
   readonly last?: string;
+  readonly lastUrgent?: string;
   readonly passPolls: number;
   readonly granted: Map<string, number>;
   readonly urgent: Set<string>;
@@ -69,6 +70,13 @@ export function followerSignature(primaryId: string, configEpoch: number): Failo
 
 export function promotionSignature(primaryId: string, configEpoch: number): FailoverSignature {
   return { ...followerSignature(primaryId, configEpoch), renewsOnLaterEpoch: true };
+}
+
+function turnAfter(ids: readonly string[], last: string | undefined, count: number): string[] {
+  const next = last === undefined ? 0 : ids.findIndex((id) => id > last);
+  const start = Math.max(next, 0);
+  const length = Math.min(count, ids.length);
+  return Array.from({ length }, (_, i) => ids[(start + i) % ids.length]);
 }
 
 function claimOfBoth(kept: HeldClaim, joined: HeldClaim): HeldClaim {
@@ -283,13 +291,10 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
       return { polledAt: now, poll, passPolls: 1, granted: new Map(), urgent: new Set() };
     }
     const urgent = others.filter((id) => held?.urgent.has(id));
-    const first = urgent.slice(0, URGENT_READS_PER_POLL);
+    const first = turnAfter(urgent, held?.lastUrgent, URGENT_READS_PER_POLL);
     const rotating = others.filter((id) => !first.includes(id));
     const slots = MEMBER_READS_PER_POLL - first.length;
-    const last = held?.last;
-    const next = last === undefined ? 0 : rotating.findIndex((id) => id > last);
-    const start = Math.max(next, 0);
-    const turn = Array.from({ length: slots }, (_, i) => rotating[(start + i) % rotating.length]);
+    const turn = turnAfter(rotating, held?.last, slots);
     const granted = new Map(
       [...(held?.granted ?? [])].filter(([, grantedAt]) => grantedAt === poll - 1),
     );
@@ -298,6 +303,7 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
       polledAt: now,
       poll,
       last: turn[turn.length - 1],
+      lastUrgent: first[first.length - 1] ?? held?.lastUrgent,
       passPolls: Math.ceil(rotating.length / slots),
       granted,
       urgent: new Set(urgent),

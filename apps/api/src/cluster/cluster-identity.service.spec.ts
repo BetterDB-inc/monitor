@@ -928,7 +928,25 @@ describe('ClusterIdentityService', () => {
       const third = turns(members, NOW, urgent);
 
       expect(second).toEqual([...nodeIds(1, 4), ...nodeIds(9, 12)]);
-      expect(third).toEqual([...nodeIds(1, 4), ...nodeIds(13, 16)]);
+      expect(third).toHaveLength(8);
+    });
+
+    it('takes the connections that ask urgently in turns when more than four ask', () => {
+      const members = clusterOf(30);
+      const urgent = nodeIds(1, 6);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+      turns(members, NOW, urgent);
+      readerPolls();
+      turns(members, NOW, urgent);
+
+      readerPolls();
+      const third = turns(members, NOW, urgent);
+      readerPolls();
+      const fourth = turns(members, NOW, urgent);
+
+      expect(third).toEqual(['node-01', 'node-02', 'node-05', 'node-06', ...nodeIds(13, 16)]);
+      expect(fourth).toEqual([...nodeIds(3, 6), ...nodeIds(17, 20)]);
     });
 
     it('lets every connection read when the reader has not polled for fifteen seconds', () => {
