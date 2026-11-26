@@ -33481,6 +33481,7 @@ describe('AnomalyService', () => {
     let migrating: Set<string>;
     let roles: Record<string, string>;
     let replicas: Record<string, string[]>;
+    let acls: Record<string, string[]>;
 
     function primary(index: number): ClusterNode {
       return {
@@ -33520,7 +33521,9 @@ describe('AnomalyService', () => {
               instantaneous_ops_per_sec: String(opsPerSec[connectionId] ?? 100),
             },
             ...(replicas[connectionId] ? { replication: replicationOf(replicas[connectionId]) } : {}),
+            ...(acls[connectionId] ? { replication: { master_replid: `replid-${connectionId}` } } : {}),
           })),
+          getAclList: jest.fn(async () => acls[connectionId] ?? []),
           getClusterInfo: jest.fn().mockResolvedValue({ cluster_state: 'ok' }),
           getClusterShards: jest.fn().mockResolvedValue([]),
           getClusterNodes: jest.fn(async () =>
@@ -33591,6 +33594,7 @@ describe('AnomalyService', () => {
       migrating = new Set();
       roles = {};
       replicas = {};
+      acls = {};
       storage.getLatencyStatsHistory = jest.fn().mockResolvedValue([]);
       const registry = (service as any).connectionRegistry;
       registry.getConfig.mockImplementation((id: string) => configs[id] ?? null);
@@ -33682,6 +33686,25 @@ describe('AnomalyService', () => {
         expect(beforeTheViewIsOld).toBe(9);
         expect(readWith('getClusterNodes')).toEqual(ids);
       });
+    });
+
+    it('raises no new ACL drift warning while connections wait to read a cluster that grew', async () => {
+      const everyone = 'user default on nopass ~* &* +@all';
+      const aclDrifts = () => service.getRecentEvents(1000).filter((e) => e.metricType === MetricType.ACL_DRIFT);
+      grow(12);
+      ids.forEach((id) => {
+        acls[id] = [everyone];
+      });
+      acls[idOf(1)] = [everyone, 'user app on #abc ~app:* +@read'];
+      await pollAll();
+      await pollAfter(1000);
+      const raisedBefore = aclDrifts().map((e) => e.id);
+
+      topology = [...topology, primary(40)];
+      await pollAfter(1000);
+
+      expect(raisedBefore).not.toHaveLength(0);
+      expect(aclDrifts().map((e) => e.id)).toEqual(raisedBefore);
     });
 
     it('gives the divergence rounds to the reader when another connection polled first', async () => {

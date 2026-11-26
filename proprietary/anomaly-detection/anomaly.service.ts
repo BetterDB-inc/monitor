@@ -4060,7 +4060,8 @@ export class AnomalyService
       const replid = info['master_replid'];
       const roleStr = info['role'];
       const isReplicating = roleStr === 'master' || isReplicaRole(roleStr);
-      const clusterKey = clusterKeyFromNodes(clusterNodes);
+      const clusterKey =
+        this.connectionClusterKeys.get(ctx.connectionId) ?? clusterKeyFromNodes(clusterNodes);
 
       if (!replid || !isReplicating) {
         this.aclSnapshot.delete(ctx.connectionId);
