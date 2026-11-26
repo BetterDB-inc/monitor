@@ -34128,6 +34128,26 @@ describe('AnomalyService', () => {
       expect(stuckReplicaEvents()).toHaveLength(1);
     });
 
+    it.each([
+      'stuckReplicaFirstSeen',
+      'hostnameStalenessFirstSeen',
+      'ghostMemberFirstSeen',
+      'replicaSlotFirstSeen',
+    ])('counts a finding seen under both keys from the earlier time when the keys join (%s)', (name) => {
+      const firstSeen = (service as any)[name] as Map<string, Map<string, number>>;
+      firstSeen.set('joined-away', new Map([['seen-first-here', 1000], ['seen-later-here', 5000], ['only-here', 3000]]));
+      firstSeen.set('kept', new Map([['seen-first-here', 2000], ['seen-later-here', 4000]]));
+
+      (service as any).joinClusterScope('joined-away', 'kept');
+
+      expect(firstSeen.has('joined-away')).toBe(false);
+      expect(Object.fromEntries(firstSeen.get('kept') ?? [])).toEqual({
+        'seen-first-here': 1000,
+        'seen-later-here': 4000,
+        'only-here': 3000,
+      });
+    });
+
     describe('replica slot state', () => {
       const REPLICA_ID = 'eeeeeeee';
       const REPLICA = cnode(REPLICA_ID, '10.0.0.9', ['slave'], { master: NODE_A.id });

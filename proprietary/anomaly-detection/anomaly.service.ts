@@ -10492,6 +10492,12 @@ export class AnomalyService
       const keptId = kept?.get(signature);
       if (keptId !== undefined && keptId !== id) this.closeLater(id);
     }
+    for (const firstSeen of this.clusterFirstSeenState()) {
+      const keptSeen = firstSeen.get(to);
+      for (const [signature, seenAt] of firstSeen.get(from) ?? []) {
+        if (keptSeen && seenAt < (keptSeen.get(signature) ?? -Infinity)) keptSeen.set(signature, seenAt);
+      }
+    }
     const bringsOldRows = (this.legacyReplicaSlotEvents.get(from)?.length ?? 0) > 0;
     for (const state of this.clusterScopedState()) {
       if (!state.has(from)) continue;
@@ -10565,6 +10571,15 @@ export class AnomalyService
       this.legacyReplicaSlotRead,
       this.legacyReplicaSlotEvents,
       this.replicaSlotEventOwners,
+    ];
+  }
+
+  private clusterFirstSeenState(): Array<Map<string, Map<string, number>>> {
+    return [
+      this.stuckReplicaFirstSeen,
+      this.hostnameStalenessFirstSeen,
+      this.ghostMemberFirstSeen,
+      this.replicaSlotFirstSeen,
     ];
   }
 
