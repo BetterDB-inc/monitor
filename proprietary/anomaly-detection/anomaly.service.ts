@@ -1739,6 +1739,7 @@ export class AnomalyService
     this.replicaSlotFirstSeen.delete(connectionId);
     this.activeReplicaSlotAnomalies.delete(connectionId);
     this.replicaSlotEventIds.delete(connectionId);
+    this.replicaSlotEventOwners.delete(connectionId);
     this.orphanedSlotLastProbe.delete(connectionId);
     this.slotMigrationWatch.delete(connectionId);
     this.failuresHeldForCancel.delete(connectionId);

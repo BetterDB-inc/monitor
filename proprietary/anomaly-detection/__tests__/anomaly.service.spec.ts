@@ -34398,6 +34398,16 @@ describe('AnomalyService', () => {
         expect(slotEvents().map((e) => e.connectionId)).toEqual(['conn-c']);
       });
 
+      it('forgets who raised the warnings of a removed connection that cannot dial', async () => {
+        configs[SEED] = { ...(configs[SEED] as object), host: 'agent' };
+        await pollAll();
+        await pollAfter(1000);
+
+        remove(SEED);
+
+        expect((service as any).replicaSlotEventOwners.has(SEED)).toBe(false);
+      });
+
       it('raises the warning under the next reader when the connection that raised it is removed', async () => {
         ownLine = STUCK;
         await pollAll();
