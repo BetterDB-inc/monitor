@@ -7572,6 +7572,7 @@ describe('AnomalyService', () => {
         );
         identity = new ClusterIdentityService(registry);
         (service as any).clusterIdentity = identity;
+        (service as any).followClusterJoins();
       });
 
       it('sends one cluster.failover when every connection of the cluster sees the state fail', async () => {
@@ -33540,6 +33541,7 @@ describe('AnomalyService', () => {
         MEMBERS.filter((id) => configs[id]).map((id) => ({ id, host: HOSTS[id], port: 6379, ...(configs[id] as object) })),
       );
       (service as any).clusterIdentity = new ClusterIdentityService(registry);
+      (service as any).followClusterJoins();
     });
 
     afterEach(() => {
@@ -33980,6 +33982,35 @@ describe('AnomalyService', () => {
 
       expect(seenWhole).toBe(true);
       expect(splitBrainAlerts()).toHaveLength(2);
+    });
+
+    it('raises no second split-brain alert when the metrics read sees two halves join before the reader polls', async () => {
+      const halves = [SEED, 'conn-c'];
+      delete configs['conn-b'];
+      configs['conn-c'] = { id: 'conn-c' };
+      const left = [NODE_A, NODE_B];
+      const right = [NODE_C, cnode('nodeXXXXXXXX', '10.0.0.7', ['master'])];
+      const half: Record<string, ClusterNode[]> = { [SEED]: left, 'conn-c': right };
+      const splitBrainAlerts = (): AnomalyEvent[] =>
+        eventsOf(MetricType.CLUSTER_TOPOLOGY).filter((e) => e.message.includes('split-brain'));
+      views = half;
+      await pollAll(halves);
+      const identity: ClusterIdentityService = (service as any).clusterIdentity;
+      const [kept, joined] = [...halves].sort((a, b) =>
+        identity.clusterKeyOf(a).localeCompare(identity.clusterKeyOf(b)),
+      );
+      const [from] = (joined === SEED ? NODE_A : NODE_C).slots[0];
+      const twin = cnode('nodeSSSSSSSS', '10.0.0.13', ['master'], { slots: [[from, from + 100]], configEpoch: 9 });
+      views = { ...half, [joined]: [...half[joined], twin] };
+      await pollAfter(1000, halves);
+      views = {};
+      topology = [...left, ...right, twin];
+      identity.observe(kept, topology);
+
+      await pollAfter(MINUTE_MS + 1000, [kept]);
+
+      expect(identity.isReader(kept)).toBe(true);
+      expect(splitBrainAlerts()).toHaveLength(1);
     });
 
     it('keeps a warning with its cluster when one connection starts reading another cluster', async () => {

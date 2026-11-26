@@ -929,6 +929,7 @@ export class AnomalyService
   private readonly connectionClusterKeys = new Map<string, string>();
   private readonly clusterScopes = new Map<string, string>();
   private readonly mergedScopeState = new WeakMap<object, object>();
+  private stopFollowingClusterJoins: (() => void) | undefined;
   private readonly replicaSlotEventOwners = new Map<string, Map<string, string>>();
   private readonly unmergedSlotEvents = new Set<string>();
   private readonly slotEventsLoaded = new Set<string>();
@@ -1351,6 +1352,7 @@ export class AnomalyService
     private readonly clusterIdentity?: ClusterIdentityService,
   ) {
     super(connectionRegistry);
+    this.followClusterJoins();
     this.correlator = new Correlator(this.correlationIntervalMs, (anomaly) =>
       this.correlationScopeOf(anomaly.connectionId),
     );
@@ -1468,6 +1470,8 @@ export class AnomalyService
 
   async onModuleDestroy(): Promise<void> {
     await super.onModuleDestroy();
+    this.stopFollowingClusterJoins?.();
+    this.stopFollowingClusterJoins = undefined;
     this.unsubscribeDetectorConfig?.();
     this.unsubscribeDetectorConfig = null;
     if (this.correlationInterval) {
@@ -10375,16 +10379,17 @@ export class AnomalyService
     return identity.claimReader(connectionId, timestamp, this.dialsDataNodes(connectionId));
   }
 
-  private joinClusterScopes(connectionId: string, nodes: ClusterNode[]): void {
-    const identity = this.clusterIdentity;
-    const joined = identity?.observe(connectionId, nodes) ?? [];
-    if (!identity || joined.length === 0) return;
-    const scope = identity.clusterKeyOf(connectionId);
-    for (const from of joined) {
-      this.moveClusterScope(from, scope);
-      for (const [member, key] of this.clusterScopes) {
-        if (key === from) this.clusterScopes.set(member, scope);
-      }
+  private followClusterJoins(): void {
+    this.stopFollowingClusterJoins?.();
+    this.stopFollowingClusterJoins = this.clusterIdentity?.onKeysJoined((from, to) =>
+      this.joinClusterScope(from, to),
+    );
+  }
+
+  private joinClusterScope(from: string, to: string): void {
+    this.moveClusterScope(from, to);
+    for (const [member, key] of this.clusterScopes) {
+      if (key === from) this.clusterScopes.set(member, to);
     }
   }
 
@@ -10743,7 +10748,7 @@ export class AnomalyService
   }
 
   private rememberClusterKey(connectionId: string, nodes: ClusterNode[], readIsCurrent: boolean): void {
-    if (readIsCurrent) this.joinClusterScopes(connectionId, nodes);
+    if (readIsCurrent) this.clusterIdentity?.observe(connectionId, nodes);
     const clusterKey = this.clusterKeyOfNodes(nodes);
     if (!clusterKey) {
       this.forgetClusterKey(connectionId);

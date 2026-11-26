@@ -22,6 +22,8 @@ interface ClusterReader {
   readonly dials: boolean;
 }
 
+type KeysJoinedListener = (joinedKey: string, clusterKey: string) => void;
+
 interface HeldClaim {
   readonly claimedAt: number;
   readonly heldUntil: number;
@@ -80,6 +82,7 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
   private readonly keyByNode = new Map<string, string>();
   private readonly claims = new Map<string, HeldClaim>();
   private readonly readers = new Map<string, ClusterReader>();
+  private readonly joinListeners = new Set<KeysJoinedListener>();
   private stopListening: (() => void) | undefined;
 
   constructor(private readonly connectionRegistry: ConnectionRegistry) {}
@@ -98,17 +101,17 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
   observe(
     connectionId: string,
     nodes: ReadonlyArray<{ id?: string; flags?: ReadonlyArray<string> }>,
-  ): string[] {
+  ): void {
     const nodeIds = new Set(
       nodes
         .filter((node) => !node.flags?.some((flag) => NOT_LIVE_FLAGS.includes(flag)))
         .map((node) => node.id)
         .filter((id): id is string => !!id),
     );
-    if (nodeIds.size === 0) return [];
+    if (nodeIds.size === 0) return;
     if (nodes.length === 1) {
       this.standAlone(connectionId, [...nodeIds][0]);
-      return [];
+      return;
     }
     const [known, ...joined] = [
       ...new Set(
@@ -122,7 +125,13 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
     this.keyByConnection.set(connectionId, clusterKey);
     nodeIds.forEach((id) => this.keyByNode.set(id, clusterKey));
     if (previous) this.releaseNodes(previous);
-    return joined;
+  }
+
+  onKeysJoined(listener: KeysJoinedListener): () => void {
+    this.joinListeners.add(listener);
+    return () => {
+      this.joinListeners.delete(listener);
+    };
   }
 
   private standAlone(connectionId: string, nodeId: string): void {
@@ -284,10 +293,10 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
     const joinedReader = this.readers.get(joinedKey);
     const keptReader = this.readers.get(clusterKey);
     this.readers.delete(joinedKey);
-    if (!joinedReader) return;
-    if (!keptReader || this.goesBefore(joinedReader, keptReader)) {
+    if (joinedReader && (!keptReader || this.goesBefore(joinedReader, keptReader))) {
       this.readers.set(clusterKey, joinedReader);
     }
+    this.joinListeners.forEach((listener) => listener(joinedKey, clusterKey));
   }
 
   private release(claim: string, now: number): void {
