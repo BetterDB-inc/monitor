@@ -33426,4 +33426,322 @@ describe('AnomalyService', () => {
       });
     });
   });
+
+  describe('cluster-wide checks with several connections of one cluster', () => {
+    const SEED = 'conn-a';
+    const MEMBERS = [SEED, 'conn-b', 'conn-c'];
+    const HOSTS: Record<string, string> = { 'conn-a': '10.0.0.1', 'conn-b': '10.0.0.2', 'conn-c': '10.0.0.3' };
+    const MINUTE_MS = 60_000;
+    const GATE_MS = 31_000;
+    const clusterInfoResponse = {
+      server: { role: 'master' },
+      clients: { connected_clients: '10', blocked_clients: '0' },
+      memory: { used_memory: '1000000', allocator_frag_ratio: '1.1' },
+      stats: {
+        instantaneous_ops_per_sec: '100',
+        instantaneous_input_kbps: '50',
+        instantaneous_output_kbps: '30',
+        evicted_keys: '0',
+        keyspace_misses: '5',
+        rejected_connections: '0',
+        acl_access_denied_auth: '0',
+        cluster_enabled: '1',
+      },
+    };
+
+    function cnode(id: string, host: string, flags: string[], extra: Partial<ClusterNode> = {}): ClusterNode {
+      return {
+        id,
+        address: `${host}:6379@16379`,
+        flags,
+        master: '',
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 1,
+        linkState: 'connected',
+        slots: [],
+        ...extra,
+      };
+    }
+
+    const NODE_A = cnode('nodeAAAAAAAA', '10.0.0.1', ['master'], { slots: [[0, 5460]] });
+    const NODE_B = cnode('nodeBBBBBBBB', '10.0.0.2', ['master'], { slots: [[5461, 10922]] });
+    const NODE_C = cnode('nodeCCCCCCCC', '10.0.0.3', ['master'], { slots: [[10923, 16383]] });
+    const HEALTHY = [NODE_A, NODE_B, NODE_C];
+    const SPLIT = [...HEALTHY, cnode('nodeDDDDDDDD', '10.0.0.4', ['master'], { slots: [[0, 5460]], configEpoch: 9 })];
+    const ORPHANED = [
+      ...HEALTHY,
+      cnode('replicaEEEEE', '10.0.0.5', ['slave'], { master: 'deadprimFFFF' }),
+      cnode('deadprimFFFF', '10.0.0.6', ['master', 'fail'], { linkState: 'disconnected' }),
+    ];
+    const GHOST = [cnode('flippedGGGGG', '127.0.0.1', ['master']), ...HEALTHY];
+    const STALE_HOSTNAME = [{ ...NODE_A, hostname: 'a.example' }, { ...NODE_B, hostname: 'b.example' }, NODE_C];
+
+    let now: number;
+    let topology: ClusterNode[];
+    let unreadable: Set<string>;
+    let configs: Record<string, unknown>;
+    let ctxs: Record<string, ConnectionContext>;
+
+    function memberCtx(connectionId: string): ConnectionContext {
+      const host = HOSTS[connectionId];
+      return {
+        ...mockCtx,
+        connectionId,
+        connectionName: connectionId,
+        host,
+        client: {
+          ...dbClient,
+          getInfoParsed: jest.fn().mockResolvedValue(clusterInfoResponse),
+          getClusterInfo: jest.fn().mockResolvedValue({ cluster_state: 'ok' }),
+          getClusterNodes: jest.fn(async () => {
+            if (unreadable.has(connectionId)) throw new Error('CLUSTER NODES failed');
+            return topology.map((node) =>
+              node.address.startsWith(`${host}:`) ? { ...node, flags: ['myself', ...node.flags] } : node,
+            );
+          }),
+        },
+      } as unknown as ConnectionContext;
+    }
+
+    async function pollAll(order: string[] = MEMBERS): Promise<void> {
+      for (const id of order) await poll(ctxs[id]);
+    }
+
+    async function pollAfter(ms: number, order: string[] = MEMBERS): Promise<void> {
+      now += ms;
+      await pollAll(order);
+    }
+
+    const eventsOf = (metricType: MetricType): AnomalyEvent[] =>
+      service.getRecentEvents().filter((e) => e.metricType === metricType);
+
+    const stuckReplicaEvents = (): AnomalyEvent[] =>
+      eventsOf(MetricType.CLUSTER_TOPOLOGY).filter((e) => e.message.includes('replicaEEEEE'.substring(0, 8)));
+
+    beforeEach(() => {
+      now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+      topology = HEALTHY;
+      unreadable = new Set();
+      configs = {
+        'conn-a': { id: 'conn-a' },
+        'conn-b': { id: 'conn-b', membership: { seedId: SEED, nodeId: NODE_B.id, origin: 'auto', source: 'cluster' } },
+        'conn-c': { id: 'conn-c', membership: { seedId: SEED, nodeId: NODE_C.id, origin: 'auto', source: 'cluster' } },
+      };
+      ctxs = Object.fromEntries(MEMBERS.map((id) => [id, memberCtx(id)]));
+      const registry = (service as any).connectionRegistry;
+      registry.getConfig.mockImplementation((id: string) => configs[id] ?? null);
+      registry.list = jest.fn(() =>
+        MEMBERS.filter((id) => configs[id]).map((id) => ({ id, host: HOSTS[id], port: 6379, ...(configs[id] as object) })),
+      );
+      (service as any).clusterIdentity = new ClusterIdentityService(registry);
+    });
+
+    afterEach(() => {
+      (Date.now as jest.Mock).mockRestore();
+    });
+
+    it('raises one split-brain alert when every connection sees two primaries for the same slots', async () => {
+      await pollAll();
+      topology = SPLIT;
+
+      await pollAfter(1000);
+      await pollAfter(1000);
+
+      const events = eventsOf(MetricType.CLUSTER_TOPOLOGY);
+      expect(events).toHaveLength(1);
+      expect(events[0].connectionId).toBe(SEED);
+    });
+
+    it('raises one stuck replica warning for the cluster', async () => {
+      topology = ORPHANED;
+      await pollAll();
+
+      await pollAfter(GATE_MS);
+
+      expect(stuckReplicaEvents()).toHaveLength(1);
+    });
+
+    it('raises one hostname warning for the cluster', async () => {
+      topology = STALE_HOSTNAME;
+      await pollAll();
+
+      await pollAfter(GATE_MS);
+
+      expect(eventsOf(MetricType.HOSTNAME_STALENESS)).toHaveLength(1);
+    });
+
+    it('raises one ghost member alert for the cluster', async () => {
+      topology = GHOST;
+      await pollAll();
+
+      await pollAfter(GATE_MS);
+
+      expect(eventsOf(MetricType.GHOST_MEMBERSHIP)).toHaveLength(1);
+    });
+
+    it('raises one warning when a forgotten node comes back', async () => {
+      const extra = cnode('removedHHHHH', '10.0.0.8', ['master']);
+      topology = [...HEALTHY, extra];
+      await pollAll();
+      topology = HEALTHY;
+      await pollAfter(GATE_MS);
+      await pollAfter(GATE_MS);
+      topology = [...HEALTHY, extra];
+
+      await pollAfter(GATE_MS);
+
+      expect(eventsOf(MetricType.GHOST_MEMBERSHIP)).toHaveLength(1);
+    });
+
+    it('raises one failover churn warning for the cluster', async () => {
+      const owner = (id: string, epoch: number): ClusterNode[] => [
+        { ...NODE_A, id, configEpoch: epoch },
+        NODE_B,
+        NODE_C,
+      ];
+      await pollAll();
+      for (const [id, epoch] of [['nodeDDDDDDDD', 2], ['nodeAAAAAAAA', 3], ['nodeDDDDDDDD', 4]] as const) {
+        topology = owner(id, epoch);
+        await pollAfter(5000);
+      }
+
+      expect(eventsOf(MetricType.FAILOVER_CHURN)).toHaveLength(1);
+    });
+
+    it('leaves the cluster-wide checks to the seed when a member is polled first', async () => {
+      topology = ORPHANED;
+      await pollAll(['conn-c', 'conn-b', SEED]);
+
+      await pollAfter(GATE_MS, ['conn-c', 'conn-b', SEED]);
+
+      expect(stuckReplicaEvents().map((e) => e.connectionId)).toEqual([SEED]);
+    });
+
+    it('does not raise a warning again when another connection takes over as reader', async () => {
+      topology = ORPHANED;
+      await pollAll();
+      await pollAfter(GATE_MS);
+      unreadable.add(SEED);
+
+      await pollAfter(MINUTE_MS + 1000);
+      await pollAfter(GATE_MS);
+
+      expect(stuckReplicaEvents()).toHaveLength(1);
+    });
+
+    it('holds the cluster-wide checks while the reader has not read for under a minute', async () => {
+      await pollAll();
+      unreadable.add(SEED);
+      topology = ORPHANED;
+
+      await pollAfter(1000);
+      await pollAfter(GATE_MS);
+
+      expect(stuckReplicaEvents()).toHaveLength(0);
+    });
+
+    it('lets a member raise the warning once the reader has not read for over a minute', async () => {
+      await pollAll();
+      unreadable.add(SEED);
+      topology = ORPHANED;
+      await pollAfter(MINUTE_MS + 1000);
+
+      await pollAfter(GATE_MS);
+
+      expect(stuckReplicaEvents().map((e) => e.connectionId)).toEqual(['conn-b']);
+    });
+
+    it('counts how long a finding lasts from when the first reader saw it', async () => {
+      topology = ORPHANED;
+      await pollAll();
+      unreadable.add(SEED);
+
+      await pollAfter(MINUTE_MS + 1000);
+
+      expect(stuckReplicaEvents().map((e) => e.connectionId)).toEqual(['conn-b']);
+    });
+
+    it('does not raise the split-brain alert again when a member fails to read the topology', async () => {
+      topology = SPLIT;
+      await pollAll();
+      unreadable.add('conn-b');
+      await pollAfter(1000);
+      unreadable.delete('conn-b');
+
+      await pollAfter(1000);
+
+      expect(eventsOf(MetricType.CLUSTER_TOPOLOGY)).toHaveLength(1);
+    });
+
+    it('raises the split-brain alert again after the reader missed a read', async () => {
+      topology = SPLIT;
+      await pollAll();
+      unreadable.add(SEED);
+      await pollAfter(1000);
+      unreadable.delete(SEED);
+
+      await pollAfter(1000);
+
+      expect(eventsOf(MetricType.CLUSTER_TOPOLOGY)).toHaveLength(2);
+    });
+
+    it('does not raise a warning again when the reader connection is removed', async () => {
+      topology = ORPHANED;
+      await pollAll();
+      await pollAfter(GATE_MS);
+      delete configs[SEED];
+      (service as any).clusterIdentity.forget(SEED);
+      (service as any).onConnectionRemoved(SEED);
+
+      await pollAfter(1000, ['conn-b', 'conn-c']);
+      await pollAfter(GATE_MS, ['conn-b', 'conn-c']);
+
+      expect(stuckReplicaEvents()).toHaveLength(1);
+    });
+
+    it('forgets the findings of a cluster once its last connection is removed', async () => {
+      topology = ORPHANED;
+      await pollAll();
+      await pollAfter(GATE_MS);
+      for (const id of MEMBERS) {
+        delete configs[id];
+        (service as any).clusterIdentity.forget(id);
+        (service as any).onConnectionRemoved(id);
+      }
+
+      expect((service as any).activeStuckReplicas.size).toBe(0);
+      expect((service as any).stuckReplicaFirstSeen.size).toBe(0);
+      expect((service as any).ghostHistories.size).toBe(0);
+      expect((service as any).failoverChurnState.size).toBe(0);
+    });
+
+    it('keeps the checks of two clusters apart', async () => {
+      const other = cnode('otherXXXXXXX', '10.0.9.1', ['myself', 'master'], { slots: [[0, 8000]] });
+      const otherCtx = {
+        ...memberCtx(SEED),
+        connectionId: 'conn-x',
+        connectionName: 'conn-x',
+        host: '10.0.9.1',
+        client: {
+          ...dbClient,
+          getInfoParsed: jest.fn().mockResolvedValue(clusterInfoResponse),
+          getClusterInfo: jest.fn().mockResolvedValue({ cluster_state: 'ok' }),
+          getClusterNodes: jest.fn(async () => [
+            other,
+            cnode('otherYYYYYYY', '10.0.9.2', ['master'], { slots: [[8001, 16383]] }),
+            cnode('otherZZZZZZZ', '10.0.9.3', ['master'], { slots: [[0, 8000]], configEpoch: 9 }),
+          ]),
+        },
+      } as unknown as ConnectionContext;
+      configs['conn-x'] = { id: 'conn-x' };
+      topology = SPLIT;
+
+      await pollAll();
+      await poll(otherCtx);
+
+      expect(eventsOf(MetricType.CLUSTER_TOPOLOGY).map((e) => e.connectionId).sort()).toEqual([SEED, 'conn-x']);
+    });
+  });
 });

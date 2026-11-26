@@ -927,6 +927,7 @@ export class AnomalyService
   private activeStuckReplicas = new Map<string, Set<string>>();
   private reshardSnapshot = new Map<string, ReshardShardSnapshot>();
   private readonly connectionClusterKeys = new Map<string, string>();
+  private readonly clusterScopes = new Map<string, string>();
   private readonly clusterKeyByNode = new Map<string, string>();
   private readonly clusterViews = new Map<string, ReadonlySet<string>>();
   private readonly clusterNodeViews = new ClusterNodeViews();
@@ -1635,7 +1636,7 @@ export class AnomalyService
     this.lastClusterState.delete(connectionId);
     this.clusterStateChangedAt.delete(connectionId);
     this.lastPersistenceState.delete(connectionId);
-    this.activeTopologyConflicts.delete(connectionId);
+    this.leaveClusterScope(connectionId);
     this.closeConnectionEventsOnRemoval(connectionId);
     for (const key of this.nodeDetectorKeysOf(connectionId)) this.forgetNodeDetectors(key);
     this.openEventsAdopted.delete(connectionId);
@@ -1658,8 +1659,6 @@ export class AnomalyService
     this.raftMode.delete(connectionId);
     this.raftNodeTimeoutMs.delete(connectionId);
     this.raftNodeTimeoutRecheck.delete(connectionId);
-    this.stuckReplicaFirstSeen.delete(connectionId);
-    this.activeStuckReplicas.delete(connectionId);
     for (const key of this.reshardSnapshotKeysOf(connectionId)) {
       this.reshardSnapshot.delete(key);
       this.reshardMissedReads.delete(key);
@@ -1694,11 +1693,6 @@ export class AnomalyService
     this.incidentEventsDroppedThrough.delete(connectionId);
     this.incidentEventsDroppedSpans.delete(connectionId);
     this.resyncLoopState.delete(connectionId);
-    this.hostnameStalenessFirstSeen.delete(connectionId);
-    this.activeHostnameStaleness.delete(connectionId);
-    this.ghostMemberFirstSeen.delete(connectionId);
-    this.activeGhostMembers.delete(connectionId);
-    this.ghostHistories.delete(connectionId);
     this.clientLockoutState.delete(connectionId);
     this.authFailureState.delete(connectionId);
     this.authFailureLastScan.delete(connectionId);
@@ -1736,7 +1730,6 @@ export class AnomalyService
     this.stuckSlotMigrationEventIds.delete(connectionId);
     this.orphanedSlotFirstSeen.delete(connectionId);
     this.activeOrphanedSlots.delete(connectionId);
-    this.failoverChurnState.delete(connectionId);
     // A shard this connection was the last to observe has no one left to
     // resolve its events, so they are closed. Its expected replica count is
     // kept until the sweep drops it: a connection added in its place must
@@ -2451,31 +2444,40 @@ export class AnomalyService
         try {
           nodes = await ctx.client.getClusterNodes();
         } catch (topologyErr) {
-          this.activeTopologyConflicts.delete(ctx.connectionId);
+          if (this.clusterIdentity?.isReader(ctx.connectionId) ?? true) {
+            this.activeTopologyConflicts.delete(this.clusterScopeOf(ctx.connectionId));
+          }
           this.logger.debug(
             `Failed to fetch cluster topology for ${ctx.connectionName}: ${topologyErr instanceof Error ? topologyErr.message : topologyErr}`,
           );
         }
         const shards = await shardsPromise;
+        let readsForCluster = false;
         if (nodes) {
+          const readIsCurrent = this.readIsCurrent(ctx, membershipAtRead);
           this.rememberClusterNodes(
             ctx.connectionId,
             nodes,
             shards,
             timestamp,
             isRaft || shards !== undefined,
-            this.readIsCurrent(ctx, membershipAtRead),
+            readIsCurrent,
           );
+          this.rememberClusterKey(ctx.connectionId, nodes, readIsCurrent);
+          readsForCluster = !isRaft && this.readsForCluster(ctx.connectionId, timestamp, readIsCurrent);
         }
 
         // Gossip-race detectors only: under Raft, topology is consensus-managed.
+        if (nodes && readsForCluster) {
+          const scope = this.clusterScopes.get(ctx.connectionId) ?? ctx.connectionId;
+          await this.detectDuplicatePrimaries(ctx, scope, timestamp, nodes);
+          await this.detectStuckReplicas(ctx, scope, timestamp, nodes);
+          await this.detectHostnameStaleness(ctx, scope, timestamp, nodes, shards);
+          await this.detectGhostMembers(ctx, scope, timestamp, nodes);
+          await this.detectForgetRejoin(ctx, scope, timestamp, nodes);
+          await this.detectFailoverChurn(ctx, scope, timestamp, nodes);
+        }
         if (!isRaft && nodes) {
-          await this.detectDuplicatePrimaries(ctx, timestamp, nodes);
-          await this.detectStuckReplicas(ctx, timestamp, nodes);
-          await this.detectHostnameStaleness(ctx, timestamp, nodes, shards);
-          await this.detectGhostMembers(ctx, timestamp, nodes);
-          await this.detectForgetRejoin(ctx, timestamp, nodes);
-          await this.detectFailoverChurn(ctx, timestamp, nodes);
           // Replica migrating/importing markers are node-local — only the
           // queried node's own line carries them — so aggregate each replica's
           // self-view before detecting (falls back to `nodes` without fan-out).
@@ -2492,7 +2494,6 @@ export class AnomalyService
         }
 
         if (nodes) {
-          this.rememberClusterKey(ctx.connectionId, nodes, this.readIsCurrent(ctx, membershipAtRead));
           if (!isRaft) await this.detectTopologyDivergence(ctx, timestamp, nodes, shards);
           // Orphaned keys in unowned slots after a persistence load
           // (valkey#539): unreachable data silently holding memory. NOT a
@@ -6572,17 +6573,14 @@ export class AnomalyService
    */
   private async detectDuplicatePrimaries(
     ctx: ConnectionContext,
+    scope: string,
     timestamp: number,
     nodes: ClusterNode[],
   ): Promise<void> {
     try {
       const conflicts = detectDuplicatePrimaries(nodes);
 
-      const active = this.connectionClaims(
-        this.activeTopologyConflicts,
-        ctx.connectionId,
-        () => new Set<string>(),
-      );
+      const active = this.connectionClaims(this.activeTopologyConflicts, scope, () => new Set<string>());
       const currentSignatures = new Set(conflicts.map((c) => conflictSignature(c)));
 
       for (const conflict of conflicts) {
@@ -6618,8 +6616,8 @@ export class AnomalyService
         };
 
         this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-        await this.addLatchedAnomaly(event, ctx, `${ctx.connectionId}:${signature}`, () => {
-          this.activeTopologyConflicts.get(ctx.connectionId)?.delete(signature);
+        await this.addLatchedAnomaly(event, ctx, `${scope}:${signature}`, () => {
+          this.activeTopologyConflicts.get(scope)?.delete(signature);
         });
       }
 
@@ -8425,6 +8423,7 @@ export class AnomalyService
    */
   private async detectStuckReplicas(
     ctx: ConnectionContext,
+    scope: string,
     timestamp: number,
     nodes: ClusterNode[],
   ): Promise<void> {
@@ -8434,6 +8433,7 @@ export class AnomalyService
         timestamp,
         findings: detectStuckReplicas(nodes),
         signatureOf: stuckReplicaSignature,
+        scope,
         firstSeenByConn: this.stuckReplicaFirstSeen,
         activeByConn: this.activeStuckReplicas,
         minPersistMs: AnomalyService.STUCK_REPLICA_MIN_PERSIST_MS,
@@ -8696,6 +8696,7 @@ export class AnomalyService
    */
   private async detectHostnameStaleness(
     ctx: ConnectionContext,
+    scope: string,
     timestamp: number,
     nodes: ClusterNode[],
     shards: ClusterShard[] | undefined,
@@ -8706,6 +8707,7 @@ export class AnomalyService
         timestamp,
         findings: detectHostnameStaleness(nodes, shards),
         signatureOf: hostnameStalenessSignature,
+        scope,
         firstSeenByConn: this.hostnameStalenessFirstSeen,
         activeByConn: this.activeHostnameStaleness,
         minPersistMs: AnomalyService.HOSTNAME_STALENESS_MIN_PERSIST_MS,
@@ -8767,6 +8769,7 @@ export class AnomalyService
    */
   private async detectGhostMembers(
     ctx: ConnectionContext,
+    scope: string,
     timestamp: number,
     nodes: ClusterNode[],
   ): Promise<void> {
@@ -8776,6 +8779,7 @@ export class AnomalyService
         timestamp,
         findings: detectGhostMembers(nodes),
         signatureOf: ghostMemberSignature,
+        scope,
         firstSeenByConn: this.ghostMemberFirstSeen,
         activeByConn: this.activeGhostMembers,
         minPersistMs: AnomalyService.GHOST_MEMBER_MIN_PERSIST_MS,
@@ -8903,14 +8907,15 @@ export class AnomalyService
    */
   private async detectForgetRejoin(
     ctx: ConnectionContext,
+    scope: string,
     timestamp: number,
     nodes: ClusterNode[],
   ): Promise<void> {
     try {
-      let history = this.ghostHistories.get(ctx.connectionId);
+      let history = this.ghostHistories.get(scope);
       if (history === undefined) {
         history = new GhostMembershipHistory();
-        this.ghostHistories.set(ctx.connectionId, history);
+        this.ghostHistories.set(scope, history);
       }
 
       for (const rejoin of history.observe(nodes, timestamp)) {
@@ -9253,6 +9258,7 @@ export class AnomalyService
     isConfirmed?: (finding: T) => boolean;
     contextOf?: (finding: T) => ConnectionContext;
     ownerOf?: (eventId: string) => string | undefined;
+    scope?: string;
   }): Promise<void> {
     const {
       ctx,
@@ -9270,7 +9276,7 @@ export class AnomalyService
       contextOf,
       ownerOf,
     } = params;
-    const connId = ctx.connectionId;
+    const connId = params.scope ?? ctx.connectionId;
     const isPreserved = (sig: string): boolean => preserveSignature?.(sig) ?? false;
 
     const firstSeen = firstSeenByConn.get(connId) ?? new Map<string, number>();
@@ -9626,11 +9632,12 @@ export class AnomalyService
    */
   private async detectFailoverChurn(
     ctx: ConnectionContext,
+    scope: string,
     timestamp: number,
     nodes: ClusterNode[],
   ): Promise<void> {
-    const state = this.failoverChurnState.get(ctx.connectionId) ?? new Map();
-    this.failoverChurnState.set(ctx.connectionId, state);
+    const state = this.failoverChurnState.get(scope) ?? new Map();
+    this.failoverChurnState.set(scope, state);
 
     const findings = evaluateFailoverChurn(state, nodes, timestamp);
     for (const finding of findings) {
@@ -10204,6 +10211,39 @@ export class AnomalyService
     if (latch === undefined || this.latchHolders.get(latch) !== anomaly.id) return false;
     this.latchHolders.delete(latch);
     return true;
+  }
+
+  private clusterScopeOf(connectionId: string): string {
+    return this.clusterIdentity?.clusterKeyOf(connectionId) ?? connectionId;
+  }
+
+  private readsForCluster(connectionId: string, timestamp: number, readIsCurrent: boolean): boolean {
+    const identity = this.clusterIdentity;
+    if (!identity) return true;
+    if (!readIsCurrent) return false;
+    this.clusterScopes.set(connectionId, identity.clusterKeyOf(connectionId));
+    return identity.claimReader(connectionId, timestamp);
+  }
+
+  private leaveClusterScope(connectionId: string): void {
+    const scope = this.clusterScopes.get(connectionId) ?? connectionId;
+    this.clusterScopes.delete(connectionId);
+    if ([...this.clusterScopes.values()].includes(scope)) return;
+    this.clusterScopedState().forEach((state) => state.delete(scope));
+  }
+
+  private clusterScopedState(): Array<Map<string, unknown>> {
+    return [
+      this.activeTopologyConflicts,
+      this.stuckReplicaFirstSeen,
+      this.activeStuckReplicas,
+      this.hostnameStalenessFirstSeen,
+      this.activeHostnameStaleness,
+      this.ghostMemberFirstSeen,
+      this.activeGhostMembers,
+      this.ghostHistories,
+      this.failoverChurnState,
+    ];
   }
 
   private connectionClaims<T>(byConn: Map<string, T>, connectionId: string, create: () => T): T {
