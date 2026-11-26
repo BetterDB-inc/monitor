@@ -273,6 +273,7 @@ import { detectLaggingPromotion, ReplPeer } from './lagging-promotion-detector';
 import { detectHostnameStaleness, hostnameStalenessSignature } from './hostname-staleness-detector';
 import {
   detectReplicaSlotState,
+  needsOwnLineOfAnotherNode,
   replicaSlotSignature,
   ReplicaSlotAnomaly,
 } from './replica-slot-state-detector';
@@ -939,6 +940,7 @@ export class AnomalyService
   private readonly replicaSlotEventOwners = new Map<string, Map<string, string>>();
   private readonly unmergedSlotEvents = new Set<string>();
   private readonly slotEventsLoaded = new Set<string>();
+  private readonly slotEventsTakenWhole = new Set<string>();
   private readonly clusterKeyByNode = new Map<string, string>();
   private readonly clusterViews = new Map<string, ReadonlySet<string>>();
   private readonly clusterNodeViews = new ClusterNodeViews();
@@ -1659,6 +1661,7 @@ export class AnomalyService
     if (endedScope !== undefined) this.forgetClusterScope(endedScope);
     this.unmergedSlotEvents.delete(connectionId);
     this.slotEventsLoaded.delete(connectionId);
+    this.slotEventsTakenWhole.delete(connectionId);
     for (const key of this.nodeDetectorKeysOf(connectionId)) this.forgetNodeDetectors(key);
     this.openEventsAdopted.delete(connectionId);
     this.openEventsRetry.delete(connectionId);
@@ -2508,6 +2511,7 @@ export class AnomalyService
           // self-view before detecting (falls back to `nodes` without fan-out).
           const slotScope = asksReplicas ? scope : ctx.connectionId;
           if (asksReplicas) this.takeOverMemberSlotEvents(ctx.connectionId, slotScope);
+          else this.leaveSlotEventsToReader(ctx.connectionId, scope, ownNodeIdOf(nodes));
           const perNodeView = await this.gatherReplicaSlotView(nodes, ctx, slotScope);
           await this.detectReplicaSlotState(
             asksReplicas ? filed : ctx,
@@ -3168,10 +3172,11 @@ export class AnomalyService
     if (!this.clusterIdentity) return true;
     const readerId = ctx.connectionId;
     const members = new Set([readerId, ...this.clusterIdentity.clusterConnectionIds(readerId)]);
+    const filedUnder = this.clusterIdentity.eventConnectionOf(readerId);
     try {
       for (const member of members) {
         if (this.openEventsAdopted.has(member) || this.slotEventsLoaded.has(member)) continue;
-        if (!this.asksReplicasForOwnLine(member)) continue;
+        if (member !== filedUnder && !this.asksReplicasForOwnLine(member)) continue;
         const open = await this.readOpenEvents(member, MetricType.REPLICA_SLOT_STATE);
         if (!this.connectionRegistry.getConfig(member)) continue;
         this.adoptReplicaSlotEvents(member, open);
@@ -3193,21 +3198,17 @@ export class AnomalyService
     const members = new Set([readerId, ...this.clusterIdentity.clusterConnectionIds(readerId)]);
     for (const member of members) {
       if (!this.unmergedSlotEvents.has(member) || member === scope) continue;
-      if (!this.asksReplicasForOwnLine(member)) continue;
       this.unmergedSlotEvents.delete(member);
-      const eventIds = this.connectionClaims(this.replicaSlotEventIds, scope, () => new Map<string, string>());
-      const owners = this.connectionClaims(this.replicaSlotEventOwners, scope, () => new Map<string, string>());
-      for (const [signature, id] of this.replicaSlotEventIds.get(member) ?? []) {
-        const kept = eventIds.get(signature);
-        if (kept !== undefined && kept !== id) {
-          this.closeLater(id);
-          continue;
-        }
-        eventIds.set(signature, id);
-        owners.set(id, member);
+      if (!this.asksReplicasForOwnLine(member)) {
+        const ownNodeId = this.knownNodeIdOf(member);
+        if (ownNodeId === undefined) this.slotEventsTakenWhole.add(member);
+        this.moveSlotEvents(member, scope, (signature) => needsOwnLineOfAnotherNode(signature, ownNodeId));
+        continue;
       }
+      this.moveSlotEvents(member, scope);
       const legacy = this.legacyReplicaSlotEvents.get(member) ?? [];
       if (legacy.length > 0) {
+        const owners = this.connectionClaims(this.replicaSlotEventOwners, scope, () => new Map<string, string>());
         legacy.forEach((event) => owners.set(event.id, member));
         this.legacyReplicaSlotEvents.set(scope, [...(this.legacyReplicaSlotEvents.get(scope) ?? []), ...legacy]);
         this.legacyReplicaSlotRead.delete(scope);
@@ -3216,6 +3217,60 @@ export class AnomalyService
       this.legacyReplicaSlotEvents.delete(member);
       this.legacyReplicaSlotRead.delete(member);
     }
+  }
+
+  private leaveSlotEventsToReader(connectionId: string, scope: string, ownNodeId: string | undefined): void {
+    if (scope === connectionId || !this.clusterIdentity) return;
+    if (this.slotEventsTakenWhole.delete(connectionId)) this.takeBackOwnSlotEvents(connectionId, scope, ownNodeId);
+    if (!this.unmergedSlotEvents.has(connectionId)) return;
+    const readerAsksReplicas = this.clusterIdentity
+      .clusterConnectionIds(connectionId)
+      .some((member) => this.asksReplicasForOwnLine(member));
+    if (!readerAsksReplicas) return;
+    this.unmergedSlotEvents.delete(connectionId);
+    this.moveSlotEvents(connectionId, scope, (signature) => needsOwnLineOfAnotherNode(signature, ownNodeId));
+  }
+
+  private takeBackOwnSlotEvents(connectionId: string, scope: string, ownNodeId: string | undefined): void {
+    const owners = this.replicaSlotEventOwners.get(scope);
+    const own = [...(this.replicaSlotEventIds.get(scope) ?? [])].filter(
+      ([signature, id]) => owners?.get(id) === connectionId && !needsOwnLineOfAnotherNode(signature, ownNodeId),
+    );
+    if (own.length === 0) return;
+    const eventIds = this.connectionClaims(this.replicaSlotEventIds, connectionId, () => new Map<string, string>());
+    for (const [signature, id] of own) {
+      this.replicaSlotEventIds.get(scope)?.delete(signature);
+      this.activeReplicaSlotAnomalies.get(scope)?.delete(signature);
+      owners?.delete(id);
+      if (eventIds.has(signature)) this.closeLater(id);
+      else eventIds.set(signature, id);
+    }
+  }
+
+  private moveSlotEvents(member: string, scope: string, moves: (signature: string) => boolean = () => true): void {
+    const held = this.replicaSlotEventIds.get(member);
+    const moving = [...(held ?? [])].filter(([signature]) => moves(signature));
+    if (!held || moving.length === 0) return;
+    const eventIds = this.connectionClaims(this.replicaSlotEventIds, scope, () => new Map<string, string>());
+    const owners = this.connectionClaims(this.replicaSlotEventOwners, scope, () => new Map<string, string>());
+    for (const [signature, id] of moving) {
+      held.delete(signature);
+      const kept = eventIds.get(signature);
+      if (kept !== undefined && kept !== id) {
+        this.closeLater(id);
+        continue;
+      }
+      eventIds.set(signature, id);
+      owners.set(id, member);
+    }
+    if (held.size === 0) this.replicaSlotEventIds.delete(member);
+  }
+
+  private knownNodeIdOf(connectionId: string): string | undefined {
+    return (
+      this.connectionRegistry.getObservedNodeId(connectionId) ??
+      this.connectionRegistry.getConfig(connectionId)?.membership?.nodeId
+    );
   }
 
   private ownedSlotEventId(owners: Map<string, string>, connectionId: string): string {

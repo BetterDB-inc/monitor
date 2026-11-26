@@ -1,6 +1,7 @@
 import { ClusterNode, ClusterShard } from '@app/common/types/metrics.types';
 import {
   detectReplicaSlotState,
+  needsOwnLineOfAnotherNode,
   replicaSlotSignature,
   ReplicaSlotAnomaly,
 } from '../replica-slot-state-detector';
@@ -235,5 +236,29 @@ describe('replicaSlotSignature', () => {
     expect(replicaSlotSignature({ ...base, affectedSlots: [1, 3] })).not.toBe(
       replicaSlotSignature(base),
     );
+  });
+});
+
+describe('needsOwnLineOfAnotherNode', () => {
+  const signatureOf = (replicaId: string, reason: ReplicaSlotAnomaly['reason']): string =>
+    replicaSlotSignature({ replicaId, replicaAddress: '10.0.0.9:6379', reason, affectedSlots: [42] });
+
+  it.each(['replica_migrating', 'replica_importing'] as const)(
+    'is true for a %s finding on another node',
+    (reason) => {
+      expect(needsOwnLineOfAnotherNode(signatureOf('replica-b', reason), 'replica-a')).toBe(true);
+    },
+  );
+
+  it('is false for a finding on the own node', () => {
+    expect(needsOwnLineOfAnotherNode(signatureOf('replica-a', 'replica_importing'), 'replica-a')).toBe(false);
+  });
+
+  it('is false for a slot view divergence, which every node reports', () => {
+    expect(needsOwnLineOfAnotherNode(signatureOf('replica-b', 'slot_view_divergence'), 'replica-a')).toBe(false);
+  });
+
+  it('is true for a migration marker when the own node is not known', () => {
+    expect(needsOwnLineOfAnotherNode(signatureOf('replica-a', 'replica_migrating'), undefined)).toBe(true);
   });
 });
