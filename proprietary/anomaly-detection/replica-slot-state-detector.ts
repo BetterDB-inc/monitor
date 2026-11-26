@@ -194,3 +194,13 @@ export function replicaSlotSignature(a: ReplicaSlotAnomaly): string {
   const slots = createHash('sha256').update(a.affectedSlots.join(',')).digest('hex').slice(0, 16);
   return `${a.replicaId}|${a.reason}|${slots}`;
 }
+
+const OWN_LINE_REASONS: ReadonlySet<string> = new Set<ReplicaSlotReason>([
+  'replica_migrating',
+  'replica_importing',
+]);
+
+export function needsOwnLineOfAnotherNode(signature: string, ownNodeId: string | undefined): boolean {
+  const [replicaId, reason] = signature.split('|');
+  return OWN_LINE_REASONS.has(reason) && replicaId !== ownNodeId;
+}

@@ -273,6 +273,7 @@ import { detectLaggingPromotion, ReplPeer } from './lagging-promotion-detector';
 import { detectHostnameStaleness, hostnameStalenessSignature } from './hostname-staleness-detector';
 import {
   detectReplicaSlotState,
+  needsOwnLineOfAnotherNode,
   replicaSlotSignature,
   ReplicaSlotAnomaly,
 } from './replica-slot-state-detector';
@@ -291,7 +292,7 @@ import {
 } from '@app/cluster/cluster-metrics.service';
 import {
   ClusterIdentityService,
-  READER_GRACE_MS,
+  readerGraceMs,
   clusterStateSignature,
 } from '@app/cluster/cluster-identity.service';
 import { withConfiguredZones, withShardMetadata } from '@app/cluster/shard-metadata';
@@ -944,6 +945,7 @@ export class AnomalyService
   private readonly replicaSlotEventOwners = new Map<string, Map<string, string>>();
   private readonly unmergedSlotEvents = new Set<string>();
   private readonly slotEventsLoaded = new Set<string>();
+  private readonly slotEventsTakenWhole = new Set<string>();
   private readonly clusterKeyByNode = new Map<string, string>();
   private readonly clusterViews = new Map<string, ReadonlySet<string>>();
   private readonly clusterNodeViews = new ClusterNodeViews();
@@ -1189,6 +1191,7 @@ export class AnomalyService
   private correlationTicking = false;
   private outboxDraining = false;
   private readonly anomalyContexts = new WeakMap<AnomalyEvent, ConnectionContext>();
+  private readonly eventReaders = new WeakMap<ConnectionContext, string>();
   private readonly latchHolders = new Map<string, string>();
   private readonly anomalySaveHooks = new WeakMap<AnomalyEvent, () => void>();
   private readonly saveTails = new Map<string, Promise<void>>();
@@ -1672,6 +1675,7 @@ export class AnomalyService
     if (endedScope !== undefined) this.forgetClusterScope(endedScope);
     this.unmergedSlotEvents.delete(connectionId);
     this.slotEventsLoaded.delete(connectionId);
+    this.slotEventsTakenWhole.delete(connectionId);
     for (const key of this.nodeDetectorKeysOf(connectionId)) this.forgetNodeDetectors(key);
     this.openEventsAdopted.delete(connectionId);
     this.openEventsRetry.delete(connectionId);
@@ -1749,6 +1753,7 @@ export class AnomalyService
     this.replicaSlotFirstSeen.delete(connectionId);
     this.activeReplicaSlotAnomalies.delete(connectionId);
     this.replicaSlotEventIds.delete(connectionId);
+    this.replicaSlotEventOwners.delete(connectionId);
     this.orphanedSlotLastProbe.delete(connectionId);
     this.slotMigrationWatch.delete(connectionId);
     this.failuresHeldForCancel.delete(connectionId);
@@ -2521,12 +2526,14 @@ export class AnomalyService
           // Replica migrating/importing markers are node-local — only the
           // queried node's own line carries them — so aggregate each replica's
           // self-view before detecting (falls back to `nodes` without fan-out).
-          const slotScope = asksReplicas ? scope : ctx.connectionId;
-          if (asksReplicas) this.takeOverMemberSlotEvents(ctx.connectionId, slotScope);
-          const perNodeView = await this.gatherReplicaSlotView(nodes, ctx, slotScope);
+          const liveScope = (): string => this.clusterScopes.get(ctx.connectionId) ?? ctx.connectionId;
+          const slotScope = (): string => (asksReplicas ? liveScope() : ctx.connectionId);
+          if (asksReplicas) this.takeOverMemberSlotEvents(ctx.connectionId, slotScope());
+          else this.leaveSlotEventsToReader(ctx.connectionId, liveScope(), ownNodeIdOf(nodes));
+          const perNodeView = await this.gatherReplicaSlotView(nodes, ctx, slotScope());
           await this.detectReplicaSlotState(
             asksReplicas ? filed : ctx,
-            slotScope,
+            slotScope(),
             timestamp,
             perNodeView.nodes,
             shards,
@@ -3194,10 +3201,11 @@ export class AnomalyService
     if (!this.clusterIdentity) return true;
     const readerId = ctx.connectionId;
     const members = new Set([readerId, ...this.clusterIdentity.clusterConnectionIds(readerId)]);
+    const filedUnder = this.clusterIdentity.eventConnectionOf(readerId);
     try {
       for (const member of members) {
         if (this.openEventsAdopted.has(member) || this.slotEventsLoaded.has(member)) continue;
-        if (!this.asksReplicasForOwnLine(member)) continue;
+        if (member !== filedUnder && !this.asksReplicasForOwnLine(member)) continue;
         const open = await this.readOpenEvents(member, MetricType.REPLICA_SLOT_STATE);
         if (!this.connectionRegistry.getConfig(member)) continue;
         this.adoptReplicaSlotEvents(member, open);
@@ -3219,21 +3227,17 @@ export class AnomalyService
     const members = new Set([readerId, ...this.clusterIdentity.clusterConnectionIds(readerId)]);
     for (const member of members) {
       if (!this.unmergedSlotEvents.has(member) || member === scope) continue;
-      if (!this.asksReplicasForOwnLine(member)) continue;
       this.unmergedSlotEvents.delete(member);
-      const eventIds = this.connectionClaims(this.replicaSlotEventIds, scope, () => new Map<string, string>());
-      const owners = this.connectionClaims(this.replicaSlotEventOwners, scope, () => new Map<string, string>());
-      for (const [signature, id] of this.replicaSlotEventIds.get(member) ?? []) {
-        const kept = eventIds.get(signature);
-        if (kept !== undefined && kept !== id) {
-          this.closeLater(id);
-          continue;
-        }
-        eventIds.set(signature, id);
-        owners.set(id, member);
+      if (!this.asksReplicasForOwnLine(member)) {
+        const ownNodeId = this.knownNodeIdOf(member);
+        if (ownNodeId === undefined) this.slotEventsTakenWhole.add(member);
+        this.moveSlotEvents(member, scope, (signature) => needsOwnLineOfAnotherNode(signature, ownNodeId));
+        continue;
       }
+      this.moveSlotEvents(member, scope);
       const legacy = this.legacyReplicaSlotEvents.get(member) ?? [];
       if (legacy.length > 0) {
+        const owners = this.connectionClaims(this.replicaSlotEventOwners, scope, () => new Map<string, string>());
         legacy.forEach((event) => owners.set(event.id, member));
         this.legacyReplicaSlotEvents.set(scope, [...(this.legacyReplicaSlotEvents.get(scope) ?? []), ...legacy]);
         this.legacyReplicaSlotRead.delete(scope);
@@ -3242,6 +3246,60 @@ export class AnomalyService
       this.legacyReplicaSlotEvents.delete(member);
       this.legacyReplicaSlotRead.delete(member);
     }
+  }
+
+  private leaveSlotEventsToReader(connectionId: string, scope: string, ownNodeId: string | undefined): void {
+    if (scope === connectionId || !this.clusterIdentity) return;
+    if (this.slotEventsTakenWhole.delete(connectionId)) this.takeBackOwnSlotEvents(connectionId, scope, ownNodeId);
+    if (!this.unmergedSlotEvents.has(connectionId)) return;
+    const readerAsksReplicas = this.clusterIdentity
+      .clusterConnectionIds(connectionId)
+      .some((member) => this.asksReplicasForOwnLine(member));
+    if (!readerAsksReplicas) return;
+    this.unmergedSlotEvents.delete(connectionId);
+    this.moveSlotEvents(connectionId, scope, (signature) => needsOwnLineOfAnotherNode(signature, ownNodeId));
+  }
+
+  private takeBackOwnSlotEvents(connectionId: string, scope: string, ownNodeId: string | undefined): void {
+    const owners = this.replicaSlotEventOwners.get(scope);
+    const own = [...(this.replicaSlotEventIds.get(scope) ?? [])].filter(
+      ([signature, id]) => owners?.get(id) === connectionId && !needsOwnLineOfAnotherNode(signature, ownNodeId),
+    );
+    if (own.length === 0) return;
+    const eventIds = this.connectionClaims(this.replicaSlotEventIds, connectionId, () => new Map<string, string>());
+    for (const [signature, id] of own) {
+      this.replicaSlotEventIds.get(scope)?.delete(signature);
+      this.activeReplicaSlotAnomalies.get(scope)?.delete(signature);
+      owners?.delete(id);
+      if (eventIds.has(signature)) this.closeLater(id);
+      else eventIds.set(signature, id);
+    }
+  }
+
+  private moveSlotEvents(member: string, scope: string, moves: (signature: string) => boolean = () => true): void {
+    const held = this.replicaSlotEventIds.get(member);
+    const moving = [...(held ?? [])].filter(([signature]) => moves(signature));
+    if (!held || moving.length === 0) return;
+    const eventIds = this.connectionClaims(this.replicaSlotEventIds, scope, () => new Map<string, string>());
+    const owners = this.connectionClaims(this.replicaSlotEventOwners, scope, () => new Map<string, string>());
+    for (const [signature, id] of moving) {
+      held.delete(signature);
+      const kept = eventIds.get(signature);
+      if (kept !== undefined && kept !== id) {
+        this.closeLater(id);
+        continue;
+      }
+      eventIds.set(signature, id);
+      owners.set(id, member);
+    }
+    if (held.size === 0) this.replicaSlotEventIds.delete(member);
+  }
+
+  private knownNodeIdOf(connectionId: string): string | undefined {
+    return (
+      this.connectionRegistry.getObservedNodeId(connectionId) ??
+      this.connectionRegistry.getConfig(connectionId)?.membership?.nodeId
+    );
   }
 
   private ownedSlotEventId(owners: Map<string, string>, connectionId: string): string {
@@ -10264,14 +10322,14 @@ export class AnomalyService
     return this.incidentEventsById.get(anomalyId);
   }
 
-  private stamp(anomaly: AnomalyEvent, connectionId = anomaly.connectionId): void {
+  private stamp(anomaly: AnomalyEvent, connectionId = anomaly.connectionId, readBy = connectionId): void {
     anomaly.scopeId ??= this.correlationScopeOf(connectionId) || undefined;
     anomaly.eventSequence ??= this.nextEventSequence++;
-    this.stampNode(anomaly, connectionId);
+    this.stampNode(anomaly, connectionId, readBy);
   }
 
-  private stampNode(anomaly: AnomalyEvent, connectionId: string | undefined): void {
-    const node = connectionId ? this.nodeInClusterView(anomaly, connectionId) : anomaly.node;
+  private stampNode(anomaly: AnomalyEvent, connectionId: string | undefined, readBy = connectionId): void {
+    const node = connectionId ? this.nodeInClusterView(anomaly, connectionId, readBy) : anomaly.node;
     if (node) anomaly.node = node;
     delete anomaly.nodeSubject;
   }
@@ -10279,8 +10337,9 @@ export class AnomalyService
   private nodeInClusterView(
     anomaly: EventNodeSource & Pick<AnomalyEvent, 'timestamp'>,
     connectionId: string,
+    readBy = connectionId,
   ): ClusterNodeRef | undefined {
-    const view = this.clusterNodeViews.view(this.nodeViewKeyOf(connectionId));
+    const view = this.clusterNodeViews.view(this.nodeViewKeyOf(readBy));
     const staleMs = this.nodeViewStaleMs();
     const roleKnown = !view || Math.abs(anomaly.timestamp - view.readAt) <= staleMs;
     const own = this.clusterNodeViews.ownRole(connectionId);
@@ -10425,8 +10484,9 @@ export class AnomalyService
     ctx?: ConnectionContext,
     onDrop?: () => void,
   ): Promise<void> {
-    this.stamp(anomaly, ctx?.connectionId || anomaly.connectionId);
-    this.addRecentAnomaly(anomaly, ctx?.connectionId || anomaly.connectionId);
+    const filedUnder = ctx?.connectionId || anomaly.connectionId;
+    this.stamp(anomaly, filedUnder, (ctx && this.eventReaders.get(ctx)) ?? filedUnder);
+    this.addRecentAnomaly(anomaly, filedUnder);
     this.rememberIncidentEvent(anomaly);
 
     if (ctx) this.anomalyContexts.set(anomaly, ctx);
@@ -10472,13 +10532,15 @@ export class AnomalyService
     const filedUnder = this.clusterIdentity?.eventConnectionOf(ctx.connectionId) ?? ctx.connectionId;
     const config = filedUnder === ctx.connectionId ? null : this.connectionRegistry.getConfig(filedUnder);
     if (!config) return ctx;
-    return {
+    const filed = {
       ...ctx,
       connectionId: filedUnder,
       connectionName: config.name ?? ctx.connectionName,
       host: config.host ?? ctx.host,
       port: config.port ?? ctx.port,
     };
+    this.eventReaders.set(filed, ctx.connectionId);
+    return filed;
   }
 
   private clusterScopeOf(connectionId: string): string {
@@ -10499,7 +10561,12 @@ export class AnomalyService
       this.clusterScopesLeft.delete(connectionId);
       this.moveClusterScope(left, scope);
     }
-    return identity.claimReader(connectionId, timestamp, this.dialsDataNodes(connectionId));
+    return identity.claimReader(
+      connectionId,
+      timestamp,
+      this.dialsDataNodes(connectionId),
+      this.getIntervalMs(),
+    );
   }
 
   private followClusterJoins(): void {
@@ -10517,9 +10584,9 @@ export class AnomalyService
   }
 
   private isScopeRead(scope: string, now: number): boolean {
+    const graceMs = readerGraceMs(this.getIntervalMs());
     return [...this.clusterScopeReadAt].some(
-      ([connectionId, readAt]) =>
-        now - readAt <= READER_GRACE_MS && this.clusterScopeOf(connectionId) === scope,
+      ([connectionId, readAt]) => now - readAt <= graceMs && this.clusterScopeOf(connectionId) === scope,
     );
   }
 

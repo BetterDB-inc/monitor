@@ -34180,6 +34180,19 @@ describe('AnomalyService', () => {
       expect(events[0].connectionId).toBe(SEED);
     });
 
+    it('links the node on a split-brain alert filed under a seed that has never read', async () => {
+      unreadable.add(SEED);
+      topology = SPLIT;
+      await pollAll();
+
+      await pollAfter(1000);
+      await pollAfter(1000);
+
+      const [event] = eventsOf(MetricType.CLUSTER_TOPOLOGY);
+      expect(event.connectionId).toBe(SEED);
+      expect(event.node).toMatchObject({ nodeId: NODE_A.id, address: '10.0.0.1:6379' });
+    });
+
     it('raises one stuck replica warning for the cluster', async () => {
       topology = ORPHANED;
       await pollAll();
@@ -34694,6 +34707,25 @@ describe('AnomalyService', () => {
       expect(stuckReplicaEvents()).toHaveLength(1);
     });
 
+    it('keeps a warning with its cluster when polls are more than a minute apart', async () => {
+      jest.spyOn(service as any, 'getIntervalMs').mockReturnValue(90_000);
+      const moverFirst = ['conn-c', SEED, 'conn-b'];
+      topology = ORPHANED;
+      await pollAll();
+      await pollAfter(90_000);
+      views = {
+        'conn-c': [
+          cnode('otherXXXXXXX', '10.0.0.3', ['master'], { slots: [[0, 8000]] }),
+          cnode('otherYYYYYYY', '10.0.9.2', ['master'], { slots: [[8001, 16383]] }),
+        ],
+      };
+
+      await pollAfter(90_000, moverFirst);
+      await pollAfter(90_000, moverFirst);
+
+      expect(stuckReplicaEvents()).toHaveLength(1);
+    });
+
     it('keeps a warning with its cluster while its other connections miss reads for less than a minute', async () => {
       topology = ORPHANED;
       await pollAll();
@@ -34753,6 +34785,18 @@ describe('AnomalyService', () => {
         await pollAfter(GATE_MS);
 
         expect(slotEvents().map((e) => e.connectionId)).toEqual([SEED]);
+      });
+
+      it('links the replica on a warning filed under a seed that has never read', async () => {
+        unreadable.add(SEED);
+        ownLine = STUCK;
+        await pollAll();
+
+        await pollAfter(GATE_MS);
+
+        const [event] = slotEvents();
+        expect(event.connectionId).toBe(SEED);
+        expect(event.node).toMatchObject({ nodeId: REPLICA_ID, address: '10.0.0.9:6379', role: 'replica' });
       });
 
       describe('when two halves turn out to be one cluster while a stored warning is looked up', () => {
@@ -34837,6 +34881,87 @@ describe('AnomalyService', () => {
         });
       });
 
+      describe('when two halves turn out to be one cluster while the stored warnings of a member are read', () => {
+        const halves = [SEED, 'conn-c'];
+        const left = [NODE_A, NODE_B];
+        const right = [NODE_C, cnode('nodeXXXXXXXX', '10.0.0.7', ['master'])];
+        let joined: string;
+        let cleanLine: string;
+        let joinsOnRead: boolean;
+
+        const closedIds = (): string[] => storage.resolveAnomaly.mock.calls.map(([id]) => id).sort();
+
+        beforeEach(async () => {
+          delete configs['conn-b'];
+          configs['conn-c'] = { id: 'conn-c' };
+          const half: Record<string, ClusterNode[]> = { [SEED]: left, 'conn-c': right };
+          views = half;
+          await pollAll(halves);
+          const keyOf = (id: string): string => (service as any).clusterIdentity.clusterKeyOf(id);
+          const [kept, joinedHalf] = [...halves].sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
+          joined = joinedHalf;
+          const primary = joined === SEED ? NODE_A : NODE_C;
+          const stuck = cnode('replicaR1111', '10.0.0.21', ['slave'], { master: primary.id });
+          cleanLine = `${stuck.id} ${stuck.address} myself,slave ${primary.id} 0 0 1 connected`;
+          ownLine = `${cleanLine} [42-<-aaaaaaaa]`;
+          views = { ...half, [joined]: [...half[joined], stuck] };
+          configs['conn-b'] = {
+            id: 'conn-b',
+            membership: { seedId: joined, nodeId: 'memberMMMMMM', origin: 'auto', source: 'cluster' },
+          };
+          const signature = replicaSlotSignature({
+            replicaId: stuck.id,
+            reason: 'replica_importing',
+            affectedSlots: [42],
+          } as ReplicaSlotAnomaly);
+          joinsOnRead = true;
+          storage.getAnomalyEvents.mockImplementation(async ({ connectionId, metricType, offset }) => {
+            if (offset || metricType !== MetricType.REPLICA_SLOT_STATE || connectionId !== 'conn-b') return [];
+            if (joinsOnRead) {
+              joinsOnRead = false;
+              views = {};
+              topology = [...left, ...right, stuck];
+              (service as any).clusterIdentity.observe(kept, topology);
+            }
+            return [{ id: 'row-b', timestamp: 1, message: 'msg', dedupeKey: signature }];
+          });
+          now += 1000;
+          await poll(ctxs[joined]);
+        });
+
+        it('raises no second warning for the finding of a stored one', async () => {
+          await pollAfter(1000, halves);
+          await pollAfter(GATE_MS, halves);
+          await (service as any).drainPersistenceOutbox();
+
+          expect(joinsOnRead).toBe(false);
+          expect(slotEvents()).toHaveLength(0);
+          expect(closedIds()).toEqual([]);
+        });
+
+        it('closes the stored warning once the replica is clean', async () => {
+          ownLine = cleanLine;
+
+          await pollAfter(1000, halves);
+          await (service as any).drainPersistenceOutbox();
+
+          expect(joinsOnRead).toBe(false);
+          expect(closedIds()).toEqual(['row-b']);
+        });
+      });
+
+      it('keeps asking the replica through the seed when polls are more than a minute apart', async () => {
+        jest.spyOn(service as any, 'getIntervalMs').mockReturnValue(90_000);
+        const membersFirst = ['conn-b', 'conn-c', SEED];
+        await pollAll();
+        getNodeConnection.mockClear();
+
+        await pollAfter(90_000, membersFirst);
+        await pollAfter(90_000, membersFirst);
+
+        expect(replicaReaders()).toEqual([SEED, SEED]);
+      });
+
       it('asks the replica through a member that can dial when the seed cannot', async () => {
         configs[SEED] = { ...(configs[SEED] as object), host: 'agent' };
         await pollAll();
@@ -34891,6 +35016,16 @@ describe('AnomalyService', () => {
         await pollAfter(GATE_MS);
 
         expect(slotEvents().map((e) => e.connectionId)).toEqual(['conn-c']);
+      });
+
+      it('forgets who raised the warnings of a removed connection that cannot dial', async () => {
+        configs[SEED] = { ...(configs[SEED] as object), host: 'agent' };
+        await pollAll();
+        await pollAfter(1000);
+
+        remove(SEED);
+
+        expect((service as any).replicaSlotEventOwners.has(SEED)).toBe(false);
       });
 
       it('raises the warning under the next reader when the connection that raised it is removed', async () => {
@@ -35064,6 +35199,84 @@ describe('AnomalyService', () => {
           await pollAfter(1000);
 
           expect(closedIds()).toEqual(['row-a']);
+        });
+
+        describe('under a seed that cannot dial other nodes', () => {
+          beforeEach(() => {
+            configs[SEED] = { ...(configs[SEED] as object), host: 'agent' };
+          });
+
+          it.each([
+            ['the seed', MEMBERS],
+            ['the reader', ['conn-b', 'conn-c', SEED]],
+          ])('keeps a warning the reader filed there when %s polls first', async (_first, order) => {
+            leaveOpen({ 'conn-a': ['row-a'] });
+            ownLine = STUCK;
+            await pollAll(order);
+
+            await pollAfter(1000, order);
+            await pollAfter(GATE_MS, order);
+            await (service as any).drainPersistenceOutbox();
+
+            expect(closedIds()).toEqual([]);
+            expect(slotEvents()).toHaveLength(0);
+          });
+
+          it('closes a warning the reader filed there once the replica is clean', async () => {
+            leaveOpen({ 'conn-a': ['row-a'] });
+            await pollAll();
+
+            await pollAfter(1000);
+            await (service as any).drainPersistenceOutbox();
+
+            expect(closedIds()).toEqual(['row-a']);
+          });
+
+          it('does not raise again a warning the reader filed there while the seed does not answer', async () => {
+            leaveOpen({ 'conn-a': ['row-a'] });
+            ownLine = STUCK;
+            await pollAll(['conn-b', 'conn-c']);
+
+            await pollAfter(GATE_MS, ['conn-b', 'conn-c']);
+            await (service as any).drainPersistenceOutbox();
+
+            expect(closedIds()).toEqual([]);
+            expect(slotEvents()).toHaveLength(0);
+          });
+
+          it.each([
+            ['the seed', MEMBERS],
+            ['the reader', ['conn-b', 'conn-c', SEED]],
+          ])('leaves a warning about the node of the seed to the seed when %s polls first', async (_first, order) => {
+            const ownSignature = replicaSlotSignature({
+              replicaId: NODE_A.id,
+              reason: 'replica_importing',
+              affectedSlots: [42],
+            } as ReplicaSlotAnomaly);
+            storage.getAnomalyEvents.mockImplementation(async ({ connectionId, metricType, offset }) =>
+              offset || metricType !== MetricType.REPLICA_SLOT_STATE || connectionId !== SEED
+                ? []
+                : [{ id: 'row-own', timestamp: 1, message: 'msg', dedupeKey: ownSignature }],
+            );
+            const seedAsReplica = { ...NODE_A, flags: ['slave'], master: NODE_B.id, slots: [] as number[][] };
+            const stuckSeed = { ...seedAsReplica, importingSlots: [{ slot: 42, sourceNodeId: NODE_B.id }] };
+            getNodeConnection.mockImplementation(async (nodeId: string) => {
+              if (nodeId === NODE_A.id) throw new Error('not reachable');
+              return { call: jest.fn(async () => ownLine) };
+            });
+            topology = [stuckSeed, NODE_B, NODE_C, REPLICA];
+            await pollAll(order);
+            await pollAfter(GATE_MS, order);
+            await (service as any).drainPersistenceOutbox();
+            expect(closedIds()).toEqual([]);
+            expect(slotEvents()).toHaveLength(0);
+            topology = [seedAsReplica, NODE_B, NODE_C, REPLICA];
+
+            await pollAfter(1000, order);
+            await (service as any).drainPersistenceOutbox();
+
+            expect(closedIds()).toEqual(['row-own']);
+          });
         });
 
         it('waits with the replica check while the open warnings of the cluster cannot be read', async () => {
