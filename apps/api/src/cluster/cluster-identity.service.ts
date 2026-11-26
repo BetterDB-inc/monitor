@@ -22,6 +22,15 @@ interface ClusterReader {
   readonly dials: boolean;
 }
 
+interface ReadTurns {
+  readonly polledAt: number;
+  readonly poll: number;
+  readonly last?: string;
+  readonly passPolls: number;
+  readonly granted: Map<string, number>;
+  readonly urgent: Set<string>;
+}
+
 interface HeldClaim {
   readonly claimedAt: number;
   readonly heldUntil: number;
@@ -34,6 +43,9 @@ const NOT_LIVE_FLAGS = ['handshake', 'noaddr', 'fail', 'fail?'];
 const STATE_HOLD_MS = 60_000;
 const PROMOTION_HOLD_MS = 10 * 60_000;
 const READER_GRACE_MS = 60_000;
+const READER_POLL_GRACE_MS = 15_000;
+const MEMBER_READS_PER_POLL = 8;
+const URGENT_READS_PER_POLL = 4;
 
 const OUTAGE = 'outage';
 const RECOVERY = 'recovery';
@@ -80,6 +92,7 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
   private readonly keyByNode = new Map<string, string>();
   private readonly claims = new Map<string, HeldClaim>();
   private readonly readers = new Map<string, ClusterReader>();
+  private readonly readTurns = new Map<string, ReadTurns>();
   private stopListening: (() => void) | undefined;
 
   constructor(private readonly connectionRegistry: ConnectionRegistry) {}
@@ -194,6 +207,28 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
     return !heldByAnother;
   }
 
+  takeTopologyRead(connectionId: string, schedule: string, now: number, urgent = false): boolean {
+    const clusterKey = this.clusterKeyOf(connectionId);
+    const reader = this.readers.get(clusterKey);
+    if (!reader || !this.stillReads(reader, clusterKey, now)) return true;
+    const turnsKey = `${clusterKey}|${schedule}`;
+    if (reader.connectionId === connectionId) {
+      this.readTurns.set(turnsKey, this.nextTurns(this.readTurns.get(turnsKey), connectionId, now));
+      return true;
+    }
+    const turns = this.readTurns.get(turnsKey);
+    if (!turns || now - turns.polledAt > READER_POLL_GRACE_MS || turns.passPolls === 1) return true;
+    if (urgent) turns.urgent.add(connectionId);
+    else turns.urgent.delete(connectionId);
+    return turns.granted.delete(connectionId);
+  }
+
+  topologyReadPolls(connectionId: string, schedule: string): number {
+    const clusterKey = this.clusterKeyOf(connectionId);
+    if (this.readers.get(clusterKey)?.connectionId === connectionId) return 1;
+    return this.readTurns.get(`${clusterKey}|${schedule}`)?.passPolls ?? 1;
+  }
+
   isReader(connectionId: string): boolean {
     return this.readers.get(this.clusterKeyOf(connectionId))?.connectionId === connectionId;
   }
@@ -237,6 +272,36 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
         !readsAnotherCluster(id) &&
         (anchors.has(id) || (membership !== undefined && anchors.has(membership.seedId))),
     );
+  }
+
+  private nextTurns(held: ReadTurns | undefined, readerId: string, now: number): ReadTurns {
+    const poll = (held?.poll ?? 0) + 1;
+    const others = this.clusterConnectionIds(readerId)
+      .filter((id) => id !== readerId)
+      .sort();
+    if (others.length <= MEMBER_READS_PER_POLL) {
+      return { polledAt: now, poll, passPolls: 1, granted: new Map(), urgent: new Set() };
+    }
+    const urgent = others.filter((id) => held?.urgent.has(id));
+    const first = urgent.slice(0, URGENT_READS_PER_POLL);
+    const rotating = others.filter((id) => !first.includes(id));
+    const slots = MEMBER_READS_PER_POLL - first.length;
+    const last = held?.last;
+    const next = last === undefined ? 0 : rotating.findIndex((id) => id > last);
+    const start = Math.max(next, 0);
+    const turn = Array.from({ length: slots }, (_, i) => rotating[(start + i) % rotating.length]);
+    const granted = new Map(
+      [...(held?.granted ?? [])].filter(([, grantedAt]) => grantedAt === poll - 1),
+    );
+    [...first, ...turn].forEach((id) => granted.set(id, poll));
+    return {
+      polledAt: now,
+      poll,
+      last: turn[turn.length - 1],
+      passPolls: Math.ceil(rotating.length / slots),
+      granted,
+      urgent: new Set(urgent),
+    };
   }
 
   private stillReads(reader: ClusterReader, clusterKey: string, now: number): boolean {
