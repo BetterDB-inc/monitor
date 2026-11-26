@@ -3217,9 +3217,9 @@ export class AnomalyService
     }
   }
 
-  private ownedSlotEventId(scope: string, connectionId: string): string {
+  private ownedSlotEventId(owners: Map<string, string>, connectionId: string): string {
     const id = randomUUID();
-    this.connectionClaims(this.replicaSlotEventOwners, scope, () => new Map<string, string>()).set(id, connectionId);
+    owners.set(id, connectionId);
     return id;
   }
 
@@ -9152,6 +9152,7 @@ export class AnomalyService
         : undefined;
       const findings = detectReplicaSlotState(nodes, shards);
       this.claimLegacyReplicaSlotEvents(scope, findings, unseenReplicaIds);
+      const owners = this.connectionClaims(this.replicaSlotEventOwners, scope, () => new Map<string, string>());
       await this.applyTopologyPersistenceGate({
         ctx,
         scope,
@@ -9165,9 +9166,9 @@ export class AnomalyService
         minPersistMs: AnomalyService.REPLICA_SLOT_STATE_MIN_PERSIST_MS,
         metricType: MetricType.REPLICA_SLOT_STATE,
         preserveSignature,
-        ownerOf: (eventId) => this.replicaSlotEventOwners.get(scope)?.get(eventId),
+        ownerOf: (eventId) => this.liveScopeState(owners).get(eventId),
         buildEvent: (a, signature) => ({
-          id: this.ownedSlotEventId(scope, ctx.connectionId),
+          id: this.ownedSlotEventId(this.liveScopeState(owners), ctx.connectionId),
           timestamp,
           metricType: MetricType.REPLICA_SLOT_STATE,
           anomalyType: AnomalyType.SPIKE,
