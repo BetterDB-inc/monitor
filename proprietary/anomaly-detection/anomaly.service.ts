@@ -10475,7 +10475,12 @@ export class AnomalyService
     );
     const isCovered: RegisteredAddress = (host, port, nodeId) =>
       nodeId === ownNodeId || isRegistered(host, port, nodeId);
-    return withHeldTargets(clusterTargets(nodes, isCovered), this.ownTopologyScopes.get(connectionId), isCovered);
+    return withHeldTargets(
+      clusterTargets(nodes, isCovered),
+      this.ownTopologyScopes.get(connectionId),
+      isCovered,
+      nodes,
+    );
   }
 
   private readIsCurrent(ctx: ConnectionContext, membershipAtRead: string): boolean {

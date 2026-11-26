@@ -33757,6 +33757,22 @@ describe('AnomalyService', () => {
         expect(coverageOf(WAITING)).toMatchObject({ reason: 'fanout_failed', notDialed: 1 });
       });
 
+      it('stops counting a primary of its own read once the cluster lists it as a replica', async () => {
+        grow(12);
+        topology = [...topology, primary(40)];
+        await pollAll();
+        await pollAfter(1000);
+        topology = topology.map((node) =>
+          node.id === nodeIdOf(40) ? { ...node, flags: ['slave'], master: nodeIdOf(1), slots: [] } : node,
+        );
+        const readsBefore = readsOf(WAITING);
+
+        await pollAfter(1000);
+
+        expect(readsOf(WAITING)).toBe(readsBefore);
+        expect(coverageOf(WAITING)?.notDialed ?? 0).toBe(0);
+      });
+
       it('follows a slot rebalance run it started with the nodes it asks for itself', async () => {
         grow(12);
         await pollAll();
