@@ -891,6 +891,22 @@ describe('ClusterIdentityService', () => {
       expect(service.takeTopologyRead(SEED, CHECKS, NOW + 7000, false, 5000)).toBe(true);
     });
 
+    it('lets the reader read on a poll the clock is behind its last read', () => {
+      clusterOf(11);
+      service.claimReader(SEED, NOW);
+      service.takeTopologyRead(SEED, CHECKS, NOW, false, 5000);
+
+      expect(service.takeTopologyRead(SEED, CHECKS, NOW - 60_000, false, 5000)).toBe(true);
+    });
+
+    it('lets a reader without an interval read on a poll the clock is behind its last read', () => {
+      clusterOf(11);
+      service.claimReader(SEED, NOW);
+      service.takeTopologyRead(SEED, CHECKS, NOW);
+
+      expect(service.takeTopologyRead(SEED, CHECKS, NOW - 60_000)).toBe(true);
+    });
+
     it('tells the interval the reader of a cluster read in turns reads at', () => {
       clusterOf(11);
       service.claimReader(SEED, NOW);

@@ -238,8 +238,9 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
       const held = this.readTurns.get(turnsKey);
       const turns = this.nextTurns(held, connectionId, now);
       const readAt = held?.readerReadAt;
+      const everyPoll = urgent || turns.passPolls === 1 || readerEveryMs <= 0;
       const reads =
-        urgent || turns.passPolls === 1 || readAt === undefined || now - readAt >= readerEveryMs;
+        everyPoll || readAt === undefined || now < readAt || now - readAt >= readerEveryMs;
       this.readTurns.set(turnsKey, {
         ...turns,
         readerReadAt: reads ? now : readAt,
