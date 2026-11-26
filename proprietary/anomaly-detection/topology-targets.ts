@@ -92,6 +92,42 @@ export function sentinelTargets(
   return scopeOf(targets, down);
 }
 
+export function withHeldTargets(
+  scope: TopologyScope,
+  held: TopologyScope | undefined,
+  isRegistered: RegisteredAddress,
+  listed: readonly ClusterNode[] = [],
+): TopologyScope {
+  if (!held) return scope;
+  const listedIds = new Set(listed.map((node) => node.id));
+  const listedAddrs = new Set(
+    listed.flatMap((node) => {
+      const address = splitHostPort(node.address);
+      return address ? [`${address.host}:${address.port}`] : [];
+    }),
+  );
+  const isListed = (addr: string, nodeId?: string): boolean =>
+    listedAddrs.has(addr) || (nodeId !== undefined && listedIds.has(nodeId));
+  const isLeftOut = (addr: string, nodeId?: string): boolean => {
+    const address = splitHostPort(addr);
+    return (
+      scope.members.has(addr) ||
+      !address ||
+      isListed(addr, nodeId) ||
+      isRegistered(address.host, address.port, nodeId)
+    );
+  };
+  const reachable = new Map(scope.targets.map((target) => [target.addr, target]));
+  const down = new Set([...scope.members].filter((addr) => !reachable.has(addr)));
+  for (const target of held.targets) {
+    if (!isLeftOut(target.addr, target.nodeId)) reachable.set(target.addr, target);
+  }
+  for (const addr of held.members) {
+    if (!reachable.has(addr) && !isLeftOut(addr)) down.add(addr);
+  }
+  return scopeOf(reachable, down);
+}
+
 function scopeOf(reachable: Map<string, TopologyTarget>, down: Set<string>): TopologyScope {
   const targets = [...reachable.values()].sort((a, b) => a.addr.localeCompare(b.addr));
   const unreachable = [...down].filter((addr) => !reachable.has(addr));

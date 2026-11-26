@@ -134,6 +134,15 @@ export class ClusterNodeViews {
     return { directory: view.directory, readAt: view.readAt };
   }
 
+  nodes(viewKey: string): { nodes: readonly ClusterNode[]; readAt: number } | undefined {
+    const view = this.views.get(viewKey);
+    return view && { nodes: view.read(), readAt: view.readAt };
+  }
+
+  readAt(viewKey: string): number | undefined {
+    return this.views.get(viewKey)?.readAt;
+  }
+
   keyOf(connectionId: string): string | undefined {
     return this.viewKeys.get(connectionId);
   }

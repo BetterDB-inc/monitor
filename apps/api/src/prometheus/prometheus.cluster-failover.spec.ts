@@ -66,6 +66,7 @@ describe('PrometheusService cluster.failover per cluster', () => {
   let dispatchClusterFailover: jest.Mock;
   let otelDispatch: jest.Mock;
   let identity: ClusterIdentityService;
+  let topologyReads: string[];
 
   const member = (seedId: string, host: string): FakeConfig => ({
     host,
@@ -89,6 +90,7 @@ describe('PrometheusService cluster.failover per cluster', () => {
     const client = {
       getClusterInfo: jest.fn(async () => clusterInfos[connectionId] ?? clusterInfo()),
       getClusterNodes: jest.fn(async () => {
+        topologyReads.push(connectionId);
         duringTopologyRead();
         return views[connectionId];
       }),
@@ -129,6 +131,7 @@ describe('PrometheusService cluster.failover per cluster', () => {
     };
     connected = new Set(Object.keys(configs));
     views = {};
+    topologyReads = [];
     clusterInfos = {};
     dispatchClusterFailover = jest.fn().mockResolvedValue(undefined);
     otelDispatch = jest.fn();
@@ -563,5 +566,62 @@ describe('PrometheusService cluster.failover per cluster', () => {
     await poll('manual-1', () => service['retireEpoch']('manual-1'));
 
     expect(identity.clusterKeyOf('manual-1')).toBe('manual-1');
+  });
+
+  describe('in a cluster with more connections than read the topology on one poll', () => {
+    const OTHERS = Array.from({ length: 11 }, (_, i) => `member-${String(i + 1).padStart(2, '0')}`);
+    const EVERYONE = [SEED, ...OTHERS];
+
+    async function nextPoll(nodes: ClusterNode[]): Promise<string[]> {
+      jest.setSystemTime(Date.now() + POLL_INTERVAL_MS);
+      topologyReads = [];
+      await pollAll(EVERYONE, nodes);
+      return topologyReads;
+    }
+
+    beforeEach(() => {
+      configs = {
+        [SEED]: { host: '10.0.0.1', port: 6379 },
+        ...Object.fromEntries(OTHERS.map((id, i) => [id, member(SEED, `10.0.2.${i + 1}`)])),
+      };
+    });
+
+    it('reads the topology on every connection while the cluster has no reader', async () => {
+      await pollAll(EVERYONE, HEALTHY);
+
+      expect(await nextPoll(HEALTHY)).toEqual(EVERYONE);
+    });
+
+    it('reads the topology on the reader and on eight other connections on a poll', async () => {
+      await pollAll(EVERYONE, HEALTHY);
+      identity.claimReader(SEED, Date.now());
+
+      expect(await nextPoll(HEALTHY)).toEqual([SEED, ...OTHERS.slice(0, 8)]);
+      expect(await nextPoll(HEALTHY)).toEqual([SEED, ...OTHERS.slice(0, 5), ...OTHERS.slice(8)]);
+    });
+
+    it('sends one event for a promotion the connections read on different polls', async () => {
+      await pollAll(EVERYONE, HEALTHY);
+      identity.claimReader(SEED, Date.now());
+      await nextPoll(HEALTHY);
+
+      await nextPoll(B_PROMOTED);
+      await nextPoll(B_PROMOTED);
+      await nextPoll(B_PROMOTED);
+
+      expect(failoverEvents()).toHaveLength(1);
+    });
+
+    it('reads the topology on every connection when the reader stops polling', async () => {
+      await pollAll(EVERYONE, HEALTHY);
+      identity.claimReader(SEED, Date.now());
+      await nextPoll(HEALTHY);
+      jest.setSystemTime(Date.now() + 20_000);
+      topologyReads = [];
+
+      await pollAll(OTHERS, HEALTHY);
+
+      expect(topologyReads).toEqual(OTHERS);
+    });
   });
 });

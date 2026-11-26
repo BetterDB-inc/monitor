@@ -38,6 +38,7 @@ export interface DivergencePoll {
   nodesPerZone: number;
   randomNodes: number;
   canRead: boolean;
+  leads?: boolean;
   readView: (node: ClusterNode) => Promise<ClusterNode[] | null>;
 }
 
@@ -115,7 +116,8 @@ export class TopologyDivergenceMonitor {
     if (!input.canRead && state.anchor === input.connectionId) state.anchor = undefined;
 
     const anchorIdle = input.at - state.anchorSeenAt > idleMs;
-    if (state.anchor && state.anchor !== input.connectionId && !anchorIdle) {
+    const takesOver = anchorIdle || (input.leads === true && input.canRead);
+    if (state.anchor && state.anchor !== input.connectionId && !takesOver) {
       if (state.observers.has(self.id)) state.offered.set(self.id, { nodes: input.nodes, at: input.at });
       return null;
     }

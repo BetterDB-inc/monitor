@@ -270,8 +270,16 @@ describe('ClusterIdentityService', () => {
       const signature = promotionSignature('node-b', 7);
       service.claimFailover('cluster-1', signature, NOW);
 
-      expect(service.claimFailover('cluster-1', signature, NOW + 10 * MINUTE_MS - 1)).toBe(false);
       expect(service.claimFailover('cluster-1', signature, NOW + 10 * MINUTE_MS)).toBe(true);
+    });
+
+    it('holds a promotion for ten minutes after the last connection saw it', () => {
+      const signature = promotionSignature('node-b', 7);
+      service.claimFailover('cluster-1', signature, NOW);
+
+      expect(service.claimFailover('cluster-1', signature, NOW + 10 * MINUTE_MS - 1)).toBe(false);
+      expect(service.claimFailover('cluster-1', signature, NOW + 20 * MINUTE_MS - 2)).toBe(false);
+      expect(service.claimFailover('cluster-1', signature, NOW + 30 * MINUTE_MS)).toBe(true);
     });
 
     it.each([
@@ -810,6 +818,379 @@ describe('ClusterIdentityService', () => {
       expect(service.isReader('member-1')).toBe(true);
       expect(service.isReader('member-2')).toBe(false);
       expect(service.claimReader('member-2', NOW + 1000)).toBe(false);
+    });
+  });
+
+  describe('topology read turns', () => {
+    const CHECKS = 'checks';
+    const nodeIds = (from: number, to: number): string[] =>
+      Array.from({ length: to - from + 1 }, (_, i) => `node-${String(from + i).padStart(2, '0')}`);
+
+    const clusterOf = (others: number): string[] => {
+      const members = nodeIds(1, others);
+      configs = { [SEED]: {}, ...Object.fromEntries(members.map((id) => [id, memberOf(SEED)])) };
+      service.observe(SEED, view('a', 'b'));
+      return members;
+    };
+
+    const readerPolls = (at = NOW, schedule = CHECKS): boolean =>
+      service.takeTopologyRead(SEED, schedule, at);
+
+    const turns = (
+      members: string[],
+      at = NOW,
+      urgent: string[] = [],
+      schedule = CHECKS,
+    ): string[] =>
+      members.filter((id) => service.takeTopologyRead(id, schedule, at, urgent.includes(id)));
+
+    it('lets every connection read while no connection reads for the cluster', () => {
+      const members = clusterOf(11);
+
+      expect(turns(members)).toEqual(members);
+      expect(turns(members)).toEqual(members);
+    });
+
+    it('lets every connection read on every poll in a cluster of nine connections', () => {
+      const members = clusterOf(8);
+      service.claimReader(SEED, NOW);
+
+      readerPolls();
+      expect(turns(members)).toEqual(members);
+      readerPolls();
+      expect(turns(members)).toEqual(members);
+    });
+
+    it('lets the reader read on every poll', () => {
+      clusterOf(11);
+      service.claimReader(SEED, NOW);
+
+      expect(readerPolls()).toBe(true);
+      expect(readerPolls()).toBe(true);
+    });
+
+    it('lets eight other connections read on a poll of the reader in a larger cluster', () => {
+      const members = clusterOf(11);
+      service.claimReader(SEED, NOW);
+
+      readerPolls();
+
+      expect(turns(members)).toEqual(nodeIds(1, 8));
+    });
+
+    it('gives a turn once', () => {
+      const members = clusterOf(11);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+      turns(members);
+
+      expect(turns(members)).toEqual([]);
+    });
+
+    it('goes on with the connections after the last one that had a turn', () => {
+      const members = clusterOf(11);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+      turns(members);
+
+      readerPolls();
+
+      expect(turns(members)).toEqual([...nodeIds(1, 5), ...nodeIds(9, 11)]);
+    });
+
+    it('keeps a turn for a connection that polls after the next poll of the reader', () => {
+      const members = clusterOf(30);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+
+      readerPolls();
+
+      expect(turns(members)).toEqual(nodeIds(1, 16));
+    });
+
+    it('drops a turn that was not taken for two polls of the reader', () => {
+      const members = clusterOf(30);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+      readerPolls();
+
+      readerPolls();
+
+      expect(turns(members)).toEqual(nodeIds(9, 24));
+    });
+
+    it('lets a connection that asks urgently read on every poll of the reader', () => {
+      const members = clusterOf(30);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+      turns(members, NOW, ['node-20']);
+
+      readerPolls();
+      const second = turns(members, NOW, ['node-20']);
+      readerPolls();
+      const third = turns(members, NOW, ['node-20']);
+
+      expect(second).toEqual([...nodeIds(9, 15), 'node-20']);
+      expect(third).toEqual([...nodeIds(16, 19), 'node-20', ...nodeIds(21, 23)]);
+    });
+
+    it('stops the urgent reads of a connection once it no longer asks for them', () => {
+      const members = clusterOf(30);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+      turns(members, NOW, ['node-20']);
+      readerPolls();
+      turns(members);
+
+      readerPolls();
+
+      expect(turns(members)).toEqual(nodeIds(16, 23));
+    });
+
+    it('lets at most four connections read urgently on a poll', () => {
+      const members = clusterOf(30);
+      const urgent = nodeIds(1, 6);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+      turns(members, NOW, urgent);
+
+      readerPolls();
+      const second = turns(members, NOW, urgent);
+      readerPolls();
+      const third = turns(members, NOW, urgent);
+
+      expect(second).toEqual([...nodeIds(1, 4), ...nodeIds(9, 12)]);
+      expect(third).toHaveLength(8);
+    });
+
+    it('takes the connections that ask urgently in turns when more than four ask', () => {
+      const members = clusterOf(30);
+      const urgent = nodeIds(1, 6);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+      turns(members, NOW, urgent);
+      readerPolls();
+      turns(members, NOW, urgent);
+
+      readerPolls();
+      const third = turns(members, NOW, urgent);
+      readerPolls();
+      const fourth = turns(members, NOW, urgent);
+
+      expect(third).toEqual(['node-01', 'node-02', 'node-05', 'node-06', ...nodeIds(13, 16)]);
+      expect(fourth).toEqual([...nodeIds(3, 6), ...nodeIds(17, 20)]);
+    });
+
+    it('lets every connection read when the reader has not polled for fifteen seconds', () => {
+      const members = clusterOf(11);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+      turns(members);
+
+      expect(turns(members, NOW + 15_000)).toEqual([]);
+      expect(turns(members, NOW + 15_001)).toEqual(members);
+    });
+
+    it('lets every connection read on every poll of a reader that polls over fifteen seconds apart', () => {
+      const members = clusterOf(30);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+      turns(members);
+
+      readerPolls(NOW + 15_001);
+
+      expect(turns(members, NOW + 15_001)).toEqual(members);
+      expect(turns(members, NOW + 15_002)).toEqual(members);
+    });
+
+    it('keeps the turns of a reader that polls fifteen seconds apart', () => {
+      const members = clusterOf(30);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+
+      readerPolls(NOW + 15_000);
+
+      expect(turns(members, NOW + 15_000)).toEqual(nodeIds(1, 16));
+    });
+
+    it('goes back to turns once the reader polls less than fifteen seconds apart again', () => {
+      const members = clusterOf(30);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+      readerPolls(NOW + 20_000);
+      turns(members, NOW + 20_000);
+
+      readerPolls(NOW + 21_000);
+
+      expect(turns(members, NOW + 21_000)).toEqual(nodeIds(9, 24));
+    });
+
+    it('takes one poll for a full pass while the reader polls over fifteen seconds apart', () => {
+      clusterOf(30);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+
+      readerPolls(NOW + 15_001);
+
+      expect(service.topologyReadPolls('node-01', CHECKS)).toBe(1);
+    });
+
+    it('lets every connection read until the reader polled for the first time', () => {
+      const members = clusterOf(11);
+      service.claimReader(SEED, NOW);
+
+      expect(turns(members)).toEqual(members);
+    });
+
+    it('lets every connection read once the reader has not read for over a minute', () => {
+      const members = clusterOf(11);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+      turns(members);
+
+      readerPolls(NOW + MINUTE_MS + 1);
+
+      expect(turns(members, NOW + MINUTE_MS + 1)).toEqual(members);
+    });
+
+    describe('records', () => {
+      const turnRecords = (): number => (service as any).readTurns.size;
+
+      it('are dropped once the last connection of the cluster is removed', () => {
+        const members = clusterOf(11);
+        service.claimReader(SEED, NOW);
+        readerPolls();
+
+        [...members, SEED].forEach((id) => service.forget(id));
+
+        expect(turnRecords()).toBe(0);
+      });
+
+      it('are kept when one connection of the cluster is removed', () => {
+        const members = clusterOf(11);
+        service.claimReader(SEED, NOW);
+        readerPolls();
+
+        service.forget('node-01');
+
+        expect(turns(members.slice(1))).toEqual(nodeIds(2, 8));
+      });
+
+      it('are dropped for a key that joined another', () => {
+        service.observe('member-1', view('a', 'b'));
+        service.observe('manual', view('c', 'd'));
+        service.claimReader('member-1', NOW);
+        service.claimReader('manual', NOW);
+        service.takeTopologyRead('member-1', CHECKS, NOW);
+        service.takeTopologyRead('manual', CHECKS, NOW);
+
+        service.observe(SEED, view('a', 'b', 'c', 'd'));
+
+        expect(turnRecords()).toBe(1);
+      });
+    });
+
+    describe('after another connection takes over as reader', () => {
+      let members: string[];
+
+      beforeEach(() => {
+        members = clusterOf(30);
+        members.forEach((id) => service.observe(id, view('a', 'b')));
+        service.claimReader(SEED, NOW);
+        readerPolls();
+        turns(members);
+        service.forget(SEED);
+        delete configs[SEED];
+        service.claimReader('node-01', NOW);
+      });
+
+      it('lets every connection read until the new reader polled', () => {
+        expect(turns(members.slice(1))).toEqual(members.slice(1));
+        expect(service.topologyReadPolls('node-02', CHECKS)).toBe(1);
+      });
+
+      it('goes on with the turns once the new reader polled', () => {
+        service.takeTopologyRead('node-01', CHECKS, NOW);
+
+        expect(turns(members.slice(1))).toEqual(nodeIds(9, 16));
+      });
+    });
+
+    it('keeps the turns of two schedules apart', () => {
+      const members = clusterOf(11);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+      turns(members);
+
+      readerPolls(NOW, 'metrics');
+
+      expect(turns(members, NOW, [], 'metrics')).toEqual(nodeIds(1, 8));
+    });
+
+    it('takes one poll for a full pass while every connection reads', () => {
+      clusterOf(8);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+
+      expect(service.topologyReadPolls('node-01', CHECKS)).toBe(1);
+    });
+
+    it('takes as many polls for a full pass as it takes to give every connection a turn', () => {
+      const members = clusterOf(30);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+
+      expect(service.topologyReadPolls('node-01', CHECKS)).toBe(4);
+      turns(members, NOW, nodeIds(1, 2));
+      readerPolls();
+      expect(service.topologyReadPolls('node-30', CHECKS)).toBe(5);
+    });
+
+    it('takes one poll between the reads of a connection that asks urgently', () => {
+      const members = clusterOf(30);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+      turns(members, NOW, nodeIds(1, 2));
+      readerPolls();
+
+      expect(service.topologyReadPolls('node-01', CHECKS, true)).toBe(1);
+    });
+
+    it('takes as many polls between urgent reads as it takes to give every urgent connection a turn', () => {
+      const members = clusterOf(30);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+      turns(members, NOW, nodeIds(1, 9));
+      readerPolls();
+
+      expect(service.topologyReadPolls('node-01', CHECKS, true)).toBe(3);
+    });
+
+    it('takes no more polls between urgent reads than a full pass takes', () => {
+      const members = clusterOf(12);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+      turns(members, NOW, nodeIds(1, 12));
+      readerPolls();
+
+      expect(service.topologyReadPolls('node-01', CHECKS)).toBe(2);
+      expect(service.topologyReadPolls('node-01', CHECKS, true)).toBe(2);
+    });
+
+    it('takes one poll between urgent reads while every connection reads', () => {
+      clusterOf(8);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+
+      expect(service.topologyReadPolls('node-01', CHECKS, true)).toBe(1);
+    });
+
+    it('takes one poll for a full pass on the reader', () => {
+      clusterOf(30);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+
+      expect(service.topologyReadPolls(SEED, CHECKS)).toBe(1);
     });
   });
 
