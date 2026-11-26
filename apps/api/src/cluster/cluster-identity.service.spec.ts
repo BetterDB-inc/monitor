@@ -967,6 +967,50 @@ describe('ClusterIdentityService', () => {
       expect(turns(members, NOW + 15_001)).toEqual(members);
     });
 
+    it('lets every connection read on every poll of a reader that polls over fifteen seconds apart', () => {
+      const members = clusterOf(30);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+      turns(members);
+
+      readerPolls(NOW + 15_001);
+
+      expect(turns(members, NOW + 15_001)).toEqual(members);
+      expect(turns(members, NOW + 15_002)).toEqual(members);
+    });
+
+    it('keeps the turns of a reader that polls fifteen seconds apart', () => {
+      const members = clusterOf(30);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+
+      readerPolls(NOW + 15_000);
+
+      expect(turns(members, NOW + 15_000)).toEqual(nodeIds(1, 16));
+    });
+
+    it('goes back to turns once the reader polls less than fifteen seconds apart again', () => {
+      const members = clusterOf(30);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+      readerPolls(NOW + 20_000);
+      turns(members, NOW + 20_000);
+
+      readerPolls(NOW + 21_000);
+
+      expect(turns(members, NOW + 21_000)).toEqual(nodeIds(9, 24));
+    });
+
+    it('takes one poll for a full pass while the reader polls over fifteen seconds apart', () => {
+      clusterOf(30);
+      service.claimReader(SEED, NOW);
+      readerPolls();
+
+      readerPolls(NOW + 15_001);
+
+      expect(service.topologyReadPolls('node-01', CHECKS)).toBe(1);
+    });
+
     it('lets every connection read until the reader polled for the first time', () => {
       const members = clusterOf(11);
       service.claimReader(SEED, NOW);

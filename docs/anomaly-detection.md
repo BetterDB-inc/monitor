@@ -536,7 +536,7 @@ Everything else stays per connection or per node: the cluster state, hot shards,
 - The reader reads `CLUSTER NODES` and `CLUSTER SHARDS` on every poll.
 - Of the other connections, eight read on each poll of the reader, in the order of their ids. With 500 connections and a poll interval of 1 second, a connection has its turn about once a minute.
 
-Every connection reads on every poll, as before, in a cluster with nine connections or fewer, while a cluster has no reader, while its reader has not read for 60 seconds, and while its reader has not polled for more than 15 seconds. With a poll interval above 15 seconds the turns are therefore never used.
+Every connection reads on every poll, as before, in a cluster with nine connections or fewer, while a cluster has no reader, while its reader has not read for 60 seconds, while its reader has not polled for more than 15 seconds, and while the last two polls of its reader were more than 15 seconds apart. With a poll interval above 15 seconds the turns are therefore never used.
 
 **A poll without a turn.** The connection sends no `CLUSTER NODES` and no `CLUSTER SHARDS`. The checks that judge the node's own line (primary without replicas, reshard pressure, keys in slots the node does not own) and the hot shard check do not run on that poll: they never run on a line that was read earlier. The checks on `INFO` and the slot migration check run on every poll. The checks on other primaries go on from the view a connection of the cluster read last, for as long as it is at most 30 seconds old, or three poll intervals when that is longer.
 
