@@ -10409,6 +10409,7 @@ export class AnomalyService
       ) ?? true;
     return (
       hasTurn ||
+      !this.ownLineReads.has(connectionId) ||
       this.ownLineIsDue(connectionId, info) ||
       this.holdsShardLoad(connectionId) ||
       !this.latestClusterNodes(connectionId, timestamp)

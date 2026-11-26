@@ -542,6 +542,7 @@ Every connection reads on every poll, as before, in a cluster with nine connecti
 
 **Reading outside a turn.** A connection reads on that same poll, whoever has the turn, when
 
+- it has not read its own line yet, as on the first poll of a connection that was just added
 - `INFO` shows another role than at its last read, so a promoted or demoted node is read at once
 - its shard is expected to have replicas and `INFO` shows none in sync
 - a primary without replicas warning for its shard is waiting its time or open

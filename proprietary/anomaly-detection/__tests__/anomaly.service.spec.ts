@@ -33686,6 +33686,17 @@ describe('AnomalyService', () => {
       expect(readWith('getClusterShards')).toEqual(due);
     });
 
+    it('reads its own line on the first poll of a connection that is added later', async () => {
+      grow(30);
+      await pollAll();
+      await pollAfter(1000);
+      grow(31);
+
+      await pollAfter(1000);
+
+      expect(readWith('getClusterShards')).toContain(idOf(30));
+    });
+
     describe('on a connection without a turn', () => {
       const WAITING = idOf(6);
       const coverageOf = (connectionId: string) => service.getFanoutCoverage(connectionId)[0];
