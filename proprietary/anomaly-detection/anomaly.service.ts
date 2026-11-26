@@ -655,14 +655,14 @@ interface ConnectionPersistenceState {
 const INCIDENT_REBUILD_INTERVAL_MS = 30_000;
 const MB = 1024 * 1024;
 
-/**
- * Whole MB at 10 MB and above. Below that, one decimal, so a 0.6 MB backlog
- * does not display as the same integer as its target.
- */
 function movesSlots(node: ClusterNode | undefined): boolean {
   return (node?.migratingSlots?.length ?? 0) + (node?.importingSlots?.length ?? 0) > 0;
 }
 
+/**
+ * Whole MB at 10 MB and above. Below that, one decimal, so a 0.6 MB backlog
+ * does not display as the same integer as its target.
+ */
 function megabytes(bytes: number, up: boolean): number {
   const mb = bytes / MB;
   const scale = mb > 0 && mb < 10 ? 10 : 1;
@@ -8383,7 +8383,7 @@ export class AnomalyService
   ): ClusterNode | null {
     const cached = this.reshardNodeSelves.get(key);
     if (!cached || cached.self.id !== nodeId) return null;
-    if ((cached.self.migratingSlots?.length ?? 0) + (cached.self.importingSlots?.length ?? 0) > 0) return null;
+    if (movesSlots(cached.self)) return null;
     const intervalMs = this.getIntervalMs();
     if (timestamp - cached.readAt >= RESHARD_QUIET_POLLS * this.nodeReadIntervalMs(connectionId, key)) return null;
     const clusterKey = this.connectionClusterKeys.get(connectionId);
