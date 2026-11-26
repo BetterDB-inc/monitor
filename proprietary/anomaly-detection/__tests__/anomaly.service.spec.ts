@@ -33818,6 +33818,36 @@ describe('AnomalyService', () => {
       expect(strayReplicaEvents()).toHaveLength(2);
     });
 
+    it('keeps the warnings of a joined half when its connection is removed before it reads the whole cluster', async () => {
+      const halves = [SEED, 'conn-c'];
+      delete configs['conn-b'];
+      configs['conn-c'] = { id: 'conn-c' };
+      const left = [NODE_A, NODE_B, ...ORPHANED.slice(HEALTHY.length)];
+      const right = [
+        NODE_C,
+        cnode('nodeXXXXXXXX', '10.0.0.7', ['master']),
+        cnode('replicaHHHHH', '10.0.0.8', ['slave'], { master: 'deadprimIIII' }),
+        cnode('deadprimIIII', '10.0.0.9', ['master', 'fail'], { linkState: 'disconnected' }),
+      ];
+      const half: Record<string, ClusterNode[]> = { [SEED]: left, 'conn-c': right };
+      const strayReplicaEvents = (): AnomalyEvent[] =>
+        eventsOf(MetricType.CLUSTER_TOPOLOGY).filter((e) => /replicaE|replicaH/.test(e.message));
+      views = half;
+      await pollAll(halves);
+      await pollAfter(GATE_MS, halves);
+      const keyOf = (id: string): string => (service as any).clusterIdentity.clusterKeyOf(id);
+      const [kept, joined] = [...halves].sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
+      views = { [joined]: half[joined] };
+      topology = [...left, ...right];
+      await pollAfter(1000, [kept]);
+      remove(joined);
+
+      await pollAfter(1000, [kept]);
+      await pollAfter(GATE_MS, [kept]);
+
+      expect(strayReplicaEvents()).toHaveLength(2);
+    });
+
     it('keeps a warning with its cluster when one connection starts reading another cluster', async () => {
       topology = ORPHANED;
       await pollAll();

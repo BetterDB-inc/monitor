@@ -10356,6 +10356,19 @@ export class AnomalyService
     return identity.claimReader(connectionId, timestamp, this.dialsDataNodes(connectionId));
   }
 
+  private joinClusterScopes(connectionId: string, nodes: ClusterNode[]): void {
+    const identity = this.clusterIdentity;
+    const joined = identity?.observe(connectionId, nodes) ?? [];
+    if (!identity || joined.length === 0) return;
+    const scope = identity.clusterKeyOf(connectionId);
+    for (const from of joined) {
+      this.moveClusterScope(from, scope);
+      for (const [member, key] of this.clusterScopes) {
+        if (key === from) this.clusterScopes.set(member, scope);
+      }
+    }
+  }
+
   private isScopeRead(scope: string, exceptId: string): boolean {
     return [...this.clusterScopes.keys()].some(
       (connectionId) => connectionId !== exceptId && this.clusterScopeOf(connectionId) === scope,
@@ -10700,7 +10713,7 @@ export class AnomalyService
   }
 
   private rememberClusterKey(connectionId: string, nodes: ClusterNode[], readIsCurrent: boolean): void {
-    if (readIsCurrent) this.clusterIdentity?.observe(connectionId, nodes);
+    if (readIsCurrent) this.joinClusterScopes(connectionId, nodes);
     const clusterKey = this.clusterKeyOfNodes(nodes);
     if (!clusterKey) {
       this.forgetClusterKey(connectionId);
