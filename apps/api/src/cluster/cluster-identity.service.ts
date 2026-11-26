@@ -188,7 +188,13 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
       held?.sightingOnly === true &&
       signature.sightingOnly !== true &&
       held.releaseTimes.length === 0;
-    if (held && !renewed && !released && !reportsSighting) return false;
+    if (held && !renewed && !released && !reportsSighting) {
+      if (signature.epoch !== undefined) {
+        const heldUntil = Math.max(held.heldUntil, now + signature.holdMs);
+        this.claims.set(claim, { ...held, heldUntil });
+      }
+      return false;
+    }
     this.claims.set(claim, {
       claimedAt: reportsSighting ? held.claimedAt : now,
       heldUntil: now + signature.holdMs,

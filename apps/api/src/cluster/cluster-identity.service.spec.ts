@@ -270,8 +270,16 @@ describe('ClusterIdentityService', () => {
       const signature = promotionSignature('node-b', 7);
       service.claimFailover('cluster-1', signature, NOW);
 
-      expect(service.claimFailover('cluster-1', signature, NOW + 10 * MINUTE_MS - 1)).toBe(false);
       expect(service.claimFailover('cluster-1', signature, NOW + 10 * MINUTE_MS)).toBe(true);
+    });
+
+    it('holds a promotion for ten minutes after the last connection saw it', () => {
+      const signature = promotionSignature('node-b', 7);
+      service.claimFailover('cluster-1', signature, NOW);
+
+      expect(service.claimFailover('cluster-1', signature, NOW + 10 * MINUTE_MS - 1)).toBe(false);
+      expect(service.claimFailover('cluster-1', signature, NOW + 20 * MINUTE_MS - 2)).toBe(false);
+      expect(service.claimFailover('cluster-1', signature, NOW + 30 * MINUTE_MS)).toBe(true);
     });
 
     it.each([
