@@ -33773,6 +33773,17 @@ describe('AnomalyService', () => {
         expect(coverageOf(WAITING)?.notDialed ?? 0).toBe(0);
       });
 
+      it('builds the node list of the view once for each connection that waits', async () => {
+        grow(12);
+        await pollAll();
+        await pollAfter(1000);
+        const built = jest.spyOn((service as any).clusterNodeViews, 'nodes');
+
+        await pollAfter(1000);
+
+        expect(built).toHaveBeenCalledTimes(3);
+      });
+
       it('follows a slot rebalance run it started with the nodes it asks for itself', async () => {
         grow(12);
         await pollAll();

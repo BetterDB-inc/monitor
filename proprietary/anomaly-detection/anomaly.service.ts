@@ -10412,7 +10412,7 @@ export class AnomalyService
       !this.ownLineReads.has(connectionId) ||
       this.ownLineIsDue(connectionId, info) ||
       this.holdsShardLoad(connectionId) ||
-      !this.latestClusterNodes(connectionId, timestamp)
+      !this.hasLatestClusterNodes(connectionId, timestamp)
     );
   }
 
@@ -10457,10 +10457,16 @@ export class AnomalyService
     );
   }
 
-  private latestClusterNodes(connectionId: string, timestamp: number): readonly ClusterNode[] | undefined {
+  private hasLatestClusterNodes(connectionId: string, timestamp: number): boolean {
     const viewKey = this.clusterNodeViews.keyOf(connectionId);
-    const view = viewKey === undefined ? undefined : this.clusterNodeViews.nodes(viewKey);
-    return view && timestamp - view.readAt <= this.nodeViewStaleMs() ? view.nodes : undefined;
+    const readAt = viewKey === undefined ? undefined : this.clusterNodeViews.readAt(viewKey);
+    return readAt !== undefined && timestamp - readAt <= this.nodeViewStaleMs();
+  }
+
+  private latestClusterNodes(connectionId: string, timestamp: number): readonly ClusterNode[] | undefined {
+    if (!this.hasLatestClusterNodes(connectionId, timestamp)) return undefined;
+    const viewKey = this.clusterNodeViews.keyOf(connectionId);
+    return viewKey === undefined ? undefined : this.clusterNodeViews.nodes(viewKey)?.nodes;
   }
 
   private otherPrimariesOfCluster(connectionId: string, timestamp: number): TopologyScope | undefined {

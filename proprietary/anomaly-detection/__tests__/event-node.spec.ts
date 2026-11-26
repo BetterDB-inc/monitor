@@ -340,6 +340,16 @@ describe('ClusterNodeViews', () => {
     });
   });
 
+  it('tells when a view was read without building its node list', () => {
+    const views = new ClusterNodeViews();
+    const describe = jest.fn(() => seenFrom(PRIMARY_A));
+    views.remember('conn-a', 'cluster-1', seenFrom(PRIMARY_A), 1_000, describe);
+
+    expect(views.readAt('cluster-1')).toBe(1_000);
+    expect(views.readAt('cluster-2')).toBeUndefined();
+    expect(describe).not.toHaveBeenCalled();
+  });
+
   it('builds the directory only when it is asked for, once per read', () => {
     const views = new ClusterNodeViews();
     const describe = jest.fn(() => seenFrom(PRIMARY_B));
