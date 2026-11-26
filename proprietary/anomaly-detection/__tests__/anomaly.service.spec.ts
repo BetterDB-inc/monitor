@@ -33783,6 +33783,14 @@ describe('AnomalyService', () => {
       expect(eventsOf(MetricType.CLUSTER_TOPOLOGY).map((e) => e.connectionId).sort()).toEqual([SEED, 'conn-x']);
     });
 
+    it('runs the checks once on the poll the seed takes over from a member', async () => {
+      const checks = jest.spyOn(service as any, 'detectGhostMembers');
+
+      await pollAll(['conn-b', 'conn-c', SEED]);
+
+      expect(checks).toHaveBeenCalledTimes(1);
+    });
+
     it('does not raise the warnings of two halves again once they turn out to be one cluster', async () => {
       const halves = [SEED, 'conn-c'];
       delete configs['conn-b'];
@@ -33864,6 +33872,15 @@ describe('AnomalyService', () => {
         await pollAfter(GATE_MS);
 
         expect(slotEvents().map((e) => e.connectionId)).toEqual([SEED]);
+      });
+
+      it('asks the replica through a member that can dial when the seed cannot', async () => {
+        configs[SEED] = { ...(configs[SEED] as object), host: 'agent' };
+        await pollAll();
+
+        await pollAfter(1000);
+
+        expect(replicaReaders()).toEqual(['conn-b']);
       });
 
       it('asks the replica through the member that takes over as reader', async () => {

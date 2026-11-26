@@ -10345,7 +10345,7 @@ export class AnomalyService
     if (previous !== undefined && previous !== scope && !this.isScopeRead(previous, connectionId)) {
       this.moveClusterScope(previous, scope);
     }
-    return identity.claimReader(connectionId, timestamp);
+    return identity.claimReader(connectionId, timestamp, this.dialsDataNodes(connectionId));
   }
 
   private isScopeRead(scope: string, exceptId: string): boolean {

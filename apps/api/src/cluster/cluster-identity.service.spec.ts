@@ -648,16 +648,58 @@ describe('ClusterIdentityService', () => {
       readAll(SEED, 'member-1');
       service.claimReader('member-1', NOW);
 
-      expect(service.claimReader(SEED, NOW)).toBe(true);
+      service.claimReader(SEED, NOW);
+
+      expect(service.isReader(SEED)).toBe(true);
       expect(service.claimReader('member-1', NOW + 1000)).toBe(false);
-      expect(service.isReader('member-1')).toBe(false);
+      expect(service.claimReader(SEED, NOW + 1000)).toBe(true);
+    });
+
+    it('leaves the poll on which a connection takes over from a reader that still reads to that reader', () => {
+      readAll(SEED, 'member-1');
+      service.claimReader('member-1', NOW);
+
+      expect(service.claimReader(SEED, NOW)).toBe(false);
+    });
+
+    it('prefers a connection that can dial the other nodes over the seed', () => {
+      readAll(SEED, 'member-1');
+      service.claimReader(SEED, NOW, false);
+
+      service.claimReader('member-1', NOW, true);
+
+      expect(service.isReader('member-1')).toBe(true);
+      expect(service.claimReader(SEED, NOW + 1000, false)).toBe(false);
+      expect(service.claimReader('member-1', NOW + 1000, true)).toBe(true);
+    });
+
+    it('is the seed that cannot dial while no connection that can dial reads', () => {
+      readAll(SEED, 'member-1');
+      service.claimReader('member-1', NOW, false);
+
+      service.claimReader(SEED, NOW, false);
+
+      expect(service.isReader(SEED)).toBe(true);
+    });
+
+    it('keeps the reader that can dial when two clusters that were read apart are joined', () => {
+      service.observe('member-1', view('a', 'b'));
+      service.observe('member-2', view('c', 'd'));
+      service.claimReader('member-1', NOW, false);
+      service.claimReader('member-2', NOW, true);
+
+      service.observe('member-2', view('a', 'b', 'c', 'd'));
+
+      expect(service.isReader('member-2')).toBe(true);
     });
 
     it('is the lowest connection id when no user-added connection reads', () => {
       readAll('member-1', 'member-2');
       service.claimReader('member-2', NOW);
 
-      expect(service.claimReader('member-1', NOW)).toBe(true);
+      service.claimReader('member-1', NOW);
+
+      expect(service.isReader('member-1')).toBe(true);
       expect(service.claimReader('member-2', NOW + 1000)).toBe(false);
     });
 
@@ -666,7 +708,9 @@ describe('ClusterIdentityService', () => {
       readAll('manual', 'manual-2');
       service.claimReader('manual-2', NOW);
 
-      expect(service.claimReader('manual', NOW)).toBe(true);
+      service.claimReader('manual', NOW);
+
+      expect(service.isReader('manual')).toBe(true);
       expect(service.claimReader('manual-2', NOW + 1000)).toBe(false);
     });
 
@@ -699,7 +743,9 @@ describe('ClusterIdentityService', () => {
       service.claimReader(SEED, NOW);
       service.claimReader('member-1', NOW + 2 * MINUTE_MS);
 
-      expect(service.claimReader(SEED, NOW + 2 * MINUTE_MS + 1000)).toBe(true);
+      service.claimReader(SEED, NOW + 2 * MINUTE_MS + 1000);
+
+      expect(service.isReader(SEED)).toBe(true);
       expect(service.claimReader('member-1', NOW + 2 * MINUTE_MS + 2000)).toBe(false);
     });
 
@@ -740,6 +786,26 @@ describe('ClusterIdentityService', () => {
       expect(service.isReader('member-1')).toBe(true);
       expect(service.isReader('member-2')).toBe(false);
       expect(service.claimReader('member-2', NOW + 1000)).toBe(false);
+    });
+  });
+
+  describe('keys joined by a view', () => {
+    it('are the keys of the clusters a view shows to be one', () => {
+      service.observe('member-1', view('a', 'b'));
+      service.observe('member-2', view('c', 'd'));
+      const keys = ['member-1', 'member-2'].map((id) => service.clusterKeyOf(id));
+
+      const joined = service.observe('member-2', view('a', 'b', 'c', 'd'));
+
+      const kept = service.clusterKeyOf('member-2');
+      expect(joined).toEqual(keys.filter((key) => key !== kept));
+      expect(service.clusterKeyOf('member-1')).toBe(kept);
+    });
+
+    it('are none for a view of one cluster', () => {
+      service.observe('member-1', view('a', 'b'));
+
+      expect(service.observe('member-2', view('a', 'b'))).toEqual([]);
     });
   });
 
