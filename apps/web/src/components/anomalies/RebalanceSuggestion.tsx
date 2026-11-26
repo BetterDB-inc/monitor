@@ -104,6 +104,7 @@ const NO_PLAN_REASONS: Record<
   cluster_hot: 'No other shard has room for this load. Consider adding a shard.',
   too_many_targets: 'This load would have to be spread over too many shards for one suggestion.',
   no_target: 'No other primary can take slots.',
+  source_excluded: 'The placement policy excludes this shard, so no slots move off it.',
   unhealthy_node:
     'A primary that owns slots is failed or suspect. A suggestion comes back when it is healthy again.',
   migration_running:

@@ -1,22 +1,24 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import type {
-  PlacementBalance,
-  PlacementMode,
-  PlacementStatus,
-  PlacementSupportIssue,
-  PlacementSupportReason,
+import {
+  DEFAULT_PLACEMENT_SETTINGS,
+  type PlacementBalance,
+  type PlacementMode,
+  type PlacementStatus,
+  type PlacementSupportIssue,
+  type PlacementSupportReason,
 } from '@betterdb/shared';
 
-const { get, setMode, canMutate, license } = vi.hoisted(() => ({
+const { get, setMode, setPolicy, canMutate, license } = vi.hoisted(() => ({
   get: vi.fn(),
   setMode: vi.fn(),
+  setPolicy: vi.fn(),
   canMutate: vi.fn(() => true),
   license: { licensed: true },
 }));
 
-vi.mock('../../api/placement', () => ({ placementApi: { get, setMode } }));
+vi.mock('../../api/placement', () => ({ placementApi: { get, setMode, setPolicy } }));
 vi.mock('../../hooks/useCanMutate', () => ({ useCanMutate: canMutate }));
 vi.mock('../../hooks/useLicense', () => ({
   useLicense: () => ({ license: null, hasFeature: () => license.licensed }),
@@ -121,6 +123,8 @@ function status(overrides: Partial<PlacementStatus> = {}): PlacementStatus {
     selectableModes: ['observe', 'recommend'],
     support: support([FLAG_OFF]),
     balance: balance(),
+    settings: DEFAULT_PLACEMENT_SETTINGS,
+    policyVersion: 3,
     ...overrides,
   };
 }
@@ -166,6 +170,39 @@ describe('PlacementCard', () => {
     expect(modeButton(region, 'Approve')).toBeDisabled();
     expect(modeButton(region, 'Auto')).toBeDisabled();
     expect(region).toHaveTextContent('Approve and Auto come in a later release.');
+  });
+
+  it('saves the policy from the drawer at the version it read', async () => {
+    setPolicy.mockResolvedValue(
+      status({ settings: { ...DEFAULT_PLACEMENT_SETTINGS, triggerRatio: 3 }, policyVersion: 4 }),
+    );
+    const client = await show(status());
+
+    fireEvent.click(within(await card()).getByRole('button', { name: 'Edit policy' }));
+    fireEvent.change(screen.getByLabelText('Trigger ratio'), { target: { value: '3' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(setPolicy).toHaveBeenCalledWith(
+        'conn-1',
+        { ...DEFAULT_PLACEMENT_SETTINGS, triggerRatio: 3 },
+        3,
+      ),
+    );
+    await waitFor(() =>
+      expect(client.getQueryData<PlacementStatus>(['placement', 'conn-1'])?.policyVersion).toBe(4),
+    );
+    await waitFor(() => expect(screen.queryByLabelText('Trigger ratio')).not.toBeInTheDocument());
+  });
+
+  it('lets a member view the policy without saving it', async () => {
+    canMutate.mockReturnValue(false);
+    await show(status());
+
+    fireEvent.click(within(await card()).getByRole('button', { name: 'View policy' }));
+
+    expect(screen.getByLabelText('Trigger ratio')).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument();
   });
 
   it('saves a new mode on the cluster', async () => {

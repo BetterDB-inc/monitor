@@ -843,6 +843,22 @@ describe('planRebalances', () => {
     },
   );
 
+  it('plans nothing for a hot shard the policy excludes, and still plans the next one', () => {
+    const [first, second] = planRebalances(hot, hotPair(5), [], {
+      ...DEFAULT_REBALANCE_POLICY,
+      excludedShardIds: ['a'],
+    });
+
+    expect(first).toEqual({
+      kind: 'no_plan',
+      action: 'spread',
+      reason: 'source_excluded',
+      pinnedSlots: [],
+    });
+    expect(planOf(second).moves.map((move) => move.targetShardId)).not.toContain('a');
+    expect(planOf(second).plannedAfter).toEqual([]);
+  });
+
   it('shows the later plan the loads the earlier plan leaves', () => {
     const [first, second] = planRebalances(hot, hotPair(5)).map(planOf);
     const moved = first.moves.find((move) => move.targetShardId === 'c')!.cpuUsecPerSecond;

@@ -876,6 +876,7 @@ The suggestion is one of two things:
   | `cluster_hot` | All the other shards together cannot take even 25% of the shard's CPU without going over 0.8 of a core or over 1.25 times the projected median. Add a shard. |
   | `too_many_targets` | The other shards have room, but not within 4 targets: the load would have to be spread over more shards than one suggestion covers. |
   | `no_target` | No other healthy primary can take slots. |
+  | `source_excluded` | The [placement policy](#placement-policy) of the cluster excludes the hot shard, so no slots move off it. |
   | `unhealthy_node` | A primary that owns slots is failed or suspect. A failed or suspect primary with no slots, such as a node ID the cluster still lists until `CLUSTER FORGET`, does not block a plan and is never a target. |
   | `migration_running` | A slot migration or reshard is running, or the monitor could not ask every primary before it made a new suggestion. |
   | `settling` | Slots changed owner and the slot load is still being measured, or a shard in the last measurement is no longer a primary. |
@@ -972,10 +973,26 @@ When one slot carries the load (`key_level`), the explanation also advises movin
 
 Observe is never blocked. When the stored mode is blocked, the cluster runs in the highest mode below it that is not, and the card says why. The verdict is computed when it is read and kept for 30 seconds. Whether a plan is shown and can be run reads the stored mode first: Observe asks no node, and Recommend checks only the reasons that block it, so a slow primary does not hold up the hot shards or the run.
 
-**API.** Both routes take the connection in `X-Connection-Id` and need the Anomaly Detection feature (Pro).
+#### Placement policy
 
-- `GET /api/anomaly/placement` answers `{ connectionId, mode, effectiveMode, selectableModes, support, balance }`. `connectionId` is the seed connection. `support` has `issues` (each with `reason`, `detail`, and `provider` for `provider_managed`) and `modes`, which gives `available` and `blockedBy` for every mode. `balance` lists each shard with its `address`, `slotCount`, `cpuUsecPerSecond`, `cpuShare`, `networkShare`, `ratio` to the median (`null` for a shard without slots) and `overTrigger`, with the `medianCpuUsecPerSecond`, the `triggerRatio` (2) and the `resolveRatio` (1.25); it is `null` until a load sample is in, and again once the latest sample is older than the metrics staleness bound, and `overTrigger` is never set while the load is `settling` or with fewer than 3 shards that own slots.
+Each cluster also has a placement policy, stored with its mode on the seed connection. The **Edit policy** button on the **Slot placement** card opens it; a member sees it read-only. Until it is saved, every field has its default.
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `triggerRatio` | 2 | A shard over this multiple of the median load is over the trigger on the card. |
+| `resolveRatio` | 1.25 | A plan aims to bring the hot shard to or under this multiple of the projected median, and no target ends over it. Must be under `triggerRatio`. |
+| `nodeCpuLimitUsecPerSecond` | 800000 | No target ends over this CPU time per second (0.8 of a core). |
+| `excludedShardIds` | none | Primaries (node IDs) that are never a source or a target. A hot shard in the list gets `source_excluded`. |
+| `excludedSlots` | none | Slots that never move. |
+| `maxCpuShare`, `maxNetworkShare`, `sustainMinutes`, `slotCooldownDays`, `noReturnDays`, `maxMigrationsPerHour`, `maxBytesPerHour`, `maintenanceWindows`, `abortLatencyMs`, `verifyMinutes`, `verifyTolerance`, `autoRollback` | see the card | Stored and checked now; slot moves start to use them in a later release. |
+
+The rebalance suggestion uses the policy as it reads 30 seconds after a save at the latest, and a change makes every suggestion again. When the policy cannot be read, the suggestions made before stay as they are.
+
+**API.** The routes take the connection in `X-Connection-Id` and need the Anomaly Detection feature (Pro).
+
+- `GET /api/anomaly/placement` answers `{ connectionId, mode, effectiveMode, selectableModes, support, balance, settings, policyVersion }`. `settings` is the placement policy and `policyVersion` the number of times it was saved (`0` before the first save). `connectionId` is the seed connection. `support` has `issues` (each with `reason`, `detail`, and `provider` for `provider_managed`) and `modes`, which gives `available` and `blockedBy` for every mode. `balance` lists each shard with its `address`, `slotCount`, `cpuUsecPerSecond`, `cpuShare`, `networkShare`, `ratio` to the median (`null` for a shard without slots) and `overTrigger`, with the `medianCpuUsecPerSecond`, the `triggerRatio` and the `resolveRatio` of the policy; it is `null` until a load sample is in, and again once the latest sample is older than the metrics staleness bound, and `overTrigger` is never set while the load is `settling` or with fewer than 3 shards that own slots.
 - `PUT /api/anomaly/placement/mode` with `{ "mode": "observe" }` or `{ "mode": "recommend" }` sets the mode and answers like the `GET`. It needs the admin role. A mode that is not available yet, or one the cluster does not support, answers `400` with the reason in `message`; for a mode the cluster does not support, `blockedBy` names the blocking reason. It is recorded in the activity log as `placement.mode`, with the seed connection as the target.
+- `PUT /api/anomaly/placement/policy` with `{ "policy": { ...every field... }, "version": 3 }` saves the policy and answers like the `GET`. `version` is the `policyVersion` the policy was read at. It needs the admin role. A policy that does not validate answers `400` with each problem in `errors`, for example `resolveRatio` at or over `triggerRatio`, a maintenance window with no duration, or a slot over 16383. When someone saved the policy since it was read, it answers `409` with `reason: "version_conflict"` and saves nothing: read it again and redo the change. It is recorded in the activity log as `placement.policy`, with the seed connection as the target.
 
 The `get_placement_status` MCP tool returns the same as the `GET`.
 

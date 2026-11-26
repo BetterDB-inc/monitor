@@ -32,6 +32,14 @@ describe('actionFor', () => {
     });
   });
 
+  it('names a placement policy save with the cluster as the target', () => {
+    expect(actionFor('PUT', '/api/anomaly/placement/policy')).toBe('placement.policy');
+    expect(targetFor('placement.policy', {}, { version: 2 }, { connectionId: 'seed' })).toEqual({
+      type: 'connection',
+      id: 'seed',
+    });
+  });
+
   it('strips the api prefix and upper-cases the method', () => {
     expect(actionFor('post', '/api/connections')).toBe('connection.create');
   });

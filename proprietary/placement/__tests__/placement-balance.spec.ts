@@ -1,5 +1,6 @@
+import { DEFAULT_PLACEMENT_SETTINGS } from '@betterdb/shared';
 import type { ShardLoad, ShardLoadSample } from '@app/cluster/shard-load';
-import { placementBalance, PLACEMENT_RESOLVE_RATIO, PLACEMENT_TRIGGER_RATIO } from '../placement-balance';
+import { placementBalance } from '../placement-balance';
 
 function shard(nodeId: string, cpuUsecPerSecond: number, overrides: Partial<ShardLoad> = {}): ShardLoad {
   return {
@@ -23,6 +24,15 @@ describe('placementBalance', () => {
     expect(placementBalance(null)).toBeNull();
   });
 
+  it('draws the trigger and resolve lines from the policy', () => {
+    const balance = placementBalance(
+      sample([shard('a', 200_000), shard('b', 600_000), shard('c', 200_000)]),
+      { ...DEFAULT_PLACEMENT_SETTINGS, triggerRatio: 4, resolveRatio: 1.5 },
+    );
+    expect(balance).toMatchObject({ triggerRatio: 4, resolveRatio: 1.5 });
+    expect(balance?.shards.find((s) => s.shardId === 'b')?.overTrigger).toBe(false);
+  });
+
   it('gives each shard its ratio to the median, hottest first, with the trigger and resolve lines', () => {
     const balance = placementBalance(
       sample([shard('a', 200_000), shard('b', 600_000, { cpuShare: 0.6 }), shard('c', 200_000)]),
@@ -31,8 +41,8 @@ describe('placementBalance', () => {
       sampledAt: 42,
       settling: false,
       medianCpuUsecPerSecond: 200_000,
-      triggerRatio: PLACEMENT_TRIGGER_RATIO,
-      resolveRatio: PLACEMENT_RESOLVE_RATIO,
+      triggerRatio: 2,
+      resolveRatio: 1.25,
     });
     expect(balance?.shards.map((s) => [s.shardId, s.ratio, s.overTrigger])).toEqual([
       ['b', 3, true],
@@ -40,11 +50,6 @@ describe('placementBalance', () => {
       ['c', 1, false],
     ]);
     expect(balance?.shards[0].cpuShare).toBe(0.6);
-  });
-
-  it('uses 2 and 1.25 as the lines', () => {
-    expect(PLACEMENT_TRIGGER_RATIO).toBe(2);
-    expect(PLACEMENT_RESOLVE_RATIO).toBe(1.25);
   });
 
   it('leaves shards without slots out of the median and gives them no ratio', () => {

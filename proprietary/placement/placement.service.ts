@@ -1,10 +1,14 @@
-import { Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
+import { Inject, Injectable, NotFoundException, OnModuleInit, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
+  DEFAULT_PLACEMENT_SETTINGS,
   PLACEMENT_DEFAULT_MODE,
   PLACEMENT_MODES,
   PLACEMENT_SETTABLE_MODES,
+  validatePlacementSettings,
   type PlacementMode,
+  type PlacementPolicy,
+  type PlacementSettings,
   type PlacementStatus,
   type PlacementSupport,
   type PlacementSupportReason,
@@ -20,7 +24,11 @@ import { WORKSPACE_CONFIG, type WorkspaceConfig } from '@app/auth/workspace-conf
 import { isManagedProviderBuild } from '@app/monitor/provider-detector';
 import { AnomalyService } from '../anomaly-detection/anomaly.service';
 import type { ServedHotShardDetail } from '../anomaly-detection/hot-shard-detector';
-import type { RebalanceExecution } from '../anomaly-detection/rebalance-planner';
+import {
+  DEFAULT_REBALANCE_POLICY,
+  type RebalanceExecution,
+  type RebalancePolicy,
+} from '../anomaly-detection/rebalance-planner';
 import type {
   ConfirmedMove,
   RebalanceRunActor,
@@ -36,6 +44,7 @@ import {
 import { placementBalance } from './placement-balance';
 
 const SUPPORT_CACHE_MS = 30_000;
+const POLICY_CACHE_MS = 30_000;
 
 export class PlacementModeError extends Error {
   constructor(
@@ -46,8 +55,31 @@ export class PlacementModeError extends Error {
   }
 }
 
+export class PlacementPolicyError extends Error {
+  constructor(readonly errors: string[]) {
+    super(`The placement policy is not valid: ${errors.join('; ')}`);
+  }
+}
+
+export class PlacementPolicyConflictError extends Error {
+  constructor() {
+    super('The placement policy changed since it was read');
+  }
+}
+
+export function rebalancePolicyFromSettings(settings: PlacementSettings): RebalancePolicy {
+  return {
+    ...DEFAULT_REBALANCE_POLICY,
+    nodeCpuLimitUsecPerSecond: settings.nodeCpuLimitUsecPerSecond,
+    resolveRatio: settings.resolveRatio,
+    excludedShardIds: settings.excludedShardIds,
+    excludedSlots: settings.excludedSlots,
+  };
+}
+
 @Injectable()
-export class PlacementService {
+export class PlacementService implements OnModuleInit {
+  private readonly policyCache = new Map<string, { at: number; policy: PlacementPolicy | null }>();
   private readonly supportCache = new Map<string, { at: number; support: PlacementSupport }>();
   private readonly supportReads = new Map<string, Promise<PlacementSupport>>();
   private readonly aclDenied = new Map<string, string | null>();
@@ -63,9 +95,19 @@ export class PlacementService {
     @Optional() private readonly clusterMetrics?: ClusterMetricsService,
   ) {}
 
+  onModuleInit(): void {
+    this.anomaly.setRebalancePolicyResolver((seedId) => this.rebalancePolicyOf(seedId));
+  }
+
   async getStatus(connectionId: string): Promise<PlacementStatus> {
     const seedId = this.seedOf(connectionId);
-    const [mode, support] = await Promise.all([this.storedMode(seedId), this.support(seedId)]);
+    const [policy, support] = await Promise.all([
+      this.storage.getPlacementPolicy(seedId),
+      this.support(seedId),
+    ]);
+    this.policyCache.set(seedId, { at: Date.now(), policy });
+    const mode = this.modeOf(policy, seedId);
+    const settings = policy?.settings ?? DEFAULT_PLACEMENT_SETTINGS;
     const selectableModes = PLACEMENT_SETTABLE_MODES.filter((each) => support.modes[each].available);
     return {
       connectionId: seedId,
@@ -73,8 +115,51 @@ export class PlacementService {
       effectiveMode: effectiveModeOf(mode, support),
       selectableModes,
       support,
-      balance: placementBalance(this.freshSample(seedId)),
+      balance: placementBalance(this.freshSample(seedId), settings),
+      settings,
+      policyVersion: policy?.version ?? 0,
     };
+  }
+
+  async setSettings(
+    connectionId: string,
+    input: unknown,
+    version: number,
+  ): Promise<PlacementStatus> {
+    const validated = validatePlacementSettings(input);
+    if (!validated.ok) throw new PlacementPolicyError(validated.errors);
+    const seedId = this.seedOf(connectionId);
+    const current = await this.storage.getPlacementPolicy(seedId);
+    const saved = await this.storage.savePlacementSettings(
+      {
+        connectionId: seedId,
+        settings: validated.settings,
+        updatedAt: Date.now(),
+        modeIfNew: this.modeOf(current, seedId),
+      },
+      version,
+    );
+    if (!saved) throw new PlacementPolicyConflictError();
+    this.policyCache.set(seedId, { at: Date.now(), policy: saved });
+    return this.getStatus(seedId);
+  }
+
+  async rebalancePolicyOf(seedId: string): Promise<RebalancePolicy> {
+    const policy = await this.cachedPolicy(seedId);
+    return rebalancePolicyFromSettings(policy?.settings ?? DEFAULT_PLACEMENT_SETTINGS);
+  }
+
+  private async cachedPolicy(seedId: string): Promise<PlacementPolicy | null> {
+    const cached = this.policyCache.get(seedId);
+    if (cached && Date.now() - cached.at < POLICY_CACHE_MS) return cached.policy;
+    try {
+      const policy = await this.storage.getPlacementPolicy(seedId);
+      this.policyCache.set(seedId, { at: Date.now(), policy });
+      return policy;
+    } catch (error) {
+      if (cached) return cached.policy;
+      throw error;
+    }
   }
 
   async setMode(connectionId: string, mode: PlacementMode): Promise<PlacementStatus> {
@@ -88,7 +173,8 @@ export class PlacementService {
       const issue = support.issues.find((each) => each.reason === state.blockedBy);
       throw new PlacementModeError(issue?.detail ?? `The ${mode} mode is not supported here`, state.blockedBy);
     }
-    await this.storage.savePlacementPolicy({ connectionId: seedId, mode, updatedAt: Date.now() });
+    await this.storage.savePlacementMode({ connectionId: seedId, mode, updatedAt: Date.now() });
+    this.policyCache.delete(seedId);
     return this.getStatus(seedId);
   }
 
@@ -170,8 +256,11 @@ export class PlacementService {
   }
 
   private async storedMode(seedId: string): Promise<PlacementMode> {
-    const stored = (await this.storage.getPlacementPolicy(seedId))?.mode;
-    if (stored) return stored;
+    return this.modeOf(await this.storage.getPlacementPolicy(seedId), seedId);
+  }
+
+  private modeOf(policy: PlacementPolicy | null, seedId: string): PlacementMode {
+    if (policy) return policy.mode;
     return this.memoryStorage() && this.clusterEnabled(seedId) ? 'recommend' : PLACEMENT_DEFAULT_MODE;
   }
 
@@ -202,7 +291,7 @@ export class PlacementService {
   }
 
   private forgetRemovedConnections(): void {
-    for (const cache of [this.supportCache, this.supportReads, this.aclDenied]) {
+    for (const cache of [this.supportCache, this.supportReads, this.aclDenied, this.policyCache]) {
       for (const seedId of cache.keys()) {
         if (!this.registry.getConfig(seedId)) cache.delete(seedId);
       }

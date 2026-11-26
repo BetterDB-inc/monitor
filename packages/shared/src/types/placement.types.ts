@@ -4,10 +4,67 @@ export const PLACEMENT_MODES: readonly PlacementMode[] = ['observe', 'recommend'
 
 export const PLACEMENT_DEFAULT_MODE: PlacementMode = 'observe';
 
+export interface PlacementMaintenanceWindow {
+  days: number[];
+  start: string;
+  durationMinutes: number;
+}
+
+export interface PlacementSettings {
+  triggerRatio: number;
+  maxCpuShare: number | null;
+  maxNetworkShare: number | null;
+  nodeCpuLimitUsecPerSecond: number;
+  resolveRatio: number;
+  sustainMinutes: number;
+  slotCooldownDays: number;
+  noReturnDays: number;
+  maxMigrationsPerHour: number;
+  maxBytesPerHour: number;
+  maintenanceWindows: PlacementMaintenanceWindow[];
+  excludedShardIds: string[];
+  excludedSlots: number[];
+  abortLatencyMs: number;
+  verifyMinutes: number;
+  verifyTolerance: number;
+  autoRollback: boolean;
+}
+
+export const DEFAULT_PLACEMENT_SETTINGS: PlacementSettings = {
+  triggerRatio: 2,
+  maxCpuShare: null,
+  maxNetworkShare: null,
+  nodeCpuLimitUsecPerSecond: 800_000,
+  resolveRatio: 1.25,
+  sustainMinutes: 30,
+  slotCooldownDays: 7,
+  noReturnDays: 7,
+  maxMigrationsPerHour: 4,
+  maxBytesPerHour: 2 * 1024 ** 3,
+  maintenanceWindows: [],
+  excludedShardIds: [],
+  excludedSlots: [],
+  abortLatencyMs: 50,
+  verifyMinutes: 10,
+  verifyTolerance: 0.5,
+  autoRollback: true,
+};
+
 export interface PlacementPolicy {
   connectionId: string;
   mode: PlacementMode;
+  settings: PlacementSettings;
+  version: number;
   updatedAt: number;
+}
+
+export type PlacementModeWrite = Pick<PlacementPolicy, 'connectionId' | 'mode' | 'updatedAt'>;
+
+export interface PlacementSettingsWrite {
+  connectionId: string;
+  settings: PlacementSettings;
+  updatedAt: number;
+  modeIfNew: PlacementMode;
 }
 
 export type PlacementSupportReason =
@@ -70,4 +127,6 @@ export interface PlacementStatus {
   selectableModes: PlacementMode[];
   support: PlacementSupport;
   balance: PlacementBalance | null;
+  settings: PlacementSettings;
+  policyVersion: number;
 }

@@ -57,7 +57,8 @@ export type RebalanceNoPlanReason =
   | 'slots_scattered'
   | 'too_many_targets'
   | 'covered_by_other_plan'
-  | 'conflicts_with_other_plan';
+  | 'conflicts_with_other_plan'
+  | 'source_excluded';
 
 export interface RebalanceCoveringShard {
   shardId: string;
@@ -671,6 +672,10 @@ export function planRebalances(
 ): RebalanceVerdict[] {
   const verdicts: RebalanceVerdict[] = [];
   for (const hotShard of hotShards) {
+    if (policy.excludedShardIds.includes(hotShard.hotShardId)) {
+      verdicts.push(noRebalancePlan('source_excluded'));
+      continue;
+    }
     const counted = [...earlier, ...verdicts].filter((verdict) => verdict.kind === 'plan');
     const left = shardsAfter(shards, counted);
     const named = (plans: readonly RebalancePlan[]) =>

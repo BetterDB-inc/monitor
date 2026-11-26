@@ -29,6 +29,7 @@ export * from './types/migration';
 export * from './types/metric-forecasting.types';
 export * from './types/scaling-readiness.types';
 export * from './types/placement.types';
+export * from './utils/placement-policy';
 export * from './types/session-explorer.types';
 export * from './types/kv-cache.types';
 export * from './types/telemetry';

@@ -4,6 +4,7 @@ import {
   type PlacementMode,
   type PlacementStatus,
 } from '@betterdb/shared';
+import { useState } from 'react';
 import { useCanMutate } from '../../hooks/useCanMutate';
 import { usePlacement } from '../../hooks/usePlacement';
 import { RebalanceSuggestion } from '../anomalies/RebalanceSuggestion';
@@ -11,6 +12,7 @@ import { formatRatio } from '../anomalies/anomaly-display';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
+import { PlacementPolicyDrawer } from './PlacementPolicyDrawer';
 
 const MODE_LABELS: Record<PlacementMode, string> = {
   observe: 'Observe',
@@ -143,7 +145,10 @@ function BalanceBars({ balance }: { balance: PlacementBalance | null }) {
 }
 
 export function PlacementCard({ connectionId }: { connectionId: string | undefined }) {
-  const { licensed, status, error, setMode, saving, modeError } = usePlacement(connectionId);
+  const { licensed, status, error, setMode, saving, modeError, savePolicy } =
+    usePlacement(connectionId);
+  const canMutate = useCanMutate();
+  const [policyOpen, setPolicyOpen] = useState(false);
   if (!licensed || !connectionId) return null;
   return (
     <>
@@ -174,6 +179,16 @@ export function PlacementCard({ connectionId }: { connectionId: string | undefin
               <EffectiveMode status={status} />
               <Support status={status} />
               <BalanceBars balance={status.balance} />
+              <Button size="sm" variant="outline" onClick={() => setPolicyOpen(true)}>
+                {canMutate ? 'Edit policy' : 'View policy'}
+              </Button>
+              <PlacementPolicyDrawer
+                open={policyOpen}
+                onOpenChange={setPolicyOpen}
+                settings={status.settings}
+                version={status.policyVersion}
+                onSave={savePolicy}
+              />
             </>
           )}
         </CardContent>

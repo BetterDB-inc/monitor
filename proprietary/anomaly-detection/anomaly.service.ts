@@ -130,10 +130,12 @@ import {
   type RebalanceExecutionBlocker,
   type RebalanceNoPlanReason,
   type RebalancePlan,
+  type RebalancePolicy,
   type RebalanceShard,
   type RebalanceVerdict,
   type ShardMemory,
   type ShardServer,
+  DEFAULT_REBALANCE_POLICY,
   describeNoPlan,
   memoryWarnings,
   noRebalancePlan,
@@ -1000,6 +1002,7 @@ export class AnomalyService
     string,
     Map<string, { verdict: RebalanceVerdict; computedAt: number; ownership: string }>
   >();
+  private rebalancePolicyResolver: ((seedId: string) => Promise<RebalancePolicy>) | null = null;
   private rebalanceRuns = new Map<string, Map<string, RebalanceRun>>();
   private rebalanceStarting = new Set<string>();
   private rebalanceFollowedAt = new Map<string, number>();
@@ -7180,6 +7183,15 @@ export class AnomalyService
     else this.hotShardKeys.delete(connectionId);
   }
 
+  setRebalancePolicyResolver(resolve: (seedId: string) => Promise<RebalancePolicy>): void {
+    this.rebalancePolicyResolver = resolve;
+  }
+
+  private async rebalancePolicyFor(connectionId: string): Promise<RebalancePolicy> {
+    if (!this.rebalancePolicyResolver) return DEFAULT_REBALANCE_POLICY;
+    return this.rebalancePolicyResolver(this.seedIdOf(connectionId) ?? connectionId);
+  }
+
   private holdRebalance(connectionId: string, reason: RebalanceNoPlanReason): void {
     this.hotShardRebalance.delete(connectionId);
     const details = this.hotShardDetails.get(connectionId);
@@ -7198,6 +7210,12 @@ export class AnomalyService
     slots: ReadonlyMap<string, SlotLoadRate[]>,
   ): Promise<void> {
     const connectionId = ctx.connectionId;
+    let policy: RebalancePolicy;
+    try {
+      policy = await this.rebalancePolicyFor(connectionId);
+    } catch {
+      return;
+    }
     const eventIds = this.hotShardEventIds.get(connectionId);
     const known = this.hotShardRebalance.get(connectionId);
     const unhealthy = this.unhealthySlotOwners(sample, nodes).map(
@@ -7207,6 +7225,7 @@ export class AnomalyService
     const ownership = [
       ...shards.map((shard) => `${shard.shardId}:${shard.slotCount}`),
       ...unhealthy,
+      `policy:${JSON.stringify(policy)}`,
     ]
       .sort()
       .join(',');
@@ -7300,6 +7319,7 @@ export class AnomalyService
             due.map(({ shardId }) => ({ hotShardId: shardId, slots: slots.get(shardId) ?? [] })),
             shards,
             earlier,
+            policy,
           ),
           earlier,
         );

@@ -1,7 +1,13 @@
-import type { DatabaseConnectionConfig } from '@betterdb/shared';
+import { DEFAULT_PLACEMENT_SETTINGS, type DatabaseConnectionConfig } from '@betterdb/shared';
 import { MemoryAdapter } from '@app/storage/adapters/memory.adapter';
 import type { ShardLoadSample } from '@app/cluster/shard-load';
-import { PlacementService, PlacementModeError } from '../placement.service';
+import {
+  PlacementService,
+  PlacementModeError,
+  PlacementPolicyConflictError,
+  PlacementPolicyError,
+} from '../placement.service';
+import { DEFAULT_REBALANCE_POLICY } from '../../anomaly-detection/rebalance-planner';
 import type { PlacementPrimaryRead } from '../placement-support';
 import type { ServedHotShardDetail } from '../../anomaly-detection/hot-shard-detector';
 import type { RebalanceNoPlan, RebalancePlan } from '../../anomaly-detection/rebalance-planner';
@@ -58,6 +64,7 @@ async function setup(options: Setup = {}) {
   const anomaly = {
     readPlacementPrimaries: jest.fn(async () => (options.primaries === undefined ? primaries() : options.primaries)),
     runRebalance: jest.fn(),
+    setRebalancePolicyResolver: jest.fn(),
   };
   const env = { BETTERDB_SLOT_MIGRATION: 'true', STORAGE_TYPE: 'sqlite', ...options.env };
   const config = { get: jest.fn((key: string) => env[key as keyof typeof env]) };
@@ -90,7 +97,7 @@ describe('PlacementService', () => {
 
   it('reads the stored mode and the balance from the latest sample', async () => {
     const { service, storage } = await setup();
-    await storage.savePlacementPolicy({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+    await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
     const status = await service.getStatus('seed');
     expect(status.mode).toBe('recommend');
     expect(status.effectiveMode).toBe('recommend');
@@ -106,7 +113,7 @@ describe('PlacementService', () => {
 
   it('counts slot stats as off when the readings carry no usage counters', async () => {
     const { service, storage, shardLoad } = await setup();
-    await storage.savePlacementPolicy({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+    await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
     shardLoad.reportsUsage.mockReturnValue(false);
     const status = await service.getStatus('seed');
     expect(status.effectiveMode).toBe('observe');
@@ -120,7 +127,7 @@ describe('PlacementService', () => {
         member: { id: 'member', host: '10.0.0.2', port: 7002, membership: { seedId: 'seed', nodeId: 'n2', origin: 'auto', source: 'cluster' } },
       },
     });
-    await storage.savePlacementPolicy({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+    await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
     const status = await service.getStatus('member');
     expect(status.connectionId).toBe('seed');
     expect(status.mode).toBe('recommend');
@@ -139,6 +146,162 @@ describe('PlacementService', () => {
     expect(await storage.getPlacementPolicy('member')).toBeNull();
   });
 
+  describe('policy', () => {
+    const tighter = {
+      ...DEFAULT_PLACEMENT_SETTINGS,
+      sustainMinutes: 45,
+      excludedSlots: [7],
+      excludedShardIds: ['c'],
+    };
+
+    it('reads the default policy at version 0 when none is stored', async () => {
+      const { service } = await setup();
+      expect(await service.getStatus('seed')).toMatchObject({
+        settings: DEFAULT_PLACEMENT_SETTINGS,
+        policyVersion: 0,
+      });
+    });
+
+    it('saves a valid policy at the version it read, keeping the mode', async () => {
+      const { service, storage } = await setup();
+      await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+      const status = await service.setSettings('seed', tighter, 0);
+      expect(status).toMatchObject({ mode: 'recommend', settings: tighter, policyVersion: 1 });
+      expect(await storage.getPlacementPolicy('seed')).toMatchObject({
+        mode: 'recommend',
+        settings: tighter,
+        version: 1,
+      });
+    });
+
+    it('stores the mode a connection runs in when its first policy is saved', async () => {
+      const { service, storage } = await setup({ env: { STORAGE_TYPE: 'memory' } });
+      await service.setSettings('seed', tighter, 0);
+      expect((await storage.getPlacementPolicy('seed'))?.mode).toBe('recommend');
+    });
+
+    it('writes the policy on the seed when saved through a member', async () => {
+      const { service, storage } = await setup({
+        configs: {
+          seed: { id: 'seed', host: '10.0.0.1', port: 7001 },
+          member: {
+            id: 'member',
+            host: '10.0.0.2',
+            port: 7002,
+            membership: { seedId: 'seed', nodeId: 'n2', origin: 'auto', source: 'cluster' },
+          },
+        },
+      });
+      await service.setSettings('member', tighter, 0);
+      expect((await storage.getPlacementPolicy('seed'))?.settings).toEqual(tighter);
+      expect(await storage.getPlacementPolicy('member')).toBeNull();
+    });
+
+    it('refuses an inconsistent policy with every error', async () => {
+      const { service, storage } = await setup();
+      const saving = service.setSettings(
+        'seed',
+        { ...tighter, resolveRatio: 3, verifyTolerance: 2 },
+        0,
+      );
+      await expect(saving).rejects.toThrow(PlacementPolicyError);
+      await expect(saving).rejects.toMatchObject({
+        errors: [
+          expect.stringContaining('verifyTolerance'),
+          expect.stringContaining('resolveRatio'),
+        ],
+      });
+      expect(await storage.getPlacementPolicy('seed')).toBeNull();
+    });
+
+    it('refuses a policy saved at a version that is no longer stored', async () => {
+      const { service } = await setup();
+      await service.setSettings('seed', tighter, 0);
+      await expect(service.setSettings('seed', DEFAULT_PLACEMENT_SETTINGS, 0)).rejects.toThrow(
+        PlacementPolicyConflictError,
+      );
+      expect((await service.getStatus('seed')).settings).toEqual(tighter);
+    });
+
+    it('draws the balance lines from the policy', async () => {
+      const { service } = await setup();
+      await service.setSettings('seed', { ...DEFAULT_PLACEMENT_SETTINGS, triggerRatio: 4 }, 0);
+      const status = await service.getStatus('seed');
+      expect(status.balance).toMatchObject({ triggerRatio: 4 });
+      expect(status.balance?.shards[0]).toMatchObject({
+        shardId: 'a',
+        ratio: 3,
+        overTrigger: false,
+      });
+    });
+
+    it('hands the planner the policy of the seed, on top of the planner defaults', async () => {
+      const { service, anomaly } = await setup();
+      service.onModuleInit();
+      const resolve = anomaly.setRebalancePolicyResolver.mock.calls[0][0] as (
+        seedId: string,
+      ) => Promise<unknown>;
+      expect(await resolve('seed')).toEqual(DEFAULT_REBALANCE_POLICY);
+
+      await service.setSettings(
+        'seed',
+        { ...tighter, nodeCpuLimitUsecPerSecond: 600_000, resolveRatio: 1.5 },
+        0,
+      );
+
+      expect(await resolve('seed')).toEqual({
+        ...DEFAULT_REBALANCE_POLICY,
+        nodeCpuLimitUsecPerSecond: 600_000,
+        resolveRatio: 1.5,
+        excludedShardIds: ['c'],
+        excludedSlots: [7],
+      });
+    });
+
+    it('lets the planner read the policy once per half minute', async () => {
+      const { service, anomaly, storage } = await setup();
+      service.onModuleInit();
+      const resolve = anomaly.setRebalancePolicyResolver.mock.calls[0][0] as (
+        seedId: string,
+      ) => Promise<unknown>;
+      const read = jest.spyOn(storage, 'getPlacementPolicy');
+      await resolve('seed');
+      await resolve('seed');
+      expect(read).toHaveBeenCalledTimes(1);
+    });
+
+    it('gives the planner a policy saved on another instance after half a minute', async () => {
+      jest.useFakeTimers({ now: 1_000_000 });
+      try {
+        const { service, anomaly, storage } = await setup();
+        service.onModuleInit();
+        const resolve = anomaly.setRebalancePolicyResolver.mock.calls[0][0] as (
+          seedId: string,
+        ) => Promise<{ excludedSlots: readonly number[] }>;
+        await resolve('seed');
+        await storage.savePlacementSettings(
+          { connectionId: 'seed', settings: tighter, updatedAt: 2, modeIfNew: 'observe' },
+          0,
+        );
+        expect((await resolve('seed')).excludedSlots).toEqual([]);
+        jest.setSystemTime(1_030_001);
+        expect((await resolve('seed')).excludedSlots).toEqual([7]);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('fails the planner read when storage fails and nothing was read before', async () => {
+      const { service, anomaly, storage } = await setup();
+      service.onModuleInit();
+      const resolve = anomaly.setRebalancePolicyResolver.mock.calls[0][0] as (
+        seedId: string,
+      ) => Promise<unknown>;
+      jest.spyOn(storage, 'getPlacementPolicy').mockRejectedValue(new Error('db down'));
+      await expect(resolve('seed')).rejects.toThrow('db down');
+    });
+  });
+
   it('refuses Approve and Auto in this phase', async () => {
     const { service } = await setup();
     await expect(service.setMode('seed', 'approve')).rejects.toThrow(PlacementModeError);
@@ -152,7 +315,7 @@ describe('PlacementService', () => {
 
   it('shows Observe as the effective mode when Recommend is no longer supported', async () => {
     const { service, storage, prometheus } = await setup();
-    await storage.savePlacementPolicy({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+    await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
     prometheus.collectsClusterSlotStats.mockReturnValue(false);
     const status = await service.getStatus('seed');
     expect(status).toMatchObject({ mode: 'recommend', effectiveMode: 'observe', selectableModes: ['observe'] });
@@ -202,7 +365,7 @@ describe('PlacementService', () => {
 
     it('passes the run on in Recommend', async () => {
       const { service, storage, anomaly } = await setup();
-      await storage.savePlacementPolicy({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+      await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
       anomaly.runRebalance.mockResolvedValue({ status: 'blocked', blockedBy: 'flag_off' });
       await expect(service.runRebalance('seed', 'a', moves, actor)).resolves.toEqual({
         status: 'blocked',
@@ -213,7 +376,7 @@ describe('PlacementService', () => {
 
     it('records a NOPERM reply of the server as acl', async () => {
       const { service, storage, anomaly } = await setup();
-      await storage.savePlacementPolicy({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+      await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
       anomaly.runRebalance.mockResolvedValue({
         status: 'refused',
         message: noperm,
@@ -225,7 +388,7 @@ describe('PlacementService', () => {
 
     it('records no acl for a NOPERM met before the slot move', async () => {
       const { service, storage, anomaly } = await setup();
-      await storage.savePlacementPolicy({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+      await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
       anomaly.runRebalance.mockResolvedValue({
         status: 'refused',
         message: `Could not re-check the cluster: ${noperm}`,
@@ -240,7 +403,7 @@ describe('PlacementService', () => {
       'keeps acl from a refusal that lands %i ticks after the primaries of a status read',
       async (ticks) => {
         const { service, storage, anomaly } = await setup();
-        await storage.savePlacementPolicy({
+        await storage.savePlacementMode({
           connectionId: 'seed',
           mode: 'recommend',
           updatedAt: 1,
@@ -271,7 +434,7 @@ describe('PlacementService', () => {
 
     it('keeps acl until the primaries of the cluster change', async () => {
       const { service, storage, anomaly } = await setup();
-      await storage.savePlacementPolicy({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+      await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
       anomaly.runRebalance.mockResolvedValue({
         status: 'refused',
         message: noperm,
@@ -328,7 +491,7 @@ describe('PlacementService', () => {
   it('reads no primaries to answer whether a plan may run', async () => {
     const { service, storage, anomaly } = await setup();
     expect(await service.allowsRun('seed')).toBe(false);
-    await storage.savePlacementPolicy({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+    await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
     expect(await service.allowsRun('seed')).toBe(true);
     expect(anomaly.readPlacementPrimaries).not.toHaveBeenCalled();
   });
@@ -358,7 +521,7 @@ describe('PlacementService', () => {
   it('tells whether plans may run on a connection', async () => {
     const { service, storage } = await setup();
     expect(await service.allowsRun('seed')).toBe(false);
-    await storage.savePlacementPolicy({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+    await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
     expect(await service.allowsRun('seed')).toBe(true);
   });
 
@@ -375,13 +538,13 @@ describe('PlacementService', () => {
 
   it('keeps a stored Observe on memory storage', async () => {
     const { service, storage } = await setup({ env: { STORAGE_TYPE: 'memory' } });
-    await storage.savePlacementPolicy({ connectionId: 'seed', mode: 'observe', updatedAt: 1 });
+    await storage.savePlacementMode({ connectionId: 'seed', mode: 'observe', updatedAt: 1 });
     expect(await service.allowsRun('seed')).toBe(false);
   });
 
   it('lets no plan run while the cluster runs as Observe', async () => {
     const { service, storage, prometheus } = await setup();
-    await storage.savePlacementPolicy({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+    await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
     prometheus.collectsClusterSlotStats.mockReturnValue(false);
     expect(await service.allowsRun('seed')).toBe(false);
   });
@@ -440,14 +603,14 @@ describe('PlacementService', () => {
 
     it('leaves plans alone in Recommend', async () => {
       const { service, storage } = await setup();
-      await storage.savePlacementPolicy({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+      await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
       const shards = [shard(plan({ available: true }))];
       expect(await service.withPlacementBlocker('seed', shards)).toEqual(shards);
     });
 
     it('keeps the plan, not runnable, when the client of the seed is gone', async () => {
       const { service, storage, registry } = await setup();
-      await storage.savePlacementPolicy({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+      await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
       registry.get.mockImplementation(() => {
         throw new Error("Connection 'seed' not found");
       });

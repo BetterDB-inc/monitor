@@ -6,6 +6,7 @@ import { RESHARD_MARKER_STALL_MS, RESHARD_PERSIST_POLLS } from '../reshard-press
 import { RESYNC_ESCALATION_WINDOW_MS } from '../recovery-amplification-detector';
 import { judgeSlotMigrations, type SlotMigrationWatch } from '../slot-migration-detector';
 import { AnomalyService } from '../anomaly.service';
+import { DEFAULT_REBALANCE_POLICY } from '../rebalance-planner';
 import { IncidentTimelineBuilder, incidentIdFor, incidentStartOf, signalKey } from '../incident-timeline';
 import { ReplicaSlotAnomaly, replicaSlotSignature } from '../replica-slot-state-detector';
 import { MetricBuffer } from '../metric-buffer';
@@ -3509,6 +3510,52 @@ describe('AnomalyService', () => {
             { code: 'memory_unknown', shardId: 'b0000000' },
           ],
         });
+      });
+
+      it('leaves out the slots the placement policy excludes', async () => {
+        spreadLoad();
+        const resolve = jest.fn(async () => ({
+          ...DEFAULT_REBALANCE_POLICY,
+          excludedSlots: [100, 101],
+        }));
+        service.setRebalancePolicyResolver(resolve);
+
+        await step(HOT, 6);
+
+        expect(resolve).toHaveBeenCalledWith('conn-a');
+        expect(rebalance()).toMatchObject({ kind: 'plan', moves: [{ ranges: [[102, 109]] }] });
+      });
+
+      it('plans nothing for a source the placement policy excludes, and plans again when it changes', async () => {
+        spreadLoad();
+        let excluded = ['a0000000'];
+        service.setRebalancePolicyResolver(async () => ({
+          ...DEFAULT_REBALANCE_POLICY,
+          excludedShardIds: excluded,
+        }));
+
+        await step(HOT, 6);
+
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'source_excluded' });
+        expect(hotEvents()[0].message).not.toContain('ebalanc');
+
+        excluded = [];
+        await step(HOT);
+
+        expect(rebalance()).toMatchObject({ kind: 'plan', sourceShardId: 'a0000000' });
+      });
+
+      it('keeps the last suggestion while the placement policy cannot be read', async () => {
+        spreadLoad();
+        await step(HOT, 6);
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+
+        service.setRebalancePolicyResolver(async () => {
+          throw new Error('db down');
+        });
+        await step(HOT, 4);
+
+        expect(rebalance()).toMatchObject({ kind: 'plan', moves: [{ ranges: [[100, 107]] }] });
       });
 
       it('says in the event why moving slots will not help', async () => {

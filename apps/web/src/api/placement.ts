@@ -1,5 +1,5 @@
 import { fetchApi } from './client';
-import type { PlacementMode, PlacementStatus } from '@betterdb/shared';
+import type { PlacementMode, PlacementSettings, PlacementStatus } from '@betterdb/shared';
 
 export const placementApi = {
   get: (connectionId: string, signal?: AbortSignal) =>
@@ -12,5 +12,11 @@ export const placementApi = {
       method: 'PUT',
       headers: { 'x-connection-id': connectionId },
       body: JSON.stringify({ mode }),
+    }),
+  setPolicy: (connectionId: string, policy: PlacementSettings, version: number) =>
+    fetchApi<PlacementStatus>('/anomaly/placement/policy', {
+      method: 'PUT',
+      headers: { 'x-connection-id': connectionId },
+      body: JSON.stringify({ policy, version }),
     }),
 };

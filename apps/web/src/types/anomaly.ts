@@ -124,6 +124,7 @@ export type RebalanceNoPlanReason =
   | 'key_level'
   | 'cluster_hot'
   | 'no_target'
+  | 'source_excluded'
   | 'unhealthy_node'
   | 'migration_running'
   | 'settling'

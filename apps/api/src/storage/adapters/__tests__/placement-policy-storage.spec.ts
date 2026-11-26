@@ -3,7 +3,11 @@ import { randomUUID } from 'crypto';
 import { Pool } from 'pg';
 import * as os from 'os';
 import * as path from 'path';
-import type { DatabaseConnectionConfig } from '@betterdb/shared';
+import {
+  DEFAULT_PLACEMENT_SETTINGS,
+  type DatabaseConnectionConfig,
+  type PlacementSettings,
+} from '@betterdb/shared';
 import { SqliteAdapter } from '../sqlite.adapter';
 import { PostgresAdapter } from '../postgres.adapter';
 import { adapters } from './anomaly-storage-adapters';
@@ -22,6 +26,22 @@ function tempDbPath(): string {
 function connection(id: string): DatabaseConnectionConfig {
   return { id, name: id, host: '10.0.0.1', port: 7001, isDefault: false, createdAt: 1 };
 }
+
+function stored(
+  connectionId: string,
+  mode: string,
+  updatedAt: number,
+  settings = DEFAULT_PLACEMENT_SETTINGS,
+  version = 0,
+) {
+  return { connectionId, mode, settings, version, updatedAt };
+}
+
+const tighter: PlacementSettings = {
+  ...DEFAULT_PLACEMENT_SETTINGS,
+  sustainMinutes: 45,
+  excludedSlots: [7],
+};
 
 function member(id: string, seedId: string): DatabaseConnectionConfig {
   return {
@@ -58,16 +78,91 @@ describe.each([
   });
 
   it('saves and replaces the mode per connection', async () => {
-    await storage.savePlacementPolicy({ connectionId: 'conn-a', mode: 'recommend', updatedAt: 1_000 });
-    await storage.savePlacementPolicy({ connectionId: 'conn-b', mode: 'observe', updatedAt: 1_500 });
-    await storage.savePlacementPolicy({ connectionId: 'conn-a', mode: 'observe', updatedAt: 2_000 });
-    expect(await storage.getPlacementPolicy('conn-a')).toEqual({ connectionId: 'conn-a', mode: 'observe', updatedAt: 2_000 });
-    expect(await storage.getPlacementPolicy('conn-b')).toEqual({ connectionId: 'conn-b', mode: 'observe', updatedAt: 1_500 });
+    await storage.savePlacementMode({
+      connectionId: 'conn-a',
+      mode: 'recommend',
+      updatedAt: 1_000,
+    });
+    await storage.savePlacementMode({ connectionId: 'conn-b', mode: 'observe', updatedAt: 1_500 });
+    await storage.savePlacementMode({ connectionId: 'conn-a', mode: 'observe', updatedAt: 2_000 });
+    expect(await storage.getPlacementPolicy('conn-a')).toEqual(stored('conn-a', 'observe', 2_000));
+    expect(await storage.getPlacementPolicy('conn-b')).toEqual(stored('conn-b', 'observe', 1_500));
+  });
+
+  it('saves settings at the version it read and moves the version on', async () => {
+    expect(
+      await storage.savePlacementSettings(
+        { connectionId: 'conn-a', settings: tighter, updatedAt: 3_000, modeIfNew: 'recommend' },
+        0,
+      ),
+    ).toEqual(stored('conn-a', 'recommend', 3_000, tighter, 1));
+    expect(await storage.getPlacementPolicy('conn-a')).toEqual(
+      stored('conn-a', 'recommend', 3_000, tighter, 1),
+    );
+  });
+
+  it('refuses settings saved at a version that is no longer stored', async () => {
+    await storage.savePlacementSettings(
+      { connectionId: 'conn-a', settings: tighter, updatedAt: 3_000, modeIfNew: 'recommend' },
+      0,
+    );
+    expect(
+      await storage.savePlacementSettings(
+        {
+          connectionId: 'conn-a',
+          settings: DEFAULT_PLACEMENT_SETTINGS,
+          updatedAt: 4_000,
+          modeIfNew: 'recommend',
+        },
+        0,
+      ),
+    ).toBeNull();
+    expect(
+      await storage.savePlacementSettings(
+        { connectionId: 'conn-b', settings: tighter, updatedAt: 4_000, modeIfNew: 'recommend' },
+        2,
+      ),
+    ).toBeNull();
+    expect(await storage.getPlacementPolicy('conn-a')).toEqual(
+      stored('conn-a', 'recommend', 3_000, tighter, 1),
+    );
+    expect(await storage.getPlacementPolicy('conn-b')).toBeNull();
+  });
+
+  it('keeps the settings and version when only the mode changes', async () => {
+    await storage.savePlacementMode({ connectionId: 'conn-a', mode: 'observe', updatedAt: 1_000 });
+    await storage.savePlacementSettings(
+      { connectionId: 'conn-a', settings: tighter, updatedAt: 3_000, modeIfNew: 'recommend' },
+      0,
+    );
+    expect(
+      await storage.savePlacementMode({
+        connectionId: 'conn-a',
+        mode: 'recommend',
+        updatedAt: 5_000,
+      }),
+    ).toEqual(stored('conn-a', 'recommend', 5_000, tighter, 1));
+    expect(await storage.getPlacementPolicy('conn-a')).toEqual(
+      stored('conn-a', 'recommend', 5_000, tighter, 1),
+    );
+  });
+
+  it('keeps the stored mode when settings are saved on an existing row', async () => {
+    await storage.savePlacementMode({ connectionId: 'conn-a', mode: 'observe', updatedAt: 1_000 });
+    await storage.savePlacementSettings(
+      { connectionId: 'conn-a', settings: tighter, updatedAt: 3_000, modeIfNew: 'recommend' },
+      0,
+    );
+    expect((await storage.getPlacementPolicy('conn-a'))?.mode).toBe('observe');
   });
 
   it('drops the policy with its connection', async () => {
     await storage.saveConnection(connection('conn-a'));
-    await storage.savePlacementPolicy({ connectionId: 'conn-a', mode: 'recommend', updatedAt: 1_000 });
+    await storage.savePlacementMode({
+      connectionId: 'conn-a',
+      mode: 'recommend',
+      updatedAt: 1_000,
+    });
     await storage.deleteConnection('conn-a');
     expect(await storage.getPlacementPolicy('conn-a')).toBeNull();
   });
@@ -164,6 +259,60 @@ describe('sqlite placement policy upgrade', () => {
     await upgraded.close();
   });
 
+  it('reads a row stored before the policy columns with the default settings', async () => {
+    const filepath = tempDbPath();
+    const first = new SqliteAdapter({ filepath });
+    await first.initialize();
+    await first.close();
+
+    const Database = await loadBetterSqlite3();
+    const raw = new Database(filepath);
+    raw.exec('DROP TABLE placement_policies');
+    raw.exec(
+      'CREATE TABLE placement_policies (connection_id TEXT PRIMARY KEY, mode TEXT NOT NULL, updated_at INTEGER NOT NULL)',
+    );
+    raw.prepare("INSERT INTO placement_policies VALUES ('conn-a', 'observe', 9)").run();
+    raw.close();
+
+    const upgraded = new SqliteAdapter({ filepath });
+    await upgraded.initialize();
+    expect(await upgraded.getPlacementPolicy('conn-a')).toEqual(stored('conn-a', 'observe', 9));
+    expect(
+      await upgraded.savePlacementSettings(
+        { connectionId: 'conn-a', settings: tighter, updatedAt: 10, modeIfNew: 'recommend' },
+        0,
+      ),
+    ).toEqual(stored('conn-a', 'observe', 10, tighter, 1));
+    await upgraded.close();
+  });
+
+  it('reads stored settings that no longer validate as the defaults', async () => {
+    const filepath = tempDbPath();
+    const first = new SqliteAdapter({ filepath });
+    await first.initialize();
+    await first.savePlacementSettings(
+      { connectionId: 'conn-a', settings: tighter, updatedAt: 10, modeIfNew: 'recommend' },
+      0,
+    );
+    await first.close();
+
+    const Database = await loadBetterSqlite3();
+    const raw = new Database(filepath);
+    raw
+      .prepare(
+        "UPDATE placement_policies SET policy = '{\"resolveRatio\":9}' WHERE connection_id = 'conn-a'",
+      )
+      .run();
+    raw.close();
+
+    const again = new SqliteAdapter({ filepath });
+    await again.initialize();
+    expect(await again.getPlacementPolicy('conn-a')).toEqual(
+      stored('conn-a', 'recommend', 10, DEFAULT_PLACEMENT_SETTINGS, 1),
+    );
+    await again.close();
+  });
+
   it('leaves a fresh database without policies', async () => {
     const storage = new SqliteAdapter({ filepath: tempDbPath() });
     await storage.initialize();
@@ -177,12 +326,12 @@ describe('sqlite placement policy upgrade', () => {
     const first = new SqliteAdapter({ filepath });
     await first.initialize();
     await first.saveConnection(connection('conn-a'));
-    await first.savePlacementPolicy({ connectionId: 'conn-a', mode: 'observe', updatedAt: 5 });
+    await first.savePlacementMode({ connectionId: 'conn-a', mode: 'observe', updatedAt: 5 });
     await first.close();
 
     const again = new SqliteAdapter({ filepath });
     await again.initialize();
-    expect(await again.getPlacementPolicy('conn-a')).toEqual({ connectionId: 'conn-a', mode: 'observe', updatedAt: 5 });
+    expect(await again.getPlacementPolicy('conn-a')).toEqual(stored('conn-a', 'observe', 5));
     await again.close();
   });
 });
@@ -223,12 +372,41 @@ const postgresReachable = adapters.some(([name]) => name === 'PostgresAdapter');
     expect((await upgraded.getPlacementPolicy('old-seed'))?.mode).toBe('recommend');
     expect(await upgraded.getPlacementPolicy('old-node')).toBeNull();
     await upgraded.saveConnection(connection('new-c'));
-    await upgraded.savePlacementPolicy({ connectionId: 'old-seed', mode: 'observe', updatedAt: 7 });
+    await upgraded.savePlacementMode({ connectionId: 'old-seed', mode: 'observe', updatedAt: 7 });
     await upgraded.close();
 
     const again = await open();
+    expect(
+      await again.savePlacementSettings(
+        { connectionId: 'old-seed', settings: tighter, updatedAt: 8, modeIfNew: 'recommend' },
+        0,
+      ),
+    ).toEqual(stored('old-seed', 'observe', 8, tighter, 1));
+    expect(
+      await again.savePlacementSettings(
+        {
+          connectionId: 'old-seed',
+          settings: DEFAULT_PLACEMENT_SETTINGS,
+          updatedAt: 9,
+          modeIfNew: 'recommend',
+        },
+        0,
+      ),
+    ).toBeNull();
+    await again.savePlacementMode({ connectionId: 'old-seed', mode: 'observe', updatedAt: 7 });
+    await again.savePlacementSettings(
+      {
+        connectionId: 'old-seed',
+        settings: DEFAULT_PLACEMENT_SETTINGS,
+        updatedAt: 7,
+        modeIfNew: 'recommend',
+      },
+      1,
+    );
     expect(await again.getPlacementPolicy('new-c')).toBeNull();
-    expect(await again.getPlacementPolicy('old-seed')).toEqual({ connectionId: 'old-seed', mode: 'observe', updatedAt: 7 });
+    expect(await again.getPlacementPolicy('old-seed')).toEqual(
+      stored('old-seed', 'observe', 7, DEFAULT_PLACEMENT_SETTINGS, 2),
+    );
     await again.close();
   });
 });
