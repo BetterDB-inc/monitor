@@ -5508,6 +5508,13 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return this.rebalanceRunRepo.getRebalanceRuns(options);
   }
 
+  async getLatestRebalanceRunPerShard(
+    connectionId: string,
+    since: number,
+  ): Promise<StoredRebalanceRun[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    return this.rebalanceRunRepo.getLatestRebalanceRunPerShard(connectionId, since);
+  }
   async pruneOldRebalanceRuns(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (!this.pool) throw new Error('Database not initialized');
     return this.rebalanceRunRepo.pruneOldRebalanceRuns(cutoffTimestamp, connectionId);

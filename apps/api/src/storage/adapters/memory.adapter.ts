@@ -1872,6 +1872,12 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return this.rebalanceRunRepo.getRebalanceRuns(options);
   }
 
+  async getLatestRebalanceRunPerShard(
+    connectionId: string,
+    since: number,
+  ): Promise<StoredRebalanceRun[]> {
+    return this.rebalanceRunRepo.getLatestRebalanceRunPerShard(connectionId, since);
+  }
   async pruneOldRebalanceRuns(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     return this.rebalanceRunRepo.pruneOldRebalanceRuns(cutoffTimestamp, connectionId);
   }

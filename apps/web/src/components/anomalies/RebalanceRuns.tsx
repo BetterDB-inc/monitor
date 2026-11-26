@@ -176,17 +176,23 @@ function HistoryList({ connectionId }: { connectionId: string }) {
       <p className="text-muted-foreground">Loading…</p>
     );
   }
-  if (runs.length === 0) {
-    return (
-      <p className="text-muted-foreground">No slot rebalance was started in the last 7 days.</p>
-    );
-  }
   return (
-    <ul className="space-y-2">
-      {runs.map((run) => (
-        <HistoryEntry key={`${run.sourceShardId} ${run.startedAt}`} run={run} />
-      ))}
-    </ul>
+    <>
+      {error && (
+        <p role="alert" className="text-destructive">
+          Could not refresh the slot rebalance history. The last list read is shown.
+        </p>
+      )}
+      {runs.length === 0 ? (
+        <p className="text-muted-foreground">No slot rebalance was started in the last 7 days.</p>
+      ) : (
+        <ul className="space-y-2">
+          {runs.map((run) => (
+            <HistoryEntry key={`${run.sourceShardId} ${run.startedAt}`} run={run} />
+          ))}
+        </ul>
+      )}
+    </>
   );
 }
 
@@ -229,7 +235,12 @@ export function RebalanceRuns({ connectionId, showHistory = false }: Props) {
     enabled: !!connectionId,
     queryKey: ['slot-rebalance-runs', connectionId],
   });
-  if (!connectionId || !runs) return null;
+  if (!connectionId) return null;
+  // Apart from the live runs, so that a failed read of them leaves the history readable.
+  const history = showHistory ? (
+    <RebalanceHistory key={connectionId} connectionId={connectionId} />
+  ) : null;
+  if (!runs) return history;
   return (
     <>
       {error && runs.length > 0 && (
@@ -268,7 +279,7 @@ export function RebalanceRuns({ connectionId, showHistory = false }: Props) {
           </Card>
         );
       })}
-      {showHistory && <RebalanceHistory key={connectionId} connectionId={connectionId} />}
+      {history}
     </>
   );
 }

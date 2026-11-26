@@ -7,6 +7,8 @@ const DAY_MS = 24 * 60 * 60_000;
 export const REBALANCE_HISTORY_MAX_MS = 30 * DAY_MS;
 export const REBALANCE_HISTORY_DEFAULT_MS = 7 * DAY_MS;
 export const REBALANCE_ADOPT_LIMIT = 100;
+/** Runs whose save failed, kept to be saved again. */
+export const REBALANCE_UNSAVED_LIMIT = 500;
 
 export const rebalanceRunId = (
   connectionId: string,
@@ -33,12 +35,16 @@ export function toStoredRun(
   };
 }
 
+const isJob = (job: unknown): boolean =>
+  typeof job === 'object' && job !== null && !Array.isArray(job);
+
 /** Null for a row that does not parse or does not look like a run: adopting never throws. */
 export function fromStoredRun(row: StoredRebalanceRun): RebalanceRun | null {
   try {
     const run = JSON.parse(row.payload) as RebalanceRun | null;
     if (typeof run?.sourceShardId !== 'string' || typeof run.startedAt !== 'number') return null;
     if (!Array.isArray(run.jobs) || !Array.isArray(run.jobsBefore)) return null;
+    if (!run.jobs.every(isJob)) return null;
     return run;
   } catch {
     return null;

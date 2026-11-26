@@ -247,6 +247,36 @@ describe('RebalanceRuns', () => {
       ).toBeInTheDocument();
     });
 
+    it('keeps the stored runs and warns when a refresh of the history fails', async () => {
+      getRebalanceRunHistory.mockResolvedValue([run({ state: 'succeeded', endedAt: 5_000 })]);
+      const client = await show([], { showHistory: true });
+      fireEvent.click(await toggle());
+      await screen.findByRole('listitem');
+
+      getRebalanceRunHistory.mockRejectedValue(new Error('Network error'));
+      await act(async () => {
+        await client.invalidateQueries({ queryKey: ['slot-rebalance-history'] });
+      });
+
+      expect(await screen.findByRole('alert', {}, { timeout: 5_000 })).toHaveTextContent(
+        'Could not refresh the slot rebalance history. The last list read is shown.',
+      );
+      expect(screen.getByRole('listitem')).toHaveTextContent('Done');
+    });
+    it('is offered when the live runs cannot be read', async () => {
+      getRebalanceRuns.mockRejectedValue(new Error('Network error'));
+      getRebalanceRunHistory.mockResolvedValue([]);
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      render(
+        <QueryClientProvider client={client}>
+          <RebalanceRuns connectionId="conn-1" showHistory />
+        </QueryClientProvider>,
+      );
+      fireEvent.click(await toggle());
+      expect(
+        await screen.findByText('No slot rebalance was started in the last 7 days.'),
+      ).toBeInTheDocument();
+    });
     it('says so when the history cannot be read', async () => {
       getRebalanceRunHistory.mockRejectedValue(new Error('Network error'));
       await show([], { showHistory: true });

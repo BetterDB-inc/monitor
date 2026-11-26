@@ -64,6 +64,8 @@ describe('rebalance run store', () => {
     ['a run without jobs', JSON.stringify({ ...run(), jobs: undefined })],
     ['a run without the jobs listed before it', JSON.stringify({ ...run(), jobsBefore: 1 })],
     ['a run without a start', JSON.stringify({ ...run(), startedAt: '1' })],
+    ['a run with a null job', JSON.stringify({ ...run(), jobs: [null] })],
+    ['a run with a job that is not an object', JSON.stringify({ ...run(), jobs: [3] })],
   ])('reads nothing from %s', (_, payload) => {
     expect(fromStoredRun({ ...row(run()), payload })).toBeNull();
   });
@@ -104,6 +106,15 @@ describe('rebalance run store', () => {
 
     it('skips a row it cannot read', () => {
       const broken = { ...row(run({ sourceShardId: 'broken' })), payload: '{' };
+
+      expect(runsToAdopt([broken, row(run())], NOW, REBALANCE_RUN_KEPT_MS)).toEqual([run()]);
+    });
+
+    it('skips a row with a null job instead of throwing', () => {
+      const broken = {
+        ...row(run({ sourceShardId: 'broken' })),
+        payload: JSON.stringify({ ...run({ sourceShardId: 'broken' }), jobs: [null] }),
+      };
 
       expect(runsToAdopt([broken, row(run())], NOW, REBALANCE_RUN_KEPT_MS)).toEqual([run()]);
     });

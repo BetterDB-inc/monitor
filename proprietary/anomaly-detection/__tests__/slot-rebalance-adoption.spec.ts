@@ -4,7 +4,7 @@ import type { DiscoveredNode } from '@app/cluster/cluster-discovery.service';
 import { AnomalyService } from '../anomaly.service';
 import { hotShardSignature } from '../hot-shard-detector';
 import type { RebalancePlan } from '../rebalance-planner';
-import { rebalanceRunId } from '../rebalance-run-store';
+import { REBALANCE_ADOPT_LIMIT, rebalanceRunId } from '../rebalance-run-store';
 import { REBALANCE_RUN_KEPT_MS, type RunReport } from '../slot-rebalance-run';
 
 const CONN = 'conn-1';
@@ -149,14 +149,17 @@ describe('slot rebalance runs across a monitor restart', () => {
     );
   }
 
-  async function poll(service: AnomalyService): Promise<void> {
+  async function poll(
+    service: AnomalyService,
+    sections: Record<string, unknown> = {},
+  ): Promise<void> {
     await (service as any).pollConnection({
       connectionId: CONN,
       connectionName: 'Test Connection',
       host: 'localhost',
       port: 6379,
       client: collaborator({
-        getInfoParsed: jest.fn(async () => ({ server: { role: 'master' } })),
+        getInfoParsed: jest.fn(async () => ({ server: { role: 'master' }, ...sections })),
         getAclList: jest.fn(async () => []),
       }),
     });
@@ -290,7 +293,9 @@ describe('slot rebalance runs across a monitor restart', () => {
   it('reads the stored runs again on the next poll after a failed read', async () => {
     await start(monitor());
     const service = monitor();
-    jest.spyOn(storage, 'getRebalanceRuns').mockRejectedValueOnce(new Error('database is locked'));
+    jest
+      .spyOn(storage, 'getLatestRebalanceRunPerShard')
+      .mockRejectedValueOnce(new Error('database is locked'));
 
     await poll(service);
     expect(await service.followRebalanceRuns(CONN)).toEqual([]);
@@ -355,5 +360,117 @@ describe('slot rebalance runs across a monitor restart', () => {
     expect(await service.getRebalanceRunHistory(CONN, 0, 50)).toMatchObject([
       { sourceAddr: '10.0.0.1:6379' },
     ]);
+  });
+
+  const storedRun = (sourceShardId: string, startedAt: number, endedAt?: number) => {
+    const run = {
+      sourceShardId,
+      sourceAddr: '10.0.0.1:6379',
+      startedBy: ADMIN,
+      startedAt,
+      ...(endedAt === undefined ? {} : { endedAt }),
+      projectedRatio: 1.2,
+      jobs: [],
+      jobsBefore: [],
+      state: endedAt === undefined ? ('running' as const) : ('succeeded' as const),
+    };
+    return {
+      id: rebalanceRunId(CONN, run),
+      connectionId: CONN,
+      sourceShardId,
+      state: run.state,
+      startedAt,
+      endedAt: endedAt ?? null,
+      updatedAt: endedAt ?? startedAt,
+      payload: JSON.stringify(run),
+    };
+  };
+
+  it('picks up a running run although another shard stored more runs than the adopt limit', async () => {
+    const now = Date.now();
+    await storage.saveRebalanceRun(storedRun('quiet', now - 60 * 60_000));
+    for (let i = 0; i < REBALANCE_ADOPT_LIMIT + 20; i++) {
+      await storage.saveRebalanceRun(storedRun('busy', now - 30 * 60_000 + i, now - 20 * 60_000));
+    }
+    const service = monitor();
+
+    await poll(service);
+
+    const runs = (service as any).rebalanceRuns.get(CONN) as Map<string, { state: string }>;
+    expect(runs.get('quiet')).toMatchObject({ state: 'running' });
+  });
+
+  it('saves the end of a run whose save failed after a new run replaced it', async () => {
+    const service = monitor();
+    await start(service);
+    const [first] = await storedRuns();
+    const save = jest.spyOn(storage, 'saveRebalanceRun');
+    save.mockRejectedValueOnce(new Error('database is locked'));
+    report.finishedJobs = ['job-1'];
+    slots = { src: [[100, 8191]], tgt: [[0, 99], [8192, 16383]] };
+    await follow(service);
+    expect((await storedRuns())[0]).toMatchObject({ id: first.id, state: 'running' });
+
+    // A new run of the same shard replaces the one whose terminal save failed.
+    const runs = (service as any).rebalanceRuns.get(CONN);
+    const ended = runs.get('src');
+    (service as any).putRun(CONN, runs, { ...ended, startedAt: ended.startedAt + 1, state: 'running', endedAt: undefined });
+    await saved(service);
+    await follow(service);
+
+    const firstNow = (await storedRuns()).find((row) => row.id === first.id);
+    expect(firstNow).toMatchObject({ state: 'succeeded', endedAt: expect.any(Number) });
+  });
+
+  it('saves the end of a run whose save failed after it expired', async () => {
+    const service = monitor();
+    await start(service);
+    const [first] = await storedRuns();
+    jest.spyOn(storage, 'saveRebalanceRun').mockRejectedValueOnce(new Error('database is locked'));
+    report.finishedJobs = ['job-1'];
+    slots = { src: [[100, 8191]], tgt: [[0, 99], [8192, 16383]] };
+    await follow(service);
+
+    const real = Date.now;
+    jest.spyOn(Date, 'now').mockImplementation(() => real() + 2 * REBALANCE_RUN_KEPT_MS);
+    expect(await follow(service)).toEqual([]);
+
+    expect((await storedRuns()).find((row) => row.id === first.id)).toMatchObject({
+      state: 'succeeded',
+    });
+  });
+
+  it('saves a failed end on a later poll once no run is left in memory', async () => {
+    // Only a poll of a cluster node follows the runs.
+    const cluster = { cluster: { cluster_enabled: '1' } };
+    const service = monitor();
+    await poll(service, cluster);
+    await start(service);
+    const [first] = await storedRuns();
+    const save = jest
+      .spyOn(storage, 'saveRebalanceRun')
+      .mockRejectedValue(new Error('database is locked'));
+    report.finishedJobs = ['job-1'];
+    slots = {
+      src: [[100, 8191]],
+      tgt: [
+        [0, 99],
+        [8192, 16383],
+      ],
+    };
+    await follow(service);
+
+    const real = Date.now;
+    jest.spyOn(Date, 'now').mockImplementation(() => real() + 2 * REBALANCE_RUN_KEPT_MS);
+    await poll(service, cluster);
+    await saved(service);
+    expect((service as any).rebalanceRuns.has(CONN)).toBe(false);
+    expect(await storedRuns()).toMatchObject([{ id: first.id, state: 'running' }]);
+
+    save.mockRestore();
+    await poll(service, cluster);
+    await saved(service);
+
+    expect(await storedRuns()).toMatchObject([{ id: first.id, state: 'succeeded' }]);
   });
 });

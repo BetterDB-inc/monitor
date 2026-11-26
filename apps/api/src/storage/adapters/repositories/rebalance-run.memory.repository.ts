@@ -28,6 +28,20 @@ export class RebalanceRunMemoryRepository {
       .map((run) => ({ ...run }));
   }
 
+  async getLatestRebalanceRunPerShard(
+    connectionId: string,
+    since: number,
+  ): Promise<StoredRebalanceRun[]> {
+    const latest = new Map<string, StoredRebalanceRun>();
+    for (const run of this.runs.values()) {
+      if (run.connectionId !== connectionId || run.startedAt < since) continue;
+      const seen = latest.get(run.sourceShardId);
+      if (!seen || run.startedAt > seen.startedAt) latest.set(run.sourceShardId, run);
+    }
+    return [...latest.values()]
+      .sort((a, b) => b.startedAt - a.startedAt)
+      .map((run) => ({ ...run }));
+  }
   async pruneOldRebalanceRuns(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     let pruned = 0;
     for (const [id, run] of this.runs) {

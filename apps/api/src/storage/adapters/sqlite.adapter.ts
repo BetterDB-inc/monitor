@@ -5506,6 +5506,13 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return this.rebalanceRunRepo.getRebalanceRuns(options);
   }
 
+  async getLatestRebalanceRunPerShard(
+    connectionId: string,
+    since: number,
+  ): Promise<StoredRebalanceRun[]> {
+    if (!this.db) throw new Error('Database not initialized');
+    return this.rebalanceRunRepo.getLatestRebalanceRunPerShard(connectionId, since);
+  }
   async pruneOldRebalanceRuns(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (!this.db) throw new Error('Database not initialized');
     return this.rebalanceRunRepo.pruneOldRebalanceRuns(cutoffTimestamp, connectionId);

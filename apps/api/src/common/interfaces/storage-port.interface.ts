@@ -932,6 +932,11 @@ export interface StoragePort {
   saveRebalanceRun(run: StoredRebalanceRun): Promise<void>;
   /** Newest `startedAt` first. */
   getRebalanceRuns(options: RebalanceRunQueryOptions): Promise<StoredRebalanceRun[]>;
+  /**
+   * The newest run (by `startedAt`) of each source shard of the connection that started at or
+   * after `since`, newest first. One row per shard, with no limit across shards.
+   */
+  getLatestRebalanceRunPerShard(connectionId: string, since: number): Promise<StoredRebalanceRun[]>;
   /** Deletes runs that ended before the cutoff. A run without `endedAt` is never deleted. */
   pruneOldRebalanceRuns(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 

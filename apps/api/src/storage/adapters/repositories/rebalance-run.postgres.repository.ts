@@ -72,6 +72,22 @@ export class RebalanceRunPostgresRepository {
     return rows.map(toStoredRun);
   }
 
+  async getLatestRebalanceRunPerShard(
+    connectionId: string,
+    since: number,
+  ): Promise<StoredRebalanceRun[]> {
+    const { rows } = await this.pool.query<RebalanceRunRow>(
+      `SELECT * FROM (
+         SELECT DISTINCT ON (source_shard_id) *
+         FROM slot_rebalance_runs
+         WHERE connection_id = $1 AND started_at >= $2
+         ORDER BY source_shard_id, started_at DESC, id DESC
+       ) latest
+       ORDER BY started_at DESC`,
+      [connectionId, since],
+    );
+    return rows.map(toStoredRun);
+  }
   async pruneOldRebalanceRuns(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     const ended = 'ended_at IS NOT NULL AND ended_at < $1';
     if (connectionId) {

@@ -79,6 +79,26 @@ export class RebalanceRunSqliteRepository {
     return rows.map(toStoredRun);
   }
 
+  async getLatestRebalanceRunPerShard(
+    connectionId: string,
+    since: number,
+  ): Promise<StoredRebalanceRun[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT id, connection_id, source_shard_id, state, started_at, ended_at, updated_at, payload
+         FROM (
+           SELECT *, ROW_NUMBER() OVER (
+             PARTITION BY source_shard_id ORDER BY started_at DESC, id DESC
+           ) AS rn
+           FROM slot_rebalance_runs
+           WHERE connection_id = ? AND started_at >= ?
+         )
+         WHERE rn = 1
+         ORDER BY started_at DESC`,
+      )
+      .all(connectionId, since) as RebalanceRunRow[];
+    return rows.map(toStoredRun);
+  }
   async pruneOldRebalanceRuns(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     const ended = 'ended_at IS NOT NULL AND ended_at < ?';
     if (connectionId) {

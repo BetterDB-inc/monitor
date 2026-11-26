@@ -118,4 +118,21 @@ describe.each<[string, AdapterFactory]>(adapters)('slot rebalance run storage (%
     expect(await list()).toEqual([]);
     expect(await storage.getRebalanceRuns({ connectionId: OTHER })).toHaveLength(1);
   });
+  it('returns the latest run of every shard, however many runs another shard has', async () => {
+    for (let i = 0; i < 60; i++) {
+      await storage.saveRebalanceRun(ended(1_000 + i, { sourceShardId: 'busy', startedAt: 500 + i }));
+    }
+    await storage.saveRebalanceRun(stored({ sourceShardId: 'quiet', startedAt: 100 }));
+    await storage.saveRebalanceRun(stored({ sourceShardId: 'quiet', startedAt: 90 }));
+    const latest = await storage.getLatestRebalanceRunPerShard(CONN, 0);
+    expect(latest.map((run) => [run.sourceShardId, run.startedAt])).toEqual([
+      ['busy', 559],
+      ['quiet', 100],
+    ]);
+  });
+  it('leaves out other connections and runs started before since from the latest runs', async () => {
+    await storage.saveRebalanceRun(stored({ sourceShardId: 'old', startedAt: 10 }));
+    await storage.saveRebalanceRun(stored({ connectionId: OTHER, sourceShardId: 'x', startedAt: 500 }));
+    expect(await storage.getLatestRebalanceRunPerShard(CONN, 100)).toEqual([]);
+  });
 });
