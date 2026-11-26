@@ -12196,9 +12196,19 @@ export class AnomalyService
         this.logger.warn(`Could not save the slot rebalance run ${id}: ${errorText(err)}`);
       })
       .finally(() => {
-        if (this.rebalanceRunSaving.get(id) === next) this.rebalanceRunSaving.delete(id);
+        if (this.rebalanceRunSaving.get(id) !== next) return;
+        this.rebalanceRunSaving.delete(id);
+        // A run memory no longer holds is not followed again: once its last save settled
+        // without a failure to retry, its fingerprint has nothing left to deduplicate.
+        if (!this.holdsRun(connectionId, run) && !this.rebalanceRunUnsaved.has(id)) {
+          this.rebalanceRunSaved.delete(id);
+        }
       });
     this.rebalanceRunSaving.set(id, next);
+  }
+
+  private holdsRun(connectionId: string, run: RebalanceRun): boolean {
+    return this.rebalanceRuns.get(connectionId)?.get(run.sourceShardId)?.startedAt === run.startedAt;
   }
 
   private keepUnsaved(id: string, connectionId: string, run: RebalanceRun): void {

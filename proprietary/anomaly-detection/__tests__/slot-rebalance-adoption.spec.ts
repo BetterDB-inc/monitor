@@ -420,6 +420,8 @@ describe('slot rebalance runs across a monitor restart', () => {
 
     const firstNow = (await storedRuns()).find((row) => row.id === first.id);
     expect(firstNow).toMatchObject({ state: 'succeeded', endedAt: expect.any(Number) });
+    expect((service as any).rebalanceRunSaved.has(first.id)).toBe(false);
+    expect((service as any).rebalanceRunUnsaved.has(first.id)).toBe(false);
   });
 
   it('saves the end of a run whose save failed after it expired', async () => {
@@ -438,6 +440,8 @@ describe('slot rebalance runs across a monitor restart', () => {
     expect((await storedRuns()).find((row) => row.id === first.id)).toMatchObject({
       state: 'succeeded',
     });
+    expect((service as any).rebalanceRunSaved.has(first.id)).toBe(false);
+    expect((service as any).rebalanceRunUnsaved.has(first.id)).toBe(false);
   });
 
   it('saves a failed end on a later poll once no run is left in memory', async () => {
@@ -472,5 +476,7 @@ describe('slot rebalance runs across a monitor restart', () => {
     await saved(service);
 
     expect(await storedRuns()).toMatchObject([{ id: first.id, state: 'succeeded' }]);
+    expect((service as any).rebalanceRunSaved.has(first.id)).toBe(false);
+    expect((service as any).rebalanceRunUnsaved.has(first.id)).toBe(false);
   });
 });
