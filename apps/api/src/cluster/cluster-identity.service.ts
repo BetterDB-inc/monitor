@@ -16,6 +16,15 @@ export interface ScopedConnection {
   readonly instance: { host: string; port: number };
 }
 
+interface ClusterReader {
+  readonly connectionId: string;
+  readonly readAt: number;
+  readonly dials: boolean;
+  readonly graceMs: number;
+}
+
+type KeysJoinedListener = (joinedKey: string, clusterKey: string) => void;
+
 interface HeldClaim {
   readonly claimedAt: number;
   readonly heldUntil: number;
@@ -27,6 +36,8 @@ interface HeldClaim {
 const NOT_LIVE_FLAGS = ['handshake', 'noaddr', 'fail', 'fail?'];
 const STATE_HOLD_MS = 60_000;
 const PROMOTION_HOLD_MS = 10 * 60_000;
+const READER_GRACE_MS = 60_000;
+const READER_GRACE_POLLS = 3;
 
 const OUTAGE = 'outage';
 const RECOVERY = 'recovery';
@@ -52,6 +63,10 @@ export function promotionSignature(primaryId: string, configEpoch: number): Fail
   return { ...followerSignature(primaryId, configEpoch), renewsOnLaterEpoch: true };
 }
 
+export function readerGraceMs(pollIntervalMs: number): number {
+  return Math.max(READER_GRACE_MS, READER_GRACE_POLLS * pollIntervalMs);
+}
+
 function claimOfBoth(kept: HeldClaim, joined: HeldClaim): HeldClaim {
   const claimedAt = Math.max(kept.claimedAt, joined.claimedAt);
   const epochs = [kept.epoch, joined.epoch].filter((epoch): epoch is number => epoch !== undefined);
@@ -72,6 +87,8 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
   private readonly keyByConnection = new Map<string, string>();
   private readonly keyByNode = new Map<string, string>();
   private readonly claims = new Map<string, HeldClaim>();
+  private readonly readers = new Map<string, ClusterReader>();
+  private readonly joinListeners = new Set<KeysJoinedListener>();
   private stopListening: (() => void) | undefined;
 
   constructor(private readonly connectionRegistry: ConnectionRegistry) {}
@@ -116,6 +133,13 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
     if (previous) this.releaseNodes(previous);
   }
 
+  onKeysJoined(listener: KeysJoinedListener): () => void {
+    this.joinListeners.add(listener);
+    return () => {
+      this.joinListeners.delete(listener);
+    };
+  }
+
   private standAlone(connectionId: string, nodeId: string): void {
     const previous = this.views.get(connectionId);
     this.views.delete(connectionId);
@@ -128,6 +152,9 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
     this.views.delete(connectionId);
     this.keyByConnection.delete(connectionId);
     if (view) this.releaseNodes(view);
+    for (const [clusterKey, reader] of this.readers) {
+      if (reader.connectionId === connectionId) this.readers.delete(clusterKey);
+    }
   }
 
   clusterKeyOf(connectionId: string): string {
@@ -169,6 +196,32 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
     return true;
   }
 
+  claimReader(connectionId: string, now: number, dials = true, pollIntervalMs = 0): boolean {
+    const clusterKey = this.clusterKeyOf(connectionId);
+    const reader = this.readers.get(clusterKey);
+    const claim: ClusterReader = {
+      connectionId,
+      readAt: now,
+      dials,
+      graceMs: readerGraceMs(pollIntervalMs),
+    };
+    const heldByAnother =
+      reader !== undefined &&
+      reader.connectionId !== connectionId &&
+      this.stillReads(reader, clusterKey, now);
+    if (heldByAnother && !this.goesBefore(claim, reader)) return false;
+    this.readers.set(clusterKey, claim);
+    return !heldByAnother;
+  }
+
+  isReader(connectionId: string): boolean {
+    return this.readers.get(this.clusterKeyOf(connectionId))?.connectionId === connectionId;
+  }
+
+  clusterConnectionIds(connectionId: string): string[] {
+    return this.clusterConnections(connectionId).map(({ id }) => id);
+  }
+
   eventConnectionOf(connectionId: string): string {
     const membership = this.connectionRegistry.getConfig(connectionId)?.membership;
     if (membership?.origin !== 'auto') return connectionId;
@@ -180,8 +233,14 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
   }
 
   otherClusterConnections(connectionId: string): ScopedConnection[] {
-    const clusterKey = this.clusterKeyOf(connectionId);
     const filedUnder = this.eventConnectionOf(connectionId);
+    return this.clusterConnections(connectionId)
+      .filter(({ id }) => id !== filedUnder)
+      .map(({ id, host, port }) => ({ connectionId: id, instance: { host, port } }));
+  }
+
+  private clusterConnections(connectionId: string): ReturnType<ConnectionRegistry['list']> {
+    const clusterKey = this.clusterKeyOf(connectionId);
     const registered = this.connectionRegistry.list();
     const observedKey = this.observedKeyOf(connectionId);
     const readsAnotherCluster = (id: string): boolean => {
@@ -193,14 +252,27 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
         .filter((connection) => this.clusterKeyOf(connection.id) === clusterKey)
         .flatMap(({ id, membership }) => (membership ? [id, membership.seedId] : [id])),
     );
-    return registered
-      .filter(
-        ({ id, membership }) =>
-          id !== filedUnder &&
-          !readsAnotherCluster(id) &&
-          (anchors.has(id) || (membership !== undefined && anchors.has(membership.seedId))),
-      )
-      .map(({ id, host, port }) => ({ connectionId: id, instance: { host, port } }));
+    return registered.filter(
+      ({ id, membership }) =>
+        !readsAnotherCluster(id) &&
+        (anchors.has(id) || (membership !== undefined && anchors.has(membership.seedId))),
+    );
+  }
+
+  private stillReads(reader: ClusterReader, clusterKey: string, now: number): boolean {
+    return (
+      now - reader.readAt <= reader.graceMs &&
+      this.connectionRegistry.getConfig(reader.connectionId) !== null &&
+      this.clusterKeyOf(reader.connectionId) === clusterKey
+    );
+  }
+
+  private goesBefore(reader: ClusterReader, other: ClusterReader): boolean {
+    if (reader.dials !== other.dials) return reader.dials;
+    const rank = (id: string): number =>
+      this.connectionRegistry.getConfig(id)?.membership?.origin === 'auto' ? 1 : 0;
+    const [own, others] = [rank(reader.connectionId), rank(other.connectionId)];
+    return own !== others ? own < others : reader.connectionId < other.connectionId;
   }
 
   private observedKeyOf(connectionId: string): string | undefined {
@@ -229,6 +301,13 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
       this.claims.delete(claim);
       this.claims.set(moved, kept ? claimOfBoth(kept, held) : held);
     }
+    const joinedReader = this.readers.get(joinedKey);
+    const keptReader = this.readers.get(clusterKey);
+    this.readers.delete(joinedKey);
+    if (joinedReader && (!keptReader || this.goesBefore(joinedReader, keptReader))) {
+      this.readers.set(clusterKey, joinedReader);
+    }
+    this.joinListeners.forEach((listener) => listener(joinedKey, clusterKey));
   }
 
   private release(claim: string, now: number): void {

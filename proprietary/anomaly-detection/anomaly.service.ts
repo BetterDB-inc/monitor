@@ -273,6 +273,7 @@ import { detectLaggingPromotion, ReplPeer } from './lagging-promotion-detector';
 import { detectHostnameStaleness, hostnameStalenessSignature } from './hostname-staleness-detector';
 import {
   detectReplicaSlotState,
+  needsOwnLineOfAnotherNode,
   replicaSlotSignature,
   ReplicaSlotAnomaly,
 } from './replica-slot-state-detector';
@@ -289,7 +290,11 @@ import {
   type SlotMigrationReport,
   parseSlotMigrationJobs,
 } from '@app/cluster/cluster-metrics.service';
-import { ClusterIdentityService, clusterStateSignature } from '@app/cluster/cluster-identity.service';
+import {
+  ClusterIdentityService,
+  readerGraceMs,
+  clusterStateSignature,
+} from '@app/cluster/cluster-identity.service';
 import { withConfiguredZones, withShardMetadata } from '@app/cluster/shard-metadata';
 import { resolveNodeRef, toClusterNodeRef, type NodeSubject } from '@app/cluster/node-ref';
 import {
@@ -927,6 +932,16 @@ export class AnomalyService
   private activeStuckReplicas = new Map<string, Set<string>>();
   private reshardSnapshot = new Map<string, ReshardShardSnapshot>();
   private readonly connectionClusterKeys = new Map<string, string>();
+  private readonly clusterScopes = new Map<string, string>();
+  private readonly clusterScopeReadAt = new Map<string, number>();
+  private readonly clusterScopesLeft = new Map<string, string>();
+  private clusterScopeMoves = 0;
+  private readonly mergedScopeState = new WeakMap<object, object>();
+  private stopFollowingClusterJoins: (() => void) | undefined;
+  private readonly replicaSlotEventOwners = new Map<string, Map<string, string>>();
+  private readonly unmergedSlotEvents = new Set<string>();
+  private readonly slotEventsLoaded = new Set<string>();
+  private readonly slotEventsTakenWhole = new Set<string>();
   private readonly clusterKeyByNode = new Map<string, string>();
   private readonly clusterViews = new Map<string, ReadonlySet<string>>();
   private readonly clusterNodeViews = new ClusterNodeViews();
@@ -1005,6 +1020,7 @@ export class AnomalyService
   // membership history, the only way to see a FORGET-then-rejoin — no single
   // snapshot distinguishes a resurrected node from an ordinary member.
   private ghostHistories = new Map<string, GhostMembershipHistory>();
+  private readonly ghostHistoryReaders = new Map<string, string>();
   // Connection-exhaustion / admin-lockout (valkey#3944) state: streak + last
   // level + last counters, one entry per connection.
   private clientLockoutState = new Map<string, ClientLockoutState>();
@@ -1165,6 +1181,7 @@ export class AnomalyService
   private correlationTicking = false;
   private outboxDraining = false;
   private readonly anomalyContexts = new WeakMap<AnomalyEvent, ConnectionContext>();
+  private readonly eventReaders = new WeakMap<ConnectionContext, string>();
   private readonly latchHolders = new Map<string, string>();
   private readonly anomalySaveHooks = new WeakMap<AnomalyEvent, () => void>();
   private readonly saveTails = new Map<string, Promise<void>>();
@@ -1345,6 +1362,7 @@ export class AnomalyService
     private readonly clusterIdentity?: ClusterIdentityService,
   ) {
     super(connectionRegistry);
+    this.followClusterJoins();
     this.correlator = new Correlator(this.correlationIntervalMs, (anomaly) =>
       this.correlationScopeOf(anomaly.connectionId),
     );
@@ -1462,6 +1480,8 @@ export class AnomalyService
 
   async onModuleDestroy(): Promise<void> {
     await super.onModuleDestroy();
+    this.stopFollowingClusterJoins?.();
+    this.stopFollowingClusterJoins = undefined;
     this.unsubscribeDetectorConfig?.();
     this.unsubscribeDetectorConfig = null;
     if (this.correlationInterval) {
@@ -1635,8 +1655,14 @@ export class AnomalyService
     this.lastClusterState.delete(connectionId);
     this.clusterStateChangedAt.delete(connectionId);
     this.lastPersistenceState.delete(connectionId);
-    this.activeTopologyConflicts.delete(connectionId);
-    this.closeConnectionEventsOnRemoval(connectionId);
+    const scope = this.clusterScopes.get(connectionId) ?? connectionId;
+    const endedScope = this.leaveClusterScope(connectionId);
+    const handedOn = endedScope === undefined ? this.releaseSlotEventsOwnedBy(connectionId, scope) : [];
+    this.closeConnectionEventsOnRemoval(connectionId, endedScope, handedOn);
+    if (endedScope !== undefined) this.forgetClusterScope(endedScope);
+    this.unmergedSlotEvents.delete(connectionId);
+    this.slotEventsLoaded.delete(connectionId);
+    this.slotEventsTakenWhole.delete(connectionId);
     for (const key of this.nodeDetectorKeysOf(connectionId)) this.forgetNodeDetectors(key);
     this.openEventsAdopted.delete(connectionId);
     this.openEventsRetry.delete(connectionId);
@@ -1658,8 +1684,6 @@ export class AnomalyService
     this.raftMode.delete(connectionId);
     this.raftNodeTimeoutMs.delete(connectionId);
     this.raftNodeTimeoutRecheck.delete(connectionId);
-    this.stuckReplicaFirstSeen.delete(connectionId);
-    this.activeStuckReplicas.delete(connectionId);
     for (const key of this.reshardSnapshotKeysOf(connectionId)) {
       this.reshardSnapshot.delete(key);
       this.reshardMissedReads.delete(key);
@@ -1694,11 +1718,6 @@ export class AnomalyService
     this.incidentEventsDroppedThrough.delete(connectionId);
     this.incidentEventsDroppedSpans.delete(connectionId);
     this.resyncLoopState.delete(connectionId);
-    this.hostnameStalenessFirstSeen.delete(connectionId);
-    this.activeHostnameStaleness.delete(connectionId);
-    this.ghostMemberFirstSeen.delete(connectionId);
-    this.activeGhostMembers.delete(connectionId);
-    this.ghostHistories.delete(connectionId);
     this.clientLockoutState.delete(connectionId);
     this.authFailureState.delete(connectionId);
     this.authFailureLastScan.delete(connectionId);
@@ -1721,6 +1740,7 @@ export class AnomalyService
     this.replicaSlotFirstSeen.delete(connectionId);
     this.activeReplicaSlotAnomalies.delete(connectionId);
     this.replicaSlotEventIds.delete(connectionId);
+    this.replicaSlotEventOwners.delete(connectionId);
     this.orphanedSlotLastProbe.delete(connectionId);
     this.slotMigrationWatch.delete(connectionId);
     this.failuresHeldForCancel.delete(connectionId);
@@ -1736,7 +1756,6 @@ export class AnomalyService
     this.stuckSlotMigrationEventIds.delete(connectionId);
     this.orphanedSlotFirstSeen.delete(connectionId);
     this.activeOrphanedSlots.delete(connectionId);
-    this.failoverChurnState.delete(connectionId);
     // A shard this connection was the last to observe has no one left to
     // resolve its events, so they are closed. Its expected replica count is
     // kept until the sweep drops it: a connection added in its place must
@@ -2451,48 +2470,68 @@ export class AnomalyService
         try {
           nodes = await ctx.client.getClusterNodes();
         } catch (topologyErr) {
-          this.activeTopologyConflicts.delete(ctx.connectionId);
+          if (this.clusterIdentity?.isReader(ctx.connectionId) ?? true) {
+            this.activeTopologyConflicts.delete(this.clusterScopeOf(ctx.connectionId));
+          }
           this.logger.debug(
             `Failed to fetch cluster topology for ${ctx.connectionName}: ${topologyErr instanceof Error ? topologyErr.message : topologyErr}`,
           );
         }
         const shards = await shardsPromise;
+        let readsForCluster = false;
         if (nodes) {
+          const readIsCurrent = this.readIsCurrent(ctx, membershipAtRead);
           this.rememberClusterNodes(
             ctx.connectionId,
             nodes,
             shards,
             timestamp,
             isRaft || shards !== undefined,
-            this.readIsCurrent(ctx, membershipAtRead),
+            readIsCurrent,
           );
+          this.rememberClusterKey(ctx.connectionId, nodes, readIsCurrent);
+          readsForCluster = !isRaft && this.readsForCluster(ctx.connectionId, timestamp, readIsCurrent);
         }
 
         // Gossip-race detectors only: under Raft, topology is consensus-managed.
-        if (!isRaft && nodes) {
-          await this.detectDuplicatePrimaries(ctx, timestamp, nodes);
-          await this.detectStuckReplicas(ctx, timestamp, nodes);
-          await this.detectHostnameStaleness(ctx, timestamp, nodes, shards);
-          await this.detectGhostMembers(ctx, timestamp, nodes);
-          await this.detectForgetRejoin(ctx, timestamp, nodes);
-          await this.detectFailoverChurn(ctx, timestamp, nodes);
+        const scope = this.clusterScopes.get(ctx.connectionId) ?? ctx.connectionId;
+        const filed = this.clusterEventContext(ctx);
+        if (nodes && readsForCluster) {
+          await this.detectDuplicatePrimaries(filed, scope, timestamp, nodes);
+          await this.detectStuckReplicas(filed, scope, timestamp, nodes);
+          await this.detectHostnameStaleness(filed, scope, timestamp, nodes, shards);
+          await this.detectGhostMembers(filed, scope, timestamp, nodes);
+          this.forgetMembershipHistoryOfAnotherReader(scope, ctx.connectionId);
+          await this.detectForgetRejoin(filed, scope, timestamp, nodes);
+          await this.detectFailoverChurn(filed, scope, timestamp, nodes);
+        }
+        const asksReplicas = this.asksReplicasForOwnLine(ctx.connectionId);
+        const slotEventsKnown = !asksReplicas || !readsForCluster || (await this.loadClusterSlotEvents(ctx));
+        if (!isRaft && nodes && slotEventsKnown && (readsForCluster || !asksReplicas)) {
           // Replica migrating/importing markers are node-local — only the
           // queried node's own line carries them — so aggregate each replica's
           // self-view before detecting (falls back to `nodes` without fan-out).
-          const perNodeView = await this.gatherReplicaSlotView(nodes, ctx);
-          await this.detectReplicaSlotState(
-            ctx,
-            timestamp,
-            perNodeView.nodes,
-            shards,
-            perNodeView.notReadIds,
-            perNodeView.unseenIds,
-            perNodeView.waitingIds,
-          );
+          const liveScope = (): string => this.clusterScopes.get(ctx.connectionId) ?? ctx.connectionId;
+          const slotScope = (): string => (asksReplicas ? liveScope() : ctx.connectionId);
+          if (asksReplicas) this.takeOverMemberSlotEvents(ctx.connectionId, slotScope());
+          else this.leaveSlotEventsToReader(ctx.connectionId, liveScope(), ownNodeIdOf(nodes));
+          const movesAtRead = this.clusterScopeMoves;
+          const perNodeView = await this.gatherReplicaSlotView(nodes, ctx, slotScope);
+          if (this.clusterScopeMoves === movesAtRead) {
+            await this.detectReplicaSlotState(
+              asksReplicas ? filed : ctx,
+              slotScope(),
+              timestamp,
+              perNodeView.nodes,
+              shards,
+              perNodeView.notReadIds,
+              perNodeView.unseenIds,
+              perNodeView.waitingIds,
+            );
+          }
         }
 
         if (nodes) {
-          this.rememberClusterKey(ctx.connectionId, nodes, this.readIsCurrent(ctx, membershipAtRead));
           if (!isRaft) await this.detectTopologyDivergence(ctx, timestamp, nodes, shards);
           // Orphaned keys in unowned slots after a persistence load
           // (valkey#539): unreachable data silently holding memory. NOT a
@@ -2886,7 +2925,9 @@ export class AnomalyService
         rows(MetricType.PARTIAL_MEMBERSHIP),
         this.topologyEventStores.partial,
       );
-      this.adoptReplicaSlotEvents(connectionId, rows(MetricType.REPLICA_SLOT_STATE));
+      if (!this.slotEventsLoaded.has(connectionId)) {
+        this.adoptReplicaSlotEvents(connectionId, rows(MetricType.REPLICA_SLOT_STATE));
+      }
       this.adoptSlotMigrationEvents(
         connectionId,
         rows(MetricType.SLOT_MIGRATION),
@@ -3128,6 +3169,149 @@ export class AnomalyService
       this.legacyReplicaSlotEvents.set(connectionId, legacy);
       this.legacyReplicaSlotRead.delete(connectionId);
     }
+    if (this.clusterIdentity && (eventIds.size > 0 || legacy.length > 0)) {
+      this.unmergedSlotEvents.add(connectionId);
+    }
+  }
+
+  private async loadClusterSlotEvents(ctx: ConnectionContext): Promise<boolean> {
+    if (!this.clusterIdentity) return true;
+    const readerId = ctx.connectionId;
+    const members = new Set([readerId, ...this.clusterIdentity.clusterConnectionIds(readerId)]);
+    const filedUnder = this.clusterIdentity.eventConnectionOf(readerId);
+    try {
+      for (const member of members) {
+        if (this.openEventsAdopted.has(member) || this.slotEventsLoaded.has(member)) continue;
+        if (member !== filedUnder && !this.asksReplicasForOwnLine(member)) continue;
+        const open = await this.readOpenEvents(member, MetricType.REPLICA_SLOT_STATE);
+        if (!this.connectionRegistry.getConfig(member)) continue;
+        this.adoptReplicaSlotEvents(member, open);
+        this.slotEventsLoaded.add(member);
+      }
+      return true;
+    } catch (err) {
+      this.logger.debug(
+        `Failed to read open replica slot events for the cluster of ${ctx.connectionName}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return false;
+    }
+  }
+
+  private takeOverMemberSlotEvents(readerId: string, scope: string): void {
+    if (this.unmergedSlotEvents.size === 0 || !this.clusterIdentity) return;
+    const members = new Set([readerId, ...this.clusterIdentity.clusterConnectionIds(readerId)]);
+    for (const member of members) {
+      if (!this.unmergedSlotEvents.has(member) || member === scope) continue;
+      this.unmergedSlotEvents.delete(member);
+      if (!this.asksReplicasForOwnLine(member)) {
+        const ownNodeId = this.knownNodeIdOf(member);
+        if (ownNodeId === undefined) this.slotEventsTakenWhole.add(member);
+        this.moveSlotEvents(member, scope, (signature) => needsOwnLineOfAnotherNode(signature, ownNodeId));
+        continue;
+      }
+      this.moveSlotEvents(member, scope);
+      const legacy = this.legacyReplicaSlotEvents.get(member) ?? [];
+      if (legacy.length > 0) {
+        const owners = this.connectionClaims(this.replicaSlotEventOwners, scope, () => new Map<string, string>());
+        legacy.forEach((event) => owners.set(event.id, member));
+        this.legacyReplicaSlotEvents.set(scope, [...(this.legacyReplicaSlotEvents.get(scope) ?? []), ...legacy]);
+        this.legacyReplicaSlotRead.delete(scope);
+      }
+      this.replicaSlotEventIds.delete(member);
+      this.legacyReplicaSlotEvents.delete(member);
+      this.legacyReplicaSlotRead.delete(member);
+    }
+  }
+
+  private leaveSlotEventsToReader(connectionId: string, scope: string, ownNodeId: string | undefined): void {
+    if (scope === connectionId || !this.clusterIdentity) return;
+    if (this.slotEventsTakenWhole.delete(connectionId)) this.takeBackOwnSlotEvents(connectionId, scope, ownNodeId);
+    if (!this.unmergedSlotEvents.has(connectionId)) return;
+    const readerAsksReplicas = this.clusterIdentity
+      .clusterConnectionIds(connectionId)
+      .some((member) => this.asksReplicasForOwnLine(member));
+    if (!readerAsksReplicas) return;
+    this.unmergedSlotEvents.delete(connectionId);
+    this.moveSlotEvents(connectionId, scope, (signature) => needsOwnLineOfAnotherNode(signature, ownNodeId));
+  }
+
+  private takeBackOwnSlotEvents(connectionId: string, scope: string, ownNodeId: string | undefined): void {
+    const owners = this.replicaSlotEventOwners.get(scope);
+    const own = [...(this.replicaSlotEventIds.get(scope) ?? [])].filter(
+      ([signature, id]) => owners?.get(id) === connectionId && !needsOwnLineOfAnotherNode(signature, ownNodeId),
+    );
+    if (own.length === 0) return;
+    const eventIds = this.connectionClaims(this.replicaSlotEventIds, connectionId, () => new Map<string, string>());
+    for (const [signature, id] of own) {
+      this.replicaSlotEventIds.get(scope)?.delete(signature);
+      this.activeReplicaSlotAnomalies.get(scope)?.delete(signature);
+      owners?.delete(id);
+      if (eventIds.has(signature)) this.closeLater(id);
+      else eventIds.set(signature, id);
+    }
+  }
+
+  private moveSlotEvents(member: string, scope: string, moves: (signature: string) => boolean = () => true): void {
+    const held = this.replicaSlotEventIds.get(member);
+    const moving = [...(held ?? [])].filter(([signature]) => moves(signature));
+    if (!held || moving.length === 0) return;
+    const eventIds = this.connectionClaims(this.replicaSlotEventIds, scope, () => new Map<string, string>());
+    const owners = this.connectionClaims(this.replicaSlotEventOwners, scope, () => new Map<string, string>());
+    for (const [signature, id] of moving) {
+      held.delete(signature);
+      const kept = eventIds.get(signature);
+      if (kept !== undefined && kept !== id) {
+        this.closeLater(id);
+        continue;
+      }
+      eventIds.set(signature, id);
+      owners.set(id, member);
+    }
+    if (held.size === 0) this.replicaSlotEventIds.delete(member);
+  }
+
+  private knownNodeIdOf(connectionId: string): string | undefined {
+    return (
+      this.connectionRegistry.getObservedNodeId(connectionId) ??
+      this.connectionRegistry.getConfig(connectionId)?.membership?.nodeId
+    );
+  }
+
+  private ownedSlotEventId(owners: Map<string, string>, connectionId: string): string {
+    const id = randomUUID();
+    owners.set(id, connectionId);
+    return id;
+  }
+
+  private forgetUntrackedSlotEventOwners(scope: string): void {
+    const owners = this.replicaSlotEventOwners.get(scope);
+    if (!owners) return;
+    const tracked = new Set([
+      ...(this.replicaSlotEventIds.get(scope)?.values() ?? []),
+      ...(this.legacyReplicaSlotEvents.get(scope) ?? []).map((event) => event.id),
+    ]);
+    for (const id of [...owners.keys()]) {
+      if (!tracked.has(id)) owners.delete(id);
+    }
+  }
+
+  private releaseSlotEventsOwnedBy(connectionId: string, scope: string): string[] {
+    const owners = this.replicaSlotEventOwners.get(scope);
+    const owned = new Set([...(owners ?? [])].filter(([, owner]) => owner === connectionId).map(([id]) => id));
+    if (owned.size === 0) return [];
+    owned.forEach((id) => owners?.delete(id));
+    const eventIds = this.replicaSlotEventIds.get(scope);
+    for (const [signature, id] of [...(eventIds ?? [])]) {
+      if (!owned.has(id)) continue;
+      eventIds?.delete(signature);
+      this.activeReplicaSlotAnomalies.get(scope)?.delete(signature);
+    }
+    const legacy = (this.legacyReplicaSlotEvents.get(scope) ?? []).filter((event) => !owned.has(event.id));
+    if (legacy.length > 0) this.legacyReplicaSlotEvents.set(scope, legacy);
+    else this.legacyReplicaSlotEvents.delete(scope);
+    return [...owned];
   }
 
   private claimLegacyReplicaSlotEvents(
@@ -6572,23 +6756,22 @@ export class AnomalyService
    */
   private async detectDuplicatePrimaries(
     ctx: ConnectionContext,
+    scope: string,
     timestamp: number,
     nodes: ClusterNode[],
   ): Promise<void> {
     try {
       const conflicts = detectDuplicatePrimaries(nodes);
 
-      const active = this.connectionClaims(
-        this.activeTopologyConflicts,
-        ctx.connectionId,
-        () => new Set<string>(),
-      );
+      const active = this.connectionClaims(this.activeTopologyConflicts, scope, () => new Set<string>());
+      const activeAtStart = [...active];
       const currentSignatures = new Set(conflicts.map((c) => conflictSignature(c)));
 
       for (const conflict of conflicts) {
         const signature = conflictSignature(conflict);
-        if (active.has(signature)) continue; // already alerted for this conflict
-        active.add(signature);
+        const alerted = this.liveScopeState(active);
+        if (alerted.has(signature)) continue;
+        alerted.add(signature);
 
         const [authoritative, phantom] = conflict.masters;
         const slotLabel =
@@ -6618,16 +6801,17 @@ export class AnomalyService
         };
 
         this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-        await this.addLatchedAnomaly(event, ctx, `${ctx.connectionId}:${signature}`, () => {
-          this.activeTopologyConflicts.get(ctx.connectionId)?.delete(signature);
+        await this.addLatchedAnomaly(event, ctx, `${scope}:${signature}`, () => {
+          this.liveScopeState(active).delete(signature);
         });
       }
 
       // Keep only signatures still in conflict so a resolved-then-recurring
       // conflict alerts again. (A CLUSTER NODES observation gap is handled at the
       // poll level, which clears this set so a missed heal re-alerts.)
-      for (const signature of active) {
-        if (!currentSignatures.has(signature)) active.delete(signature);
+      const stillActive = this.liveScopeState(active);
+      for (const signature of activeAtStart) {
+        if (!currentSignatures.has(signature)) stillActive.delete(signature);
       }
     } catch (topologyErr) {
       this.logger.debug(
@@ -8425,6 +8609,7 @@ export class AnomalyService
    */
   private async detectStuckReplicas(
     ctx: ConnectionContext,
+    scope: string,
     timestamp: number,
     nodes: ClusterNode[],
   ): Promise<void> {
@@ -8434,6 +8619,7 @@ export class AnomalyService
         timestamp,
         findings: detectStuckReplicas(nodes),
         signatureOf: stuckReplicaSignature,
+        scope,
         firstSeenByConn: this.stuckReplicaFirstSeen,
         activeByConn: this.activeStuckReplicas,
         minPersistMs: AnomalyService.STUCK_REPLICA_MIN_PERSIST_MS,
@@ -8696,6 +8882,7 @@ export class AnomalyService
    */
   private async detectHostnameStaleness(
     ctx: ConnectionContext,
+    scope: string,
     timestamp: number,
     nodes: ClusterNode[],
     shards: ClusterShard[] | undefined,
@@ -8706,6 +8893,7 @@ export class AnomalyService
         timestamp,
         findings: detectHostnameStaleness(nodes, shards),
         signatureOf: hostnameStalenessSignature,
+        scope,
         firstSeenByConn: this.hostnameStalenessFirstSeen,
         activeByConn: this.activeHostnameStaleness,
         minPersistMs: AnomalyService.HOSTNAME_STALENESS_MIN_PERSIST_MS,
@@ -8767,6 +8955,7 @@ export class AnomalyService
    */
   private async detectGhostMembers(
     ctx: ConnectionContext,
+    scope: string,
     timestamp: number,
     nodes: ClusterNode[],
   ): Promise<void> {
@@ -8776,6 +8965,7 @@ export class AnomalyService
         timestamp,
         findings: detectGhostMembers(nodes),
         signatureOf: ghostMemberSignature,
+        scope,
         firstSeenByConn: this.ghostMemberFirstSeen,
         activeByConn: this.activeGhostMembers,
         minPersistMs: AnomalyService.GHOST_MEMBER_MIN_PERSIST_MS,
@@ -8884,6 +9074,12 @@ export class AnomalyService
     };
   }
 
+  private forgetMembershipHistoryOfAnotherReader(scope: string, readerId: string): void {
+    const previous = this.ghostHistoryReaders.get(scope);
+    this.ghostHistoryReaders.set(scope, readerId);
+    if (previous !== undefined && previous !== readerId) this.ghostHistories.delete(scope);
+  }
+
   /**
    * Known false positive: an INTENTIONAL re-add of the same node-id — a host that
    * kept its `nodes.conf` and was brought back without a `CLUSTER RESET`, inside
@@ -8903,14 +9099,15 @@ export class AnomalyService
    */
   private async detectForgetRejoin(
     ctx: ConnectionContext,
+    scope: string,
     timestamp: number,
     nodes: ClusterNode[],
   ): Promise<void> {
     try {
-      let history = this.ghostHistories.get(ctx.connectionId);
+      let history = this.ghostHistories.get(scope);
       if (history === undefined) {
         history = new GhostMembershipHistory();
-        this.ghostHistories.set(ctx.connectionId, history);
+        this.ghostHistories.set(scope, history);
       }
 
       for (const rejoin of history.observe(nodes, timestamp)) {
@@ -8995,6 +9192,7 @@ export class AnomalyService
    */
   private async detectReplicaSlotState(
     ctx: ConnectionContext,
+    scope: string,
     timestamp: number,
     nodes: ClusterNode[],
     shards: ClusterShard[] | undefined,
@@ -9015,9 +9213,11 @@ export class AnomalyService
         ? (signature: string) => notReadReplicaIds.has(signature.split('|')[0])
         : undefined;
       const findings = detectReplicaSlotState(nodes, shards);
-      this.claimLegacyReplicaSlotEvents(ctx.connectionId, findings, unseenReplicaIds);
+      this.claimLegacyReplicaSlotEvents(scope, findings, unseenReplicaIds);
+      const owners = this.connectionClaims(this.replicaSlotEventOwners, scope, () => new Map<string, string>());
       await this.applyTopologyPersistenceGate({
         ctx,
+        scope,
         timestamp,
         findings,
         signatureOf: replicaSlotSignature,
@@ -9028,8 +9228,9 @@ export class AnomalyService
         minPersistMs: AnomalyService.REPLICA_SLOT_STATE_MIN_PERSIST_MS,
         metricType: MetricType.REPLICA_SLOT_STATE,
         preserveSignature,
+        ownerOf: (eventId) => this.liveScopeState(owners).get(eventId),
         buildEvent: (a, signature) => ({
-          id: randomUUID(),
+          id: this.ownedSlotEventId(this.liveScopeState(owners), ctx.connectionId),
           timestamp,
           metricType: MetricType.REPLICA_SLOT_STATE,
           anomalyType: AnomalyType.SPIKE,
@@ -9046,6 +9247,7 @@ export class AnomalyService
           connectionId: ctx.connectionId,
         }),
       });
+      this.forgetUntrackedSlotEventOwners(scope);
     } catch (err) {
       this.logger.debug(
         `Failed to check replica slot state for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
@@ -9085,6 +9287,7 @@ export class AnomalyService
   private async gatherReplicaSlotView(
     baseNodes: ClusterNode[],
     ctx: ConnectionContext,
+    scopeOf: () => string,
   ): Promise<{ nodes: ClusterNode[]; notReadIds: Set<string>; unseenIds: Set<string>; waitingIds: Set<string> }> {
     const unchanged = {
       nodes: baseNodes,
@@ -9092,7 +9295,7 @@ export class AnomalyService
       unseenIds: new Set<string>(),
       waitingIds: new Set<string>(),
     };
-    if (!this.clusterDiscovery || !this.dialsDataNodes(ctx.connectionId)) {
+    if (!this.clusterDiscovery || !this.asksReplicasForOwnLine(ctx.connectionId)) {
       return unchanged;
     }
 
@@ -9109,9 +9312,10 @@ export class AnomalyService
     );
     if (remoteReplicas.length === 0) return unchanged;
 
-    const watched = this.replicaSlotWatchedIds(ctx.connectionId);
+    const askedUnder = scopeOf();
+    const watched = this.replicaSlotWatchedIds(askedUnder);
     const { due } = this.replicaSlotRotation.pick(
-      ctx.connectionId,
+      askedUnder,
       remoteReplicas,
       (r) => r.id,
       AnomalyService.REPLICA_SLOT_READ_BUDGET,
@@ -9140,12 +9344,13 @@ export class AnomalyService
       }),
     );
 
+    const scope = scopeOf();
     const merged = baseNodes.map((n) => ({ ...n }));
     const byId = new Map(merged.map((n) => [n.id, n]));
     const replicaIds = new Set(remoteReplicas.map((r) => r.id));
     // A replica whose last read failed stays unreachable while it waits its turn.
     const unreachableIds = new Set(
-      [...(this.replicaSlotUnreachable.get(ctx.connectionId) ?? [])].filter((id) => replicaIds.has(id)),
+      [...(this.replicaSlotUnreachable.get(scope) ?? [])].filter((id) => replicaIds.has(id)),
     );
     const read = new Set<string>();
     // allSettled preserves order, so selfViews[i] corresponds to due[i].
@@ -9182,7 +9387,7 @@ export class AnomalyService
     // every-poll warn would spam). This gives an ongoing signal that slot-state
     // detection is blind for some replicas, and a recovery line when it clears.
     const unreachable = unreachableIds.size;
-    const prevUnreachable = this.replicaFanoutUnreachable.get(ctx.connectionId) ?? 0;
+    const prevUnreachable = this.replicaFanoutUnreachable.get(scope) ?? 0;
     if (unreachable !== prevUnreachable) {
       if (unreachable > 0) {
         this.logger.warn(
@@ -9193,18 +9398,18 @@ export class AnomalyService
           `Replica slot-state fan-out for ${ctx.connectionName}: all replica self-views reachable again.`,
         );
       }
-      this.replicaFanoutUnreachable.set(ctx.connectionId, unreachable);
+      this.replicaFanoutUnreachable.set(scope, unreachable);
     }
-    this.replicaSlotUnreachable.set(ctx.connectionId, unreachableIds);
+    this.replicaSlotUnreachable.set(scope, unreachableIds);
     const notReadIds = new Set([...replicaIds].filter((id) => !read.has(id)));
     const waitingIds = new Set([...notReadIds].filter((id) => !unreachableIds.has(id)));
-    if (!this.legacyReplicaSlotEvents.has(ctx.connectionId)) {
-      this.legacyReplicaSlotRead.delete(ctx.connectionId);
+    if (!this.legacyReplicaSlotEvents.has(scope)) {
+      this.legacyReplicaSlotRead.delete(scope);
       return { nodes: merged, notReadIds, unseenIds: notReadIds, waitingIds };
     }
-    const seen = this.legacyReplicaSlotRead.get(ctx.connectionId) ?? new Set<string>();
+    const seen = this.legacyReplicaSlotRead.get(scope) ?? new Set<string>();
     read.forEach((id) => seen.add(id));
-    this.legacyReplicaSlotRead.set(ctx.connectionId, seen);
+    this.legacyReplicaSlotRead.set(scope, seen);
     return {
       nodes: merged,
       notReadIds,
@@ -9253,6 +9458,7 @@ export class AnomalyService
     isConfirmed?: (finding: T) => boolean;
     contextOf?: (finding: T) => ConnectionContext;
     ownerOf?: (eventId: string) => string | undefined;
+    scope?: string;
   }): Promise<void> {
     const {
       ctx,
@@ -9270,15 +9476,17 @@ export class AnomalyService
       contextOf,
       ownerOf,
     } = params;
-    const connId = ctx.connectionId;
+    const connId = params.scope ?? ctx.connectionId;
     const isPreserved = (sig: string): boolean => preserveSignature?.(sig) ?? false;
 
-    const firstSeen = firstSeenByConn.get(connId) ?? new Map<string, number>();
+    const firstSeen = this.connectionClaims(firstSeenByConn, connId, () => new Map<string, number>());
     const active = this.connectionClaims(activeByConn, connId, () => new Set<string>());
     const eventIds = eventIdsByConn
       ? this.connectionClaims(eventIdsByConn, connId, () => new Map<string, string>())
       : new Map<string, string>();
     const currentSignatures = new Set(findings.map(signatureOf));
+    const activeAtStart = [...active];
+    const trackedAtStart = [...eventIds];
 
     // Forget recovered signatures so their grace window restarts if they recur.
     // A preserved (observation-gap) signature is NOT recovered — keep its clock.
@@ -9288,8 +9496,9 @@ export class AnomalyService
 
     for (const finding of findings) {
       const signature = signatureOf(finding);
-      const seenAt = firstSeen.get(signature) ?? timestamp;
-      if (!firstSeen.has(signature)) firstSeen.set(signature, timestamp);
+      const seen = this.liveScopeState(firstSeen);
+      const seenAt = seen.get(signature) ?? timestamp;
+      if (!seen.has(signature)) seen.set(signature, timestamp);
 
       // Persistence gate.
       if (timestamp - seenAt < minPersistMs || isConfirmed?.(finding) === false) continue;
@@ -9304,7 +9513,7 @@ export class AnomalyService
       // externally or evicted, we stop tracking it and fall through to re-emit
       // (mirrors the Raft re-pin behavior).
       if (eventIdsByConn) {
-        const existingId = eventIds.get(signature);
+        const existingId = this.liveScopeState(eventIds).get(signature);
         if (existingId) {
           // Still open in the in-memory ring → dedupe. If it's been evicted from
           // the ring we can't tell from memory alone, so consult the storage-
@@ -9317,24 +9526,27 @@ export class AnomalyService
             metricType,
           );
           if (stillOpen) {
-            active.add(signature);
+            this.liveScopeState(active).add(signature);
             continue;
           }
-          eventIds.delete(signature);
-          active.delete(signature);
+          const tracked = this.liveScopeState(eventIds);
+          const trackedId = tracked.get(signature);
+          if (trackedId !== undefined && trackedId !== existingId) continue;
+          tracked.delete(signature);
+          this.liveScopeState(active).delete(signature);
         }
-      } else if (active.has(signature)) {
+      } else if (this.liveScopeState(active).has(signature)) {
         continue;
       }
 
       const event = buildEvent(finding, signature);
       const eventCtx = contextOf?.(finding) ?? ctx;
       this.logger.warn(`Anomaly detected for ${eventCtx.connectionName}: ${event.message}`);
-      active.add(signature);
-      if (eventIdsByConn) eventIds.set(signature, event.id);
+      this.liveScopeState(active).add(signature);
+      if (eventIdsByConn) this.liveScopeState(eventIds).set(signature, event.id);
       await this.addLatchedAnomaly(event, eventCtx, `${connId}:${signature}`, () => {
-        activeByConn.get(connId)?.delete(signature);
-        const tracked = eventIdsByConn?.get(connId);
+        (activeByConn.get(connId) ?? this.liveScopeState(active)).delete(signature);
+        const tracked = eventIdsByConn && (eventIdsByConn.get(connId) ?? this.liveScopeState(eventIds));
         if (tracked?.get(signature) === event.id) tracked.delete(signature);
       });
     }
@@ -9349,10 +9561,11 @@ export class AnomalyService
     // the outbox retries it. Retry is decoupled from `active`, so a genuine
     // recurrence of the same signature still re-alerts.
     if (eventIdsByConn) {
-      for (const [sig, id] of [...eventIds]) {
+      for (const [sig, id] of trackedAtStart) {
         // Still active this poll, or an observation gap (unreachable node) — don't
         // resolve: a gap must not read as recovery.
         if (currentSignatures.has(sig) || isPreserved(sig)) continue;
+        if (this.liveScopeState(eventIds).get(sig) !== id) continue;
         if (this.persistenceOutbox.resolvedAt(id) !== undefined) continue;
         let outcome: 'resolved' | 'retry' | 'gone' = 'retry';
         try {
@@ -9360,15 +9573,16 @@ export class AnomalyService
         } catch {
           outcome = 'retry';
         }
-        if (outcome !== 'retry') eventIds.delete(sig);
+        const tracked = this.liveScopeState(eventIds);
+        if (outcome !== 'retry' && tracked.get(sig) === id) tracked.delete(sig);
       }
     }
 
-    firstSeenByConn.set(connId, firstSeen);
     // Keep signatures active this poll AND preserved ones (unreachable nodes),
     // so a transient connectivity gap doesn't drop a still-open finding.
-    for (const sig of active) {
-      if (!currentSignatures.has(sig) && !isPreserved(sig)) active.delete(sig);
+    const stillActive = this.liveScopeState(active);
+    for (const sig of activeAtStart) {
+      if (!currentSignatures.has(sig) && !isPreserved(sig)) stillActive.delete(sig);
     }
   }
 
@@ -9626,11 +9840,12 @@ export class AnomalyService
    */
   private async detectFailoverChurn(
     ctx: ConnectionContext,
+    scope: string,
     timestamp: number,
     nodes: ClusterNode[],
   ): Promise<void> {
-    const state = this.failoverChurnState.get(ctx.connectionId) ?? new Map();
-    this.failoverChurnState.set(ctx.connectionId, state);
+    const state = this.failoverChurnState.get(scope) ?? new Map();
+    this.failoverChurnState.set(scope, state);
 
     const findings = evaluateFailoverChurn(state, nodes, timestamp);
     for (const finding of findings) {
@@ -10074,14 +10289,14 @@ export class AnomalyService
     return this.incidentEventsById.get(anomalyId);
   }
 
-  private stamp(anomaly: AnomalyEvent, connectionId = anomaly.connectionId): void {
+  private stamp(anomaly: AnomalyEvent, connectionId = anomaly.connectionId, readBy = connectionId): void {
     anomaly.scopeId ??= this.correlationScopeOf(connectionId) || undefined;
     anomaly.eventSequence ??= this.nextEventSequence++;
-    this.stampNode(anomaly, connectionId);
+    this.stampNode(anomaly, connectionId, readBy);
   }
 
-  private stampNode(anomaly: AnomalyEvent, connectionId: string | undefined): void {
-    const node = connectionId ? this.nodeInClusterView(anomaly, connectionId) : anomaly.node;
+  private stampNode(anomaly: AnomalyEvent, connectionId: string | undefined, readBy = connectionId): void {
+    const node = connectionId ? this.nodeInClusterView(anomaly, connectionId, readBy) : anomaly.node;
     if (node) anomaly.node = node;
     delete anomaly.nodeSubject;
   }
@@ -10089,8 +10304,9 @@ export class AnomalyService
   private nodeInClusterView(
     anomaly: EventNodeSource & Pick<AnomalyEvent, 'timestamp'>,
     connectionId: string,
+    readBy = connectionId,
   ): ClusterNodeRef | undefined {
-    const view = this.clusterNodeViews.view(this.nodeViewKeyOf(connectionId));
+    const view = this.clusterNodeViews.view(this.nodeViewKeyOf(readBy));
     const staleMs = this.nodeViewStaleMs();
     const roleKnown = !view || Math.abs(anomaly.timestamp - view.readAt) <= staleMs;
     const own = this.clusterNodeViews.ownRole(connectionId);
@@ -10163,8 +10379,9 @@ export class AnomalyService
     ctx?: ConnectionContext,
     onDrop?: () => void,
   ): Promise<void> {
-    this.stamp(anomaly, ctx?.connectionId || anomaly.connectionId);
-    this.addRecentAnomaly(anomaly, ctx?.connectionId || anomaly.connectionId);
+    const filedUnder = ctx?.connectionId || anomaly.connectionId;
+    this.stamp(anomaly, filedUnder, (ctx && this.eventReaders.get(ctx)) ?? filedUnder);
+    this.addRecentAnomaly(anomaly, filedUnder);
     this.rememberIncidentEvent(anomaly);
 
     if (ctx) this.anomalyContexts.set(anomaly, ctx);
@@ -10204,6 +10421,166 @@ export class AnomalyService
     if (latch === undefined || this.latchHolders.get(latch) !== anomaly.id) return false;
     this.latchHolders.delete(latch);
     return true;
+  }
+
+  private clusterEventContext(ctx: ConnectionContext): ConnectionContext {
+    const filedUnder = this.clusterIdentity?.eventConnectionOf(ctx.connectionId) ?? ctx.connectionId;
+    const config = filedUnder === ctx.connectionId ? null : this.connectionRegistry.getConfig(filedUnder);
+    if (!config) return ctx;
+    const filed = {
+      ...ctx,
+      connectionId: filedUnder,
+      connectionName: config.name ?? ctx.connectionName,
+      host: config.host ?? ctx.host,
+      port: config.port ?? ctx.port,
+    };
+    this.eventReaders.set(filed, ctx.connectionId);
+    return filed;
+  }
+
+  private clusterScopeOf(connectionId: string): string {
+    return this.clusterIdentity?.clusterKeyOf(connectionId) ?? connectionId;
+  }
+
+  private readsForCluster(connectionId: string, timestamp: number, readIsCurrent: boolean): boolean {
+    const identity = this.clusterIdentity;
+    if (!identity) return true;
+    if (!readIsCurrent) return false;
+    const scope = identity.clusterKeyOf(connectionId);
+    const previous = this.clusterScopes.get(connectionId);
+    this.clusterScopes.set(connectionId, scope);
+    this.clusterScopeReadAt.set(connectionId, timestamp);
+    if (previous !== undefined && previous !== scope) this.clusterScopesLeft.set(connectionId, previous);
+    const left = this.clusterScopesLeft.get(connectionId);
+    if (left !== undefined && !this.isScopeRead(left, timestamp)) {
+      this.clusterScopesLeft.delete(connectionId);
+      this.moveClusterScope(left, scope);
+    }
+    return identity.claimReader(
+      connectionId,
+      timestamp,
+      this.dialsDataNodes(connectionId),
+      this.getIntervalMs(),
+    );
+  }
+
+  private followClusterJoins(): void {
+    this.stopFollowingClusterJoins?.();
+    this.stopFollowingClusterJoins = this.clusterIdentity?.onKeysJoined((from, to) =>
+      this.joinClusterScope(from, to),
+    );
+  }
+
+  private joinClusterScope(from: string, to: string): void {
+    this.moveClusterScope(from, to);
+    for (const [member, key] of this.clusterScopes) {
+      if (key === from) this.clusterScopes.set(member, to);
+    }
+  }
+
+  private isScopeRead(scope: string, now: number): boolean {
+    const graceMs = readerGraceMs(this.getIntervalMs());
+    return [...this.clusterScopeReadAt].some(
+      ([connectionId, readAt]) => now - readAt <= graceMs && this.clusterScopeOf(connectionId) === scope,
+    );
+  }
+
+  private moveClusterScope(from: string, to: string): void {
+    this.clusterScopeMoves += 1;
+    const kept = this.replicaSlotEventIds.get(to);
+    for (const [signature, id] of this.replicaSlotEventIds.get(from) ?? []) {
+      const keptId = kept?.get(signature);
+      if (keptId !== undefined && keptId !== id) this.closeLater(id);
+    }
+    for (const firstSeen of this.clusterFirstSeenState()) {
+      const keptSeen = firstSeen.get(to);
+      for (const [signature, seenAt] of firstSeen.get(from) ?? []) {
+        if (keptSeen && seenAt < (keptSeen.get(signature) ?? -Infinity)) keptSeen.set(signature, seenAt);
+      }
+    }
+    const bringsOldRows = (this.legacyReplicaSlotEvents.get(from)?.length ?? 0) > 0;
+    for (const state of this.clusterScopedState()) {
+      if (!state.has(from)) continue;
+      state.set(to, this.joinedScopeState(state.get(to), state.get(from)));
+      state.delete(from);
+    }
+    if (bringsOldRows) this.legacyReplicaSlotRead.delete(to);
+    this.replicaSlotRotation.forget(from);
+  }
+
+  private joinedScopeState(kept: unknown, joined: unknown): unknown {
+    if (kept === undefined || kept === joined) return joined;
+    if (kept instanceof Set && joined instanceof Set) {
+      joined.forEach((value) => kept.add(value));
+      this.mergedScopeState.set(joined, kept);
+      return kept;
+    }
+    if (kept instanceof Map && joined instanceof Map) {
+      joined.forEach((value, key) => {
+        if (!kept.has(key)) kept.set(key, value);
+      });
+      this.mergedScopeState.set(joined, kept);
+      return kept;
+    }
+    if (Array.isArray(kept) && Array.isArray(joined)) return [...kept, ...joined];
+    return kept;
+  }
+
+  private liveScopeState<S extends object>(state: S): S {
+    let live = state;
+    for (let next = this.mergedScopeState.get(live); next !== undefined; next = this.mergedScopeState.get(live)) {
+      live = next as S;
+    }
+    return live;
+  }
+
+  private asksReplicasForOwnLine(connectionId: string): boolean {
+    return Boolean(this.clusterDiscovery) && this.dialsDataNodes(connectionId);
+  }
+
+  private leaveClusterScope(connectionId: string): string | undefined {
+    const scope = this.clusterScopes.get(connectionId) ?? connectionId;
+    this.clusterScopes.delete(connectionId);
+    this.clusterScopeReadAt.delete(connectionId);
+    this.clusterScopesLeft.delete(connectionId);
+    return [...this.clusterScopes.values()].includes(scope) ? undefined : scope;
+  }
+
+  private forgetClusterScope(scope: string): void {
+    this.clusterScopedState().forEach((state) => state.delete(scope));
+    this.replicaSlotRotation.forget(scope);
+  }
+
+  private clusterScopedState(): Array<Map<string, unknown>> {
+    return [
+      this.activeTopologyConflicts,
+      this.stuckReplicaFirstSeen,
+      this.activeStuckReplicas,
+      this.hostnameStalenessFirstSeen,
+      this.activeHostnameStaleness,
+      this.ghostMemberFirstSeen,
+      this.activeGhostMembers,
+      this.ghostHistories,
+      this.ghostHistoryReaders,
+      this.failoverChurnState,
+      this.replicaSlotFirstSeen,
+      this.activeReplicaSlotAnomalies,
+      this.replicaSlotEventIds,
+      this.replicaFanoutUnreachable,
+      this.replicaSlotUnreachable,
+      this.legacyReplicaSlotRead,
+      this.legacyReplicaSlotEvents,
+      this.replicaSlotEventOwners,
+    ];
+  }
+
+  private clusterFirstSeenState(): Array<Map<string, Map<string, number>>> {
+    return [
+      this.stuckReplicaFirstSeen,
+      this.hostnameStalenessFirstSeen,
+      this.ghostMemberFirstSeen,
+      this.replicaSlotFirstSeen,
+    ];
   }
 
   private connectionClaims<T>(byConn: Map<string, T>, connectionId: string, create: () => T): T {
@@ -13953,7 +14330,12 @@ export class AnomalyService
     this.divergenceOrphans.set(key, orphans);
   }
 
-  private closeConnectionEventsOnRemoval(connectionId: string): void {
+  private closeConnectionEventsOnRemoval(
+    connectionId: string,
+    endedScope?: string,
+    handedOn: string[] = [],
+  ): void {
+    const slotKeys = [...new Set([connectionId, endedScope ?? connectionId])];
     const backlogEventId = this.backlogCoverageEventIds.get(connectionId);
     const divergenceKeys = this.divergenceKeysOf(connectionId);
     const ids = [
@@ -13964,10 +14346,11 @@ export class AnomalyService
       ...(this.reshardSkewEventIds.get(connectionId)?.values() ?? []),
       ...(this.hotShardEventIds.get(connectionId)?.values() ?? []),
       ...this.allTopologyEventStores.flatMap((store) => [...(store.eventIds.get(connectionId)?.values() ?? [])]),
-      ...(this.replicaSlotEventIds.get(connectionId)?.values() ?? []),
+      ...slotKeys.flatMap((key) => [...(this.replicaSlotEventIds.get(key)?.values() ?? [])]),
       ...(this.slotMigrationEventIds.get(connectionId)?.values() ?? []),
       ...(this.stuckSlotMigrationEventIds.get(connectionId)?.values() ?? []),
-      ...(this.legacyReplicaSlotEvents.get(connectionId) ?? []).map((e) => e.id),
+      ...slotKeys.flatMap((key) => this.legacyReplicaSlotEvents.get(key) ?? []).map((e) => e.id),
+      ...handedOn,
       this.adoptedReshardEventIds.get(connectionId),
       ...(this.adoptedNodeReshardEventIds.get(connectionId)?.values() ?? []),
       ...(this.resyncEscalationEvents.get(connectionId) ?? []).map((e) => e.id),

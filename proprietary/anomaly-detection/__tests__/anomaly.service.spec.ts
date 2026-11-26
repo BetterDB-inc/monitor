@@ -7572,6 +7572,7 @@ describe('AnomalyService', () => {
         );
         identity = new ClusterIdentityService(registry);
         (service as any).clusterIdentity = identity;
+        (service as any).followClusterJoins();
       });
 
       it('sends one cluster.failover when every connection of the cluster sees the state fail', async () => {
@@ -33423,6 +33424,1388 @@ describe('AnomalyService', () => {
         (service as any).onConnectionRemoved('conn-1');
 
         expect((service as any).topologyFullChecks.state(clusterKey, now)).toEqual({ state: 'none' });
+      });
+    });
+  });
+
+  describe('cluster-wide checks with several connections of one cluster', () => {
+    const SEED = 'conn-a';
+    const MEMBERS = [SEED, 'conn-b', 'conn-c'];
+    const HOSTS: Record<string, string> = { 'conn-a': '10.0.0.1', 'conn-b': '10.0.0.2', 'conn-c': '10.0.0.3' };
+    const MINUTE_MS = 60_000;
+    const GATE_MS = 31_000;
+    const clusterInfoResponse = {
+      server: { role: 'master' },
+      clients: { connected_clients: '10', blocked_clients: '0' },
+      memory: { used_memory: '1000000', allocator_frag_ratio: '1.1' },
+      stats: {
+        instantaneous_ops_per_sec: '100',
+        instantaneous_input_kbps: '50',
+        instantaneous_output_kbps: '30',
+        evicted_keys: '0',
+        keyspace_misses: '5',
+        rejected_connections: '0',
+        acl_access_denied_auth: '0',
+        cluster_enabled: '1',
+      },
+    };
+
+    function cnode(id: string, host: string, flags: string[], extra: Partial<ClusterNode> = {}): ClusterNode {
+      return {
+        id,
+        address: `${host}:6379@16379`,
+        flags,
+        master: '',
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 1,
+        linkState: 'connected',
+        slots: [],
+        ...extra,
+      };
+    }
+
+    const NODE_A = cnode('nodeAAAAAAAA', '10.0.0.1', ['master'], { slots: [[0, 5460]] });
+    const NODE_B = cnode('nodeBBBBBBBB', '10.0.0.2', ['master'], { slots: [[5461, 10922]] });
+    const NODE_C = cnode('nodeCCCCCCCC', '10.0.0.3', ['master'], { slots: [[10923, 16383]] });
+    const HEALTHY = [NODE_A, NODE_B, NODE_C];
+    const SPLIT = [...HEALTHY, cnode('nodeDDDDDDDD', '10.0.0.4', ['master'], { slots: [[0, 5460]], configEpoch: 9 })];
+    const ORPHANED = [
+      ...HEALTHY,
+      cnode('replicaEEEEE', '10.0.0.5', ['slave'], { master: 'deadprimFFFF' }),
+      cnode('deadprimFFFF', '10.0.0.6', ['master', 'fail'], { linkState: 'disconnected' }),
+    ];
+    const GHOST = [cnode('flippedGGGGG', '127.0.0.1', ['master']), ...HEALTHY];
+    const STALE_HOSTNAME = [{ ...NODE_A, hostname: 'a.example' }, { ...NODE_B, hostname: 'b.example' }, NODE_C];
+
+    let now: number;
+    let topology: ClusterNode[];
+    let views: Record<string, ClusterNode[]>;
+    let unreadable: Set<string>;
+    let configs: Record<string, unknown>;
+    let ctxs: Record<string, ConnectionContext>;
+
+    function memberCtx(connectionId: string): ConnectionContext {
+      const host = HOSTS[connectionId];
+      return {
+        ...mockCtx,
+        connectionId,
+        connectionName: connectionId,
+        host,
+        client: {
+          ...dbClient,
+          getInfoParsed: jest.fn().mockResolvedValue(clusterInfoResponse),
+          getClusterInfo: jest.fn().mockResolvedValue({ cluster_state: 'ok' }),
+          getClusterNodes: jest.fn(async () => {
+            if (unreadable.has(connectionId)) throw new Error('CLUSTER NODES failed');
+            return (views[connectionId] ?? topology).map((node) =>
+              node.address.startsWith(`${host}:`)
+                ? { ...node, flags: ['myself', ...node.flags] }
+                : { ...node, migratingSlots: undefined, importingSlots: undefined },
+            );
+          }),
+        },
+      } as unknown as ConnectionContext;
+    }
+
+    async function pollAll(order: string[] = MEMBERS): Promise<void> {
+      for (const id of order) await poll(ctxs[id]);
+    }
+
+    async function pollAfter(ms: number, order: string[] = MEMBERS): Promise<void> {
+      now += ms;
+      await pollAll(order);
+    }
+
+    const eventsOf = (metricType: MetricType): AnomalyEvent[] =>
+      service.getRecentEvents().filter((e) => e.metricType === metricType);
+
+    const stuckReplicaEvents = (): AnomalyEvent[] =>
+      eventsOf(MetricType.CLUSTER_TOPOLOGY).filter((e) => e.message.includes('replicaEEEEE'.substring(0, 8)));
+
+    beforeEach(() => {
+      now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+      topology = HEALTHY;
+      views = {};
+      unreadable = new Set();
+      configs = {
+        'conn-a': { id: 'conn-a' },
+        'conn-b': { id: 'conn-b', membership: { seedId: SEED, nodeId: NODE_B.id, origin: 'auto', source: 'cluster' } },
+        'conn-c': { id: 'conn-c', membership: { seedId: SEED, nodeId: NODE_C.id, origin: 'auto', source: 'cluster' } },
+      };
+      ctxs = Object.fromEntries(MEMBERS.map((id) => [id, memberCtx(id)]));
+      const registry = (service as any).connectionRegistry;
+      registry.getConfig.mockImplementation((id: string) => configs[id] ?? null);
+      registry.list = jest.fn(() =>
+        MEMBERS.filter((id) => configs[id]).map((id) => ({ id, host: HOSTS[id], port: 6379, ...(configs[id] as object) })),
+      );
+      (service as any).clusterIdentity = new ClusterIdentityService(registry);
+      (service as any).followClusterJoins();
+    });
+
+    afterEach(() => {
+      (Date.now as jest.Mock).mockRestore();
+    });
+
+    it('raises one split-brain alert when every connection sees two primaries for the same slots', async () => {
+      await pollAll();
+      topology = SPLIT;
+
+      await pollAfter(1000);
+      await pollAfter(1000);
+
+      const events = eventsOf(MetricType.CLUSTER_TOPOLOGY);
+      expect(events).toHaveLength(1);
+      expect(events[0].connectionId).toBe(SEED);
+    });
+
+    it('links the node on a split-brain alert filed under a seed that has never read', async () => {
+      unreadable.add(SEED);
+      topology = SPLIT;
+      await pollAll();
+
+      await pollAfter(1000);
+      await pollAfter(1000);
+
+      const [event] = eventsOf(MetricType.CLUSTER_TOPOLOGY);
+      expect(event.connectionId).toBe(SEED);
+      expect(event.node).toMatchObject({ nodeId: NODE_A.id, address: '10.0.0.1:6379' });
+    });
+
+    it('raises one stuck replica warning for the cluster', async () => {
+      topology = ORPHANED;
+      await pollAll();
+
+      await pollAfter(GATE_MS);
+
+      expect(stuckReplicaEvents()).toHaveLength(1);
+    });
+
+    it('raises one hostname warning for the cluster', async () => {
+      topology = STALE_HOSTNAME;
+      await pollAll();
+
+      await pollAfter(GATE_MS);
+
+      expect(eventsOf(MetricType.HOSTNAME_STALENESS)).toHaveLength(1);
+    });
+
+    it('raises one ghost member alert for the cluster', async () => {
+      topology = GHOST;
+      await pollAll();
+
+      await pollAfter(GATE_MS);
+
+      expect(eventsOf(MetricType.GHOST_MEMBERSHIP)).toHaveLength(1);
+    });
+
+    it('raises one warning when a forgotten node comes back', async () => {
+      const extra = cnode('removedHHHHH', '10.0.0.8', ['master']);
+      topology = [...HEALTHY, extra];
+      await pollAll();
+      topology = HEALTHY;
+      await pollAfter(GATE_MS);
+      await pollAfter(GATE_MS);
+      topology = [...HEALTHY, extra];
+
+      await pollAfter(GATE_MS);
+
+      expect(eventsOf(MetricType.GHOST_MEMBERSHIP)).toHaveLength(1);
+    });
+
+    it('raises one failover churn warning for the cluster', async () => {
+      const owner = (id: string, epoch: number): ClusterNode[] => [
+        { ...NODE_A, id, configEpoch: epoch },
+        NODE_B,
+        NODE_C,
+      ];
+      await pollAll();
+      for (const [id, epoch] of [['nodeDDDDDDDD', 2], ['nodeAAAAAAAA', 3], ['nodeDDDDDDDD', 4]] as const) {
+        topology = owner(id, epoch);
+        await pollAfter(5000);
+      }
+
+      expect(eventsOf(MetricType.FAILOVER_CHURN)).toHaveLength(1);
+    });
+
+    it('leaves the cluster-wide checks to the seed when a member is polled first', async () => {
+      topology = ORPHANED;
+      await pollAll(['conn-c', 'conn-b', SEED]);
+
+      await pollAfter(GATE_MS, ['conn-c', 'conn-b', SEED]);
+
+      expect(stuckReplicaEvents().map((e) => e.connectionId)).toEqual([SEED]);
+    });
+
+    it('does not raise a warning again when another connection takes over as reader', async () => {
+      topology = ORPHANED;
+      await pollAll();
+      await pollAfter(GATE_MS);
+      unreadable.add(SEED);
+
+      await pollAfter(MINUTE_MS + 1000);
+      await pollAfter(GATE_MS);
+
+      expect(stuckReplicaEvents()).toHaveLength(1);
+    });
+
+    it('holds the cluster-wide checks while the reader has not read for under a minute', async () => {
+      await pollAll();
+      unreadable.add(SEED);
+      topology = ORPHANED;
+
+      await pollAfter(1000);
+      await pollAfter(GATE_MS);
+
+      expect(stuckReplicaEvents()).toHaveLength(0);
+    });
+
+    it('lets a member raise the warning once the reader has not read for over a minute', async () => {
+      await pollAll();
+      unreadable.add(SEED);
+      topology = ORPHANED;
+      await pollAfter(MINUTE_MS + 1000);
+
+      await pollAfter(GATE_MS);
+
+      expect(stuckReplicaEvents().map((e) => e.connectionId)).toEqual([SEED]);
+    });
+
+    it('counts how long a finding lasts from when the first reader saw it', async () => {
+      topology = ORPHANED;
+      await pollAll();
+      unreadable.add(SEED);
+
+      await pollAfter(MINUTE_MS + 1000);
+
+      expect(stuckReplicaEvents().map((e) => e.connectionId)).toEqual([SEED]);
+    });
+
+    it('does not raise the split-brain alert again when a member fails to read the topology', async () => {
+      topology = SPLIT;
+      await pollAll();
+      unreadable.add('conn-b');
+      await pollAfter(1000);
+      unreadable.delete('conn-b');
+
+      await pollAfter(1000);
+
+      expect(eventsOf(MetricType.CLUSTER_TOPOLOGY)).toHaveLength(1);
+    });
+
+    it('raises the split-brain alert again after the reader missed a read', async () => {
+      topology = SPLIT;
+      await pollAll();
+      unreadable.add(SEED);
+      await pollAfter(1000);
+      unreadable.delete(SEED);
+
+      await pollAfter(1000);
+
+      expect(eventsOf(MetricType.CLUSTER_TOPOLOGY)).toHaveLength(2);
+    });
+
+    function remove(connectionId: string): void {
+      delete configs[connectionId];
+      (service as any).clusterIdentity.forget(connectionId);
+      (service as any).onConnectionRemoved(connectionId);
+    }
+
+    it('does not raise a warning again when the seed it was filed under is removed', async () => {
+      topology = ORPHANED;
+      await pollAll();
+      await pollAfter(GATE_MS);
+      remove(SEED);
+
+      await pollAfter(1000, ['conn-b', 'conn-c']);
+      await pollAfter(GATE_MS, ['conn-b', 'conn-c']);
+
+      expect(stuckReplicaEvents().map((e) => e.connectionId)).toEqual([SEED]);
+    });
+
+    it('does not raise the split-brain alert again when the seed it was filed under is removed', async () => {
+      topology = SPLIT;
+      await pollAll();
+      remove(SEED);
+
+      await pollAfter(1000, ['conn-b', 'conn-c']);
+      await pollAfter(1000, ['conn-b', 'conn-c']);
+
+      expect(eventsOf(MetricType.CLUSTER_TOPOLOGY).map((e) => e.connectionId)).toEqual([SEED]);
+    });
+
+    it('does not raise a warning again when a connection that did not raise it is removed', async () => {
+      topology = ORPHANED;
+      await pollAll();
+      await pollAfter(GATE_MS);
+      remove('conn-c');
+
+      await pollAfter(1000, [SEED, 'conn-b']);
+
+      expect(stuckReplicaEvents()).toHaveLength(1);
+    });
+
+    it('does not raise a warning again when the member that raised it during a seed outage is removed', async () => {
+      await pollAll();
+      unreadable.add(SEED);
+      topology = ORPHANED;
+      await pollAfter(MINUTE_MS + 1000);
+      await pollAfter(GATE_MS);
+      remove('conn-b');
+
+      await pollAfter(1000, [SEED, 'conn-c']);
+      await pollAfter(GATE_MS, [SEED, 'conn-c']);
+
+      expect(stuckReplicaEvents().map((e) => e.connectionId)).toEqual([SEED]);
+    });
+
+    it('forgets the findings of a cluster once its last connection is removed', async () => {
+      topology = ORPHANED;
+      await pollAll();
+      await pollAfter(GATE_MS);
+      MEMBERS.forEach(remove);
+
+      expect((service as any).activeStuckReplicas.size).toBe(0);
+      expect((service as any).stuckReplicaFirstSeen.size).toBe(0);
+      expect((service as any).ghostHistories.size).toBe(0);
+      expect((service as any).failoverChurnState.size).toBe(0);
+    });
+
+    it('keeps the checks of two clusters apart', async () => {
+      const other = cnode('otherXXXXXXX', '10.0.9.1', ['myself', 'master'], { slots: [[0, 8000]] });
+      const otherCtx = {
+        ...memberCtx(SEED),
+        connectionId: 'conn-x',
+        connectionName: 'conn-x',
+        host: '10.0.9.1',
+        client: {
+          ...dbClient,
+          getInfoParsed: jest.fn().mockResolvedValue(clusterInfoResponse),
+          getClusterInfo: jest.fn().mockResolvedValue({ cluster_state: 'ok' }),
+          getClusterNodes: jest.fn(async () => [
+            other,
+            cnode('otherYYYYYYY', '10.0.9.2', ['master'], { slots: [[8001, 16383]] }),
+            cnode('otherZZZZZZZ', '10.0.9.3', ['master'], { slots: [[0, 8000]], configEpoch: 9 }),
+          ]),
+        },
+      } as unknown as ConnectionContext;
+      configs['conn-x'] = { id: 'conn-x' };
+      topology = SPLIT;
+
+      await pollAll();
+      await poll(otherCtx);
+
+      expect(eventsOf(MetricType.CLUSTER_TOPOLOGY).map((e) => e.connectionId).sort()).toEqual([SEED, 'conn-x']);
+    });
+
+    it('runs the checks once on the poll the seed takes over from a member', async () => {
+      const checks = jest.spyOn(service as any, 'detectGhostMembers');
+
+      await pollAll(['conn-b', 'conn-c', SEED]);
+
+      expect(checks).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not raise the warnings of two halves again once they turn out to be one cluster', async () => {
+      const halves = [SEED, 'conn-c'];
+      delete configs['conn-b'];
+      configs['conn-c'] = { id: 'conn-c' };
+      const left = [NODE_A, NODE_B, ...ORPHANED.slice(HEALTHY.length)];
+      const right = [
+        NODE_C,
+        cnode('nodeXXXXXXXX', '10.0.0.7', ['master']),
+        cnode('replicaHHHHH', '10.0.0.8', ['slave'], { master: 'deadprimIIII' }),
+        cnode('deadprimIIII', '10.0.0.9', ['master', 'fail'], { linkState: 'disconnected' }),
+      ];
+      const strayReplicaEvents = (): AnomalyEvent[] =>
+        eventsOf(MetricType.CLUSTER_TOPOLOGY).filter((e) => /replicaE|replicaH/.test(e.message));
+      views = { [SEED]: left, 'conn-c': right };
+      await pollAll(halves);
+      await pollAfter(GATE_MS, halves);
+      expect(strayReplicaEvents()).toHaveLength(2);
+      views = {};
+      topology = [...left, ...right];
+
+      await pollAfter(1000, halves);
+      await pollAfter(GATE_MS, halves);
+
+      expect(strayReplicaEvents()).toHaveLength(2);
+    });
+
+    describe('with a node only some connections still list', () => {
+      const FORGOTTEN = cnode('forgotJJJJJJ', '10.0.0.7', ['master']);
+      const rejoinEvents = (): AnomalyEvent[] =>
+        service.getRecentEvents().filter((e) => e.message.includes('reintroduced itself'));
+
+      it('does not report a rejoin when the reader moves to a connection that still lists the node', async () => {
+        views = { 'conn-b': [...HEALTHY, FORGOTTEN], 'conn-c': [...HEALTHY, FORGOTTEN] };
+        topology = [...HEALTHY, FORGOTTEN];
+        await pollAll();
+        topology = HEALTHY;
+        await pollAfter(1000);
+        await pollAfter(1000);
+        unreadable.add(SEED);
+
+        await pollAfter(MINUTE_MS + 1000);
+        await pollAfter(1000);
+
+        expect(rejoinEvents()).toHaveLength(0);
+      });
+
+      it('does not report a rejoin when the reader moves back to a connection that still lists the node', async () => {
+        views = { 'conn-b': HEALTHY, 'conn-c': HEALTHY };
+        topology = [...HEALTHY, FORGOTTEN];
+        await pollAll();
+        unreadable.add(SEED);
+        await pollAfter(MINUTE_MS + 1000);
+        await pollAfter(1000);
+        unreadable.delete(SEED);
+
+        await pollAfter(MINUTE_MS);
+        await pollAfter(1000);
+        await pollAfter(1000);
+
+        expect(rejoinEvents()).toHaveLength(0);
+      });
+
+      it('reports a node that comes back while one connection keeps reading', async () => {
+        topology = [...HEALTHY, FORGOTTEN];
+        await pollAll();
+        topology = HEALTHY;
+        await pollAfter(1000);
+        await pollAfter(MINUTE_MS);
+        topology = [...HEALTHY, FORGOTTEN];
+
+        await pollAfter(1000);
+
+        expect(rejoinEvents().map((e) => e.connectionId)).toEqual([SEED]);
+      });
+    });
+
+    it('keeps the warnings of a joined half when its connection is removed before it reads the whole cluster', async () => {
+      const halves = [SEED, 'conn-c'];
+      delete configs['conn-b'];
+      configs['conn-c'] = { id: 'conn-c' };
+      const left = [NODE_A, NODE_B, ...ORPHANED.slice(HEALTHY.length)];
+      const right = [
+        NODE_C,
+        cnode('nodeXXXXXXXX', '10.0.0.7', ['master']),
+        cnode('replicaHHHHH', '10.0.0.8', ['slave'], { master: 'deadprimIIII' }),
+        cnode('deadprimIIII', '10.0.0.9', ['master', 'fail'], { linkState: 'disconnected' }),
+      ];
+      const half: Record<string, ClusterNode[]> = { [SEED]: left, 'conn-c': right };
+      const strayReplicaEvents = (): AnomalyEvent[] =>
+        eventsOf(MetricType.CLUSTER_TOPOLOGY).filter((e) => /replicaE|replicaH/.test(e.message));
+      views = half;
+      await pollAll(halves);
+      await pollAfter(GATE_MS, halves);
+      const keyOf = (id: string): string => (service as any).clusterIdentity.clusterKeyOf(id);
+      const [kept, joined] = [...halves].sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
+      views = { [joined]: half[joined] };
+      topology = [...left, ...right];
+      await pollAfter(1000, [kept]);
+      remove(joined);
+
+      await pollAfter(1000, [kept]);
+      await pollAfter(GATE_MS, [kept]);
+
+      expect(strayReplicaEvents()).toHaveLength(2);
+    });
+
+    it('raises one warning per finding when two halves turn out to be one cluster while a warning is stored', async () => {
+      const halves = [SEED, 'conn-c'];
+      delete configs['conn-b'];
+      configs['conn-c'] = { id: 'conn-c' };
+      const left = [NODE_A, NODE_B, ...ORPHANED.slice(HEALTHY.length)];
+      const right = [
+        NODE_C,
+        cnode('nodeXXXXXXXX', '10.0.0.7', ['master']),
+        cnode('replicaHHHHH', '10.0.0.8', ['slave'], { master: 'deadprimIIII' }),
+        cnode('deadprimIIII', '10.0.0.9', ['master', 'fail'], { linkState: 'disconnected' }),
+      ];
+      const late = [
+        cnode('replicaPPPPP', '10.0.0.10', ['slave'], { master: 'deadprimRRRR' }),
+        cnode('replicaQQQQQ', '10.0.0.11', ['slave'], { master: 'deadprimRRRR' }),
+        cnode('deadprimRRRR', '10.0.0.12', ['master', 'fail'], { linkState: 'disconnected' }),
+      ];
+      const half: Record<string, ClusterNode[]> = { [SEED]: left, 'conn-c': right };
+      const lateEvents = (): AnomalyEvent[] =>
+        eventsOf(MetricType.CLUSTER_TOPOLOGY).filter((e) => /replicaP|replicaQ/.test(e.message));
+      views = half;
+      await pollAll(halves);
+      await pollAfter(GATE_MS, halves);
+      const keyOf = (id: string): string => (service as any).clusterIdentity.clusterKeyOf(id);
+      const [kept, joined] = [...halves].sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
+      views = { ...half, [joined]: [...half[joined], ...late] };
+      await pollAfter(1000, [joined]);
+      now += GATE_MS;
+      const store = (service as any).addLatchedAnomaly.bind(service);
+      let seenWhole = false;
+      jest.spyOn(service as any, 'addLatchedAnomaly').mockImplementation(async (...args: unknown[]) => {
+        await store(...args);
+        if (seenWhole) return;
+        seenWhole = true;
+        views = {};
+        topology = [...left, ...right, ...late];
+        await poll(ctxs[kept]);
+      });
+
+      await poll(ctxs[joined]);
+      await pollAfter(1000, halves);
+
+      expect(seenWhole).toBe(true);
+      expect(lateEvents()).toHaveLength(2);
+      expect(eventsOf(MetricType.CLUSTER_TOPOLOGY).filter((e) => /replicaE|replicaH/.test(e.message))).toHaveLength(2);
+    });
+
+    it('raises one split-brain alert per conflict when two halves turn out to be one cluster while an alert is stored', async () => {
+      const halves = [SEED, 'conn-c'];
+      delete configs['conn-b'];
+      configs['conn-c'] = { id: 'conn-c' };
+      const left = [NODE_A, NODE_B];
+      const right = [NODE_C, cnode('nodeXXXXXXXX', '10.0.0.7', ['master'])];
+      const half: Record<string, ClusterNode[]> = { [SEED]: left, 'conn-c': right };
+      const splitBrainAlerts = (): AnomalyEvent[] =>
+        eventsOf(MetricType.CLUSTER_TOPOLOGY).filter((e) => e.message.includes('split-brain'));
+      views = half;
+      await pollAll(halves);
+      const keyOf = (id: string): string => (service as any).clusterIdentity.clusterKeyOf(id);
+      const [kept, joined] = [...halves].sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
+      const [from] = (joined === SEED ? NODE_A : NODE_C).slots[0];
+      const twins = [
+        cnode('nodeSSSSSSSS', '10.0.0.13', ['master'], { slots: [[from, from + 100]], configEpoch: 9 }),
+        cnode('nodeTTTTTTTT', '10.0.0.14', ['master'], { slots: [[from + 200, from + 300]], configEpoch: 9 }),
+      ];
+      views = { ...half, [joined]: [...half[joined], ...twins] };
+      now += 1000;
+      const store = (service as any).addLatchedAnomaly.bind(service);
+      let seenWhole = false;
+      jest.spyOn(service as any, 'addLatchedAnomaly').mockImplementation(async (...args: unknown[]) => {
+        await store(...args);
+        if (seenWhole) return;
+        seenWhole = true;
+        views = {};
+        topology = [...left, ...right, ...twins];
+        await poll(ctxs[kept]);
+      });
+
+      await poll(ctxs[joined]);
+      await pollAfter(1000, halves);
+
+      expect(seenWhole).toBe(true);
+      expect(splitBrainAlerts()).toHaveLength(2);
+    });
+
+    it('keeps the split-brain alert of the other half when two halves join while an alert is stored', async () => {
+      const halves = [SEED, 'conn-c'];
+      delete configs['conn-b'];
+      configs['conn-c'] = { id: 'conn-c' };
+      const left = [NODE_A, NODE_B];
+      const right = [NODE_C, cnode('nodeXXXXXXXX', '10.0.0.7', ['master'])];
+      const half: Record<string, ClusterNode[]> = { [SEED]: left, 'conn-c': right };
+      const splitBrainAlerts = (): AnomalyEvent[] =>
+        eventsOf(MetricType.CLUSTER_TOPOLOGY).filter((e) => e.message.includes('split-brain'));
+      const twinOf = (connectionId: string, id: string, host: string): ClusterNode => {
+        const [from] = (connectionId === SEED ? NODE_A : NODE_C).slots[0];
+        return cnode(id, host, ['master'], { slots: [[from, from + 100]], configEpoch: 9 });
+      };
+      views = half;
+      await pollAll(halves);
+      const keyOf = (id: string): string => (service as any).clusterIdentity.clusterKeyOf(id);
+      const [kept, joined] = [...halves].sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
+      const keptTwin = twinOf(kept, 'nodeSSSSSSSS', '10.0.0.13');
+      const joinedTwin = twinOf(joined, 'nodeTTTTTTTT', '10.0.0.14');
+      views = { ...half, [kept]: [...half[kept], keptTwin] };
+      await pollAfter(1000, [kept]);
+      const raisedInTheKeptHalf = splitBrainAlerts().length;
+      views = { ...views, [joined]: [...half[joined], joinedTwin] };
+      now += 1000;
+      const store = (service as any).addLatchedAnomaly.bind(service);
+      let seenWhole = false;
+      jest.spyOn(service as any, 'addLatchedAnomaly').mockImplementation(async (...args: unknown[]) => {
+        await store(...args);
+        if (seenWhole) return;
+        seenWhole = true;
+        views = {};
+        topology = [...left, ...right, keptTwin, joinedTwin];
+        await poll(ctxs[kept]);
+      });
+
+      await poll(ctxs[joined]);
+      await pollAfter(1000, halves);
+
+      expect(seenWhole).toBe(true);
+      expect(raisedInTheKeptHalf).toBe(1);
+      expect(splitBrainAlerts()).toHaveLength(2);
+    });
+
+    it('raises no second split-brain alert when the metrics read sees two halves join before the reader polls', async () => {
+      const halves = [SEED, 'conn-c'];
+      delete configs['conn-b'];
+      configs['conn-c'] = { id: 'conn-c' };
+      const left = [NODE_A, NODE_B];
+      const right = [NODE_C, cnode('nodeXXXXXXXX', '10.0.0.7', ['master'])];
+      const half: Record<string, ClusterNode[]> = { [SEED]: left, 'conn-c': right };
+      const splitBrainAlerts = (): AnomalyEvent[] =>
+        eventsOf(MetricType.CLUSTER_TOPOLOGY).filter((e) => e.message.includes('split-brain'));
+      views = half;
+      await pollAll(halves);
+      const identity: ClusterIdentityService = (service as any).clusterIdentity;
+      const [kept, joined] = [...halves].sort((a, b) =>
+        identity.clusterKeyOf(a).localeCompare(identity.clusterKeyOf(b)),
+      );
+      const [from] = (joined === SEED ? NODE_A : NODE_C).slots[0];
+      const twin = cnode('nodeSSSSSSSS', '10.0.0.13', ['master'], { slots: [[from, from + 100]], configEpoch: 9 });
+      views = { ...half, [joined]: [...half[joined], twin] };
+      await pollAfter(1000, halves);
+      views = {};
+      topology = [...left, ...right, twin];
+      identity.observe(kept, topology);
+
+      await pollAfter(MINUTE_MS + 1000, [kept]);
+
+      expect(identity.isReader(kept)).toBe(true);
+      expect(splitBrainAlerts()).toHaveLength(1);
+    });
+
+    it('keeps a warning with its cluster when one connection starts reading another cluster', async () => {
+      topology = ORPHANED;
+      await pollAll();
+      await pollAfter(GATE_MS);
+      views = {
+        'conn-c': [
+          cnode('otherXXXXXXX', '10.0.0.3', ['master'], { slots: [[0, 8000]] }),
+          cnode('otherYYYYYYY', '10.0.9.2', ['master'], { slots: [[8001, 16383]] }),
+        ],
+      };
+
+      await pollAfter(1000);
+      await pollAfter(GATE_MS);
+      await pollAfter(GATE_MS);
+
+      expect(stuckReplicaEvents()).toHaveLength(1);
+    });
+
+    it('keeps a warning with its cluster when polls are more than a minute apart', async () => {
+      jest.spyOn(service as any, 'getIntervalMs').mockReturnValue(90_000);
+      const moverFirst = ['conn-c', SEED, 'conn-b'];
+      topology = ORPHANED;
+      await pollAll();
+      await pollAfter(90_000);
+      views = {
+        'conn-c': [
+          cnode('otherXXXXXXX', '10.0.0.3', ['master'], { slots: [[0, 8000]] }),
+          cnode('otherYYYYYYY', '10.0.9.2', ['master'], { slots: [[8001, 16383]] }),
+        ],
+      };
+
+      await pollAfter(90_000, moverFirst);
+      await pollAfter(90_000, moverFirst);
+
+      expect(stuckReplicaEvents()).toHaveLength(1);
+    });
+
+    it('keeps a warning with its cluster while its other connections miss reads for less than a minute', async () => {
+      topology = ORPHANED;
+      await pollAll();
+      await pollAfter(GATE_MS);
+      views = {
+        'conn-c': [
+          cnode('otherXXXXXXX', '10.0.0.3', ['master'], { slots: [[0, 8000]] }),
+          cnode('otherYYYYYYY', '10.0.9.2', ['master'], { slots: [[8001, 16383]] }),
+        ],
+      };
+      await pollAfter(1000);
+      unreadable = new Set([SEED, 'conn-b']);
+      await pollAfter(GATE_MS);
+      unreadable = new Set();
+
+      await pollAfter(1000);
+      await pollAfter(GATE_MS);
+      await pollAfter(GATE_MS);
+
+      expect(stuckReplicaEvents()).toHaveLength(1);
+    });
+
+    it.each([
+      'stuckReplicaFirstSeen',
+      'hostnameStalenessFirstSeen',
+      'ghostMemberFirstSeen',
+      'replicaSlotFirstSeen',
+    ])('counts a finding seen under both keys from the earlier time when the keys join (%s)', (name) => {
+      const firstSeen = (service as any)[name] as Map<string, Map<string, number>>;
+      firstSeen.set('joined-away', new Map([['seen-first-here', 1000], ['seen-later-here', 5000], ['only-here', 3000]]));
+      firstSeen.set('kept', new Map([['seen-first-here', 2000], ['seen-later-here', 4000]]));
+
+      (service as any).joinClusterScope('joined-away', 'kept');
+
+      expect(firstSeen.has('joined-away')).toBe(false);
+      expect(Object.fromEntries(firstSeen.get('kept') ?? [])).toEqual({
+        'seen-first-here': 1000,
+        'seen-later-here': 4000,
+        'only-here': 3000,
+      });
+    });
+
+    describe('replica slot state', () => {
+      const REPLICA_ID = 'eeeeeeee';
+      const REPLICA = cnode(REPLICA_ID, '10.0.0.9', ['slave'], { master: NODE_A.id });
+      const CLEAN = `${REPLICA_ID} 10.0.0.9:6379@16379 myself,slave ${NODE_A.id} 0 0 1 connected`;
+      const STUCK = `${CLEAN} [42-<-aaaaaaaa]`;
+      let ownLine: string;
+      let getNodeConnection: jest.Mock;
+
+      const replicaReaders = (): string[] =>
+        getNodeConnection.mock.calls.filter(([nodeId]) => nodeId === REPLICA_ID).map(([, reader]) => reader);
+      const slotEvents = (): AnomalyEvent[] => eventsOf(MetricType.REPLICA_SLOT_STATE);
+
+      beforeEach(() => {
+        ownLine = CLEAN;
+        getNodeConnection = jest.fn(async () => ({ call: jest.fn(async () => ownLine) }));
+        (service as any).clusterDiscovery = {
+          retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+          releaseConnection: jest.fn().mockResolvedValue(undefined),
+          getNodeConnection,
+        };
+        (service as any).topologyDivergenceSettings.enabled = false;
+        topology = [...HEALTHY, REPLICA];
+      });
+
+      it('asks a replica for its own line through one connection per cluster', async () => {
+        await pollAll();
+
+        expect(replicaReaders()).toEqual([SEED]);
+      });
+
+      it('raises one replica slot warning for the cluster', async () => {
+        ownLine = STUCK;
+        await pollAll();
+
+        await pollAfter(GATE_MS);
+
+        expect(slotEvents().map((e) => e.connectionId)).toEqual([SEED]);
+      });
+
+      it('links the replica on a warning filed under a seed that has never read', async () => {
+        unreadable.add(SEED);
+        ownLine = STUCK;
+        await pollAll();
+
+        await pollAfter(GATE_MS);
+
+        const [event] = slotEvents();
+        expect(event.connectionId).toBe(SEED);
+        expect(event.node).toMatchObject({ nodeId: REPLICA_ID, address: '10.0.0.9:6379', role: 'replica' });
+      });
+
+      describe('when two halves turn out to be one cluster while a stored warning is looked up', () => {
+        const halves = [SEED, 'conn-c'];
+        const left = [NODE_A, NODE_B];
+        const right = [NODE_C, cnode('nodeXXXXXXXX', '10.0.0.7', ['master'])];
+        let kept: string;
+        let joined: string;
+        let stuck: ClusterNode[];
+        let raised: AnomalyEvent[];
+        let closedInStorage: Set<string>;
+        let joinsOnLookup: boolean;
+
+        function forgetCachedEvents(): void {
+          (service as any).recentAnomalies = [];
+        }
+
+        beforeEach(async () => {
+          delete configs['conn-b'];
+          configs['conn-c'] = { id: 'conn-c' };
+          const half: Record<string, ClusterNode[]> = { [SEED]: left, 'conn-c': right };
+          views = half;
+          await pollAll(halves);
+          const keyOf = (id: string): string => (service as any).clusterIdentity.clusterKeyOf(id);
+          [kept, joined] = [...halves].sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
+          const primary = joined === SEED ? NODE_A : NODE_C;
+          stuck = [
+            cnode('replicaR1111', '10.0.0.21', ['slave'], { master: primary.id }),
+            cnode('replicaR2222', '10.0.0.22', ['slave'], { master: primary.id }),
+          ];
+          const lines = Object.fromEntries(
+            stuck.map((replica) => [
+              replica.id,
+              `${replica.id} ${replica.address} myself,slave ${primary.id} 0 0 1 connected [42-<-aaaaaaaa]`,
+            ]),
+          );
+          getNodeConnection.mockImplementation(async (nodeId: string) => ({
+            call: jest.fn(async () => lines[nodeId] ?? CLEAN),
+          }));
+          views = { ...half, [joined]: [...half[joined], ...stuck] };
+          await pollAfter(1000, [joined]);
+          await pollAfter(GATE_MS, [joined]);
+          raised = slotEvents();
+          closedInStorage = new Set();
+          joinsOnLookup = true;
+          storage.getAnomalyEvents = jest.fn(async ({ connectionId }: { connectionId: string }) => {
+            if (joinsOnLookup) {
+              joinsOnLookup = false;
+              views = {};
+              topology = [...left, ...right, ...stuck];
+              await poll(ctxs[kept]);
+            }
+            return [...raised, ...slotEvents()]
+              .filter((e) => e.connectionId === connectionId && !closedInStorage.has(e.id))
+              .map((e) => ({ id: e.id, resolved: false }));
+          });
+          forgetCachedEvents();
+        });
+
+        it('raises no second warning for a finding looked up after the join', async () => {
+          now += 1000;
+          await poll(ctxs[joined]);
+
+          expect(raised).toHaveLength(2);
+          expect(joinsOnLookup).toBe(false);
+          expect(slotEvents()).toHaveLength(0);
+        });
+
+        it('raises no third warning for a finding raised again after the join', async () => {
+          raised.forEach((e) => closedInStorage.add(e.id));
+          now += 1000;
+          await poll(ctxs[joined]);
+          const raisedAgain = slotEvents();
+          raised = [...raised, ...raisedAgain];
+          forgetCachedEvents();
+
+          await pollAfter(1000, halves);
+
+          expect(joinsOnLookup).toBe(false);
+          expect(raisedAgain).toHaveLength(2);
+          expect(slotEvents()).toHaveLength(0);
+        });
+      });
+
+      describe('when two halves turn out to be one cluster while the stored warnings of a member are read', () => {
+        const halves = [SEED, 'conn-c'];
+        const left = [NODE_A, NODE_B];
+        const right = [NODE_C, cnode('nodeXXXXXXXX', '10.0.0.7', ['master'])];
+        let joined: string;
+        let cleanLine: string;
+        let joinsOnRead: boolean;
+
+        const closedIds = (): string[] => storage.resolveAnomaly.mock.calls.map(([id]) => id).sort();
+
+        beforeEach(async () => {
+          delete configs['conn-b'];
+          configs['conn-c'] = { id: 'conn-c' };
+          const half: Record<string, ClusterNode[]> = { [SEED]: left, 'conn-c': right };
+          views = half;
+          await pollAll(halves);
+          const keyOf = (id: string): string => (service as any).clusterIdentity.clusterKeyOf(id);
+          const [kept, joinedHalf] = [...halves].sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
+          joined = joinedHalf;
+          const primary = joined === SEED ? NODE_A : NODE_C;
+          const stuck = cnode('replicaR1111', '10.0.0.21', ['slave'], { master: primary.id });
+          cleanLine = `${stuck.id} ${stuck.address} myself,slave ${primary.id} 0 0 1 connected`;
+          ownLine = `${cleanLine} [42-<-aaaaaaaa]`;
+          views = { ...half, [joined]: [...half[joined], stuck] };
+          configs['conn-b'] = {
+            id: 'conn-b',
+            membership: { seedId: joined, nodeId: 'memberMMMMMM', origin: 'auto', source: 'cluster' },
+          };
+          const signature = replicaSlotSignature({
+            replicaId: stuck.id,
+            reason: 'replica_importing',
+            affectedSlots: [42],
+          } as ReplicaSlotAnomaly);
+          joinsOnRead = true;
+          storage.getAnomalyEvents.mockImplementation(async ({ connectionId, metricType, offset }) => {
+            if (offset || metricType !== MetricType.REPLICA_SLOT_STATE || connectionId !== 'conn-b') return [];
+            if (joinsOnRead) {
+              joinsOnRead = false;
+              views = {};
+              topology = [...left, ...right, stuck];
+              (service as any).clusterIdentity.observe(kept, topology);
+            }
+            return [{ id: 'row-b', timestamp: 1, message: 'msg', dedupeKey: signature }];
+          });
+          now += 1000;
+          await poll(ctxs[joined]);
+        });
+
+        it('raises no second warning for the finding of a stored one', async () => {
+          await pollAfter(1000, halves);
+          await pollAfter(GATE_MS, halves);
+          await (service as any).drainPersistenceOutbox();
+
+          expect(joinsOnRead).toBe(false);
+          expect(slotEvents()).toHaveLength(0);
+          expect(closedIds()).toEqual([]);
+        });
+
+        it('closes the stored warning once the replica is clean', async () => {
+          ownLine = cleanLine;
+
+          await pollAfter(1000, halves);
+          await (service as any).drainPersistenceOutbox();
+
+          expect(joinsOnRead).toBe(false);
+          expect(closedIds()).toEqual(['row-b']);
+        });
+      });
+
+      describe('when two halves turn out to be one cluster while a replica is asked for its own line', () => {
+        const halves = [SEED, 'conn-c'];
+        const left = [NODE_A, NODE_B];
+        const right = [NODE_C, cnode('nodeXXXXXXXX', '10.0.0.7', ['master'])];
+        const scopeOf = (id: string): string => (service as any).clusterScopes.get(id);
+        let joined: string;
+        let kept: string;
+        let silent: ClusterNode;
+        let joinsOnAsk: boolean;
+
+        beforeEach(async () => {
+          delete configs['conn-b'];
+          configs['conn-c'] = { id: 'conn-c' };
+          const half: Record<string, ClusterNode[]> = { [SEED]: left, 'conn-c': right };
+          views = half;
+          await pollAll(halves);
+          const keyOf = (id: string): string => (service as any).clusterIdentity.clusterKeyOf(id);
+          [kept, joined] = [...halves].sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
+          const primary = joined === SEED ? NODE_A : NODE_C;
+          silent = cnode('replicaR1111', '10.0.0.21', ['slave'], { master: primary.id });
+          views = { ...half, [joined]: [...half[joined], silent] };
+          joinsOnAsk = true;
+          getNodeConnection.mockImplementation(async () => {
+            if (joinsOnAsk) {
+              joinsOnAsk = false;
+              views = {};
+              topology = [...left, ...right, silent];
+              (service as any).clusterIdentity.observe(kept, topology);
+            }
+            throw new Error('ECONNREFUSED');
+          });
+        });
+
+        it('keeps the replica that did not answer under the key the cluster keeps', async () => {
+          const joinedAway = scopeOf(joined);
+          now += 1000;
+
+          await poll(ctxs[joined]);
+
+          expect(joinsOnAsk).toBe(false);
+          expect(scopeOf(joined)).toBe(scopeOf(kept));
+          expect(scopeOf(joined)).not.toBe(joinedAway);
+          expect((service as any).replicaSlotUnreachable.get(scopeOf(kept))).toEqual(new Set([silent.id]));
+          expect((service as any).replicaFanoutUnreachable.get(scopeOf(kept))).toBe(1);
+          const underJoinedAway = ((service as any).clusterScopedState() as Array<Map<string, unknown>>).filter(
+            (state) => state.has(joinedAway),
+          );
+          expect(underJoinedAway).toEqual([]);
+        });
+      });
+
+      describe('when two halves turn out to be one cluster while one half asks its own replica', () => {
+        const halves = [SEED, 'conn-c'];
+        const left = [NODE_A, NODE_B];
+        const right = [NODE_C, cnode('nodeXXXXXXXX', '10.0.0.7', ['master'])];
+        let joinsOnAsk: boolean;
+
+        const closedIds = (): string[] => storage.resolveAnomaly.mock.calls.map(([id]) => id).sort();
+
+        async function warnInOtherHalfOf(asker: 'kept' | 'joined'): Promise<string> {
+          delete configs['conn-b'];
+          configs['conn-c'] = { id: 'conn-c' };
+          const half: Record<string, ClusterNode[]> = { [SEED]: left, 'conn-c': right };
+          views = half;
+          await pollAll(halves);
+          const keyOf = (id: string): string => (service as any).clusterIdentity.clusterKeyOf(id);
+          const [kept, joined] = [...halves].sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
+          const [asking, warned] = asker === 'kept' ? [kept, joined] : [joined, kept];
+          const primaryOf = (id: string): ClusterNode => (id === SEED ? NODE_A : NODE_C);
+          const stuck = cnode('replicaR1111', '10.0.0.21', ['slave'], { master: primaryOf(warned).id });
+          const clean = cnode('replicaR3333', '10.0.0.23', ['slave'], { master: primaryOf(asking).id });
+          const lineOf = (replica: ClusterNode, primary: ClusterNode): string =>
+            `${replica.id} ${replica.address} myself,slave ${primary.id} 0 0 1 connected`;
+          joinsOnAsk = false;
+          getNodeConnection.mockImplementation(async (nodeId: string) => {
+            if (nodeId === clean.id && joinsOnAsk) {
+              joinsOnAsk = false;
+              views = {};
+              topology = [...left, ...right, stuck, clean];
+              (service as any).clusterIdentity.observe(kept, topology);
+            }
+            return {
+              call: jest.fn(async () =>
+                nodeId === stuck.id
+                  ? `${lineOf(stuck, primaryOf(warned))} [42-<-aaaaaaaa]`
+                  : lineOf(clean, primaryOf(asking)),
+              ),
+            };
+          });
+          views = { [warned]: [...half[warned], stuck], [asking]: [...half[asking], clean] };
+          await pollAfter(1000, [warned]);
+          await pollAfter(GATE_MS, [warned]);
+          joinsOnAsk = true;
+          return asking;
+        }
+
+        it.each(['kept', 'joined'] as const)(
+          'keeps the warning of the other half open when the half that asks has the %s key',
+          async (asker) => {
+            const asking = await warnInOtherHalfOf(asker);
+            const raised = slotEvents().map((e) => e.id);
+            now += 1000;
+
+            await poll(ctxs[asking]);
+            await pollAfter(1000, halves);
+            await (service as any).drainPersistenceOutbox();
+
+            expect(raised).toHaveLength(1);
+            expect(joinsOnAsk).toBe(false);
+            expect(closedIds()).toEqual([]);
+            expect(slotEvents().map((e) => e.id)).toEqual(raised);
+          },
+        );
+      });
+
+      it('keeps asking the replica through the seed when polls are more than a minute apart', async () => {
+        jest.spyOn(service as any, 'getIntervalMs').mockReturnValue(90_000);
+        const membersFirst = ['conn-b', 'conn-c', SEED];
+        await pollAll();
+        getNodeConnection.mockClear();
+
+        await pollAfter(90_000, membersFirst);
+        await pollAfter(90_000, membersFirst);
+
+        expect(replicaReaders()).toEqual([SEED, SEED]);
+      });
+
+      it('asks the replica through a member that can dial when the seed cannot', async () => {
+        configs[SEED] = { ...(configs[SEED] as object), host: 'agent' };
+        await pollAll();
+
+        await pollAfter(1000);
+
+        expect(replicaReaders()).toEqual(['conn-b']);
+      });
+
+      it('asks the replica through the member that takes over as reader', async () => {
+        await pollAll();
+        unreadable.add(SEED);
+        await pollAfter(MINUTE_MS + 1000);
+        getNodeConnection.mockClear();
+
+        await pollAfter(1000);
+
+        expect(replicaReaders()).toEqual(['conn-b']);
+      });
+
+      it('keeps the replica slot warning open when another connection takes over as reader', async () => {
+        ownLine = STUCK;
+        await pollAll();
+        await pollAfter(GATE_MS);
+        unreadable.add(SEED);
+
+        await pollAfter(MINUTE_MS + 1000);
+        await pollAfter(GATE_MS);
+
+        expect(slotEvents().map((e) => e.resolved)).toEqual([false]);
+      });
+
+      it('closes the replica slot warning through the new reader once the replica is clean', async () => {
+        ownLine = STUCK;
+        await pollAll();
+        await pollAfter(GATE_MS);
+        unreadable.add(SEED);
+        await pollAfter(MINUTE_MS + 1000);
+        ownLine = CLEAN;
+
+        await pollAfter(1000);
+
+        expect(slotEvents().map((e) => e.resolved)).toEqual([true]);
+      });
+
+      it('lets a member that cannot dial other nodes report the slot state of its own node', async () => {
+        for (const id of MEMBERS) configs[id] = { ...(configs[id] as object), host: 'agent' };
+        const stuckMember = { ...NODE_C, flags: ['slave'], master: NODE_A.id, slots: [] as number[][] };
+        topology = [NODE_A, NODE_B, { ...stuckMember, importingSlots: [{ slot: 42, sourceNodeId: NODE_A.id }] }];
+        await pollAll();
+
+        await pollAfter(GATE_MS);
+
+        expect(slotEvents().map((e) => e.connectionId)).toEqual(['conn-c']);
+      });
+
+      it('forgets who raised the warnings of a removed connection that cannot dial', async () => {
+        configs[SEED] = { ...(configs[SEED] as object), host: 'agent' };
+        await pollAll();
+        await pollAfter(1000);
+
+        remove(SEED);
+
+        expect((service as any).replicaSlotEventOwners.has(SEED)).toBe(false);
+      });
+
+      it('raises the warning under the next reader when the connection that raised it is removed', async () => {
+        ownLine = STUCK;
+        await pollAll();
+        await pollAfter(GATE_MS);
+        const [raised] = slotEvents();
+        remove(SEED);
+        await (service as any).drainPersistenceOutbox();
+
+        await pollAfter(1000, ['conn-b', 'conn-c']);
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith(raised.id, expect.any(Number));
+        expect(slotEvents().filter((e) => e.id !== raised.id).map((e) => e.connectionId)).toEqual(['conn-b']);
+      });
+
+      it('files the warning a member raises under the seed', async () => {
+        await pollAll();
+        unreadable.add(SEED);
+        ownLine = STUCK;
+        await pollAfter(MINUTE_MS + 1000);
+
+        await pollAfter(GATE_MS);
+
+        expect(slotEvents().map((e) => e.connectionId)).toEqual([SEED]);
+      });
+
+      it('keeps the warning open when the member that raised it for the seed is removed', async () => {
+        await pollAll();
+        unreadable.add(SEED);
+        ownLine = STUCK;
+        await pollAfter(MINUTE_MS + 1000);
+        await pollAfter(GATE_MS);
+        remove('conn-b');
+
+        await pollAfter(1000, [SEED, 'conn-c']);
+        await pollAfter(GATE_MS, [SEED, 'conn-c']);
+
+        expect(slotEvents().map((e) => e.resolved)).toEqual([false]);
+        expect(storage.resolveAnomaly).not.toHaveBeenCalled();
+      });
+
+      it('keeps the warning open when a connection that did not raise it is removed', async () => {
+        ownLine = STUCK;
+        await pollAll();
+        await pollAfter(GATE_MS);
+        remove('conn-c');
+
+        await pollAfter(1000, [SEED, 'conn-b']);
+
+        expect(slotEvents().map((e) => e.resolved)).toEqual([false]);
+        expect(storage.resolveAnomaly).not.toHaveBeenCalled();
+      });
+
+      it('closes the warning when the cluster comes back with new node ids', async () => {
+        ownLine = STUCK;
+        await pollAll();
+        await pollAfter(GATE_MS);
+        const rebuiltA = cnode('rebuiltAAAAA', '10.0.0.1', ['master'], { slots: [[0, 5460]] });
+        topology = [
+          rebuiltA,
+          cnode('rebuiltBBBBB', '10.0.0.2', ['master'], { slots: [[5461, 10922]] }),
+          cnode('rebuiltCCCCC', '10.0.0.3', ['master'], { slots: [[10923, 16383]] }),
+          cnode('ffffffff', '10.0.0.9', ['slave'], { master: rebuiltA.id }),
+        ];
+        ownLine = `ffffffff 10.0.0.9:6379@16379 myself,slave ${rebuiltA.id} 0 0 1 connected`;
+
+        await pollAfter(1000);
+        await pollAfter(1000);
+
+        expect(slotEvents().map((e) => e.resolved)).toEqual([true]);
+      });
+
+      it('closes the warning after the cluster comes back with new node ids while one connection cannot read', async () => {
+        ownLine = STUCK;
+        await pollAll();
+        await pollAfter(GATE_MS);
+        const rebuiltA = cnode('rebuiltAAAAA', '10.0.0.1', ['master'], { slots: [[0, 5460]] });
+        topology = [
+          rebuiltA,
+          cnode('rebuiltBBBBB', '10.0.0.2', ['master'], { slots: [[5461, 10922]] }),
+          cnode('rebuiltCCCCC', '10.0.0.3', ['master'], { slots: [[10923, 16383]] }),
+          cnode('ffffffff', '10.0.0.9', ['slave'], { master: rebuiltA.id }),
+        ];
+        ownLine = `ffffffff 10.0.0.9:6379@16379 myself,slave ${rebuiltA.id} 0 0 1 connected`;
+        unreadable.add('conn-c');
+        await pollAfter(1000);
+        expect(slotEvents().map((e) => e.resolved)).toEqual([false]);
+
+        await pollAfter(MINUTE_MS);
+        await pollAfter(1000);
+
+        expect(slotEvents().map((e) => e.resolved)).toEqual([true]);
+      });
+
+      describe('with warnings left open before a restart', () => {
+        const signature = replicaSlotSignature({
+          replicaId: REPLICA_ID,
+          reason: 'replica_importing',
+          affectedSlots: [42],
+        } as ReplicaSlotAnomaly);
+        const openRow = (id: string) => ({ id, timestamp: 1, message: 'msg', dedupeKey: signature });
+        const closedIds = (): string[] => storage.resolveAnomaly.mock.calls.map(([id]) => id).sort();
+
+        function leaveOpen(rows: Record<string, string[]>): void {
+          storage.getAnomalyEvents.mockImplementation(async ({ connectionId, metricType, offset }) =>
+            offset || metricType !== MetricType.REPLICA_SLOT_STATE ? [] : (rows[connectionId] ?? []).map(openRow),
+          );
+        }
+
+        it('does not raise again a warning another connection raised', async () => {
+          leaveOpen({ 'conn-b': ['row-b'] });
+          ownLine = STUCK;
+          await pollAll();
+
+          await pollAfter(GATE_MS);
+          await (service as any).drainPersistenceOutbox();
+
+          expect(slotEvents()).toHaveLength(0);
+          expect(closedIds()).toEqual([]);
+        });
+
+        it('closes a warning another connection raised once the replica is clean', async () => {
+          leaveOpen({ 'conn-b': ['row-b'] });
+          await pollAll();
+
+          await pollAfter(1000);
+
+          expect(closedIds()).toEqual(['row-b']);
+        });
+
+        it('keeps one warning when every connection had raised its own', async () => {
+          leaveOpen({ 'conn-a': ['row-a'], 'conn-b': ['row-b'], 'conn-c': ['row-c'] });
+          ownLine = STUCK;
+          await pollAll();
+
+          await pollAfter(GATE_MS);
+          await (service as any).drainPersistenceOutbox();
+
+          expect(slotEvents()).toHaveLength(0);
+          expect(closedIds()).toEqual(['row-b', 'row-c']);
+        });
+
+        it('does not raise again a warning left under a seed that does not answer', async () => {
+          leaveOpen({ 'conn-a': ['row-a'] });
+          ownLine = STUCK;
+          await pollAll(['conn-b', 'conn-c']);
+
+          await pollAfter(GATE_MS, ['conn-b', 'conn-c']);
+          await (service as any).drainPersistenceOutbox();
+
+          expect(slotEvents()).toHaveLength(0);
+          expect(closedIds()).toEqual([]);
+        });
+
+        it('closes a warning left under a seed that does not answer once the replica is clean', async () => {
+          leaveOpen({ 'conn-a': ['row-a'] });
+          await pollAll(['conn-b', 'conn-c']);
+
+          await pollAfter(1000, ['conn-b', 'conn-c']);
+
+          expect(closedIds()).toEqual(['row-a']);
+        });
+
+        it('takes a warning in once when its connection answers after another one loaded it', async () => {
+          leaveOpen({ 'conn-a': ['row-a'] });
+          await pollAll(['conn-b', 'conn-c']);
+          await pollAfter(1000, ['conn-b', 'conn-c']);
+
+          await pollAfter(1000);
+          await pollAfter(1000);
+
+          expect(closedIds()).toEqual(['row-a']);
+        });
+
+        describe('under a seed that cannot dial other nodes', () => {
+          beforeEach(() => {
+            configs[SEED] = { ...(configs[SEED] as object), host: 'agent' };
+          });
+
+          it.each([
+            ['the seed', MEMBERS],
+            ['the reader', ['conn-b', 'conn-c', SEED]],
+          ])('keeps a warning the reader filed there when %s polls first', async (_first, order) => {
+            leaveOpen({ 'conn-a': ['row-a'] });
+            ownLine = STUCK;
+            await pollAll(order);
+
+            await pollAfter(1000, order);
+            await pollAfter(GATE_MS, order);
+            await (service as any).drainPersistenceOutbox();
+
+            expect(closedIds()).toEqual([]);
+            expect(slotEvents()).toHaveLength(0);
+          });
+
+          it('closes a warning the reader filed there once the replica is clean', async () => {
+            leaveOpen({ 'conn-a': ['row-a'] });
+            await pollAll();
+
+            await pollAfter(1000);
+            await (service as any).drainPersistenceOutbox();
+
+            expect(closedIds()).toEqual(['row-a']);
+          });
+
+          it('does not raise again a warning the reader filed there while the seed does not answer', async () => {
+            leaveOpen({ 'conn-a': ['row-a'] });
+            ownLine = STUCK;
+            await pollAll(['conn-b', 'conn-c']);
+
+            await pollAfter(GATE_MS, ['conn-b', 'conn-c']);
+            await (service as any).drainPersistenceOutbox();
+
+            expect(closedIds()).toEqual([]);
+            expect(slotEvents()).toHaveLength(0);
+          });
+
+          it.each([
+            ['the seed', MEMBERS],
+            ['the reader', ['conn-b', 'conn-c', SEED]],
+          ])('leaves a warning about the node of the seed to the seed when %s polls first', async (_first, order) => {
+            const ownSignature = replicaSlotSignature({
+              replicaId: NODE_A.id,
+              reason: 'replica_importing',
+              affectedSlots: [42],
+            } as ReplicaSlotAnomaly);
+            storage.getAnomalyEvents.mockImplementation(async ({ connectionId, metricType, offset }) =>
+              offset || metricType !== MetricType.REPLICA_SLOT_STATE || connectionId !== SEED
+                ? []
+                : [{ id: 'row-own', timestamp: 1, message: 'msg', dedupeKey: ownSignature }],
+            );
+            const seedAsReplica = { ...NODE_A, flags: ['slave'], master: NODE_B.id, slots: [] as number[][] };
+            const stuckSeed = { ...seedAsReplica, importingSlots: [{ slot: 42, sourceNodeId: NODE_B.id }] };
+            getNodeConnection.mockImplementation(async (nodeId: string) => {
+              if (nodeId === NODE_A.id) throw new Error('not reachable');
+              return { call: jest.fn(async () => ownLine) };
+            });
+            topology = [stuckSeed, NODE_B, NODE_C, REPLICA];
+            await pollAll(order);
+            await pollAfter(GATE_MS, order);
+            await (service as any).drainPersistenceOutbox();
+            expect(closedIds()).toEqual([]);
+            expect(slotEvents()).toHaveLength(0);
+            topology = [seedAsReplica, NODE_B, NODE_C, REPLICA];
+
+            await pollAfter(1000, order);
+            await (service as any).drainPersistenceOutbox();
+
+            expect(closedIds()).toEqual(['row-own']);
+          });
+        });
+
+        it('waits with the replica check while the open warnings of the cluster cannot be read', async () => {
+          storage.getAnomalyEvents.mockImplementation(async ({ connectionId }) => {
+            if (connectionId === SEED) throw new Error('storage down');
+            return [];
+          });
+          ownLine = STUCK;
+          await pollAll(['conn-b', 'conn-c']);
+
+          await pollAfter(GATE_MS, ['conn-b', 'conn-c']);
+
+          expect(slotEvents()).toHaveLength(0);
+        });
       });
     });
   });
