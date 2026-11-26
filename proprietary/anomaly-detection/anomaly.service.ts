@@ -6696,8 +6696,9 @@ export class AnomalyService
 
       for (const conflict of conflicts) {
         const signature = conflictSignature(conflict);
-        if (active.has(signature)) continue; // already alerted for this conflict
-        active.add(signature);
+        const alerted = this.liveScopeState(active);
+        if (alerted.has(signature)) continue;
+        alerted.add(signature);
 
         const [authoritative, phantom] = conflict.masters;
         const slotLabel =
@@ -6728,15 +6729,16 @@ export class AnomalyService
 
         this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
         await this.addLatchedAnomaly(event, ctx, `${scope}:${signature}`, () => {
-          this.activeTopologyConflicts.get(scope)?.delete(signature);
+          this.liveScopeState(active).delete(signature);
         });
       }
 
       // Keep only signatures still in conflict so a resolved-then-recurring
       // conflict alerts again. (A CLUSTER NODES observation gap is handled at the
       // poll level, which clears this set so a missed heal re-alerts.)
-      for (const signature of active) {
-        if (!currentSignatures.has(signature)) active.delete(signature);
+      const stillActive = this.liveScopeState(active);
+      for (const signature of stillActive) {
+        if (!currentSignatures.has(signature)) stillActive.delete(signature);
       }
     } catch (topologyErr) {
       this.logger.debug(

@@ -33944,6 +33944,44 @@ describe('AnomalyService', () => {
       expect(eventsOf(MetricType.CLUSTER_TOPOLOGY).filter((e) => /replicaE|replicaH/.test(e.message))).toHaveLength(2);
     });
 
+    it('raises one split-brain alert per conflict when two halves turn out to be one cluster while an alert is stored', async () => {
+      const halves = [SEED, 'conn-c'];
+      delete configs['conn-b'];
+      configs['conn-c'] = { id: 'conn-c' };
+      const left = [NODE_A, NODE_B];
+      const right = [NODE_C, cnode('nodeXXXXXXXX', '10.0.0.7', ['master'])];
+      const half: Record<string, ClusterNode[]> = { [SEED]: left, 'conn-c': right };
+      const splitBrainAlerts = (): AnomalyEvent[] =>
+        eventsOf(MetricType.CLUSTER_TOPOLOGY).filter((e) => e.message.includes('split-brain'));
+      views = half;
+      await pollAll(halves);
+      const keyOf = (id: string): string => (service as any).clusterIdentity.clusterKeyOf(id);
+      const [kept, joined] = [...halves].sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
+      const [from] = (joined === SEED ? NODE_A : NODE_C).slots[0];
+      const twins = [
+        cnode('nodeSSSSSSSS', '10.0.0.13', ['master'], { slots: [[from, from + 100]], configEpoch: 9 }),
+        cnode('nodeTTTTTTTT', '10.0.0.14', ['master'], { slots: [[from + 200, from + 300]], configEpoch: 9 }),
+      ];
+      views = { ...half, [joined]: [...half[joined], ...twins] };
+      now += 1000;
+      const store = (service as any).addLatchedAnomaly.bind(service);
+      let seenWhole = false;
+      jest.spyOn(service as any, 'addLatchedAnomaly').mockImplementation(async (...args: unknown[]) => {
+        await store(...args);
+        if (seenWhole) return;
+        seenWhole = true;
+        views = {};
+        topology = [...left, ...right, ...twins];
+        await poll(ctxs[kept]);
+      });
+
+      await poll(ctxs[joined]);
+      await pollAfter(1000, halves);
+
+      expect(seenWhole).toBe(true);
+      expect(splitBrainAlerts()).toHaveLength(2);
+    });
+
     it('keeps a warning with its cluster when one connection starts reading another cluster', async () => {
       topology = ORPHANED;
       await pollAll();
