@@ -33689,29 +33689,64 @@ describe('AnomalyService', () => {
       expect(eventsOf(MetricType.CLUSTER_TOPOLOGY)).toHaveLength(2);
     });
 
-    it('does not raise a warning again when the reader connection is removed', async () => {
+    function remove(connectionId: string): void {
+      delete configs[connectionId];
+      (service as any).clusterIdentity.forget(connectionId);
+      (service as any).onConnectionRemoved(connectionId);
+    }
+
+    it('raises a warning under the next reader when the connection that raised it is removed', async () => {
       topology = ORPHANED;
       await pollAll();
       await pollAfter(GATE_MS);
-      delete configs[SEED];
-      (service as any).clusterIdentity.forget(SEED);
-      (service as any).onConnectionRemoved(SEED);
+      remove(SEED);
 
       await pollAfter(1000, ['conn-b', 'conn-c']);
       await pollAfter(GATE_MS, ['conn-b', 'conn-c']);
 
+      expect(stuckReplicaEvents().map((e) => e.connectionId).sort()).toEqual([SEED, 'conn-b']);
+    });
+
+    it('raises the split-brain alert under the next reader when the connection that raised it is removed', async () => {
+      topology = SPLIT;
+      await pollAll();
+      remove(SEED);
+
+      await pollAfter(1000, ['conn-b', 'conn-c']);
+      await pollAfter(1000, ['conn-b', 'conn-c']);
+
+      expect(eventsOf(MetricType.CLUSTER_TOPOLOGY).map((e) => e.connectionId).sort()).toEqual([SEED, 'conn-b']);
+    });
+
+    it('does not raise a warning again when a connection that did not raise it is removed', async () => {
+      topology = ORPHANED;
+      await pollAll();
+      await pollAfter(GATE_MS);
+      remove('conn-c');
+
+      await pollAfter(1000, [SEED, 'conn-b']);
+
       expect(stuckReplicaEvents()).toHaveLength(1);
+    });
+
+    it('does not raise again what the remaining reader raised when an earlier reader is removed', async () => {
+      await pollAll();
+      unreadable.add(SEED);
+      topology = ORPHANED;
+      await pollAfter(MINUTE_MS + 1000);
+      await pollAfter(GATE_MS);
+      remove(SEED);
+
+      await pollAfter(1000, ['conn-b', 'conn-c']);
+
+      expect(stuckReplicaEvents().map((e) => e.connectionId)).toEqual(['conn-b']);
     });
 
     it('forgets the findings of a cluster once its last connection is removed', async () => {
       topology = ORPHANED;
       await pollAll();
       await pollAfter(GATE_MS);
-      for (const id of MEMBERS) {
-        delete configs[id];
-        (service as any).clusterIdentity.forget(id);
-        (service as any).onConnectionRemoved(id);
-      }
+      MEMBERS.forEach(remove);
 
       expect((service as any).activeStuckReplicas.size).toBe(0);
       expect((service as any).stuckReplicaFirstSeen.size).toBe(0);
@@ -33763,6 +33798,7 @@ describe('AnomalyService', () => {
         getNodeConnection = jest.fn(async () => ({ call: jest.fn(async () => ownLine) }));
         (service as any).clusterDiscovery = {
           retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+          releaseConnection: jest.fn().mockResolvedValue(undefined),
           getNodeConnection,
         };
         (service as any).topologyDivergenceSettings.enabled = false;
@@ -33829,6 +33865,81 @@ describe('AnomalyService', () => {
         await pollAfter(GATE_MS);
 
         expect(slotEvents().map((e) => e.connectionId)).toEqual(['conn-c']);
+      });
+
+      it('raises the warning under the next reader when the connection that raised it is removed', async () => {
+        ownLine = STUCK;
+        await pollAll();
+        await pollAfter(GATE_MS);
+        const [raised] = slotEvents();
+        remove(SEED);
+        await (service as any).drainPersistenceOutbox();
+
+        await pollAfter(1000, ['conn-b', 'conn-c']);
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith(raised.id, expect.any(Number));
+        expect(slotEvents().filter((e) => e.id !== raised.id).map((e) => e.connectionId)).toEqual(['conn-b']);
+      });
+
+      it('keeps the warning open when a connection that did not raise it is removed', async () => {
+        ownLine = STUCK;
+        await pollAll();
+        await pollAfter(GATE_MS);
+        remove('conn-c');
+
+        await pollAfter(1000, [SEED, 'conn-b']);
+
+        expect(slotEvents().map((e) => e.resolved)).toEqual([false]);
+        expect(storage.resolveAnomaly).not.toHaveBeenCalled();
+      });
+
+      describe('with warnings left open before a restart', () => {
+        const signature = replicaSlotSignature({
+          replicaId: REPLICA_ID,
+          reason: 'replica_importing',
+          affectedSlots: [42],
+        } as ReplicaSlotAnomaly);
+        const openRow = (id: string) => ({ id, timestamp: 1, message: 'msg', dedupeKey: signature });
+        const closedIds = (): string[] => storage.resolveAnomaly.mock.calls.map(([id]) => id).sort();
+
+        function leaveOpen(rows: Record<string, string[]>): void {
+          storage.getAnomalyEvents.mockImplementation(async ({ connectionId, metricType, offset }) =>
+            offset || metricType !== MetricType.REPLICA_SLOT_STATE ? [] : (rows[connectionId] ?? []).map(openRow),
+          );
+        }
+
+        it('does not raise again a warning another connection raised', async () => {
+          leaveOpen({ 'conn-b': ['row-b'] });
+          ownLine = STUCK;
+          await pollAll();
+
+          await pollAfter(GATE_MS);
+          await (service as any).drainPersistenceOutbox();
+
+          expect(slotEvents()).toHaveLength(0);
+          expect(closedIds()).toEqual([]);
+        });
+
+        it('closes a warning another connection raised once the replica is clean', async () => {
+          leaveOpen({ 'conn-b': ['row-b'] });
+          await pollAll();
+
+          await pollAfter(1000);
+
+          expect(closedIds()).toEqual(['row-b']);
+        });
+
+        it('keeps one warning when every connection had raised its own', async () => {
+          leaveOpen({ 'conn-a': ['row-a'], 'conn-b': ['row-b'], 'conn-c': ['row-c'] });
+          ownLine = STUCK;
+          await pollAll();
+
+          await pollAfter(GATE_MS);
+          await (service as any).drainPersistenceOutbox();
+
+          expect(slotEvents()).toHaveLength(0);
+          expect(closedIds()).toEqual(['row-b', 'row-c']);
+        });
       });
     });
   });
