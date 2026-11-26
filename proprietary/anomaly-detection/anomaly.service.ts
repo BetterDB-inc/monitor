@@ -928,6 +928,7 @@ export class AnomalyService
   private reshardSnapshot = new Map<string, ReshardShardSnapshot>();
   private readonly connectionClusterKeys = new Map<string, string>();
   private readonly clusterScopes = new Map<string, string>();
+  private readonly mergedScopeState = new WeakMap<object, object>();
   private readonly replicaSlotEventOwners = new Map<string, Map<string, string>>();
   private readonly unmergedSlotEvents = new Set<string>();
   private readonly slotEventsLoaded = new Set<string>();
@@ -9400,12 +9401,14 @@ export class AnomalyService
     const connId = params.scope ?? ctx.connectionId;
     const isPreserved = (sig: string): boolean => preserveSignature?.(sig) ?? false;
 
-    const firstSeen = firstSeenByConn.get(connId) ?? new Map<string, number>();
+    const firstSeen = this.connectionClaims(firstSeenByConn, connId, () => new Map<string, number>());
     const active = this.connectionClaims(activeByConn, connId, () => new Set<string>());
     const eventIds = eventIdsByConn
       ? this.connectionClaims(eventIdsByConn, connId, () => new Map<string, string>())
       : new Map<string, string>();
     const currentSignatures = new Set(findings.map(signatureOf));
+    const activeAtStart = [...active];
+    const trackedAtStart = [...eventIds];
 
     // Forget recovered signatures so their grace window restarts if they recur.
     // A preserved (observation-gap) signature is NOT recovered — keep its clock.
@@ -9415,8 +9418,9 @@ export class AnomalyService
 
     for (const finding of findings) {
       const signature = signatureOf(finding);
-      const seenAt = firstSeen.get(signature) ?? timestamp;
-      if (!firstSeen.has(signature)) firstSeen.set(signature, timestamp);
+      const seen = this.liveScopeState(firstSeen);
+      const seenAt = seen.get(signature) ?? timestamp;
+      if (!seen.has(signature)) seen.set(signature, timestamp);
 
       // Persistence gate.
       if (timestamp - seenAt < minPersistMs || isConfirmed?.(finding) === false) continue;
@@ -9431,7 +9435,7 @@ export class AnomalyService
       // externally or evicted, we stop tracking it and fall through to re-emit
       // (mirrors the Raft re-pin behavior).
       if (eventIdsByConn) {
-        const existingId = eventIds.get(signature);
+        const existingId = this.liveScopeState(eventIds).get(signature);
         if (existingId) {
           // Still open in the in-memory ring → dedupe. If it's been evicted from
           // the ring we can't tell from memory alone, so consult the storage-
@@ -9444,24 +9448,27 @@ export class AnomalyService
             metricType,
           );
           if (stillOpen) {
-            active.add(signature);
+            this.liveScopeState(active).add(signature);
             continue;
           }
-          eventIds.delete(signature);
-          active.delete(signature);
+          const tracked = this.liveScopeState(eventIds);
+          const trackedId = tracked.get(signature);
+          if (trackedId !== undefined && trackedId !== existingId) continue;
+          tracked.delete(signature);
+          this.liveScopeState(active).delete(signature);
         }
-      } else if (active.has(signature)) {
+      } else if (this.liveScopeState(active).has(signature)) {
         continue;
       }
 
       const event = buildEvent(finding, signature);
       const eventCtx = contextOf?.(finding) ?? ctx;
       this.logger.warn(`Anomaly detected for ${eventCtx.connectionName}: ${event.message}`);
-      active.add(signature);
-      if (eventIdsByConn) eventIds.set(signature, event.id);
+      this.liveScopeState(active).add(signature);
+      if (eventIdsByConn) this.liveScopeState(eventIds).set(signature, event.id);
       await this.addLatchedAnomaly(event, eventCtx, `${connId}:${signature}`, () => {
-        activeByConn.get(connId)?.delete(signature);
-        const tracked = eventIdsByConn?.get(connId);
+        (activeByConn.get(connId) ?? this.liveScopeState(active)).delete(signature);
+        const tracked = eventIdsByConn && (eventIdsByConn.get(connId) ?? this.liveScopeState(eventIds));
         if (tracked?.get(signature) === event.id) tracked.delete(signature);
       });
     }
@@ -9476,10 +9483,11 @@ export class AnomalyService
     // the outbox retries it. Retry is decoupled from `active`, so a genuine
     // recurrence of the same signature still re-alerts.
     if (eventIdsByConn) {
-      for (const [sig, id] of [...eventIds]) {
+      for (const [sig, id] of trackedAtStart) {
         // Still active this poll, or an observation gap (unreachable node) — don't
         // resolve: a gap must not read as recovery.
         if (currentSignatures.has(sig) || isPreserved(sig)) continue;
+        if (this.liveScopeState(eventIds).get(sig) !== id) continue;
         if (this.persistenceOutbox.resolvedAt(id) !== undefined) continue;
         let outcome: 'resolved' | 'retry' | 'gone' = 'retry';
         try {
@@ -9487,15 +9495,16 @@ export class AnomalyService
         } catch {
           outcome = 'retry';
         }
-        if (outcome !== 'retry') eventIds.delete(sig);
+        const tracked = this.liveScopeState(eventIds);
+        if (outcome !== 'retry' && tracked.get(sig) === id) tracked.delete(sig);
       }
     }
 
-    firstSeenByConn.set(connId, firstSeen);
     // Keep signatures active this poll AND preserved ones (unreachable nodes),
     // so a transient connectivity gap doesn't drop a still-open finding.
-    for (const sig of active) {
-      if (!currentSignatures.has(sig) && !isPreserved(sig)) active.delete(sig);
+    const stillActive = this.liveScopeState(active);
+    for (const sig of activeAtStart) {
+      if (!currentSignatures.has(sig) && !isPreserved(sig)) stillActive.delete(sig);
     }
   }
 
@@ -10400,19 +10409,29 @@ export class AnomalyService
   }
 
   private joinedScopeState(kept: unknown, joined: unknown): unknown {
-    if (kept === undefined) return joined;
+    if (kept === undefined || kept === joined) return joined;
     if (kept instanceof Set && joined instanceof Set) {
       joined.forEach((value) => kept.add(value));
+      this.mergedScopeState.set(joined, kept);
       return kept;
     }
     if (kept instanceof Map && joined instanceof Map) {
       joined.forEach((value, key) => {
         if (!kept.has(key)) kept.set(key, value);
       });
+      this.mergedScopeState.set(joined, kept);
       return kept;
     }
     if (Array.isArray(kept) && Array.isArray(joined)) return [...kept, ...joined];
     return kept;
+  }
+
+  private liveScopeState<S extends object>(state: S): S {
+    let live = state;
+    for (let next = this.mergedScopeState.get(live); next !== undefined; next = this.mergedScopeState.get(live)) {
+      live = next as S;
+    }
+    return live;
   }
 
   private asksReplicasForOwnLine(connectionId: string): boolean {
