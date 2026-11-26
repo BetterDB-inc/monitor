@@ -34031,6 +34031,28 @@ describe('AnomalyService', () => {
       expect(stuckReplicaEvents()).toHaveLength(1);
     });
 
+    it('keeps a warning with its cluster while its other connections miss reads for less than a minute', async () => {
+      topology = ORPHANED;
+      await pollAll();
+      await pollAfter(GATE_MS);
+      views = {
+        'conn-c': [
+          cnode('otherXXXXXXX', '10.0.0.3', ['master'], { slots: [[0, 8000]] }),
+          cnode('otherYYYYYYY', '10.0.9.2', ['master'], { slots: [[8001, 16383]] }),
+        ],
+      };
+      await pollAfter(1000);
+      unreadable = new Set([SEED, 'conn-b']);
+      await pollAfter(GATE_MS);
+      unreadable = new Set();
+
+      await pollAfter(1000);
+      await pollAfter(GATE_MS);
+      await pollAfter(GATE_MS);
+
+      expect(stuckReplicaEvents()).toHaveLength(1);
+    });
+
     describe('replica slot state', () => {
       const REPLICA_ID = 'eeeeeeee';
       const REPLICA = cnode(REPLICA_ID, '10.0.0.9', ['slave'], { master: NODE_A.id });
@@ -34192,6 +34214,28 @@ describe('AnomalyService', () => {
         ownLine = `ffffffff 10.0.0.9:6379@16379 myself,slave ${rebuiltA.id} 0 0 1 connected`;
 
         await pollAfter(1000);
+        await pollAfter(1000);
+
+        expect(slotEvents().map((e) => e.resolved)).toEqual([true]);
+      });
+
+      it('closes the warning after the cluster comes back with new node ids while one connection cannot read', async () => {
+        ownLine = STUCK;
+        await pollAll();
+        await pollAfter(GATE_MS);
+        const rebuiltA = cnode('rebuiltAAAAA', '10.0.0.1', ['master'], { slots: [[0, 5460]] });
+        topology = [
+          rebuiltA,
+          cnode('rebuiltBBBBB', '10.0.0.2', ['master'], { slots: [[5461, 10922]] }),
+          cnode('rebuiltCCCCC', '10.0.0.3', ['master'], { slots: [[10923, 16383]] }),
+          cnode('ffffffff', '10.0.0.9', ['slave'], { master: rebuiltA.id }),
+        ];
+        ownLine = `ffffffff 10.0.0.9:6379@16379 myself,slave ${rebuiltA.id} 0 0 1 connected`;
+        unreadable.add('conn-c');
+        await pollAfter(1000);
+        expect(slotEvents().map((e) => e.resolved)).toEqual([false]);
+
+        await pollAfter(MINUTE_MS);
         await pollAfter(1000);
 
         expect(slotEvents().map((e) => e.resolved)).toEqual([true]);

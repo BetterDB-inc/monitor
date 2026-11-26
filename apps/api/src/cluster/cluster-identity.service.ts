@@ -35,7 +35,7 @@ interface HeldClaim {
 const NOT_LIVE_FLAGS = ['handshake', 'noaddr', 'fail', 'fail?'];
 const STATE_HOLD_MS = 60_000;
 const PROMOTION_HOLD_MS = 10 * 60_000;
-const READER_GRACE_MS = 60_000;
+export const READER_GRACE_MS = 60_000;
 
 const OUTAGE = 'outage';
 const RECOVERY = 'recovery';

@@ -289,7 +289,11 @@ import {
   type SlotMigrationReport,
   parseSlotMigrationJobs,
 } from '@app/cluster/cluster-metrics.service';
-import { ClusterIdentityService, clusterStateSignature } from '@app/cluster/cluster-identity.service';
+import {
+  ClusterIdentityService,
+  READER_GRACE_MS,
+  clusterStateSignature,
+} from '@app/cluster/cluster-identity.service';
 import { withConfiguredZones, withShardMetadata } from '@app/cluster/shard-metadata';
 import { resolveNodeRef, toClusterNodeRef, type NodeSubject } from '@app/cluster/node-ref';
 import {
@@ -928,6 +932,8 @@ export class AnomalyService
   private reshardSnapshot = new Map<string, ReshardShardSnapshot>();
   private readonly connectionClusterKeys = new Map<string, string>();
   private readonly clusterScopes = new Map<string, string>();
+  private readonly clusterScopeReadAt = new Map<string, number>();
+  private readonly clusterScopesLeft = new Map<string, string>();
   private readonly mergedScopeState = new WeakMap<object, object>();
   private stopFollowingClusterJoins: (() => void) | undefined;
   private readonly replicaSlotEventOwners = new Map<string, Map<string, string>>();
@@ -10373,8 +10379,12 @@ export class AnomalyService
     const scope = identity.clusterKeyOf(connectionId);
     const previous = this.clusterScopes.get(connectionId);
     this.clusterScopes.set(connectionId, scope);
-    if (previous !== undefined && previous !== scope && !this.isScopeRead(previous, connectionId)) {
-      this.moveClusterScope(previous, scope);
+    this.clusterScopeReadAt.set(connectionId, timestamp);
+    if (previous !== undefined && previous !== scope) this.clusterScopesLeft.set(connectionId, previous);
+    const left = this.clusterScopesLeft.get(connectionId);
+    if (left !== undefined && !this.isScopeRead(left, timestamp)) {
+      this.clusterScopesLeft.delete(connectionId);
+      this.moveClusterScope(left, scope);
     }
     return identity.claimReader(connectionId, timestamp, this.dialsDataNodes(connectionId));
   }
@@ -10393,9 +10403,10 @@ export class AnomalyService
     }
   }
 
-  private isScopeRead(scope: string, exceptId: string): boolean {
-    return [...this.clusterScopes.keys()].some(
-      (connectionId) => connectionId !== exceptId && this.clusterScopeOf(connectionId) === scope,
+  private isScopeRead(scope: string, now: number): boolean {
+    return [...this.clusterScopeReadAt].some(
+      ([connectionId, readAt]) =>
+        now - readAt <= READER_GRACE_MS && this.clusterScopeOf(connectionId) === scope,
     );
   }
 
@@ -10448,6 +10459,8 @@ export class AnomalyService
   private leaveClusterScope(connectionId: string): string | undefined {
     const scope = this.clusterScopes.get(connectionId) ?? connectionId;
     this.clusterScopes.delete(connectionId);
+    this.clusterScopeReadAt.delete(connectionId);
+    this.clusterScopesLeft.delete(connectionId);
     return [...this.clusterScopes.values()].includes(scope) ? undefined : scope;
   }
 
