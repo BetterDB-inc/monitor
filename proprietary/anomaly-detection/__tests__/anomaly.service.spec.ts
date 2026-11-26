@@ -34075,6 +34075,28 @@ describe('AnomalyService', () => {
       expect(skews().map((e) => e.resolved)).toEqual([true]);
     });
 
+    it('keeps the shard of the reader in the reshard comparison between its reads at half second polls', async () => {
+      const interval = jest.spyOn(service as any, 'getIntervalMs').mockReturnValue(500);
+      try {
+        grow(12);
+        await pollAll();
+        await pollTimes(4, 500);
+        const clusterKey = (service as any).connectionClusterKeys.get(SEED);
+        const compared = (): boolean =>
+          (service as any).freshReshardEntries(clusterKey, now, 500).some(([key]: [string]) => key === SEED);
+        const seen: boolean[] = [];
+
+        for (let n = 0; n < 20; n += 1) {
+          await pollAfter(500);
+          seen.push(compared());
+        }
+
+        expect(seen).not.toContain(false);
+      } finally {
+        interval.mockRestore();
+      }
+    });
+
     it('reads the topology on every connection on a poll in a cluster of nine connections', async () => {
       grow(9);
       await pollAll();

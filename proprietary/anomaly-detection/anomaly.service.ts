@@ -8422,7 +8422,7 @@ export class AnomalyService
     const connectionId = connectionOfStateKey(key);
     const readPolls =
       key === connectionId
-        ? this.ownTopologyReadPolls(connectionId, readsAhead)
+        ? this.ownTopologyReadPolls(connectionId, readsAhead, intervalMs)
         : this.nodeReadPolls(connectionId, key);
     return intervalMs * readPolls;
   }
@@ -10387,9 +10387,14 @@ export class AnomalyService
     return shard.expectedReplicas > 0 && syncedReplicaCount(info) === 0;
   }
 
-  private ownTopologyReadPolls(connectionId: string, readsAhead: boolean): number {
+  private ownTopologyReadPolls(connectionId: string, readsAhead: boolean, intervalMs: number): number {
     return (
-      this.clusterIdentity?.topologyReadPolls(connectionId, AnomalyService.TOPOLOGY_READS, readsAhead) ?? 1
+      this.clusterIdentity?.topologyReadPolls(
+        connectionId,
+        AnomalyService.TOPOLOGY_READS,
+        readsAhead,
+        intervalMs,
+      ) ?? 1
     );
   }
 

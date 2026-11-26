@@ -259,11 +259,15 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
     if (turns) this.readTurns.set(turnsKey, { ...turns, readerReadAt: now });
   }
 
-  topologyReadPolls(connectionId: string, schedule: string, urgent = false): number {
+  topologyReadPolls(connectionId: string, schedule: string, urgent = false, pollMs = 0): number {
     const clusterKey = this.clusterKeyOf(connectionId);
-    if (this.readers.get(clusterKey)?.connectionId === connectionId) return 1;
     const turns = this.readTurns.get(`${clusterKey}|${schedule}`);
     if (!turns) return 1;
+    if (this.readers.get(clusterKey)?.connectionId === connectionId) {
+      const everyMs = turns.readerEveryMs ?? 0;
+      const everyPoll = urgent || turns.passPolls === 1 || everyMs <= 0 || pollMs <= 0;
+      return everyPoll ? 1 : Math.max(1, Math.ceil(everyMs / pollMs));
+    }
     if (!urgent) return turns.passPolls;
     const urgentPolls = Math.max(1, Math.ceil(turns.urgent.size / URGENT_READS_PER_POLL));
     return Math.min(turns.passPolls, urgentPolls);

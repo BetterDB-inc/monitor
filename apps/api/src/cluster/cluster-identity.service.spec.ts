@@ -943,6 +943,31 @@ describe('ClusterIdentityService', () => {
       expect(service.takeTopologyRead(SEED, CHECKS, NOW - 60_000)).toBe(true);
     });
 
+    it('takes as many polls between reads of the reader as its interval holds', () => {
+      clusterOf(11);
+      service.claimReader(SEED, NOW);
+      service.takeTopologyRead(SEED, CHECKS, NOW, false, 4750);
+
+      expect(service.topologyReadPolls(SEED, CHECKS, false, 500)).toBe(10);
+      expect(service.topologyReadPolls(SEED, CHECKS, false, 5000)).toBe(1);
+    });
+
+    it('takes one poll between reads of a reader that asks urgently', () => {
+      clusterOf(11);
+      service.claimReader(SEED, NOW);
+      service.takeTopologyRead(SEED, CHECKS, NOW, true, 4750);
+
+      expect(service.topologyReadPolls(SEED, CHECKS, true, 500)).toBe(1);
+    });
+
+    it('takes one poll between reads of the reader of a cluster of nine connections', () => {
+      clusterOf(8);
+      service.claimReader(SEED, NOW);
+      service.takeTopologyRead(SEED, CHECKS, NOW, false, 4750);
+
+      expect(service.topologyReadPolls(SEED, CHECKS, false, 500)).toBe(1);
+    });
+
     it('tells the interval the reader of a cluster read in turns reads at', () => {
       clusterOf(11);
       service.claimReader(SEED, NOW);
