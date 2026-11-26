@@ -35,6 +35,7 @@ export interface DivergencePoll {
   nodes: ClusterNode[];
   at: number;
   intervalMs: number;
+  earlyByMs?: number;
   nodesPerZone: number;
   randomNodes: number;
   canRead: boolean;
@@ -124,7 +125,8 @@ export class TopologyDivergenceMonitor {
     if (!input.canRead) return this.blindRound(state, input, self);
     state.anchor = input.connectionId;
     state.anchorSeenAt = input.at;
-    if (state.running || input.at - state.lastRoundAt < input.intervalMs) return null;
+    const roundEveryMs = input.intervalMs - (input.earlyByMs ?? 0);
+    if (state.running || input.at - state.lastRoundAt < roundEveryMs) return null;
 
     state.running = true;
     try {

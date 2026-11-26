@@ -2702,6 +2702,7 @@ export class AnomalyService
   }
 
   private static readonly TOPOLOGY_READS = 'anomaly';
+  private static readonly READER_TOPOLOGY_READ_MS = 5_000;
   private static readonly FANOUT_INFO_SECTIONS = ['clients', 'memory', 'stats', 'replication', 'persistence'] as const;
   private static readonly CLIENT_SATURATION_WARN = 0.8;
   private static readonly CLIENT_SATURATION_CRIT = 0.95;
@@ -7817,6 +7818,7 @@ export class AnomalyService
       ),
       at: timestamp,
       intervalMs: Math.max(settings.intervalMs, this.getIntervalMs()),
+      earlyByMs: this.readsAtReaderInterval(ctx.connectionId) ? this.pollJitterMs() : 0,
       nodesPerZone: settings.nodesPerZone,
       randomNodes: settings.randomNodes,
       canRead: canDial,
@@ -10316,12 +10318,29 @@ export class AnomalyService
         AnomalyService.TOPOLOGY_READS,
         timestamp,
         this.hasOwnNodeFinding(connectionId),
+        this.readerTopologyReadEveryMs(),
       ) ?? true;
     return (
       hasTurn ||
       this.ownLineIsDue(connectionId, info) ||
       !this.latestClusterNodes(connectionId, timestamp)
     );
+  }
+
+  private readerTopologyReadEveryMs(): number {
+    const { enabled, intervalMs } = this.topologyDivergenceSettings;
+    const everyMs = enabled
+      ? Math.min(AnomalyService.READER_TOPOLOGY_READ_MS, intervalMs)
+      : AnomalyService.READER_TOPOLOGY_READ_MS;
+    return everyMs - this.pollJitterMs();
+  }
+
+  private pollJitterMs(): number {
+    return this.getIntervalMs() / 2;
+  }
+
+  private readsAtReaderInterval(connectionId: string): boolean {
+    return (this.clusterIdentity?.readerReadEveryMs(connectionId, AnomalyService.TOPOLOGY_READS) ?? 0) > 0;
   }
 
   private hasOwnNodeFinding(connectionId: string): boolean {

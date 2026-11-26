@@ -33608,7 +33608,88 @@ describe('AnomalyService', () => {
       (Date.now as jest.Mock).mockRestore();
     });
 
-    it('reads the topology on the reader and on eight other connections on a poll', async () => {
+    it('reads the topology on the reader every five seconds', async () => {
+      grow(12);
+      await pollAll();
+      await pollAfter(1000);
+      const reads: number[] = [];
+      const shardReads: number[] = [];
+
+      for (let n = 1; n <= 10; n += 1) {
+        forgetReads();
+        await pollAfter(1000);
+        if (readWith('getClusterNodes').includes(SEED)) reads.push(n);
+        if (readWith('getClusterShards').includes(SEED)) shardReads.push(n);
+      }
+
+      expect(reads).toEqual([5, 10]);
+      expect(shardReads).toEqual([5, 10]);
+    });
+
+    it('raises a cluster-wide warning on the next read of the reader', async () => {
+      grow(12);
+      await pollAll();
+      await pollAfter(1000);
+      const conflicts = () =>
+        service.getRecentEvents().filter((e) => e.metricType === MetricType.CLUSTER_TOPOLOGY).length;
+      topology[2] = { ...topology[2], slots: topology[1].slots };
+
+      await pollTimes(4);
+      const beforeTheRead = conflicts();
+      await pollAfter(1000);
+
+      expect(beforeTheRead).toBe(0);
+      expect(conflicts()).toBe(1);
+    });
+
+    it('reads the topology on the reader on every poll while its own line shows a slot on the move', async () => {
+      grow(12);
+      migrating.add(SEED);
+      await pollAll();
+      await pollAfter(1000);
+      forgetReads();
+
+      await pollTimes(3);
+
+      expect(readsOf(SEED)).toBe(3);
+    });
+
+    it('reads the topology on the reader on the poll INFO shows another role', async () => {
+      grow(12);
+      await pollAll();
+      await pollAfter(1000);
+      await pollAfter(1000);
+      forgetReads();
+      roles[SEED] = 'slave';
+
+      await pollAfter(1000);
+
+      expect(readsOf(SEED)).toBe(1);
+    });
+
+    it('runs a divergence round on every read of the reader when its polls come a little early', async () => {
+      grow(12);
+      (service as any).clusterDiscovery = {
+        retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+        releaseConnection: jest.fn().mockResolvedValue(undefined),
+        getNodeConnection: jest.fn().mockRejectedValue(new Error('ECONNREFUSED')),
+      };
+      await pollAll();
+      await pollTimes(6, 990);
+      const clusterKey = (service as any).connectionClusterKeys.get(SEED);
+      const roundAt = (): number | undefined => (service as any).topologyDivergence.lastRound(clusterKey)?.at;
+      const first = roundAt() as number;
+      const rounds = new Set<number>();
+
+      for (let n = 1; n <= 10; n += 1) {
+        await pollAfter(990);
+        rounds.add((roundAt() as number) - first);
+      }
+
+      expect([...rounds]).toEqual([0, 4950, 9900]);
+    });
+
+    it('reads the topology on eight other connections on a poll the reader does not read on', async () => {
       grow(12);
       await pollAll();
       await pollAfter(1000);
@@ -33616,7 +33697,7 @@ describe('AnomalyService', () => {
 
       await pollAfter(1000);
 
-      const due = [SEED, ...[1, 2, 3, 4, 5, 9, 10, 11].map(idOf)];
+      const due = [1, 2, 3, 4, 5, 9, 10, 11].map(idOf);
       expect(readWith('getClusterNodes')).toEqual(due);
       expect(readWith('getClusterShards')).toEqual(due);
     });

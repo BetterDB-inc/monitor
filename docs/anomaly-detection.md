@@ -531,7 +531,7 @@ Everything else stays per connection or per node: the cluster state, hot shards,
 
 `CLUSTER NODES` answers with one line per node. Read on every connection on every poll, it grows with the square of the cluster. So in a cluster with more than nine connections it is read in turns:
 
-- The reader reads `CLUSTER NODES` and `CLUSTER SHARDS` on every poll.
+- The reader reads `CLUSTER NODES` and `CLUSTER SHARDS` every 5 seconds, or on every poll when the poll interval is longer than that.
 - Of the other connections, eight read on each poll of the reader, in the order of their ids. With 500 connections and a poll interval of 1 second, a connection has its turn about once a minute.
 
 Every connection reads on every poll, as before, in a cluster with nine connections or fewer, while a cluster has no reader, while its reader has not read for 60 seconds, and while its reader has not polled for more than 15 seconds. With a poll interval above 15 seconds the turns are therefore never used.
@@ -547,6 +547,8 @@ Every connection reads on every poll, as before, in a cluster with nine connecti
 The 5 second threshold of [primary without replicas](#primary_without_replicas) holds on every node this way, also on one that is far from its turn.
 
 **Reading sooner.** A connection is put ahead of the others on the next poll of the reader while its own line shows a slot that is migrating or importing, while it counts keys in slots its node does not own, and while a reshard skew finding on it is waiting or open. At most four connections go ahead per poll. When more ask, they take turns among themselves, and the other four turns of the poll go on down the list. A reshard counts as running until two polls after such a connection last showed a slot on the move, or two rounds of their turns when more than four ask. A slot that starts to move on a node not yet put ahead is first seen on that node's turn.
+
+**The reader.** Between two reads the reader sends no `CLUSTER NODES` and no `CLUSTER SHARDS` either, and the checks that run once per cluster wait for its next read, as do the checks on its own line and the hot shard check. So a finding of those checks is raised up to 5 seconds later than in a small cluster. The reader reads at once in the same cases as any other connection: another role in `INFO`, a shard left without a synced replica, a slot on the move on its own line, keys in slots its node does not own, a reshard skew finding on it. The other connections keep their turns on every poll of the reader. The rounds of [topology divergence](#topology_divergence) run on the reader's reads; when `ANOMALY_TOPOLOGY_DIVERGENCE_INTERVAL_MS` is below 5 seconds, the reader reads at that interval instead. A poll that comes up to half a poll interval early still counts.
 
 **What comes later.** A finding on a node that is in none of these cases is first seen when its connection has a turn, so up to one pass late: about a minute with 500 connections and a 1 second interval. A check that needs several readings in a row counts the readings, not the polls. Reshard skew, for example, needs three: the first can take a pass, the next two follow on the next polls because the connection is put ahead.
 
