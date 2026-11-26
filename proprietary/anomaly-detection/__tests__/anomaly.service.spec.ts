@@ -33732,6 +33732,29 @@ describe('AnomalyService', () => {
       expect(readsOf(SEED)).toBe(3);
     });
 
+    it('reads the topology on the reader on every poll while a slot rebalance run it started is running', async () => {
+      grow(12);
+      await pollAll();
+      await pollAfter(1000);
+      const discoverNodesIsolated = jest.fn().mockResolvedValue([]);
+      (service as any).clusterDiscovery = { ...(service as any).clusterDiscovery, discoverNodesIsolated };
+      const readSlotMigrations = jest
+        .fn()
+        .mockResolvedValue({ jobViews: [], finishedJobs: [], failed: [], complete: true, migrations: [] });
+      (service as any).clusterMetrics = { coveredBySeed: () => true, readSlotMigrations };
+      const job = { targetShardId: nodeIdOf(1), ranges: [[0, 9]], state: 'starting' };
+      const run = { state: 'running', sourceShardId: nodeIdOf(0), startedAt: now, jobs: [job], jobsBefore: [] };
+      (service as any).rebalanceRuns.set(SEED, new Map([[run.sourceShardId, run]]));
+      forgetReads();
+
+      await pollTimes(7);
+
+      expect((service as any).rebalanceRuns.get(SEED).get(run.sourceShardId).state).toBe('running');
+      expect(readSlotMigrations).toHaveBeenCalledTimes(2);
+      expect(readsOf(SEED)).toBe(7);
+      expect(discoverNodesIsolated).not.toHaveBeenCalled();
+    });
+
     it('reads the topology on the reader on the poll INFO shows another role', async () => {
       grow(12);
       await pollAll();
@@ -34004,10 +34027,7 @@ describe('AnomalyService', () => {
         expect(built).toHaveBeenCalledTimes(waiting);
       });
 
-      it('follows a slot rebalance run it started with the nodes it asks for itself', async () => {
-        grow(12);
-        await pollAll();
-        await pollAfter(1000);
+      const followsRun = (connectionId: string, run: Record<string, unknown> = {}): jest.Mock => {
         const discoverNodesIsolated = jest.fn().mockResolvedValue([]);
         (service as any).clusterDiscovery = { ...(service as any).clusterDiscovery, discoverNodesIsolated };
         (service as any).clusterMetrics = {
@@ -34016,8 +34036,34 @@ describe('AnomalyService', () => {
             .fn()
             .mockResolvedValue({ jobViews: [], finishedJobs: [], failed: [], complete: true, migrations: [] }),
         };
-        const run = { state: 'running', sourceShardId: nodeIdOf(6), startedAt: now, jobs: [], jobsBefore: [] };
-        (service as any).rebalanceRuns.set(WAITING, new Map([[run.sourceShardId, run]]));
+        const sourceShardId = nodeIdOf(ids.indexOf(connectionId));
+        (service as any).rebalanceRuns.set(
+          connectionId,
+          new Map([
+            [sourceShardId, { state: 'running', sourceShardId, startedAt: now, jobs: [], jobsBefore: [], ...run }],
+          ]),
+        );
+        return discoverNodesIsolated;
+      };
+
+      it('reads the topology itself on the poll it follows a slot rebalance run it started', async () => {
+        grow(12);
+        await pollAll();
+        await pollAfter(1000);
+        const discoverNodesIsolated = followsRun(WAITING);
+        forgetReads();
+
+        await pollAfter(1000);
+
+        expect(readsOf(WAITING)).toBe(1);
+        expect(discoverNodesIsolated).not.toHaveBeenCalled();
+      });
+
+      it('follows a slot rebalance run that is being cancelled with the nodes it asks for itself', async () => {
+        grow(12);
+        await pollAll();
+        await pollAfter(1000);
+        const discoverNodesIsolated = followsRun(WAITING, { cancelRequestedAt: now, cancelAcceptedAt: now });
         forgetReads();
 
         await pollAfter(1000);

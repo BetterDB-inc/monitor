@@ -10414,9 +10414,17 @@ export class AnomalyService
       !this.ownLineReads.has(connectionId) ||
       this.ownLineIsDue(connectionId, info) ||
       this.divergenceRoundIsDue(connectionId, timestamp) ||
+      this.followsRebalanceRunWithOwnRead(connectionId) ||
       this.holdsNewShardLoad(connectionId, timestamp) ||
       !this.hasLatestClusterNodes(connectionId, timestamp)
     );
+  }
+
+  private followsRebalanceRunWithOwnRead(connectionId: string): boolean {
+    const running = [...(this.rebalanceRuns.get(connectionId)?.values() ?? [])].filter(
+      (run) => run.state === 'running',
+    );
+    return running.length > 0 && running.every((run) => run.cancelAcceptedAt === undefined);
   }
 
   private holdsNewShardLoad(connectionId: string, timestamp: number): boolean {
