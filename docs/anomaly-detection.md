@@ -14,6 +14,7 @@ Comprehensive guide to BetterDB's real-time anomaly detection system for Valkey 
 - [Detected Patterns](#detected-patterns)
 - [Incident Sequence Rules](#incident-sequence-rules)
 - [Per-node coverage](#per-node-coverage)
+- [Checks that run once per cluster](#checks-that-run-once-per-cluster)
 - [Failing node on cluster events](#failing-node-on-cluster-events)
 - [Severity Levels](#severity-levels)
 - [Monitored Metrics](#monitored-metrics)
@@ -494,13 +495,37 @@ When a cluster or Sentinel group is registered through one connection (the seed)
 - reshard pressure, including write P99 read from `INFO latencystats` at most every 30 seconds
 - primary without replicas, without the early CRITICAL for persistence being off
 
-On a cluster the seed also asks replicas for their own `CLUSTER NODES` line, to find slot state left on a replica (`replica_slot_state`). It reads 8 replicas per poll, and in rotation when there are more, so each replica is read once per replica sweep: with 250 replicas, every 32 polls. Up to 6 replicas that showed slot state are read on every poll until they are clean; any more keep their state and wait their turn. A replica that waits its turn keeps its open warning and is not counted as unreachable, and a new finding on it is raised only once the replica itself has been read. Events stored before they carried a dedupe key are closed once every replica has been read after a start, which takes one replica sweep instead of one poll.
+On a cluster the seed also asks replicas for their own `CLUSTER NODES` line, to find slot state left on a replica (`replica_slot_state`). When several connections of the cluster are registered, only one of them asks (see [Checks that run once per cluster](#checks-that-run-once-per-cluster)). It reads 8 replicas per poll, and in rotation when there are more, so each replica is read once per replica sweep: with 250 replicas, every 32 polls. Up to 6 replicas that showed slot state are read on every poll until they are clean; any more keep their state and wait their turn. A replica that waits its turn keeps its open warning and is not counted as unreachable, and a new finding on it is raised only once the replica itself has been read. Events stored before they carried a dedupe key are closed once every replica has been read after a start, which takes one replica sweep instead of one poll.
 
 Events from these primaries carry `nodeAddr`. Same-connection sequence rules (`backlog_exhaustion`, `recovery_amplification`) and the correlated signals on a divergence alert group them per node, so a non-seed shard's fork or output-buffer pressure shows on that shard's divergence, not the seed's. `divergence_under_pressure` cannot match on a non-seed shard, because its first step is a z-score write-rate spike, which only runs on registered connections.
 
 A node's divergence, backlog coverage, resync escalation, fork memory and output-buffer events close when it leaves the topology, is claimed by another connection, or is registered as its own connection, and when the seed is removed. Retry amplification alerts are not closed this way; they stay open, as they do on the seed. Open backlog coverage, resync escalation, fork memory and output-buffer events are picked up again per node after a restart, so a node that is still at risk does not raise a duplicate, and the events of a node that did not come back are closed. An output-buffer event is picked up for the replica it was raised on, and a picked-up resync-loop event keeps its 5 minute cooldown. Events of a node whose seed is removed before they are picked up are closed too.
 
 Each command to a primary gets 2 seconds of its own. One that does not answer in time drops that primary's connection once the poll's other commands on it have answered or timed out, so the next poll starts on a fresh one instead of queueing behind it. A primary that cannot be reached is backed off and logged as unreachable; none of the checks above run on it until it answers again. Z-score metrics and the other state-based detectors run only on registered connections. Register a node to get them. A primary whose replication ID matches a registered primary is treated as that connection and skipped, so a node Sentinel reports by IP is not checked twice when it is registered by hostname. The skip lasts while that connection is connected and polling; once it disconnects, or goes three poll intervals (at least 30 seconds) without a poll, the fan-out checks the primary again.
+
+## Checks that run once per cluster
+
+A cluster can have several connections: the seed and the nodes registered from it, or connections you added yourself. Each of them reads `CLUSTER NODES` and sees the same cluster. The checks below judge the cluster as a whole, so they run on one of those connections, the reader, and raise one alert per cluster instead of one per connection:
+
+- two primaries that claim the same slots
+- a replica stuck on a primary that is gone
+- nodes that announce no hostname while the others do
+- ghost members
+- a node that was forgotten and joined again
+- failover churn
+- slot state left on a replica (`replica_slot_state`)
+
+**Which connection reads.** A connection you added goes before an automatically registered node, so the seed reads while it is connected. Between two connections of the same kind, the one with the lower id reads.
+
+**When the reader stops.** A reader that has not read the cluster for 60 seconds loses the role, and the next connection takes over. The checks do not run during those 60 seconds. Open alerts and the state behind them are kept, so the new reader does not raise them again, and a finding that was already waiting its 30 seconds does not start over. A reader that is removed, or that starts reading another cluster, is replaced on the next poll.
+
+**The connection on an alert.** An alert is stored under the connection that raised it. When that connection is removed and the cluster still has others, its replica slot warnings are closed, and the next reader raises what is still wrong under its own id, without the 30 second wait. Alerts raised by the other connections are not touched. When the last connection of a cluster is removed, its open replica slot warnings are closed.
+
+**After a restart.** The reader picks up the open replica slot warnings of every connection of the cluster. Where several connections had raised the same warning, one stays open and the others are closed.
+
+**Connections that cannot reach other nodes.** A connection that cannot dial the other nodes, one that reads through an agent for example, cannot ask a replica for its own line. It reports the slot state of its own node only, whether it is the reader or not. When the reader is such a connection, the replicas are not asked.
+
+Everything else stays per connection or per node: the cluster state, hot shards, slot migrations, topology divergence and the per-node checks above.
 
 ## Failing node on cluster events
 
