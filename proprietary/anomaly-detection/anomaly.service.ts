@@ -10339,8 +10339,55 @@ export class AnomalyService
     const identity = this.clusterIdentity;
     if (!identity) return true;
     if (!readIsCurrent) return false;
-    this.clusterScopes.set(connectionId, identity.clusterKeyOf(connectionId));
+    const scope = identity.clusterKeyOf(connectionId);
+    const previous = this.clusterScopes.get(connectionId);
+    this.clusterScopes.set(connectionId, scope);
+    if (previous !== undefined && previous !== scope && !this.isScopeRead(previous, connectionId)) {
+      this.moveClusterScope(previous, scope);
+    }
     return identity.claimReader(connectionId, timestamp);
+  }
+
+  private isScopeRead(scope: string, exceptId: string): boolean {
+    return [...this.clusterScopes.keys()].some(
+      (connectionId) => connectionId !== exceptId && this.clusterScopeOf(connectionId) === scope,
+    );
+  }
+
+  private moveClusterScope(from: string, to: string): void {
+    const kept = this.replicaSlotEventIds.get(to);
+    for (const [signature, id] of this.replicaSlotEventIds.get(from) ?? []) {
+      const keptId = kept?.get(signature);
+      if (keptId !== undefined && keptId !== id) this.closeLater(id);
+    }
+    const bringsOldRows = (this.legacyReplicaSlotEvents.get(from)?.length ?? 0) > 0;
+    for (const state of this.clusterScopedState()) {
+      if (!state.has(from)) continue;
+      state.set(to, this.joinedScopeState(state.get(to), state.get(from)));
+      state.delete(from);
+    }
+    if (bringsOldRows) this.legacyReplicaSlotRead.delete(to);
+    this.replicaSlotRotation.forget(from);
+  }
+
+  private joinedScopeState(kept: unknown, joined: unknown): unknown {
+    if (kept === undefined) return joined;
+    if (kept instanceof Set && joined instanceof Set) {
+      const keptFilers = this.findingFilers.get(kept);
+      joined.forEach((value) => kept.add(value));
+      this.findingFilers.get(joined)?.forEach((filer, signature) => {
+        if (!keptFilers?.has(signature)) this.noteFiler(kept, signature, filer);
+      });
+      return kept;
+    }
+    if (kept instanceof Map && joined instanceof Map) {
+      joined.forEach((value, key) => {
+        if (!kept.has(key)) kept.set(key, value);
+      });
+      return kept;
+    }
+    if (Array.isArray(kept) && Array.isArray(joined)) return [...kept, ...joined];
+    return kept;
   }
 
   private asksReplicasForOwnLine(connectionId: string): boolean {

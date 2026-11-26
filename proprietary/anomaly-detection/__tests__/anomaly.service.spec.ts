@@ -33479,6 +33479,7 @@ describe('AnomalyService', () => {
 
     let now: number;
     let topology: ClusterNode[];
+    let views: Record<string, ClusterNode[]>;
     let unreadable: Set<string>;
     let configs: Record<string, unknown>;
     let ctxs: Record<string, ConnectionContext>;
@@ -33496,7 +33497,7 @@ describe('AnomalyService', () => {
           getClusterInfo: jest.fn().mockResolvedValue({ cluster_state: 'ok' }),
           getClusterNodes: jest.fn(async () => {
             if (unreadable.has(connectionId)) throw new Error('CLUSTER NODES failed');
-            return topology.map((node) =>
+            return (views[connectionId] ?? topology).map((node) =>
               node.address.startsWith(`${host}:`)
                 ? { ...node, flags: ['myself', ...node.flags] }
                 : { ...node, migratingSlots: undefined, importingSlots: undefined },
@@ -33525,6 +33526,7 @@ describe('AnomalyService', () => {
       now = 1_700_000_000_000;
       jest.spyOn(Date, 'now').mockImplementation(() => now);
       topology = HEALTHY;
+      views = {};
       unreadable = new Set();
       configs = {
         'conn-a': { id: 'conn-a' },
@@ -33781,6 +33783,50 @@ describe('AnomalyService', () => {
       expect(eventsOf(MetricType.CLUSTER_TOPOLOGY).map((e) => e.connectionId).sort()).toEqual([SEED, 'conn-x']);
     });
 
+    it('does not raise the warnings of two halves again once they turn out to be one cluster', async () => {
+      const halves = [SEED, 'conn-c'];
+      delete configs['conn-b'];
+      configs['conn-c'] = { id: 'conn-c' };
+      const left = [NODE_A, NODE_B, ...ORPHANED.slice(HEALTHY.length)];
+      const right = [
+        NODE_C,
+        cnode('nodeXXXXXXXX', '10.0.0.7', ['master']),
+        cnode('replicaHHHHH', '10.0.0.8', ['slave'], { master: 'deadprimIIII' }),
+        cnode('deadprimIIII', '10.0.0.9', ['master', 'fail'], { linkState: 'disconnected' }),
+      ];
+      const strayReplicaEvents = (): AnomalyEvent[] =>
+        eventsOf(MetricType.CLUSTER_TOPOLOGY).filter((e) => /replicaE|replicaH/.test(e.message));
+      views = { [SEED]: left, 'conn-c': right };
+      await pollAll(halves);
+      await pollAfter(GATE_MS, halves);
+      expect(strayReplicaEvents()).toHaveLength(2);
+      views = {};
+      topology = [...left, ...right];
+
+      await pollAfter(1000, halves);
+      await pollAfter(GATE_MS, halves);
+
+      expect(strayReplicaEvents()).toHaveLength(2);
+    });
+
+    it('keeps a warning with its cluster when one connection starts reading another cluster', async () => {
+      topology = ORPHANED;
+      await pollAll();
+      await pollAfter(GATE_MS);
+      views = {
+        'conn-c': [
+          cnode('otherXXXXXXX', '10.0.0.3', ['master'], { slots: [[0, 8000]] }),
+          cnode('otherYYYYYYY', '10.0.9.2', ['master'], { slots: [[8001, 16383]] }),
+        ],
+      };
+
+      await pollAfter(1000);
+      await pollAfter(GATE_MS);
+      await pollAfter(GATE_MS);
+
+      expect(stuckReplicaEvents()).toHaveLength(1);
+    });
+
     describe('replica slot state', () => {
       const REPLICA_ID = 'eeeeeeee';
       const REPLICA = cnode(REPLICA_ID, '10.0.0.9', ['slave'], { master: NODE_A.id });
@@ -33891,6 +33937,25 @@ describe('AnomalyService', () => {
 
         expect(slotEvents().map((e) => e.resolved)).toEqual([false]);
         expect(storage.resolveAnomaly).not.toHaveBeenCalled();
+      });
+
+      it('closes the warning when the cluster comes back with new node ids', async () => {
+        ownLine = STUCK;
+        await pollAll();
+        await pollAfter(GATE_MS);
+        const rebuiltA = cnode('rebuiltAAAAA', '10.0.0.1', ['master'], { slots: [[0, 5460]] });
+        topology = [
+          rebuiltA,
+          cnode('rebuiltBBBBB', '10.0.0.2', ['master'], { slots: [[5461, 10922]] }),
+          cnode('rebuiltCCCCC', '10.0.0.3', ['master'], { slots: [[10923, 16383]] }),
+          cnode('ffffffff', '10.0.0.9', ['slave'], { master: rebuiltA.id }),
+        ];
+        ownLine = `ffffffff 10.0.0.9:6379@16379 myself,slave ${rebuiltA.id} 0 0 1 connected`;
+
+        await pollAfter(1000);
+        await pollAfter(1000);
+
+        expect(slotEvents().map((e) => e.resolved)).toEqual([true]);
       });
 
       describe('with warnings left open before a restart', () => {
