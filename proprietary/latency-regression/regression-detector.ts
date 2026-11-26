@@ -7,8 +7,8 @@
  *
  * Input samples are per-command P99s. They are per-interval values (from LATENCY HISTOGRAM
  * deltas) when `input.basis` is 'interval', or cumulative-since-start latencystats values when
- * 'cumulative' (the default). The rules below are identical for both; the basis is only
- * copied onto each finding.
+ * 'cumulative' (the default). The rules below are identical for both. The basis is copied onto
+ * each finding, and an open upgrade window rebuilds its baselines when the basis changes.
  *
  * Rules:
  * 1. Upgrade regression: a server version change opens a 24h window. Baseline is the
@@ -32,6 +32,7 @@ import {
   CommandP99Point,
   CommandRegression,
   DetectorInput,
+  RegressionBasis,
   RegressionFinding,
 } from './types';
 
@@ -133,6 +134,8 @@ interface UpgradeWindowState {
   openedAtMs: number;
   /** Per-command median p99 (us) from old-version samples; commands without enough samples absent. */
   baselines: Map<string, number>;
+  /** Basis of the samples `baselines` came from; baselines are rebuilt when the input's differs. */
+  basis: RegressionBasis;
   consecutive: Map<string, number>;
   /** capturedAt of the last sample counted toward `consecutive`, per command. */
   lastCountedAt: Map<string, number>;
@@ -175,7 +178,7 @@ export class RegressionDetector {
     const latestByCommand = this.latestByCommand(samples);
     const currentVersion = this.currentVersion(samples);
 
-    this.trackVersion(currentVersion, nowMs, samples);
+    this.trackVersion(currentVersion, nowMs, samples, input.basis ?? 'cumulative');
 
     if (this.upgrade && nowMs - this.upgrade.openedAtMs > UPGRADE_WINDOW_MS) {
       this.upgrade = undefined;
@@ -284,7 +287,12 @@ export class RegressionDetector {
     return newest.serverVersion;
   }
 
-  private trackVersion(currentVersion: string, nowMs: number, samples: CommandP99Point[]): void {
+  private trackVersion(
+    currentVersion: string,
+    nowMs: number,
+    samples: CommandP99Point[],
+    basis: RegressionBasis,
+  ): void {
     if (!currentVersion) return;
     if (this.lastVersion === undefined) {
       this.lastVersion = currentVersion;
@@ -312,6 +320,25 @@ export class RegressionDetector {
     }
 
     // Major upgrade: open (or replace) the upgrade window.
+    this.upgrade = {
+      fromVersion,
+      toVersion: currentVersion,
+      openedAtMs: nowMs,
+      baselines: this.computeUpgradeBaselines(samples, fromVersion, nowMs),
+      basis,
+      consecutive: new Map(),
+      lastCountedAt: new Map(),
+      fired: false,
+    };
+    this.sustained.clear();
+  }
+
+  /** Per-command median p99 of old-major samples from the 6h before the window opened. */
+  private computeUpgradeBaselines(
+    samples: CommandP99Point[],
+    fromVersion: string,
+    openedAtMs: number,
+  ): Map<string, number> {
     const baselines = new Map<string, number>();
     const byCommand = new Map<string, number[]>();
     // Baseline from the pre-upgrade MAJOR line (the major we're leaving), not only the exact
@@ -322,7 +349,7 @@ export class RegressionDetector {
     const fromMajor = parseMajorVersion(fromVersion);
     for (const s of samples) {
       if (parseMajorVersion(s.serverVersion) !== fromMajor) continue;
-      if (s.capturedAt < nowMs - UPGRADE_BASELINE_LOOKBACK_MS) continue;
+      if (s.capturedAt < openedAtMs - UPGRADE_BASELINE_LOOKBACK_MS) continue;
       const arr = byCommand.get(s.command) ?? [];
       arr.push(s.p99Us);
       byCommand.set(s.command, arr);
@@ -332,17 +359,7 @@ export class RegressionDetector {
         baselines.set(command, median(values));
       }
     }
-
-    this.upgrade = {
-      fromVersion,
-      toVersion: currentVersion,
-      openedAtMs: nowMs,
-      baselines,
-      consecutive: new Map(),
-      lastCountedAt: new Map(),
-      fired: false,
-    };
-    this.sustained.clear();
+    return baselines;
   }
 
   /**
@@ -366,7 +383,24 @@ export class RegressionDetector {
     eligible: Set<string>,
   ): RegressionFinding | null {
     const upgrade = this.upgrade;
-    if (!upgrade || upgrade.fired) return null;
+    if (!upgrade) return null;
+
+    const basis = input.basis ?? 'cumulative';
+    if (upgrade.basis !== basis) {
+      // Baselines and samples must share a basis: an interval baseline against cumulative samples
+      // (or the reverse) can fake or hide an upgrade regression. Rebuild from this poll's samples,
+      // which carry serverVersion in both modes, and restart the streaks. Done for fired windows
+      // too, because evaluateSustained judges the commands they own against these baselines.
+      upgrade.baselines = this.computeUpgradeBaselines(
+        input.samples,
+        upgrade.fromVersion,
+        upgrade.openedAtMs,
+      );
+      upgrade.basis = basis;
+      upgrade.consecutive.clear();
+      upgrade.lastCountedAt.clear();
+    }
+    if (upgrade.fired) return null;
 
     const { nowMs } = input;
     for (const [command, baseline] of upgrade.baselines) {

@@ -33,20 +33,40 @@ import {
 } from './types';
 import {
   IntervalPoint,
+  IntervalVolume,
   callsPerMinute,
-  intervalPoints,
-  versionAt,
+  diffSnapshots,
+  versionTimeline,
 } from './interval-percentiles';
 
 const POLL_INTERVAL_MS = 60_000;
-/** Histogram snapshots read per page when backfilling, to bound memory on the first poll. */
+/** Histogram snapshots per page on the first-poll backfill. Only one page is held at a time. */
 const HISTOGRAM_PAGE = 240;
+/** Page size for the per-poll incremental read. Paging continues until a short page. */
+const INCREMENTAL_PAGE = 10;
 
 interface IntervalState {
   last: StoredLatencyHistogram;
   /** Ascending capturedAt, trimmed to SAMPLE_LOOKBACK_MS. */
   points: IntervalPoint[];
+  /** Every interval's call volume (not only P99-eligible ones), ascending, trimmed to VOLUME_WINDOW_MS. */
+  volumes: IntervalVolume[];
 }
+
+/** Why a poll used the cumulative basis. Shown in the log line. */
+type FallbackReason =
+  | 'no histogram rows'
+  | 'not enough histogram data yet'
+  | 'too few calls per interval'
+  | 'histogram rows are stale'
+  | 'histogram read failed';
+
+function trimBefore<T extends { capturedAt: number }>(items: T[], cutoff: number): T[] {
+  const first = items.findIndex((p) => p.capturedAt >= cutoff);
+  if (first === -1) return [];
+  return first === 0 ? items : items.slice(first);
+}
+
 /** How much latencystats history the detector needs (sustained baseline window). */
 const SAMPLE_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 /** Window used to derive per-command call volume from commandstats deltas. */
@@ -54,6 +74,11 @@ const VOLUME_WINDOW_MS = 10 * 60 * 1000;
 /** Window of cluster|slots / cluster|shards deltas for topology correlation. */
 const CLUSTER_DELTA_WINDOW_MS = 60 * 60 * 1000;
 const CLUSTER_REFRESH_COMMANDS = ['cluster|slots', 'cluster|shards'];
+/** First runbook step. It depends on the basis: the latencystats history is cumulative. */
+const CUMULATIVE_RUNBOOK_STEP =
+  'Compare per-command P99 before/after the change via GET /metrics/latencystats/history.';
+const INTERVAL_RUNBOOK_STEP =
+  'This finding uses per-minute P99s from consecutive LATENCY HISTOGRAM snapshots: compare the bucket deltas of each command before and after the change via GET /latency-analytics/histograms (set startTime, endTime and limit). GET /metrics/latencystats/history is cumulative since server start and can look flat for this regression.';
 
 /**
  * Commands the detector skips. LATENCY_REGRESSION_IGNORE_COMMANDS replaces the
@@ -80,8 +105,8 @@ export class LatencyRegressionService extends MultiConnectionPoller implements O
 
   private detectors = new Map<string, RegressionDetector>();
   private intervals = new Map<string, IntervalState>();
-  /** Last basis logged per connection, so the choice is logged once per change. */
-  private basisLogged = new Map<string, RegressionBasis>();
+  /** Last (basis, reason) logged per connection, so each change is logged once (read failures included). */
+  private basisLogged = new Map<string, string>();
   // Read once at startup, like the slowlog ignore lists.
   private readonly ignoreCommands = latencyRegressionIgnoreCommands();
 
@@ -114,65 +139,114 @@ export class LatencyRegressionService extends MultiConnectionPoller implements O
     this.basisLogged.delete(connectionId);
   }
 
-  /** First poll: page backwards through 24h of snapshots, then process oldest-first. */
-  private async backfillIntervals(
+  /**
+   * Reads every snapshot in [startTime, endTime] one page at a time. The adapters return
+   * newest-first with LIMIT, so paging runs backwards in time. Each consecutive pair is diffed
+   * as soon as both are seen, so only one page of snapshots is in memory, and no snapshot is
+   * skipped however many piled up. `anchor` is the newest snapshot already processed: it is
+   * diffed against the oldest snapshot read. Returns null when the range has no snapshots.
+   */
+  private async readHistogramRange(
     connectionId: string,
-    nowMs: number,
-  ): Promise<IntervalState | null> {
-    const pages: StoredLatencyHistogram[][] = [];
-    let endTime = nowMs;
-    const startTime = nowMs - SAMPLE_LOOKBACK_MS;
+    startTime: number,
+    endTime: number,
+    pageSize: number,
+    anchor?: StoredLatencyHistogram,
+  ): Promise<{
+    newest: StoredLatencyHistogram;
+    points: IntervalPoint[];
+    volumes: IntervalVolume[];
+  } | null> {
+    let newest: StoredLatencyHistogram | undefined;
+    let newer: StoredLatencyHistogram | undefined; // oldest snapshot seen so far
+    const points: IntervalPoint[] = [];
+    const volumes: IntervalVolume[] = [];
+    const take = (older: StoredLatencyHistogram, younger: StoredLatencyHistogram) => {
+      const diff = diffSnapshots(older, younger);
+      for (const p of diff.points) points.push(p);
+      for (const v of diff.volumes) volumes.push(v);
+    };
+    let cursor = endTime;
     for (;;) {
       const page = await this.storage.getLatencyHistograms({
         connectionId,
         startTime,
-        endTime,
-        limit: HISTOGRAM_PAGE,
+        endTime: cursor,
+        limit: pageSize,
       });
       if (page.length === 0) break;
-      pages.push(page); // each page is newest-first
+      page.sort((a, b) => b.timestamp - a.timestamp); // adapters already do this; cheap guard
+      for (const snapshot of page) {
+        if (!newest) newest = snapshot;
+        if (newer) take(snapshot, newer);
+        newer = snapshot;
+      }
       const oldest = page[page.length - 1].timestamp;
-      if (page.length < HISTOGRAM_PAGE || oldest <= startTime) break;
-      endTime = oldest - 1;
+      if (page.length < pageSize || oldest <= startTime) break;
+      cursor = oldest - 1;
     }
-    const snapshots = pages.flat().reverse(); // oldest-first
-    if (snapshots.length === 0) return null;
-    const points: IntervalPoint[] = [];
-    for (let i = 1; i < snapshots.length; i += 1) {
-      points.push(...intervalPoints(snapshots[i - 1], snapshots[i]));
-    }
-    return { last: snapshots[snapshots.length - 1], points };
+    if (!newest || !newer) return null;
+    if (anchor) take(anchor, newer);
+    // Built newest-first; flip to ascending capturedAt (points of one interval share capturedAt).
+    points.reverse();
+    volumes.reverse();
+    return { newest, points, volumes };
   }
 
-  /** Rolling per-connection window of interval points; null when no histogram rows exist. */
+  /** Rolling per-connection window of interval points; null when the connection has no histogram rows. */
   private async advanceIntervals(
     connectionId: string,
     nowMs: number,
   ): Promise<IntervalState | null> {
     let state = this.intervals.get(connectionId);
     if (!state) {
-      const filled = await this.backfillIntervals(connectionId, nowMs);
-      if (!filled) return null;
-      state = filled;
+      const read = await this.readHistogramRange(
+        connectionId,
+        nowMs - SAMPLE_LOOKBACK_MS,
+        nowMs,
+        HISTOGRAM_PAGE,
+      );
+      if (!read) return null;
+      state = { last: read.newest, points: read.points, volumes: read.volumes };
     } else {
-      const fresh = (
-        await this.storage.getLatencyHistograms({
-          connectionId,
-          startTime: state.last.timestamp + 1,
-          endTime: nowMs,
-          limit: 10,
-        })
-      ).reverse();
-      for (const snapshot of fresh) {
-        state.points.push(...intervalPoints(state.last, snapshot));
-        state.last = snapshot;
+      const read = await this.readHistogramRange(
+        connectionId,
+        state.last.timestamp + 1,
+        nowMs,
+        INCREMENTAL_PAGE,
+        state.last,
+      );
+      if (read) {
+        for (const p of read.points) state.points.push(p);
+        for (const v of read.volumes) state.volumes.push(v);
+        state.last = read.newest;
       }
     }
-    const cutoff = nowMs - SAMPLE_LOOKBACK_MS;
-    const firstKept = state.points.findIndex((p) => p.capturedAt >= cutoff);
-    state.points = firstKept === -1 ? [] : state.points.slice(firstKept);
+    state.points = trimBefore(state.points, nowMs - SAMPLE_LOOKBACK_MS);
+    state.volumes = trimBefore(state.volumes, nowMs - VOLUME_WINDOW_MS);
     this.intervals.set(connectionId, state);
     return state;
+  }
+
+  /** Logs the basis choice once per (basis, reason) change, so a lasting read failure warns once. */
+  private logBasis(
+    ctx: ConnectionContext,
+    basis: RegressionBasis,
+    reason?: FallbackReason,
+    error?: string,
+  ): void {
+    const key = basis === 'interval' ? 'interval' : `cumulative:${reason}`;
+    if (this.basisLogged.get(ctx.connectionId) === key) return;
+    this.basisLogged.set(ctx.connectionId, key);
+    if (basis === 'interval') {
+      this.logger.log(
+        `latency regression for ${ctx.connectionName}: judging per-interval P99 from LATENCY HISTOGRAM`,
+      );
+      return;
+    }
+    const message = `latency regression for ${ctx.connectionName}: falling back to cumulative latencystats (${reason})`;
+    if (reason === 'histogram read failed') this.logger.warn(`${message}: ${error}`);
+    else this.logger.log(message);
   }
 
   /** Cumulative-path volume gating input: commandstats call deltas for commands seen recently. */
@@ -218,33 +292,43 @@ export class LatencyRegressionService extends MultiConnectionPoller implements O
     // Prefer per-interval P99s derived from LATENCY HISTOGRAM deltas: INFO latencystats is
     // cumulative since server start, so a recent regression barely moves it on a long-lived node.
     let state: IntervalState | null = null;
+    let readError: string | undefined;
     try {
       state = await this.advanceIntervals(ctx.connectionId, nowMs);
     } catch (err) {
-      this.logger.warn(
-        `Failed to read latency histograms for ${ctx.connectionName}, using cumulative latencystats: ${err instanceof Error ? err.message : err}`,
-      );
+      readError = err instanceof Error ? err.message : String(err);
     }
-    const basis: RegressionBasis = state && state.points.length > 0 ? 'interval' : 'cumulative';
-    if (this.basisLogged.get(ctx.connectionId) !== basis) {
-      this.basisLogged.set(ctx.connectionId, basis);
-      this.logger.log(
-        basis === 'interval'
-          ? `latency regression for ${ctx.connectionName}: judging per-interval P99 from LATENCY HISTOGRAM`
-          : `latency regression for ${ctx.connectionName}: falling back to cumulative latencystats (no histogram rows)`,
-      );
+
+    // Interval mode only while histogram collection is live. If it stops (e.g. polling was
+    // disabled), old points stay in the 24h window but the detector rejects them as stale, so
+    // fall back to the fresh cumulative samples instead of judging nothing for up to 24h.
+    const newestPoint = state?.points[state.points.length - 1];
+    const intervalFresh =
+      newestPoint !== undefined && newestPoint.capturedAt >= nowMs - STALE_SAMPLE_MS;
+    const basis: RegressionBasis = state && intervalFresh ? 'interval' : 'cumulative';
+    let reason: FallbackReason | undefined;
+    if (basis === 'cumulative') {
+      // A fresh newest snapshot means collection is alive, even when it yields no P99 points.
+      if (readError !== undefined) reason = 'histogram read failed';
+      else if (!state) reason = 'no histogram rows';
+      else if (state.last.timestamp < nowMs - STALE_SAMPLE_MS) reason = 'histogram rows are stale';
+      else if (state.points.length === 0 && state.volumes.length === 0) {
+        reason = 'not enough histogram data yet';
+      } else reason = 'too few calls per interval';
     }
+    this.logBasis(ctx, basis, reason, readError);
 
     let samples: CommandP99Point[];
     let callsPerMin: Map<string, number>;
     if (state && basis === 'interval') {
+      const versionOf = versionTimeline(stored); // built once per poll
       samples = state.points.map((p) => ({
         command: p.command,
         p99Us: p.p99Us,
         capturedAt: p.capturedAt,
-        serverVersion: versionAt(stored, p.capturedAt),
+        serverVersion: versionOf(p.capturedAt),
       }));
-      callsPerMin = callsPerMinute(state.points, nowMs - VOLUME_WINDOW_MS, nowMs);
+      callsPerMin = callsPerMinute(state.volumes, nowMs - VOLUME_WINDOW_MS, nowMs);
     } else {
       samples = stored.map((s) => ({
         command: s.command,
@@ -389,7 +473,7 @@ export class LatencyRegressionService extends MultiConnectionPoller implements O
 
   private buildRunbook(finding: RegressionFinding, prefetchBatchMaxSize: number | null): string[] {
     const runbook: string[] = [
-      'Compare per-command P99 before/after the change via GET /metrics/latencystats/history.',
+      finding.basis === 'interval' ? INTERVAL_RUNBOOK_STEP : CUMULATIVE_RUNBOOK_STEP,
     ];
     if (parseMajorVersion(finding.currentVersion) >= 9) {
       const current =

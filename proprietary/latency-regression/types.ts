@@ -3,7 +3,7 @@ import type { AnomalyKind } from '@app/common/interfaces/storage-port.interface'
 /**
  * Types for the P99 latency regression guard (valkey/valkey#3527).
  * All latency values are microseconds. P99s are per interval (derived from consecutive
- * LATENCY HISTOGRAM snapshots) when a connection has histogram rows, and the cumulative
+ * LATENCY HISTOGRAM snapshots) when a connection has fresh histogram data, and the cumulative
  * INFO latencystats t-digest values otherwise.
  */
 

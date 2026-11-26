@@ -400,7 +400,7 @@ export interface LatencyRegressionDetectedData {
   topologyRefreshCorrelated: boolean;
   /**
    * 'interval': P99s derived from per-minute LATENCY HISTOGRAM deltas. 'cumulative': INFO
-   * latencystats values since server start (no histogram rows). Defaults to 'cumulative'.
+   * latencystats values since server start (no usable histogram data). Defaults to 'cumulative'.
    */
   basis?: 'interval' | 'cumulative';
   /** Current value of prefetch-batch-max-size on Valkey 9+, null if unreadable. */

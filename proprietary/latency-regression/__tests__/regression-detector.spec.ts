@@ -841,3 +841,67 @@ describe('finding basis', () => {
     expect(fireSustained()[0].basis).toBe('cumulative');
   });
 });
+
+describe('upgrade baselines and basis changes', () => {
+  type Basis = 'interval' | 'cumulative';
+
+  /**
+   * Opens an upgrade window under the interval basis (old-version baseline 1000us), then polls
+   * with `basis` over a separate sample set whose old-version P99 is `oldP99Us`, while the new
+   * version stays at 4000us.
+   */
+  const driveUpgrade = (basis: Basis, oldP99Us: number) => {
+    const sim = new Sim();
+    const findings: RegressionFinding[] = [];
+    const evaluate = (samples: CommandP99Point[], inputBasis: Basis) => {
+      findings.push(
+        ...sim.detector.evaluate({
+          nowMs: sim.now,
+          samples,
+          callsPerMin: sim.callsPerMin,
+          clusterRefreshDeltas: [],
+          basis: inputBasis,
+        }),
+      );
+    };
+
+    for (let i = 0; i < 6; i++) {
+      sim.now += MINUTE;
+      sim.addSample(1000, '8.1.0');
+      evaluate(sim.samples, 'interval');
+    }
+    const oldTimes = sim.samples.map((s) => s.capturedAt);
+    sim.now += MINUTE;
+    sim.addSample(1000, '9.0.0');
+    evaluate(sim.samples, 'interval');
+
+    const polled: CommandP99Point[] = oldTimes.map((capturedAt) => ({
+      command: 'hmget',
+      p99Us: oldP99Us,
+      serverVersion: '8.1.0',
+      capturedAt,
+    }));
+    for (let i = 0; i < CONSECUTIVE_REQUIRED + 1; i++) {
+      sim.now += MINUTE;
+      polled.push({ command: 'hmget', p99Us: 4000, serverVersion: '9.0.0', capturedAt: sim.now });
+      evaluate(polled, basis);
+    }
+    return findings.filter((f) => f.kind === 'upgrade_regression');
+  };
+
+  it('rebuilds the baseline when the basis changes, so the two bases are never compared', () => {
+    expect(driveUpgrade('cumulative', 4000)).toEqual([]);
+  });
+
+  it('still fires after rebuilding when the new basis shows a real regression', () => {
+    const findings = driveUpgrade('cumulative', 1000);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ basis: 'cumulative', severity: 'critical' });
+  });
+
+  it('still fires against the original baseline when the basis does not change', () => {
+    const findings = driveUpgrade('interval', 1000);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].commands[0]).toMatchObject({ baselineP99Us: 1000, currentP99Us: 4000 });
+  });
+});
