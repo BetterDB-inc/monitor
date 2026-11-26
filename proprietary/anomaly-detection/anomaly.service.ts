@@ -2447,11 +2447,12 @@ export class AnomalyService
         // For failover churn the skip also carries the window state — churn
         // evidence must survive a probe blip or a flapping shard could never
         // accumulate enough observations to fire.
-        const shardsPromise = isRaft ? undefined : this.safeGetClusterShards(ctx);
+        const readsTopology = this.takesTopologyRead(ctx.connectionId, timestamp);
+        const shardsPromise = isRaft || !readsTopology ? undefined : this.safeGetClusterShards(ctx);
         const membershipAtRead = this.savedMembershipOf(ctx.connectionId);
         let nodes: ClusterNode[] | undefined;
         try {
-          nodes = await ctx.client.getClusterNodes();
+          if (readsTopology) nodes = await ctx.client.getClusterNodes();
         } catch (topologyErr) {
           if (this.clusterIdentity?.isReader(ctx.connectionId) ?? true) {
             this.activeTopologyConflicts.delete(this.clusterScopeOf(ctx.connectionId));
@@ -2526,20 +2527,21 @@ export class AnomalyService
           const self = nodes.find((n) => n.flags.includes('myself'));
           if (self) await this.detectPrimaryWithoutReplicas(info, ctx, timestamp, self);
         }
-        await this.detectHotShards(ctx, timestamp, nodes);
+        if (readsTopology) await this.detectHotShards(ctx, timestamp, nodes);
         aclClusterNodes = nodes;
-        if (nodes && !this.dialsDataNodes(ctx.connectionId)) {
+        const otherPrimaries = nodes
+          ? clusterTargets(nodes, this.registeredAddresses())
+          : readsTopology
+            ? undefined
+            : this.otherPrimariesOfCluster(ctx.connectionId, timestamp);
+        if (otherPrimaries && !this.dialsDataNodes(ctx.connectionId)) {
           // The agent reaches only this node; cluster discovery would fail on
           // the seed's raw client for every other primary and count them all
           // unreachable.
-          fanoutGap = this.undialedGap(
-            ctx.connectionId,
-            clusterTargets(nodes, this.registeredAddresses()),
-            'agent_connection',
-          );
+          fanoutGap = this.undialedGap(ctx.connectionId, otherPrimaries, 'agent_connection');
           divergenceTargets = { targets: [], members: new Set() };
-        } else if (nodes) {
-          divergenceTargets = clusterTargets(nodes, this.registeredAddresses());
+        } else if (otherPrimaries) {
+          divergenceTargets = otherPrimaries;
         } else {
           fanoutGap = { reason: 'topology_unreadable', notDialed: 0 };
         }
@@ -2687,6 +2689,7 @@ export class AnomalyService
     }
   }
 
+  private static readonly TOPOLOGY_READS = 'anomaly';
   private static readonly FANOUT_INFO_SECTIONS = ['clients', 'memory', 'stats', 'replication', 'persistence'] as const;
   private static readonly CLIENT_SATURATION_WARN = 0.8;
   private static readonly CLIENT_SATURATION_CRIT = 0.95;
@@ -10271,6 +10274,35 @@ export class AnomalyService
   private savedMembershipOf(connectionId: string): string {
     const membership = this.connectionRegistry.getConfig(connectionId)?.membership;
     return membership ? `${membership.nodeId}:${membership.retiredAt ?? ''}` : '';
+  }
+
+  private takesTopologyRead(connectionId: string, timestamp: number): boolean {
+    const hasTurn =
+      this.clusterIdentity?.takeTopologyRead(connectionId, AnomalyService.TOPOLOGY_READS, timestamp) ??
+      true;
+    return hasTurn || !this.latestClusterNodes(connectionId, timestamp);
+  }
+
+  private latestClusterNodes(connectionId: string, timestamp: number): readonly ClusterNode[] | undefined {
+    const viewKey = this.clusterNodeViews.keyOf(connectionId);
+    const view = viewKey === undefined ? undefined : this.clusterNodeViews.nodes(viewKey);
+    return view && timestamp - view.readAt <= this.nodeViewStaleMs() ? view.nodes : undefined;
+  }
+
+  private otherPrimariesOfCluster(connectionId: string, timestamp: number): TopologyScope | undefined {
+    const latest = this.latestClusterNodes(connectionId, timestamp);
+    if (!latest) return undefined;
+    const ownNodeId = this.connectionRegistry.getObservedNodeId(connectionId);
+    const isRegistered = this.registeredAddresses();
+    const nodes = latest.map((node) =>
+      node.flags.includes('myself')
+        ? { ...node, flags: node.flags.filter((flag) => flag !== 'myself') }
+        : node,
+    );
+    return clusterTargets(
+      nodes,
+      (host, port, nodeId) => nodeId === ownNodeId || isRegistered(host, port, nodeId),
+    );
   }
 
   private readIsCurrent(ctx: ConnectionContext, membershipAtRead: string): boolean {

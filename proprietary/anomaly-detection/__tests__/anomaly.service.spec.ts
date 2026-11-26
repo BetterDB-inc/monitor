@@ -2493,6 +2493,29 @@ describe('AnomalyService', () => {
       expect(service.getHotShards('conn-a')).toEqual([]);
     });
 
+    it('keeps an open event while the connection waits over five minutes for its turn to read the topology', async () => {
+      await step(HOT, 6);
+      const identity = new ClusterIdentityService((service as any).connectionRegistry);
+      jest.spyOn(identity, 'takeTopologyRead').mockImplementation((id) => id !== 'conn-a');
+      (service as any).clusterIdentity = identity;
+      const other = {
+        ...ctx,
+        connectionId: 'conn-b',
+        connectionName: 'other',
+        client: { ...ctx.client, getClusterNodes: jest.fn(async () => clusterNodes()) },
+      } as unknown as ConnectionContext;
+      (ctx.client.getClusterNodes as jest.Mock).mockClear();
+
+      for (let n = 0; n < 22; n += 1) {
+        clock += STEP_MS;
+        await poll(other);
+        await poll(ctx);
+      }
+
+      expect(ctx.client.getClusterNodes).not.toHaveBeenCalled();
+      expect(hotEvents()[0].resolved).toBe(false);
+    });
+
     it('judges the latest sample again once the topology can be read', async () => {
       await step(HOT, 4);
       (ctx.client.getClusterNodes as jest.Mock).mockRejectedValue(new Error('CLUSTERDOWN'));
@@ -33424,6 +33447,214 @@ describe('AnomalyService', () => {
 
         expect((service as any).topologyFullChecks.state(clusterKey, now)).toEqual({ state: 'none' });
       });
+    });
+  });
+
+  describe('topology reads in a cluster with more connections than read on one poll', () => {
+    const idOf = (index: number): string => `conn-${String(index).padStart(2, '0')}`;
+    const hostOf = (index: number): string => `10.0.1.${index + 1}`;
+    const nodeIdOf = (index: number): string => `node${String(index).padStart(2, '0')}aaaaaa`;
+    const SEED = idOf(0);
+    const memberInfo = {
+      server: { role: 'master' },
+      clients: { connected_clients: '10', blocked_clients: '0' },
+      memory: { used_memory: '1000000', allocator_frag_ratio: '1.1' },
+      stats: {
+        instantaneous_ops_per_sec: '100',
+        instantaneous_input_kbps: '50',
+        instantaneous_output_kbps: '30',
+        evicted_keys: '0',
+        keyspace_misses: '5',
+        rejected_connections: '0',
+        acl_access_denied_auth: '0',
+        cluster_enabled: '1',
+      },
+    };
+
+    let now: number;
+    let ids: string[];
+    let topology: ClusterNode[];
+    let configs: Record<string, unknown>;
+    let hosts: Record<string, string>;
+    let ctxs: Record<string, ConnectionContext>;
+
+    function primary(index: number): ClusterNode {
+      return {
+        id: nodeIdOf(index),
+        address: `${hostOf(index)}:6379@16379`,
+        flags: ['master'],
+        master: '',
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 1,
+        linkState: 'connected',
+        slots: [[index * 100, index * 100 + 99]],
+      };
+    }
+
+    function memberCtx(index: number): ConnectionContext {
+      const connectionId = idOf(index);
+      return {
+        ...mockCtx,
+        connectionId,
+        connectionName: connectionId,
+        host: hosts[connectionId],
+        client: {
+          ...dbClient,
+          getInfoParsed: jest.fn().mockResolvedValue(memberInfo),
+          getClusterInfo: jest.fn().mockResolvedValue({ cluster_state: 'ok' }),
+          getClusterShards: jest.fn().mockResolvedValue([]),
+          getClusterNodes: jest.fn(async () =>
+            topology.map((node) =>
+              node.id === nodeIdOf(index) ? { ...node, flags: ['myself', ...node.flags] } : node,
+            ),
+          ),
+        },
+      } as unknown as ConnectionContext;
+    }
+
+    function grow(count: number): void {
+      const indexes = Array.from({ length: count }, (_, index) => index);
+      ids = indexes.map(idOf);
+      topology = indexes.map(primary);
+      hosts = Object.fromEntries(indexes.map((index) => [idOf(index), hostOf(index)]));
+      configs = Object.fromEntries(
+        indexes.map((index) => [
+          idOf(index),
+          index === 0
+            ? { id: SEED }
+            : {
+                id: idOf(index),
+                membership: { seedId: SEED, nodeId: nodeIdOf(index), origin: 'auto', source: 'cluster' },
+              },
+        ]),
+      );
+      ctxs = Object.fromEntries(indexes.map((index) => [idOf(index), memberCtx(index)]));
+    }
+
+    async function pollAll(): Promise<void> {
+      for (const id of ids) await poll(ctxs[id]);
+    }
+
+    async function pollAfter(ms: number): Promise<void> {
+      now += ms;
+      await pollAll();
+    }
+
+    const readWith = (command: 'getClusterNodes' | 'getClusterShards'): string[] =>
+      ids.filter((id) => (ctxs[id].client[command] as jest.Mock).mock.calls.length > 0);
+
+    const forgetReads = (): void =>
+      ids.forEach((id) => {
+        (ctxs[id].client.getClusterNodes as jest.Mock).mockClear();
+        (ctxs[id].client.getClusterShards as jest.Mock).mockClear();
+      });
+
+    beforeEach(() => {
+      now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+      const registry = (service as any).connectionRegistry;
+      registry.getConfig.mockImplementation((id: string) => configs[id] ?? null);
+      registry.list = jest.fn(() =>
+        ids.map((id) => ({ id, host: hosts[id], port: 6379, isConnected: true, ...(configs[id] as object) })),
+      );
+      (service as any).clusterIdentity = new ClusterIdentityService(registry);
+    });
+
+    afterEach(() => {
+      (Date.now as jest.Mock).mockRestore();
+    });
+
+    it('reads the topology on the reader and on eight other connections on a poll', async () => {
+      grow(12);
+      await pollAll();
+      await pollAfter(1000);
+      forgetReads();
+
+      await pollAfter(1000);
+
+      const due = [SEED, ...[1, 2, 3, 4, 5, 9, 10, 11].map(idOf)];
+      expect(readWith('getClusterNodes')).toEqual(due);
+      expect(readWith('getClusterShards')).toEqual(due);
+    });
+
+    describe('on a connection without a turn', () => {
+      const WAITING = idOf(6);
+      const coverageOf = (connectionId: string) => service.getFanoutCoverage(connectionId)[0];
+
+      it('keeps counting the primaries no connection is registered for', async () => {
+        grow(12);
+        topology = [...topology, primary(40)];
+        await pollAll();
+        await pollAfter(1000);
+
+        await pollAfter(1000);
+
+        expect(coverageOf(idOf(1))).toMatchObject({ reason: 'fanout_failed', notDialed: 1 });
+        expect(coverageOf(WAITING)).toMatchObject({ reason: 'fanout_failed', notDialed: 1 });
+      });
+
+      it('does not count its own node when it is registered under a host name', async () => {
+        grow(12);
+        topology = [...topology, primary(40)];
+        hosts[WAITING] = 'db-06.internal';
+        configs[WAITING] = { id: WAITING };
+        ctxs[WAITING] = memberCtx(6);
+        await pollAll();
+        await pollAfter(1000);
+
+        await pollAfter(1000);
+
+        expect(coverageOf(WAITING)).toMatchObject({ reason: 'fanout_failed', notDialed: 1 });
+      });
+
+      it('counts the node of the connection that read last when that one is registered under a host name', async () => {
+        grow(12);
+        const last = idOf(11);
+        hosts[last] = 'db-11.internal';
+        configs[last] = { id: last };
+        ctxs[last] = memberCtx(11);
+        await pollAll();
+        await pollAfter(1000);
+        await pollAfter(1000);
+
+        now += 1000;
+        await poll(ctxs[WAITING]);
+
+        expect(coverageOf(WAITING)).toMatchObject({ reason: 'fanout_failed', notDialed: 1 });
+      });
+
+      it('reads the topology itself once no connection read the cluster for thirty seconds', async () => {
+        grow(12);
+        await pollAll();
+        await pollAfter(1000);
+        ids.forEach((id) =>
+          (ctxs[id].client.getClusterNodes as jest.Mock).mockRejectedValue(new Error('CLUSTER NODES failed')),
+        );
+        await pollAfter(10_000);
+        await pollAfter(10_000);
+        forgetReads();
+        await pollAfter(10_000);
+        const beforeTheViewIsOld = readWith('getClusterNodes').length;
+        forgetReads();
+
+        await pollAfter(10_000);
+
+        expect(beforeTheViewIsOld).toBe(9);
+        expect(readWith('getClusterNodes')).toEqual(ids);
+      });
+    });
+
+    it('reads the topology on every connection on a poll in a cluster of nine connections', async () => {
+      grow(9);
+      await pollAll();
+      await pollAfter(1000);
+      forgetReads();
+
+      await pollAfter(1000);
+
+      expect(readWith('getClusterNodes')).toEqual(ids);
+      expect(readWith('getClusterShards')).toEqual(ids);
     });
   });
 
