@@ -34242,6 +34242,75 @@ describe('AnomalyService', () => {
         });
       });
 
+      describe('when two halves turn out to be one cluster while the stored warnings of a member are read', () => {
+        const halves = [SEED, 'conn-c'];
+        const left = [NODE_A, NODE_B];
+        const right = [NODE_C, cnode('nodeXXXXXXXX', '10.0.0.7', ['master'])];
+        let joined: string;
+        let cleanLine: string;
+        let joinsOnRead: boolean;
+
+        const closedIds = (): string[] => storage.resolveAnomaly.mock.calls.map(([id]) => id).sort();
+
+        beforeEach(async () => {
+          delete configs['conn-b'];
+          configs['conn-c'] = { id: 'conn-c' };
+          const half: Record<string, ClusterNode[]> = { [SEED]: left, 'conn-c': right };
+          views = half;
+          await pollAll(halves);
+          const keyOf = (id: string): string => (service as any).clusterIdentity.clusterKeyOf(id);
+          const [kept, joinedHalf] = [...halves].sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
+          joined = joinedHalf;
+          const primary = joined === SEED ? NODE_A : NODE_C;
+          const stuck = cnode('replicaR1111', '10.0.0.21', ['slave'], { master: primary.id });
+          cleanLine = `${stuck.id} ${stuck.address} myself,slave ${primary.id} 0 0 1 connected`;
+          ownLine = `${cleanLine} [42-<-aaaaaaaa]`;
+          views = { ...half, [joined]: [...half[joined], stuck] };
+          configs['conn-b'] = {
+            id: 'conn-b',
+            membership: { seedId: joined, nodeId: 'memberMMMMMM', origin: 'auto', source: 'cluster' },
+          };
+          const signature = replicaSlotSignature({
+            replicaId: stuck.id,
+            reason: 'replica_importing',
+            affectedSlots: [42],
+          } as ReplicaSlotAnomaly);
+          joinsOnRead = true;
+          storage.getAnomalyEvents.mockImplementation(async ({ connectionId, metricType, offset }) => {
+            if (offset || metricType !== MetricType.REPLICA_SLOT_STATE || connectionId !== 'conn-b') return [];
+            if (joinsOnRead) {
+              joinsOnRead = false;
+              views = {};
+              topology = [...left, ...right, stuck];
+              (service as any).clusterIdentity.observe(kept, topology);
+            }
+            return [{ id: 'row-b', timestamp: 1, message: 'msg', dedupeKey: signature }];
+          });
+          now += 1000;
+          await poll(ctxs[joined]);
+        });
+
+        it('raises no second warning for the finding of a stored one', async () => {
+          await pollAfter(1000, halves);
+          await pollAfter(GATE_MS, halves);
+          await (service as any).drainPersistenceOutbox();
+
+          expect(joinsOnRead).toBe(false);
+          expect(slotEvents()).toHaveLength(0);
+          expect(closedIds()).toEqual([]);
+        });
+
+        it('closes the stored warning once the replica is clean', async () => {
+          ownLine = cleanLine;
+
+          await pollAfter(1000, halves);
+          await (service as any).drainPersistenceOutbox();
+
+          expect(joinsOnRead).toBe(false);
+          expect(closedIds()).toEqual(['row-b']);
+        });
+      });
+
       it('asks the replica through a member that can dial when the seed cannot', async () => {
         configs[SEED] = { ...(configs[SEED] as object), host: 'agent' };
         await pollAll();

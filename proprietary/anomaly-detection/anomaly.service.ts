@@ -2509,13 +2509,14 @@ export class AnomalyService
           // Replica migrating/importing markers are node-local — only the
           // queried node's own line carries them — so aggregate each replica's
           // self-view before detecting (falls back to `nodes` without fan-out).
-          const slotScope = asksReplicas ? scope : ctx.connectionId;
-          if (asksReplicas) this.takeOverMemberSlotEvents(ctx.connectionId, slotScope);
-          else this.leaveSlotEventsToReader(ctx.connectionId, scope, ownNodeIdOf(nodes));
-          const perNodeView = await this.gatherReplicaSlotView(nodes, ctx, slotScope);
+          const liveScope = (): string => this.clusterScopes.get(ctx.connectionId) ?? ctx.connectionId;
+          const slotScope = (): string => (asksReplicas ? liveScope() : ctx.connectionId);
+          if (asksReplicas) this.takeOverMemberSlotEvents(ctx.connectionId, slotScope());
+          else this.leaveSlotEventsToReader(ctx.connectionId, liveScope(), ownNodeIdOf(nodes));
+          const perNodeView = await this.gatherReplicaSlotView(nodes, ctx, slotScope());
           await this.detectReplicaSlotState(
             asksReplicas ? filed : ctx,
-            slotScope,
+            slotScope(),
             timestamp,
             perNodeView.nodes,
             shards,
