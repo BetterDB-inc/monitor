@@ -32,6 +32,8 @@ interface ReadTurns {
   readonly urgent: Set<string>;
 }
 
+type KeysJoinedListener = (joinedKey: string, clusterKey: string) => void;
+
 interface HeldClaim {
   readonly claimedAt: number;
   readonly heldUntil: number;
@@ -43,7 +45,7 @@ interface HeldClaim {
 const NOT_LIVE_FLAGS = ['handshake', 'noaddr', 'fail', 'fail?'];
 const STATE_HOLD_MS = 60_000;
 const PROMOTION_HOLD_MS = 10 * 60_000;
-const READER_GRACE_MS = 60_000;
+export const READER_GRACE_MS = 60_000;
 const READER_POLL_GRACE_MS = 15_000;
 const MEMBER_READS_PER_POLL = 8;
 const URGENT_READS_PER_POLL = 4;
@@ -101,6 +103,7 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
   private readonly claims = new Map<string, HeldClaim>();
   private readonly readers = new Map<string, ClusterReader>();
   private readonly readTurns = new Map<string, ReadTurns>();
+  private readonly joinListeners = new Set<KeysJoinedListener>();
   private stopListening: (() => void) | undefined;
 
   constructor(private readonly connectionRegistry: ConnectionRegistry) {}
@@ -119,17 +122,17 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
   observe(
     connectionId: string,
     nodes: ReadonlyArray<{ id?: string; flags?: ReadonlyArray<string> }>,
-  ): string[] {
+  ): void {
     const nodeIds = new Set(
       nodes
         .filter((node) => !node.flags?.some((flag) => NOT_LIVE_FLAGS.includes(flag)))
         .map((node) => node.id)
         .filter((id): id is string => !!id),
     );
-    if (nodeIds.size === 0) return [];
+    if (nodeIds.size === 0) return;
     if (nodes.length === 1) {
       this.standAlone(connectionId, [...nodeIds][0]);
-      return [];
+      return;
     }
     const [known, ...joined] = [
       ...new Set(
@@ -143,7 +146,13 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
     this.keyByConnection.set(connectionId, clusterKey);
     nodeIds.forEach((id) => this.keyByNode.set(id, clusterKey));
     if (previous) this.releaseNodes(previous);
-    return joined;
+  }
+
+  onKeysJoined(listener: KeysJoinedListener): () => void {
+    this.joinListeners.add(listener);
+    return () => {
+      this.joinListeners.delete(listener);
+    };
   }
 
   private standAlone(connectionId: string, nodeId: string): void {
@@ -365,10 +374,10 @@ export class ClusterIdentityService implements OnModuleInit, OnModuleDestroy {
     const joinedReader = this.readers.get(joinedKey);
     const keptReader = this.readers.get(clusterKey);
     this.readers.delete(joinedKey);
-    if (!joinedReader) return;
-    if (!keptReader || this.goesBefore(joinedReader, keptReader)) {
+    if (joinedReader && (!keptReader || this.goesBefore(joinedReader, keptReader))) {
       this.readers.set(clusterKey, joinedReader);
     }
+    this.joinListeners.forEach((listener) => listener(joinedKey, clusterKey));
   }
 
   private release(claim: string, now: number): void {

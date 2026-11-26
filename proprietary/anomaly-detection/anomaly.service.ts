@@ -289,7 +289,11 @@ import {
   type SlotMigrationReport,
   parseSlotMigrationJobs,
 } from '@app/cluster/cluster-metrics.service';
-import { ClusterIdentityService, clusterStateSignature } from '@app/cluster/cluster-identity.service';
+import {
+  ClusterIdentityService,
+  READER_GRACE_MS,
+  clusterStateSignature,
+} from '@app/cluster/cluster-identity.service';
 import { withConfiguredZones, withShardMetadata } from '@app/cluster/shard-metadata';
 import { resolveNodeRef, toClusterNodeRef, type NodeSubject } from '@app/cluster/node-ref';
 import {
@@ -932,7 +936,10 @@ export class AnomalyService
   private reshardSnapshot = new Map<string, ReshardShardSnapshot>();
   private readonly connectionClusterKeys = new Map<string, string>();
   private readonly clusterScopes = new Map<string, string>();
+  private readonly clusterScopeReadAt = new Map<string, number>();
+  private readonly clusterScopesLeft = new Map<string, string>();
   private readonly mergedScopeState = new WeakMap<object, object>();
+  private stopFollowingClusterJoins: (() => void) | undefined;
   private readonly replicaSlotEventOwners = new Map<string, Map<string, string>>();
   private readonly unmergedSlotEvents = new Set<string>();
   private readonly slotEventsLoaded = new Set<string>();
@@ -1357,6 +1364,7 @@ export class AnomalyService
     private readonly clusterIdentity?: ClusterIdentityService,
   ) {
     super(connectionRegistry);
+    this.followClusterJoins();
     this.correlator = new Correlator(this.correlationIntervalMs, (anomaly) =>
       this.correlationScopeOf(anomaly.connectionId),
     );
@@ -1474,6 +1482,8 @@ export class AnomalyService
 
   async onModuleDestroy(): Promise<void> {
     await super.onModuleDestroy();
+    this.stopFollowingClusterJoins?.();
+    this.stopFollowingClusterJoins = undefined;
     this.unsubscribeDetectorConfig?.();
     this.unsubscribeDetectorConfig = null;
     if (this.correlationInterval) {
@@ -6711,8 +6721,9 @@ export class AnomalyService
 
       for (const conflict of conflicts) {
         const signature = conflictSignature(conflict);
-        if (active.has(signature)) continue; // already alerted for this conflict
-        active.add(signature);
+        const alerted = this.liveScopeState(active);
+        if (alerted.has(signature)) continue;
+        alerted.add(signature);
 
         const [authoritative, phantom] = conflict.masters;
         const slotLabel =
@@ -6743,15 +6754,16 @@ export class AnomalyService
 
         this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
         await this.addLatchedAnomaly(event, ctx, `${scope}:${signature}`, () => {
-          this.activeTopologyConflicts.get(scope)?.delete(signature);
+          this.liveScopeState(active).delete(signature);
         });
       }
 
       // Keep only signatures still in conflict so a resolved-then-recurring
       // conflict alerts again. (A CLUSTER NODES observation gap is handled at the
       // poll level, which clears this set so a missed heal re-alerts.)
-      for (const signature of active) {
-        if (!currentSignatures.has(signature)) active.delete(signature);
+      const stillActive = this.liveScopeState(active);
+      for (const signature of stillActive) {
+        if (!currentSignatures.has(signature)) stillActive.delete(signature);
       }
     } catch (topologyErr) {
       this.logger.debug(
@@ -9020,6 +9032,12 @@ export class AnomalyService
     };
   }
 
+  private forgetMembershipHistoryOfAnotherReader(scope: string, readerId: string): void {
+    const previous = this.ghostHistoryReaders.get(scope);
+    this.ghostHistoryReaders.set(scope, readerId);
+    if (previous !== undefined && previous !== readerId) this.ghostHistories.delete(scope);
+  }
+
   /**
    * Known false positive: an INTENTIONAL re-add of the same node-id — a host that
    * kept its `nodes.conf` and was brought back without a `CLUSTER RESET`, inside
@@ -9037,12 +9055,6 @@ export class AnomalyService
    * per rejoin, so it needs no dedupe set of its own; the history's minimum
    * absence requirement is the noise gate.
    */
-  private forgetMembershipHistoryOfAnotherReader(scope: string, readerId: string): void {
-    const previous = this.ghostHistoryReaders.get(scope);
-    this.ghostHistoryReaders.set(scope, readerId);
-    if (previous !== undefined && previous !== readerId) this.ghostHistories.delete(scope);
-  }
-
   private async detectForgetRejoin(
     ctx: ConnectionContext,
     scope: string,
@@ -10456,28 +10468,34 @@ export class AnomalyService
     const scope = identity.clusterKeyOf(connectionId);
     const previous = this.clusterScopes.get(connectionId);
     this.clusterScopes.set(connectionId, scope);
-    if (previous !== undefined && previous !== scope && !this.isScopeRead(previous, connectionId)) {
-      this.moveClusterScope(previous, scope);
+    this.clusterScopeReadAt.set(connectionId, timestamp);
+    if (previous !== undefined && previous !== scope) this.clusterScopesLeft.set(connectionId, previous);
+    const left = this.clusterScopesLeft.get(connectionId);
+    if (left !== undefined && !this.isScopeRead(left, timestamp)) {
+      this.clusterScopesLeft.delete(connectionId);
+      this.moveClusterScope(left, scope);
     }
     return identity.claimReader(connectionId, timestamp, this.dialsDataNodes(connectionId));
   }
 
-  private joinClusterScopes(connectionId: string, nodes: ClusterNode[]): void {
-    const identity = this.clusterIdentity;
-    const joined = identity?.observe(connectionId, nodes) ?? [];
-    if (!identity || joined.length === 0) return;
-    const scope = identity.clusterKeyOf(connectionId);
-    for (const from of joined) {
-      this.moveClusterScope(from, scope);
-      for (const [member, key] of this.clusterScopes) {
-        if (key === from) this.clusterScopes.set(member, scope);
-      }
+  private followClusterJoins(): void {
+    this.stopFollowingClusterJoins?.();
+    this.stopFollowingClusterJoins = this.clusterIdentity?.onKeysJoined((from, to) =>
+      this.joinClusterScope(from, to),
+    );
+  }
+
+  private joinClusterScope(from: string, to: string): void {
+    this.moveClusterScope(from, to);
+    for (const [member, key] of this.clusterScopes) {
+      if (key === from) this.clusterScopes.set(member, to);
     }
   }
 
-  private isScopeRead(scope: string, exceptId: string): boolean {
-    return [...this.clusterScopes.keys()].some(
-      (connectionId) => connectionId !== exceptId && this.clusterScopeOf(connectionId) === scope,
+  private isScopeRead(scope: string, now: number): boolean {
+    return [...this.clusterScopeReadAt].some(
+      ([connectionId, readAt]) =>
+        now - readAt <= READER_GRACE_MS && this.clusterScopeOf(connectionId) === scope,
     );
   }
 
@@ -10530,6 +10548,8 @@ export class AnomalyService
   private leaveClusterScope(connectionId: string): string | undefined {
     const scope = this.clusterScopes.get(connectionId) ?? connectionId;
     this.clusterScopes.delete(connectionId);
+    this.clusterScopeReadAt.delete(connectionId);
+    this.clusterScopesLeft.delete(connectionId);
     return [...this.clusterScopes.values()].includes(scope) ? undefined : scope;
   }
 
@@ -10830,7 +10850,7 @@ export class AnomalyService
   }
 
   private rememberClusterKey(connectionId: string, nodes: ClusterNode[], readIsCurrent: boolean): void {
-    if (readIsCurrent) this.joinClusterScopes(connectionId, nodes);
+    if (readIsCurrent) this.clusterIdentity?.observe(connectionId, nodes);
     const clusterKey = this.clusterKeyOfNodes(nodes);
     if (!clusterKey) {
       this.forgetClusterKey(connectionId);
