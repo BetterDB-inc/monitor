@@ -137,6 +137,31 @@ describe('topology targets', () => {
       expect([...scope.members]).toEqual(['10.0.0.2:6379']);
     });
 
+    it('drops a held primary the later view lists as a replica', () => {
+      const later = [primaryB, { ...clusterNode('c', '10.0.0.3:6379@16379', ['slave']), master: 'b' }];
+
+      const scope = withHeldTargets(clusterTargets(later, nothingRegistered), held, nothingRegistered, later);
+
+      expect(scope.targets.map((t) => t.addr)).toEqual(['10.0.0.2:6379']);
+      expect([...scope.members].sort()).toEqual(['10.0.0.2:6379', '10.0.0.4:6379']);
+    });
+
+    it('drops the old address of a held primary the later view lists at a new one', () => {
+      const later = [primaryB, clusterNode('c', '10.0.0.9:6379@16379', ['master'])];
+
+      const scope = withHeldTargets(clusterTargets(later, nothingRegistered), held, nothingRegistered, later);
+
+      expect(scope.targets.map((t) => t.addr)).toEqual(['10.0.0.2:6379', '10.0.0.9:6379']);
+    });
+
+    it('drops a held down primary whose address the later view lists as a replica', () => {
+      const later = [primaryB, primaryC, { ...clusterNode('d', '10.0.0.4:6379@16379', ['slave']), master: 'b' }];
+
+      const scope = withHeldTargets(clusterTargets(later, nothingRegistered), held, nothingRegistered, later);
+
+      expect([...scope.members].sort()).toEqual(['10.0.0.2:6379', '10.0.0.3:6379']);
+    });
+
     it('returns the later view as it is when nothing is held', () => {
       const later = clusterTargets([primaryB], nothingRegistered);
 

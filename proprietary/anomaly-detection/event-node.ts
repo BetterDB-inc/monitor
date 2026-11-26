@@ -139,6 +139,10 @@ export class ClusterNodeViews {
     return view && { nodes: view.read(), readAt: view.readAt };
   }
 
+  readAt(viewKey: string): number | undefined {
+    return this.views.get(viewKey)?.readAt;
+  }
+
   keyOf(connectionId: string): string | undefined {
     return this.viewKeys.get(connectionId);
   }
