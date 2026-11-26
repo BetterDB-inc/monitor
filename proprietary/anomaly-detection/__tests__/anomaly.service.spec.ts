@@ -2493,8 +2493,23 @@ describe('AnomalyService', () => {
       expect(service.getHotShards('conn-a')).toEqual([]);
     });
 
-    it('keeps an open event while the connection waits over five minutes for its turn to read the topology', async () => {
+    it('judges every sample on a connection that holds them and has no turn to read the topology', async () => {
+      const identity = new ClusterIdentityService((service as any).connectionRegistry);
+      jest.spyOn(identity, 'takeTopologyRead').mockImplementation((id) => id !== 'conn-a');
+      (service as any).clusterIdentity = identity;
+      (service as any).followClusterJoins();
+      await step(EVEN, 2);
+      (ctx.client.getClusterNodes as jest.Mock).mockClear();
+
+      await step(HOT, 5);
+
+      expect(ctx.client.getClusterNodes).toHaveBeenCalledTimes(5);
+      expect(hotEvents()).toHaveLength(1);
+    });
+
+    it('keeps an open event while a connection that no longer holds samples waits over five minutes for its turn', async () => {
       await step(HOT, 6);
+      shardLoad.forget('conn-a');
       const identity = new ClusterIdentityService((service as any).connectionRegistry);
       jest.spyOn(identity, 'takeTopologyRead').mockImplementation((id) => id !== 'conn-a');
       (service as any).clusterIdentity = identity;

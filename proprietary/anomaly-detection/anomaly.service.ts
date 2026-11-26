@@ -10410,8 +10410,13 @@ export class AnomalyService
     return (
       hasTurn ||
       this.ownLineIsDue(connectionId, info) ||
+      this.holdsShardLoad(connectionId) ||
       !this.latestClusterNodes(connectionId, timestamp)
     );
+  }
+
+  private holdsShardLoad(connectionId: string): boolean {
+    return !!this.shardLoad?.getLatest(connectionId);
   }
 
   private hasOwnNodeFinding(connectionId: string): boolean {
