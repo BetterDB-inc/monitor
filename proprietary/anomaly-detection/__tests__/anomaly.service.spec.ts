@@ -33497,7 +33497,9 @@ describe('AnomalyService', () => {
           getClusterNodes: jest.fn(async () => {
             if (unreadable.has(connectionId)) throw new Error('CLUSTER NODES failed');
             return topology.map((node) =>
-              node.address.startsWith(`${host}:`) ? { ...node, flags: ['myself', ...node.flags] } : node,
+              node.address.startsWith(`${host}:`)
+                ? { ...node, flags: ['myself', ...node.flags] }
+                : { ...node, migratingSlots: undefined, importingSlots: undefined },
             );
           }),
         },
@@ -33742,6 +33744,92 @@ describe('AnomalyService', () => {
       await poll(otherCtx);
 
       expect(eventsOf(MetricType.CLUSTER_TOPOLOGY).map((e) => e.connectionId).sort()).toEqual([SEED, 'conn-x']);
+    });
+
+    describe('replica slot state', () => {
+      const REPLICA_ID = 'eeeeeeee';
+      const REPLICA = cnode(REPLICA_ID, '10.0.0.9', ['slave'], { master: NODE_A.id });
+      const CLEAN = `${REPLICA_ID} 10.0.0.9:6379@16379 myself,slave ${NODE_A.id} 0 0 1 connected`;
+      const STUCK = `${CLEAN} [42-<-aaaaaaaa]`;
+      let ownLine: string;
+      let getNodeConnection: jest.Mock;
+
+      const replicaReaders = (): string[] =>
+        getNodeConnection.mock.calls.filter(([nodeId]) => nodeId === REPLICA_ID).map(([, reader]) => reader);
+      const slotEvents = (): AnomalyEvent[] => eventsOf(MetricType.REPLICA_SLOT_STATE);
+
+      beforeEach(() => {
+        ownLine = CLEAN;
+        getNodeConnection = jest.fn(async () => ({ call: jest.fn(async () => ownLine) }));
+        (service as any).clusterDiscovery = {
+          retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+          getNodeConnection,
+        };
+        (service as any).topologyDivergenceSettings.enabled = false;
+        topology = [...HEALTHY, REPLICA];
+      });
+
+      it('asks a replica for its own line through one connection per cluster', async () => {
+        await pollAll();
+
+        expect(replicaReaders()).toEqual([SEED]);
+      });
+
+      it('raises one replica slot warning for the cluster', async () => {
+        ownLine = STUCK;
+        await pollAll();
+
+        await pollAfter(GATE_MS);
+
+        expect(slotEvents().map((e) => e.connectionId)).toEqual([SEED]);
+      });
+
+      it('asks the replica through the member that takes over as reader', async () => {
+        await pollAll();
+        unreadable.add(SEED);
+        await pollAfter(MINUTE_MS + 1000);
+        getNodeConnection.mockClear();
+
+        await pollAfter(1000);
+
+        expect(replicaReaders()).toEqual(['conn-b']);
+      });
+
+      it('keeps the replica slot warning open when another connection takes over as reader', async () => {
+        ownLine = STUCK;
+        await pollAll();
+        await pollAfter(GATE_MS);
+        unreadable.add(SEED);
+
+        await pollAfter(MINUTE_MS + 1000);
+        await pollAfter(GATE_MS);
+
+        expect(slotEvents().map((e) => e.resolved)).toEqual([false]);
+      });
+
+      it('closes the replica slot warning through the new reader once the replica is clean', async () => {
+        ownLine = STUCK;
+        await pollAll();
+        await pollAfter(GATE_MS);
+        unreadable.add(SEED);
+        await pollAfter(MINUTE_MS + 1000);
+        ownLine = CLEAN;
+
+        await pollAfter(1000);
+
+        expect(slotEvents().map((e) => e.resolved)).toEqual([true]);
+      });
+
+      it('lets a member that cannot dial other nodes report the slot state of its own node', async () => {
+        for (const id of MEMBERS) configs[id] = { ...(configs[id] as object), host: 'agent' };
+        const stuckMember = { ...NODE_C, flags: ['slave'], master: NODE_A.id, slots: [] as number[][] };
+        topology = [NODE_A, NODE_B, { ...stuckMember, importingSlots: [{ slot: 42, sourceNodeId: NODE_A.id }] }];
+        await pollAll();
+
+        await pollAfter(GATE_MS);
+
+        expect(slotEvents().map((e) => e.connectionId)).toEqual(['conn-c']);
+      });
     });
   });
 });
