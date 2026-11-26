@@ -82,7 +82,7 @@
       "id": 1,
       "type": "timeseries",
       "title": "ACL denied events captured",
-      "description": "Commands rejected per second by ACL rules. Any sustained rate means a client is attempting unauthorized operations.",
+      "description": "Total ACL denials in stored audit data (all-time count, updated once per audit poll). Not a per-second rate. A count that keeps rising means a client is attempting unauthorized operations.",
       "datasource": {
         "type": "prometheus",
         "uid": "${ds}"
@@ -118,7 +118,7 @@
       "id": 2,
       "type": "timeseries",
       "title": "ACL denied by reason",
-      "description": "Denial rate split by cause (command, key, channel, auth).",
+      "description": "Total ACL denials in stored audit data, split by cause (command, key, channel, auth) (all-time count, updated once per audit poll). Not a per-second rate.",
       "datasource": {
         "type": "prometheus",
         "uid": "${ds}"
@@ -140,7 +140,7 @@
             "uid": "${ds}"
           },
           "expr": "betterdb_acl_denied_by_reason{job=~\"$job\",connection=~\"$connection\"}",
-          "legendFormat": "{{reason}}"
+          "legendFormat": "{{connection}} {{reason}}"
         }
       ],
       "gridPos": {
@@ -154,7 +154,7 @@
       "id": 3,
       "type": "timeseries",
       "title": "ACL denied by user",
-      "description": "Denial rate split by ACL user.",
+      "description": "Total ACL denials in stored audit data, split by ACL user (all-time count, updated once per audit poll). Not a per-second rate.",
       "datasource": {
         "type": "prometheus",
         "uid": "${ds}"
@@ -176,7 +176,7 @@
             "uid": "${ds}"
           },
           "expr": "betterdb_acl_denied_by_user{job=~\"$job\",connection=~\"$connection\"}",
-          "legendFormat": "{{username}}"
+          "legendFormat": "{{connection}} {{username}}"
         }
       ],
       "gridPos": {
@@ -211,7 +211,7 @@
             "type": "prometheus",
             "uid": "${ds}"
           },
-          "expr": "sum(betterdb_cve_findings{job=~\"$job\",connection=~\"$connection\"}) or vector(0)",
+          "expr": "sum(betterdb_cve_findings{job=~\"$job\",connection=~\"$connection\"})",
           "legendFormat": "findings"
         }
       ],
@@ -244,7 +244,7 @@
             "type": "prometheus",
             "uid": "${ds}"
           },
-          "expr": "sum(betterdb_cve_kev{job=~\"$job\",connection=~\"$connection\"}) or vector(0)",
+          "expr": "sum(betterdb_cve_kev{job=~\"$job\",connection=~\"$connection\"})",
           "legendFormat": "kev"
         }
       ],

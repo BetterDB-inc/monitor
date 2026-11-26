@@ -1,0 +1,39 @@
+{{- if .Values.metrics.grafanaDashboards.enabled }}
+{{- /*
+One ConfigMap per dashboard keeps each well under the 1 MiB ConfigMap limit.
+dashboards/*.json are byte-identical copies of deploy/observability/dashboards
+(scripts/sync-chart-observability.mjs). .Files.Get returns them as data, so
+Grafana's own legend templates are not evaluated by Helm.
+
+Names must stay within 63 characters and be unique per release. The prefix is
+the fullname cut to 25 characters plus 8 characters of the sha256 of
+"<release namespace>/<fullname>", so same-named releases in different
+namespaces that publish to one Grafana namespace do not collide. The prefix is
+at most 34 characters; the longest suffix, -dashboard-monitor-internals, adds
+28, for 62 in total.
+*/}}
+{{- $fullname := include "betterdb-monitor.fullname" . }}
+{{- $hash := printf "%s/%s" .Release.Namespace $fullname | sha256sum | trunc 8 }}
+{{- $prefix := printf "%s-%s" ($fullname | trunc 25 | trimSuffix "-") $hash }}
+{{- range $path, $_ := .Files.Glob "dashboards/*.json" }}
+{{- $dashboard := base $path | trimSuffix ".json" | trimPrefix "betterdb-" }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-dashboard-%s" $prefix $dashboard }}
+  namespace: {{ $.Values.metrics.grafanaDashboards.namespace | default $.Release.Namespace }}
+  labels:
+    {{- include "betterdb-monitor.labels" $ | nindent 4 }}
+    {{- with $.Values.metrics.grafanaDashboards.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with $.Values.metrics.grafanaDashboards.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  {{ base $path }}: |-
+    {{- $.Files.Get $path | nindent 4 }}
+{{- end }}
+{{- end }}
