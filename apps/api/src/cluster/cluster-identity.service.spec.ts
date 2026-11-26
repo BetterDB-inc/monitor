@@ -628,6 +628,150 @@ describe('ClusterIdentityService', () => {
     });
   });
 
+  describe('cluster reader', () => {
+    const readAll = (...ids: string[]): void => ids.forEach((id) => service.observe(id, view('a', 'b')));
+
+    it('is the only connection that read the cluster', () => {
+      readAll('member-1');
+
+      expect(service.claimReader('member-1', NOW)).toBe(true);
+      expect(service.isReader('member-1')).toBe(true);
+    });
+
+    it('is nobody before a connection claimed it', () => {
+      readAll(SEED);
+
+      expect(service.isReader(SEED)).toBe(false);
+    });
+
+    it('is the seed once it reads, also when a member read first', () => {
+      readAll(SEED, 'member-1');
+      service.claimReader('member-1', NOW);
+
+      expect(service.claimReader(SEED, NOW)).toBe(true);
+      expect(service.claimReader('member-1', NOW + 1000)).toBe(false);
+      expect(service.isReader('member-1')).toBe(false);
+    });
+
+    it('is the lowest connection id when no user-added connection reads', () => {
+      readAll('member-1', 'member-2');
+      service.claimReader('member-2', NOW);
+
+      expect(service.claimReader('member-1', NOW)).toBe(true);
+      expect(service.claimReader('member-2', NOW + 1000)).toBe(false);
+    });
+
+    it('is the lowest connection id of two user-added connections', () => {
+      configs['manual-2'] = {};
+      readAll('manual', 'manual-2');
+      service.claimReader('manual-2', NOW);
+
+      expect(service.claimReader('manual', NOW)).toBe(true);
+      expect(service.claimReader('manual-2', NOW + 1000)).toBe(false);
+    });
+
+    it('stays the seed for a minute after its last read', () => {
+      readAll(SEED, 'member-1');
+      service.claimReader(SEED, NOW);
+
+      expect(service.claimReader('member-1', NOW + MINUTE_MS)).toBe(false);
+      expect(service.isReader(SEED)).toBe(true);
+    });
+
+    it('moves to a member once the seed has not read for over a minute', () => {
+      readAll(SEED, 'member-1');
+      service.claimReader(SEED, NOW);
+
+      expect(service.claimReader('member-1', NOW + MINUTE_MS + 1)).toBe(true);
+      expect(service.isReader(SEED)).toBe(false);
+    });
+
+    it('counts the minute from the last read of the reader, not from its first', () => {
+      readAll(SEED, 'member-1');
+      service.claimReader(SEED, NOW);
+      service.claimReader(SEED, NOW + MINUTE_MS);
+
+      expect(service.claimReader('member-1', NOW + MINUTE_MS + 1)).toBe(false);
+    });
+
+    it('goes back to the seed when it reads again', () => {
+      readAll(SEED, 'member-1');
+      service.claimReader(SEED, NOW);
+      service.claimReader('member-1', NOW + 2 * MINUTE_MS);
+
+      expect(service.claimReader(SEED, NOW + 2 * MINUTE_MS + 1000)).toBe(true);
+      expect(service.claimReader('member-1', NOW + 2 * MINUTE_MS + 2000)).toBe(false);
+    });
+
+    it('is separate for two clusters', () => {
+      service.observe(SEED, view('a', 'b'));
+      service.observe('manual', view('x', 'y'));
+
+      expect(service.claimReader(SEED, NOW)).toBe(true);
+      expect(service.claimReader('manual', NOW)).toBe(true);
+    });
+
+    it('moves at once when the reader is removed', () => {
+      readAll(SEED, 'member-1');
+      service.claimReader(SEED, NOW);
+      delete configs[SEED];
+      removalListeners.forEach((listener) => listener(SEED));
+
+      expect(service.claimReader('member-1', NOW + 1000)).toBe(true);
+    });
+
+    it('moves at once when the reader now reads another cluster', () => {
+      readAll('member-1', 'member-2');
+      service.claimReader('member-1', NOW);
+      service.observe('member-1', view('x', 'y'));
+
+      expect(service.claimReader('member-2', NOW + 1000)).toBe(true);
+      expect(service.claimReader('member-1', NOW + 1000)).toBe(true);
+    });
+
+    it('is one connection again after two clusters that were read apart are joined', () => {
+      service.observe('member-1', view('a', 'b'));
+      service.observe('member-2', view('c', 'd'));
+      service.claimReader('member-1', NOW);
+      service.claimReader('member-2', NOW);
+
+      service.observe('member-2', view('a', 'b', 'c', 'd'));
+
+      expect(service.isReader('member-1')).toBe(true);
+      expect(service.isReader('member-2')).toBe(false);
+      expect(service.claimReader('member-2', NOW + 1000)).toBe(false);
+    });
+  });
+
+  describe('connections of the cluster', () => {
+    it('lists the seed and its members, also one that has not read a view yet', () => {
+      service.observe(SEED, view('a', 'b'));
+      service.observe('member-1', view('a', 'b'));
+
+      expect(service.clusterConnectionIds('member-1')).toEqual([SEED, 'member-1', 'member-2']);
+    });
+
+    it('lists the seed for a member while the seed has not read a view', () => {
+      service.observe('member-1', view('a', 'b'));
+
+      expect(service.clusterConnectionIds('member-1')).toEqual([SEED, 'member-1', 'member-2']);
+    });
+
+    it('leaves out the connections of another cluster', () => {
+      service.observe(SEED, view('a', 'b'));
+      service.observe('manual', view('x', 'y'));
+
+      expect(service.clusterConnectionIds('manual')).toEqual(['manual']);
+    });
+
+    it('leaves out a member that reads another cluster than its seed', () => {
+      service.observe(SEED, view('a', 'b'));
+      service.observe('member-1', view('x', 'y'));
+
+      expect(service.clusterConnectionIds(SEED)).toEqual([SEED, 'member-2']);
+    });
+  });
+
   describe('other connections of the cluster', () => {
     const others = (connectionId: string): string[] =>
       service.otherClusterConnections(connectionId).map((other) => other.connectionId);
