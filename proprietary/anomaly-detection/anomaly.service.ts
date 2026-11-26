@@ -2539,9 +2539,11 @@ export class AnomalyService
           await this.detectOrphanedSlotKeys(ctx, timestamp, nodes);
           await this.detectReshardPressure(info, ctx, timestamp, nodes, cpuUtilizationSample);
         }
-        if (nodes || !readsTopology) await this.detectSlotMigrations(ctx, timestamp);
-        if (nodes) {
+        if (nodes || !readsTopology) {
+          await this.detectSlotMigrations(ctx, timestamp);
           await this.followRebalanceRunsOnPoll(ctx.connectionId, timestamp, nodes);
+        }
+        if (nodes) {
           // A slot-owning primary with no synced replica (#714). Runs in both
           // topology modes, and is not held back during a rolling update: that
           // is when the shard is most often left with a single copy.
@@ -11884,7 +11886,7 @@ export class AnomalyService
   private async followRebalanceRunsOnPoll(
     connectionId: string,
     timestamp: number,
-    nodes: readonly ClusterNode[],
+    nodes: readonly ClusterNode[] | undefined,
   ): Promise<void> {
     const read = this.slotMigrationReadOnPoll.get(connectionId);
     this.slotMigrationReadOnPoll.delete(connectionId);
@@ -11895,7 +11897,7 @@ export class AnomalyService
     );
     await this.advanceRebalanceRuns(connectionId, {
       report: read?.timestamp === timestamp ? read.report : undefined,
-      nodes: settling ? undefined : runNodesOf(nodes),
+      nodes: settling || !nodes ? undefined : runNodesOf(nodes),
     });
   }
 

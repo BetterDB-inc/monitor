@@ -33670,6 +33670,28 @@ describe('AnomalyService', () => {
         expect(coverageOf(WAITING)).toMatchObject({ reason: 'fanout_failed', notDialed: 1 });
       });
 
+      it('follows a slot rebalance run it started with the nodes it asks for itself', async () => {
+        grow(12);
+        await pollAll();
+        await pollAfter(1000);
+        const discoverNodesIsolated = jest.fn().mockResolvedValue([]);
+        (service as any).clusterDiscovery = { ...(service as any).clusterDiscovery, discoverNodesIsolated };
+        (service as any).clusterMetrics = {
+          coveredBySeed: () => true,
+          readSlotMigrations: jest
+            .fn()
+            .mockResolvedValue({ jobViews: [], finishedJobs: [], failed: [], complete: true, migrations: [] }),
+        };
+        const run = { state: 'running', sourceShardId: nodeIdOf(6), startedAt: now, jobs: [], jobsBefore: [] };
+        (service as any).rebalanceRuns.set(WAITING, new Map([[run.sourceShardId, run]]));
+        forgetReads();
+
+        await pollAfter(1000);
+
+        expect(readsOf(WAITING)).toBe(0);
+        expect(discoverNodesIsolated.mock.calls.map(([connectionId]) => connectionId)).toEqual([WAITING]);
+      });
+
       it('reads the topology itself once no connection read the cluster for thirty seconds', async () => {
         grow(12);
         await pollAll();
