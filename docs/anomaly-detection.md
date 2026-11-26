@@ -533,7 +533,7 @@ Everything else stays per connection or per node: the cluster state, hot shards,
 
 `CLUSTER NODES` answers with one line per node. Read on every connection on every poll, it grows with the square of the cluster. So in a cluster with more than nine connections it is read in turns:
 
-- The reader reads `CLUSTER NODES` and `CLUSTER SHARDS` every 5 seconds, or on every poll when the poll interval is longer than that.
+- The reader reads `CLUSTER NODES` and `CLUSTER SHARDS` on the poll nearest to every 5 seconds: every 5 seconds with a poll interval of 1 second, every 4 with 2 seconds, every 6 with 3 seconds, and on every poll from 4 seconds up.
 - Of the other connections, eight read on each poll of the reader, in the order of their ids. With 500 connections and a poll interval of 1 second, a connection has its turn about once a minute.
 
 Every connection reads on every poll, as before, in a cluster with nine connections or fewer, while a cluster has no reader, while its reader has not read for 60 seconds, while its reader has not polled for more than 15 seconds, and while the last two polls of its reader were more than 15 seconds apart. With a poll interval above 15 seconds the turns are therefore never used.
