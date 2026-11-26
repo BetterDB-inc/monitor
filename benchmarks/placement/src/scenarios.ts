@@ -395,6 +395,32 @@ export const B3_CASES: B3Case[] = [
     days: 7,
     maxFiresPerDay: 1,
   },
+  {
+    variant: 'daily 20-min peak at 3x, no samples from minute 7 to 35 of it, 15 s poll',
+    peakMinutes: 20,
+    peakFactor: 3,
+    pollSeconds: 15,
+    days: 3,
+    gap: { fromMinute: 7, toMinute: 35 },
+    maxFiresPerDay: 0,
+  },
+  {
+    variant: 'daily 5-min spike at 10x, 15 s poll',
+    peakMinutes: 5,
+    peakFactor: 10,
+    pollSeconds: 15,
+    days: 3,
+    maxFiresPerDay: 0,
+  },
+  {
+    variant: 'daily 2 h of 1-min bursts at 6x every 3 min, 15 s poll',
+    peakMinutes: 120,
+    peakFactor: 6,
+    pollSeconds: 15,
+    days: 3,
+    bursts: { onMinutes: 1, everyMinutes: 3 },
+    maxFiresPerDay: 1,
+  },
 ];
 
 export function runB3Case(entry: B3Case): ScenarioResult {

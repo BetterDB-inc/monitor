@@ -28,6 +28,7 @@ export interface ShardLoad {
   cpuUsecPerSecond: number;
   sustainCpuUsecPerSecond: number;
   baselineCpuUsecPerSecond: number;
+  sustainReset: boolean;
   networkBytesInPerSecond: number;
   networkBytesOutPerSecond: number;
   cpuShare: number | null;
@@ -65,6 +66,7 @@ export class ShardLoadTracker {
   private readonly seen = new Uint8Array(CLUSTER_TOTAL_SLOTS);
   private readonly measured = new Uint8Array(CLUSTER_TOTAL_SLOTS);
   private readonly present = new Uint8Array(CLUSTER_TOTAL_SLOTS);
+  private readonly missing = new Uint8Array(CLUSTER_TOTAL_SLOTS);
   private readonly owner: (string | undefined)[] = new Array(CLUSTER_TOTAL_SLOTS);
   private slotsByNode = new Map<string, number[]>();
   private settledShares = new Map<string, Pick<ShardLoad, 'cpuShare' | 'networkShare'>>();
@@ -101,6 +103,7 @@ export class ShardLoadTracker {
     const slotsByNode = new Map<string, number[]>();
     let ownershipChanged = false;
     let unmeasured = false;
+    const restarted = new Set<string>();
     this.present.fill(0);
 
     for (const node of nodes) {
@@ -121,8 +124,11 @@ export class ShardLoadTracker {
           bytesOut < this.lastBytesOut[slot];
         if (moved && previous !== null) ownershipChanged = true;
 
-        if (wentBack && !moved) this.clearHistory(slot);
-        if (previous === null || !this.seen[slot] || moved || wentBack) {
+        if (wentBack && !moved) {
+          this.clearHistory(slot);
+          restarted.add(node.nodeId);
+        }
+        if (previous === null || !this.seen[slot] || this.missing[slot] || moved || wentBack) {
           this.clearRates(slot);
           if (previous !== null) unmeasured = true;
         } else {
@@ -152,16 +158,22 @@ export class ShardLoadTracker {
         this.keyCount[slot] = stats.key_count;
         this.owner[slot] = node.nodeId;
         this.seen[slot] = 1;
+        this.missing[slot] = 0;
       }
     }
 
     for (let slot = 0; slot < CLUSTER_TOTAL_SLOTS; slot++) {
       if (!this.seen[slot] || this.present[slot]) continue;
+      this.clearRates(slot);
+      if (!this.missing[slot]) {
+        this.missing[slot] = 1;
+        ownershipChanged = true;
+        continue;
+      }
+      this.missing[slot] = 0;
       this.seen[slot] = 0;
       this.owner[slot] = undefined;
-      this.clearRates(slot);
       this.clearHistory(slot);
-      ownershipChanged = true;
     }
 
     this.slotsByNode = slotsByNode;
@@ -176,7 +188,7 @@ export class ShardLoadTracker {
       this.settleRemaining -= 1;
       settling = true;
     }
-    return { timestamp, shards: this.summarize(nodes, settling), settling };
+    return { timestamp, shards: this.summarize(nodes, settling, restarted), settling };
   }
 
   slotsOf(nodeId: string): SlotLoadRate[] {
@@ -195,7 +207,7 @@ export class ShardLoadTracker {
   medianKeyCount(): number | null {
     const counts: number[] = [];
     for (let slot = 0; slot < CLUSTER_TOTAL_SLOTS; slot++) {
-      if (this.seen[slot]) counts.push(this.keyCount[slot]);
+      if (this.seen[slot] && !this.missing[slot]) counts.push(this.keyCount[slot]);
     }
     if (counts.length === 0) return null;
     counts.sort((a, b) => a - b);
@@ -234,6 +246,7 @@ export class ShardLoadTracker {
   private reset(): void {
     this.seen.fill(0);
     this.measured.fill(0);
+    this.missing.fill(0);
     this.sustainRate.fill(0);
     this.baselineRate.fill(0);
     this.warmSince.fill(NaN);
@@ -244,7 +257,11 @@ export class ShardLoadTracker {
     this.settleRemaining = 0;
   }
 
-  private summarize(nodes: readonly NodeSlotStats[], settling: boolean): ShardLoad[] {
+  private summarize(
+    nodes: readonly NodeSlotStats[],
+    settling: boolean,
+    restarted: ReadonlySet<string>,
+  ): ShardLoad[] {
     const shards: ShardLoad[] = [];
     for (const node of nodes) {
       const slots = this.slotsByNode.get(node.nodeId) ?? [];
@@ -256,6 +273,7 @@ export class ShardLoadTracker {
         cpuUsecPerSecond: 0,
         sustainCpuUsecPerSecond: 0,
         baselineCpuUsecPerSecond: 0,
+        sustainReset: restarted.has(node.nodeId),
         networkBytesInPerSecond: 0,
         networkBytesOutPerSecond: 0,
         cpuShare: null,

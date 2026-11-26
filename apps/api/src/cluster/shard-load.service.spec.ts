@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { NodeSlotStats } from './shard-load';
 import { ShardLoadService } from './shard-load.service';
 
@@ -99,5 +100,100 @@ describe('ShardLoadService', () => {
 
     expect(service.getLatest('conn-a')).toBeNull();
     expect(service.record('conn-a', reading({ 0: 900 }), 2_000)).toBeNull();
+  });
+});
+
+describe('ShardLoadService listeners and sustain minutes', () => {
+  const CORE = 1_000_000;
+
+  function listen(service: ShardLoadService) {
+    const listener = { tracking: jest.fn(), sample: jest.fn(), reset: jest.fn() };
+    const stop = service.addListener(listener);
+    return { listener, stop };
+  }
+
+  function sustainAfter(service: ShardLoadService, connectionId: string, minutes: number) {
+    let sample = null;
+    for (let at = 0; at <= minutes * 60_000; at += 5_000) {
+      sample = service.record(connectionId, reading({ 0: CORE * (at / 1000) }), at) ?? sample;
+    }
+    return sample?.shards[0].sustainCpuUsecPerSecond ?? 0;
+  }
+
+  const expected = (sustainMinutes: number, minutes: number) =>
+    CORE * (1 - Math.exp(-minutes / (sustainMinutes / 3)));
+
+  it('tells a listener when a connection starts tracking and hands it every sample', () => {
+    const service = new ShardLoadService();
+    const { listener } = listen(service);
+    service.record('conn-a', reading({ 0: 0 }), 0);
+    const sample = service.record('conn-a', reading({ 0: 500 }), 1_000);
+    service.record('conn-a', reading({ 0: 900 }), 2_000);
+
+    expect(listener.tracking).toHaveBeenCalledTimes(1);
+    expect(listener.tracking).toHaveBeenCalledWith('conn-a');
+    expect(listener.sample).toHaveBeenCalledTimes(2);
+    expect(listener.sample).toHaveBeenNthCalledWith(1, 'conn-a', sample);
+    expect(listener.reset).not.toHaveBeenCalled();
+  });
+
+  it('tells a listener when the tracker resets, and once only', () => {
+    const service = new ShardLoadService();
+    const { listener } = listen(service);
+    const untracked = [{ nodeId: 'n1', address: '10.0.0.1:6379', stats: { 0: { key_count: 1 } } }];
+    service.record('conn-a', reading({ 0: 0 }), 0);
+    service.record('conn-a', reading({ 0: 500 }), 1_000);
+
+    service.record('conn-a', untracked, 2_000);
+    service.record('conn-a', untracked, 3_000);
+
+    expect(listener.reset).toHaveBeenCalledTimes(1);
+    expect(listener.reset).toHaveBeenCalledWith('conn-a');
+  });
+
+  it('tells a listener when a connection is forgotten or removed', () => {
+    const service = new ShardLoadService();
+    const { listener } = listen(service);
+
+    service.forget('conn-a');
+    service.remove('conn-b');
+
+    expect(listener.reset.mock.calls).toEqual([['conn-a'], ['conn-b']]);
+  });
+
+  it('keeps calling the other listeners when one throws, and stops calling a removed one', () => {
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const service = new ShardLoadService();
+    const failing = listen(service);
+    failing.listener.sample.mockImplementation(() => {
+      throw new Error('boom');
+    });
+    const { listener, stop } = listen(service);
+    service.record('conn-a', reading({ 0: 0 }), 0);
+    service.record('conn-a', reading({ 0: 500 }), 1_000);
+    expect(listener.sample).toHaveBeenCalledTimes(1);
+
+    stop();
+    service.record('conn-a', reading({ 0: 900 }), 2_000);
+    expect(listener.sample).toHaveBeenCalledTimes(1);
+  });
+
+  it('applies sustain minutes set before the tracker exists', () => {
+    const service = new ShardLoadService();
+    service.setSustainMinutes('conn-a', 60);
+
+    expect(sustainAfter(service, 'conn-a', 10)).toBeCloseTo(expected(60, 10), -3);
+  });
+
+  it('keeps the sustain minutes through forget, and drops them on remove', () => {
+    const service = new ShardLoadService();
+    service.setSustainMinutes('conn-a', 60);
+    sustainAfter(service, 'conn-a', 1);
+
+    service.forget('conn-a');
+    expect(sustainAfter(service, 'conn-a', 10)).toBeCloseTo(expected(60, 10), -3);
+
+    service.remove('conn-a');
+    expect(sustainAfter(service, 'conn-a', 10)).toBeCloseTo(expected(30, 10), -3);
   });
 });

@@ -4717,7 +4717,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.clearKvCache(connectionId);
     this.perConnectionState.delete(connectionId);
     this.passDeadlines.delete(connectionId);
-    this.shardLoadService?.forget(connectionId);
+    this.shardLoadService?.remove(connectionId);
     this.webhookEventsProService?.clearReplicationLag(connectionId);
     this.webhookEventsProService?.forgetReplication(connectionId);
     // Drop any in-flight metric update so a reused connection ID cannot join

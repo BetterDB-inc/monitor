@@ -3,6 +3,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  OnModuleDestroy,
   OnModuleInit,
   Optional,
 } from '@nestjs/common';
@@ -110,7 +111,7 @@ function settingsReadOf(policy: PlacementPolicy | null): PlacementSettingsRead {
 }
 
 @Injectable()
-export class PlacementService implements OnModuleInit {
+export class PlacementService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PlacementService.name);
   private readonly invalidWarned = new Map<string, string>();
   private readonly policyCache = new Map<string, { at: number; policy: PlacementPolicy | null }>();
@@ -119,6 +120,8 @@ export class PlacementService implements OnModuleInit {
   private readonly supportReads = new Map<string, Promise<PlacementSupport>>();
   private readonly aclDenied = new Map<string, string | null>();
   private readonly triggers = new PlacementTriggers();
+  private readonly policyRefreshes = new Map<string, Promise<unknown>>();
+  private stopListening: (() => void) | null = null;
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -133,6 +136,33 @@ export class PlacementService implements OnModuleInit {
 
   onModuleInit(): void {
     this.anomaly.setRebalancePolicyResolver((seedId) => this.rebalancePolicyFor(seedId));
+    this.stopListening?.();
+    this.stopListening =
+      this.shardLoad?.addListener({
+        tracking: (seedId) => this.refreshPolicy(seedId),
+        sample: (seedId, sample) => this.observeSample(seedId, sample),
+        reset: (seedId) => this.triggers.reset(seedId),
+      }) ?? null;
+  }
+
+  onModuleDestroy(): void {
+    this.stopListening?.();
+    this.stopListening = null;
+  }
+
+  private observeSample(seedId: string, sample: ShardLoadSample): void {
+    if (!this.registry.getConfig(seedId)) return;
+    const cached = this.policyCache.get(seedId);
+    if (!cached || Date.now() - cached.at >= POLICY_CACHE_MS) this.refreshPolicy(seedId);
+    this.triggers.observe(seedId, sample, this.prometheus.shardLoadStalenessMs);
+  }
+
+  private refreshPolicy(seedId: string): void {
+    if (this.policyRefreshes.has(seedId) || !this.registry.getConfig(seedId)) return;
+    const refresh = this.readPolicy(seedId)
+      .catch(() => null)
+      .finally(() => this.policyRefreshes.delete(seedId));
+    this.policyRefreshes.set(seedId, refresh);
   }
 
   async getStatus(connectionId: string): Promise<PlacementStatus> {
@@ -148,7 +178,7 @@ export class PlacementService implements OnModuleInit {
       selectableModes,
       support,
       balance: placementBalance(this.freshSample(seedId), settings, (shardId) =>
-        this.triggerOf(seedId, shardId, settings),
+        this.triggerOf(seedId, shardId),
       ),
       settings,
       policyVersion: version,
@@ -177,7 +207,7 @@ export class PlacementService implements OnModuleInit {
     if (!saved) throw new PlacementPolicyConflictError();
     this.advancePolicy(seedId);
     this.policyCache.set(seedId, { at: Date.now(), policy: saved });
-    this.shardLoad?.setSustainMinutes(seedId, saved.settings.sustainMinutes);
+    this.applyTriggerSettings(seedId, saved.settings);
     return this.getStatus(seedId);
   }
 
@@ -227,21 +257,20 @@ export class PlacementService implements OnModuleInit {
     const policy = await this.storage.getPlacementPolicy(seedId);
     if ((this.policyGeneration.get(seedId) ?? 0) === generation) {
       this.policyCache.set(seedId, { at: Date.now(), policy });
-      this.shardLoad?.setSustainMinutes(seedId, settingsReadOf(policy).settings.sustainMinutes);
+      this.applyTriggerSettings(seedId, settingsReadOf(policy).settings);
     }
     this.warnInvalid(seedId, policy);
     return policy;
   }
 
-  triggerOf(
-    seedId: string,
-    shardId: string,
-    settings: PlacementSettings,
-    now = Date.now(),
-  ): PlacementTriggerRead | null {
-    const history = this.shardLoad?.sustainHistory(seedId);
-    if (!history) return null;
-    return this.triggers.read(seedId, shardId, history.entries(shardId), settings, now);
+  private applyTriggerSettings(seedId: string, settings: PlacementSettings): void {
+    this.shardLoad?.setSustainMinutes(seedId, settings.sustainMinutes);
+    this.triggers.configure(seedId, settings);
+  }
+
+  triggerOf(seedId: string, shardId: string, now = Date.now()): PlacementTriggerRead | null {
+    if (!this.shardLoad) return null;
+    return this.triggers.read(seedId, shardId, now, this.prometheus.shardLoadStalenessMs);
   }
 
   private warnInvalid(seedId: string, policy: PlacementPolicy | null): void {

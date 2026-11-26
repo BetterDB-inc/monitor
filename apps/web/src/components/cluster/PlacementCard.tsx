@@ -3,6 +3,7 @@ import {
   type PlacementBalance,
   type PlacementMode,
   type PlacementPolicyInvalid,
+  type PlacementSettings,
   type PlacementStatus,
 } from '@betterdb/shared';
 import { useState } from 'react';
@@ -111,19 +112,29 @@ function SustainLine({ shard }: { shard: PlacementBalance['shards'][number] }) {
     shard.baselineRatio === null ? '' : `, ${formatRatio(shard.baselineRatio)} over 6 hours`;
   return (
     <p className="text-xs text-muted-foreground">
-      {shard.trigger === 'short_history' && shard.warmUntil !== null
-        ? `Warming up until ${clockTime(shard.warmUntil)}`
-        : `Sustained ${formatRatio(shard.sustainRatio)} the median${baseline}`}
+      {shard.trigger !== 'short_history'
+        ? `Sustained ${formatRatio(shard.sustainRatio)} the median${baseline}`
+        : shard.warmUntil === null
+          ? 'Warming up'
+          : `Warming up until ${clockTime(shard.warmUntil)}`}
     </p>
   );
 }
 
+function triggerSentence(balance: PlacementBalance, settings: PlacementSettings): string {
+  const share =
+    settings.maxCpuShare === null
+      ? ''
+      : `, or above ${Math.round(settings.maxCpuShare * 100)}% of the cluster CPU,`;
+  return `The trigger for slot moves fires only when the sustained load stays over ${formatRatio(balance.triggerRatio)}${share} for ${settings.sustainMinutes} minutes.`;
+}
+
 function BalanceBars({
   balance,
-  sustainMinutes,
+  settings,
 }: {
   balance: PlacementBalance | null;
-  sustainMinutes: number;
+  settings: PlacementSettings;
 }) {
   if (!balance) return <p className="text-muted-foreground">No per-slot load sampled yet.</p>;
   const scale = Math.max(
@@ -172,7 +183,7 @@ function BalanceBars({
         ))}
       </ul>
       <p className="text-muted-foreground">
-        {`A shard over ${formatRatio(balance.triggerRatio)} the median load is a hot shard; a slot move aims to bring it under ${formatRatio(balance.resolveRatio)}. The trigger for slot moves fires only when the sustained load stays over ${formatRatio(balance.triggerRatio)} for ${sustainMinutes} minutes.`}
+        {`A shard over ${formatRatio(balance.triggerRatio)} the median load is a hot shard; a slot move aims to bring it under ${formatRatio(balance.resolveRatio)}. ${triggerSentence(balance, settings)}`}
       </p>
     </div>
   );
@@ -236,10 +247,7 @@ function ClusterPlacementCard({ connectionId }: { connectionId: string | undefin
               <PolicyInvalid invalid={status.policyInvalid} />
               <EffectiveMode status={status} />
               <Support status={status} />
-              <BalanceBars
-                balance={status.balance}
-                sustainMinutes={status.settings.sustainMinutes}
-              />
+              <BalanceBars balance={status.balance} settings={status.settings} />
               <Button size="sm" variant="outline" onClick={() => setPolicyOpen(true)}>
                 {canMutate ? 'Edit policy' : 'View policy'}
               </Button>

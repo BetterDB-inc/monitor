@@ -470,6 +470,7 @@ describe('slot rebalance run', () => {
         cpuUsecPerSecond,
         sustainCpuUsecPerSecond: cpuUsecPerSecond,
         baselineCpuUsecPerSecond: cpuUsecPerSecond,
+        sustainReset: false,
         networkBytesInPerSecond: 0,
         networkBytesOutPerSecond: 0,
         cpuShare: null,

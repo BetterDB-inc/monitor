@@ -9,7 +9,7 @@ export type {
   SlotLoadRate,
 } from '../../../apps/api/src/cluster/shard-load';
 export { ShardLoadTracker } from '../../../apps/api/src/cluster/shard-load';
-export { SustainHistory } from '../../../apps/api/src/cluster/sustain-history';
+export { resolveStalenessMs } from '../../../apps/api/src/prometheus/staleness';
 export { isManagedProviderBuild } from '../../../apps/api/src/monitor/provider-detector';
 export {
   type HashTagAdvice,
@@ -34,7 +34,7 @@ export {
   planRebalances,
 } from '../../../proprietary/anomaly-detection/rebalance-planner';
 export { placementBalance } from '../../../proprietary/placement/placement-balance';
-export { readPlacementTrigger } from '../../../proprietary/placement/placement-trigger';
+export { PlacementTriggers } from '../../../proprietary/placement/placement-trigger';
 export { placementPrimaryFacts } from '../../../proprietary/placement/placement-primaries';
 export {
   type PlacementSupportFacts,
@@ -49,8 +49,8 @@ const pinFile = join(__dirname, '..', 'product-pin.json');
 
 export const PINNED_FILES = [
   'apps/api/src/cluster/shard-load.ts',
-  'apps/api/src/cluster/sustain-history.ts',
   'apps/api/src/monitor/provider-detector.ts',
+  'apps/api/src/prometheus/staleness.ts',
   'proprietary/anomaly-detection/hash-tag-advisor.ts',
   'proprietary/anomaly-detection/hot-shard-detector.ts',
   'proprietary/anomaly-detection/hot-shard-keys.ts',

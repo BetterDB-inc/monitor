@@ -6,7 +6,7 @@ import {
 } from '@betterdb/shared';
 import { MemoryAdapter } from '@app/storage/adapters/memory.adapter';
 import type { ShardLoadSample } from '@app/cluster/shard-load';
-import { SustainHistory } from '@app/cluster/sustain-history';
+import type { ShardLoadListener } from '@app/cluster/shard-load.service';
 import {
   PlacementService,
   PlacementModeError,
@@ -41,6 +41,7 @@ const sample: ShardLoadSample = {
     cpuUsecPerSecond: index === 0 ? 900_000 : 300_000,
     sustainCpuUsecPerSecond: index === 0 ? 900_000 : 300_000,
     baselineCpuUsecPerSecond: 300_000,
+    sustainReset: false,
     networkBytesInPerSecond: 0,
     networkBytesOutPerSecond: 0,
     cpuShare: null,
@@ -79,11 +80,15 @@ async function setup(options: Setup = {}) {
   const env = { BETTERDB_SLOT_MIGRATION: 'true', STORAGE_TYPE: 'sqlite', ...options.env };
   const config = { get: jest.fn((key: string) => env[key as keyof typeof env]) };
   const prometheus = { collectsClusterSlotStats: jest.fn(() => true), shardLoadStalenessMs: 90_000 };
+  const listeners: ShardLoadListener[] = [];
   const shardLoad = {
     getLatest: jest.fn((): ShardLoadSample | null => sample),
     reportsUsage: jest.fn((): boolean | null => true),
     setSustainMinutes: jest.fn(),
-    sustainHistory: jest.fn((): SustainHistory | undefined => undefined),
+    addListener: jest.fn((listener: ShardLoadListener) => {
+      listeners.push(listener);
+      return () => listeners.splice(listeners.indexOf(listener), 1);
+    }),
   };
   const clusterMetrics = { usesClusterWideSlotStats: jest.fn(async () => true) };
   const service = new PlacementService(
@@ -96,7 +101,33 @@ async function setup(options: Setup = {}) {
     shardLoad as never,
     clusterMetrics as never,
   );
-  return { service, storage, registry, anomaly, prometheus, shardLoad, clusterMetrics, configs };
+  service.onModuleInit();
+  const feed = (
+    seedId: string,
+    from: number,
+    to: number,
+    at = (timestamp: number) => ({ ...sample, timestamp }),
+  ) => {
+    for (let timestamp = from; timestamp <= to; timestamp += 5_000) {
+      for (const listener of listeners) listener.sample(seedId, at(timestamp));
+    }
+  };
+  return {
+    service,
+    storage,
+    registry,
+    anomaly,
+    prometheus,
+    shardLoad,
+    clusterMetrics,
+    configs,
+    listeners,
+    feed,
+  };
+}
+
+async function settled(): Promise<void> {
+  await new Promise((done) => setImmediate(done));
 }
 
 describe('PlacementService', () => {
@@ -117,14 +148,11 @@ describe('PlacementService', () => {
     expect(status.support.issues).toEqual([]);
   });
 
-  it('reads the sustained trigger of each shard from its load history', async () => {
-    const { service, shardLoad } = await setup();
-    const history = new SustainHistory();
+  it('reads the sustained trigger of each shard from the samples it was handed', async () => {
+    const { service, feed } = await setup();
     const now = Date.now();
-    for (let at = now - 30 * 60_000; at <= now; at += 5_000) {
-      history.record({ ...sample, timestamp: at });
-    }
-    shardLoad.sustainHistory.mockReturnValue(history);
+    await service.settingsOf('seed', { fresh: true });
+    feed('seed', now - 30 * 60_000, now);
 
     const shards = (await service.getStatus('seed')).balance?.shards;
 
@@ -138,17 +166,100 @@ describe('PlacementService', () => {
   });
 
   it('shows a shard as warming up while its load history is short', async () => {
-    const { service, shardLoad } = await setup();
-    const history = new SustainHistory();
+    const { service, feed } = await setup();
     const now = Date.now();
-    history.record({ ...sample, timestamp: now - 60_000 });
-    history.record({ ...sample, timestamp: now });
-    shardLoad.sustainHistory.mockReturnValue(history);
+    await service.settingsOf('seed', { fresh: true });
+    feed('seed', now - 60_000, now);
 
     const row = (await service.getStatus('seed')).balance?.shards[0];
 
     expect(row?.trigger).toBe('short_history');
     expect(row?.warmUntil).toBeGreaterThanOrEqual(now + 23 * 60_000);
+  });
+
+  it('shows a shard with no samples yet as warming up with no end time', async () => {
+    const { service } = await setup();
+
+    const row = (await service.getStatus('seed')).balance?.shards[0];
+
+    expect(row).toMatchObject({ trigger: 'short_history', warmUntil: null });
+  });
+
+  it('reads the policy when a connection starts tracking load, and fires with no one reading', async () => {
+    const { service, shardLoad, storage, listeners, feed } = await setup();
+    await storage.savePlacementSettings(
+      {
+        connectionId: 'seed',
+        settings: { ...DEFAULT_PLACEMENT_SETTINGS, sustainMinutes: 20 },
+        updatedAt: 1,
+        modeIfNew: 'observe',
+      },
+      0,
+    );
+    for (const listener of listeners) listener.tracking('seed');
+    await settled();
+    expect(shardLoad.setSustainMinutes).toHaveBeenLastCalledWith('seed', 20);
+
+    const start = Date.now() - 30 * 60_000;
+    feed('seed', start, start + 30 * 60_000);
+
+    expect(service.triggerOf('seed', 'a', start + 30 * 60_000)).toMatchObject({
+      state: 'over',
+      firedAt: start + 16 * 60_000,
+    });
+    expect(service.triggerOf('seed', 'b', start + 30 * 60_000)?.firedAt).toBeNull();
+  });
+
+  it('reads the policy on the first sample when nothing has read it yet', async () => {
+    const { shardLoad, listeners } = await setup();
+    for (const listener of listeners) listener.sample('seed', sample);
+    await settled();
+
+    expect(shardLoad.setSustainMinutes).toHaveBeenLastCalledWith('seed', 30);
+  });
+
+  it('reads a trigger whose samples stopped longer ago than the staleness bound as short', async () => {
+    const { service, feed } = await setup();
+    const start = Date.now() - 40 * 60_000;
+    await service.settingsOf('seed', { fresh: true });
+    feed('seed', start, start + 30 * 60_000);
+
+    expect(service.triggerOf('seed', 'a', start + 30 * 60_000 + 90_000)?.state).toBe('over');
+    expect(service.triggerOf('seed', 'a', start + 30 * 60_000 + 90_001)).toMatchObject({
+      state: 'short_history',
+      firedAt: null,
+      warmUntil: null,
+    });
+  });
+
+  it('starts the warm-up again when the load tracker resets or the trigger settings change', async () => {
+    const { service, listeners, feed } = await setup();
+    const start = Date.now() - 30 * 60_000;
+    const end = start + 30 * 60_000;
+    await service.settingsOf('seed', { fresh: true });
+    feed('seed', start, end);
+    expect(service.triggerOf('seed', 'a', end)?.state).toBe('over');
+
+    for (const listener of listeners) listener.reset('seed');
+    expect(service.triggerOf('seed', 'a', end)).toMatchObject({
+      state: 'short_history',
+      coveredMs: 0,
+    });
+
+    feed('seed', start, end);
+    await service.setSettings('seed', { ...DEFAULT_PLACEMENT_SETTINGS, resolveRatio: 1.5 }, 0);
+    expect(service.triggerOf('seed', 'a', end)?.state).toBe('over');
+    await service.setSettings('seed', { ...DEFAULT_PLACEMENT_SETTINGS, triggerRatio: 2.5 }, 1);
+    expect(service.triggerOf('seed', 'a', end)).toMatchObject({
+      state: 'short_history',
+      coveredMs: 0,
+    });
+  });
+
+  it('stops listening to the load tracker when the module is destroyed', async () => {
+    const { service, listeners } = await setup();
+    service.onModuleDestroy();
+    expect(listeners).toHaveLength(0);
   });
 
   it('hands the sustain minutes of the policy to the load tracker', async () => {

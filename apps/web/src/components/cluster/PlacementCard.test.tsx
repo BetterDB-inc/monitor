@@ -427,6 +427,28 @@ describe('PlacementCard', () => {
     expect(rows[2]).not.toHaveTextContent('Sustained');
   });
 
+  it('shows a shard with no load history yet as warming up', async () => {
+    const shards = balance().shards.map((shard) =>
+      shard.shardId === 'b2' ? { ...shard, warmUntil: null } : shard,
+    );
+    await show(status({ balance: balance({ shards }) }));
+
+    const bars = within(await card()).getByRole('list', { name: 'Load against the median' });
+    const rows = within(bars).getAllByRole('listitem');
+    expect(rows[1]).toHaveTextContent('Warming up');
+    expect(rows[1]).not.toHaveTextContent('Warming up until');
+    expect(rows[1]).not.toHaveTextContent('Sustained');
+  });
+
+  it('names the CPU share limit in the trigger sentence when one is set', async () => {
+    const base = status();
+    await show(status({ settings: { ...base.settings, maxCpuShare: 0.4 } }));
+
+    expect(await card()).toHaveTextContent(
+      'The trigger for slot moves fires only when the sustained load stays over 2x, or above 40% of the cluster CPU, for 30 minutes.',
+    );
+  });
+
   it('says when the load is settling after slots moved', async () => {
     await show(status({ balance: balance({ settling: true }) }));
 

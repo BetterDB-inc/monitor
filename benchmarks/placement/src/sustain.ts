@@ -2,9 +2,9 @@ import { DEFAULT_PLACEMENT_SETTINGS } from '@betterdb/shared';
 import { evenShards } from './model';
 import {
   type NodeSlotStats,
+  PlacementTriggers,
   ShardLoadTracker,
-  SustainHistory,
-  readPlacementTrigger,
+  resolveStalenessMs,
 } from './product';
 
 const MINUTE_MS = 60_000;
@@ -20,6 +20,8 @@ export interface PeakCase {
   peakFactor: number;
   pollSeconds: number;
   days: number;
+  gap?: { fromMinute: number; toMinute: number };
+  bursts?: { onMinutes: number; everyMinutes: number };
 }
 
 export interface PeakRun {
@@ -30,7 +32,14 @@ export interface PeakRun {
   peakOverShare: number;
 }
 
-export function runPeaks({ peakMinutes, peakFactor, pollSeconds, days }: PeakCase): PeakRun {
+export function runPeaks({
+  peakMinutes,
+  peakFactor,
+  pollSeconds,
+  days,
+  gap,
+  bursts,
+}: PeakCase): PeakRun {
   const shards = evenShards(SHARDS);
   const hot = shards[0];
   const counters = shards.map((shard) => {
@@ -41,8 +50,9 @@ export function runPeaks({ peakMinutes, peakFactor, pollSeconds, days }: PeakCas
     return { nodeId: shard.nodeId, address: shard.address, stats };
   });
   const tracker = new ShardLoadTracker();
-  const history = new SustainHistory();
-  const settings = DEFAULT_PLACEMENT_SETTINGS;
+  const triggers = new PlacementTriggers();
+  const staleMs = resolveStalenessMs(pollSeconds * 1000);
+  triggers.configure('bench', DEFAULT_PLACEMENT_SETTINGS);
   const firesByDay = Array.from({ length: days }, () => 0);
   const last = new Map<string, string>();
   let otherShardFires = 0;
@@ -50,10 +60,21 @@ export function runPeaks({ peakMinutes, peakFactor, pollSeconds, days }: PeakCas
   let peakOverShare = 0;
   let clock = 0;
 
-  const advance = (to: number, inPeak: boolean) => {
+  const hotFactor = (sinceStartMs: number) => {
+    if (sinceStartMs <= 0 || sinceStartMs > peakMinutes * MINUTE_MS) return 1;
+    if (!bursts) return peakFactor;
+    const minute = (sinceStartMs - 1) / MINUTE_MS;
+    return minute % bursts.everyMinutes < bursts.onMinutes ? peakFactor : 1;
+  };
+  const skipped = (sinceStartMs: number) =>
+    gap !== undefined &&
+    sinceStartMs > gap.fromMinute * MINUTE_MS &&
+    sinceStartMs < gap.toMinute * MINUTE_MS;
+
+  const advance = (to: number, hotLoad: number) => {
     const seconds = (to - clock) / 1000;
     for (const node of counters) {
-      const factor = inPeak && node.nodeId === hot.nodeId ? peakFactor : 1;
+      const factor = node.nodeId === hot.nodeId ? hotLoad : 1;
       for (const stats of Object.values(node.stats)) {
         stats.cpu_usec = (stats.cpu_usec ?? 0) + BASE_CPU_USEC_PER_SLOT * factor * seconds;
         stats.network_bytes_in = (stats.network_bytes_in ?? 0) + BYTES_PER_SLOT * seconds;
@@ -67,13 +88,14 @@ export function runPeaks({ peakMinutes, peakFactor, pollSeconds, days }: PeakCas
     const peakStart = day * DAY_MS + 12 * 60 * MINUTE_MS;
     const peakEnd = peakStart + peakMinutes * MINUTE_MS;
     for (let at = peakStart - LEAD_MS; at <= peakEnd + TAIL_MS; at += pollSeconds * 1000) {
-      advance(at, at > peakStart && at <= peakEnd);
+      advance(at, hotFactor(at - peakStart));
+      if (skipped(at - peakStart)) continue;
       const sample = tracker.observe(counters, at);
       if (!sample) continue;
       samples += 1;
-      history.record(sample);
+      triggers.observe('bench', sample, staleMs);
       for (const shard of sample.shards) {
-        const read = readPlacementTrigger(history.entries(shard.nodeId), settings, at);
+        const read = triggers.read('bench', shard.nodeId, at, staleMs);
         if (read.state === 'over' && last.get(shard.nodeId) !== 'over') {
           if (shard.nodeId === hot.nodeId) firesByDay[day] += 1;
           else otherShardFires += 1;

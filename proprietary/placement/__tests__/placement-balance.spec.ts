@@ -11,6 +11,7 @@ function shard(nodeId: string, cpuUsecPerSecond: number, overrides: Partial<Shar
     cpuUsecPerSecond,
     sustainCpuUsecPerSecond: cpuUsecPerSecond,
     baselineCpuUsecPerSecond: cpuUsecPerSecond,
+    sustainReset: false,
     networkBytesInPerSecond: 0,
     networkBytesOutPerSecond: 0,
     cpuShare: null,

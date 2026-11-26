@@ -148,3 +148,11 @@ test('a daily 20-min peak never fires the trigger and a 2-h peak fires once a da
   assert.deepEqual(runPeaks({ ...short, days: 2 }).firesByDay, [0, 0]);
   assert.deepEqual(runPeaks({ ...long, days: 2 }).firesByDay, [1, 1]);
 });
+
+test('a poll gap in a short peak does not fire the trigger, and heavy bursts do', () => {
+  const [, , , gap, spike, bursts] = B3_CASES;
+  assert.deepEqual(runPeaks({ ...gap, days: 1 }).firesByDay, [0]);
+  assert.deepEqual(runPeaks({ ...gap, gap: undefined, days: 1 }).firesByDay, [0]);
+  assert.deepEqual(runPeaks({ ...spike, days: 1 }).firesByDay, [0]);
+  assert.deepEqual(runPeaks({ ...bursts, days: 1 }).firesByDay, [1]);
+});

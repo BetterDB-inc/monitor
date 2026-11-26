@@ -18,6 +18,7 @@ function shard(nodeId: string, cpu: number, network = 0, slotCount = 5461): Shar
     cpuUsecPerSecond: cpu,
     sustainCpuUsecPerSecond: cpu,
     baselineCpuUsecPerSecond: cpu,
+    sustainReset: false,
     networkBytesInPerSecond: network / 2,
     networkBytesOutPerSecond: network / 2,
     cpuShare: 0,
