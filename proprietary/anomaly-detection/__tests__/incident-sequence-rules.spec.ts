@@ -1,4 +1,9 @@
-import { IncidentTimelineBuilder, RecoveryProbe } from '../incident-timeline';
+import {
+  IncidentTimelineBuilder,
+  RecoveryProbe,
+  incidentStartOf,
+  mergeRuleSteps,
+} from '../incident-timeline';
 import {
   BACKLOG_EXHAUSTION_MAX_SPAN_MS,
   DIVERGENCE_UNDER_PRESSURE_MAX_SPAN_MS,
@@ -65,6 +70,9 @@ function patternsOf(events: AnomalyEvent[], pattern: AnomalyPattern, scope = (id
 const drop = (metric: MetricType, at: number, connectionId = 'conn-a') =>
   event(metric, at, connectionId, AnomalyType.DROP);
 
+/** What a rule's events must share: a node of one connection, one connection, or only the cluster. */
+type Scope = 'node' | 'connection' | 'cluster';
+
 interface RuleCase {
   pattern: AnomalyPattern;
   steps: MetricType[];
@@ -72,7 +80,7 @@ interface RuleCase {
   optional?: MetricType;
   spanMs: number;
   lead?: { step: number; ms: number };
-  sameConnection: boolean;
+  scope: Scope;
   rising: MetricType[];
 }
 
@@ -96,7 +104,7 @@ const cases: RuleCase[] = [
     optional: MetricType.EVICTED_KEYS,
     spanMs: DIVERGENCE_UNDER_PRESSURE_MAX_SPAN_MS,
     lead: { step: 2, ms: DIVERGENCE_UNDER_PRESSURE_MAX_SPAN_MS },
-    sameConnection: true,
+    scope: 'node',
     rising: WRITE_AND_MEMORY_RISES,
   },
   {
@@ -105,7 +113,7 @@ const cases: RuleCase[] = [
     alternatives: [[MetricType.RESHARD_SHARD_SKEW], [MetricType.REPLICATION_DIVERGENCE]],
     optional: MetricType.COMMAND_P99,
     spanMs: RESHARD_UNDER_WRITES_MAX_SPAN_MS,
-    sameConnection: false,
+    scope: 'cluster',
     rising: [],
   },
   {
@@ -119,7 +127,7 @@ const cases: RuleCase[] = [
     optional: MetricType.INPUT_KBPS,
     spanMs: RESHARD_DIVERGENCE_PRESSURE_MAX_SPAN_MS,
     lead: { step: 2, ms: RESHARD_DIVERGENCE_PRESSURE_MAX_SPAN_MS },
-    sameConnection: true,
+    scope: 'node',
     rising: WRITE_AND_MEMORY_RISES,
   },
   {
@@ -131,7 +139,7 @@ const cases: RuleCase[] = [
     ],
     optional: MetricType.CLIENT_LOCKOUT_RISK,
     spanMs: RETRY_STORM_MAX_SPAN_MS,
-    sameConnection: true,
+    scope: 'node',
     rising: [MetricType.COMMAND_P99, MetricType.ERROR_REPLIES, MetricType.CONNECTION_CHURN],
   },
   {
@@ -140,7 +148,7 @@ const cases: RuleCase[] = [
     alternatives: [[MetricType.BACKLOG_COVERAGE_RISK], [MetricType.RESYNC_ESCALATION]],
     spanMs: BACKLOG_EXHAUSTION_MAX_SPAN_MS,
     lead: { step: 1, ms: RESYNC_ESCALATION_WINDOW_MS },
-    sameConnection: true,
+    scope: 'node',
     rising: [],
   },
   {
@@ -152,7 +160,7 @@ const cases: RuleCase[] = [
     ],
     optional: MetricType.FAILOVER_CHURN,
     spanMs: SPLIT_BRAIN_MAX_SPAN_MS,
-    sameConnection: true,
+    scope: 'connection',
     rising: [MetricType.ERROR_REPLIES],
   },
   {
@@ -162,7 +170,7 @@ const cases: RuleCase[] = [
     optional: MetricType.CLIENT_SATURATION,
     spanMs: HOT_SHARD_LATENCY_MAX_SPAN_MS,
     lead: { step: 1, ms: HOT_SHARD_LATENCY_LEAD_MS },
-    sameConnection: true,
+    scope: 'connection',
     rising: [MetricType.COMMAND_P99, MetricType.ERROR_REPLIES],
   },
   {
@@ -174,7 +182,7 @@ const cases: RuleCase[] = [
     ],
     optional: MetricType.RETRY_AMPLIFICATION,
     spanMs: MIGRATION_REDIRECTS_MAX_SPAN_MS,
-    sameConnection: true,
+    scope: 'connection',
     rising: [MetricType.ERROR_REPLIES, MetricType.COMMAND_P99],
   },
   {
@@ -186,7 +194,7 @@ const cases: RuleCase[] = [
     ],
     optional: MetricType.TOPOLOGY_DIVERGENCE,
     spanMs: MEMBERSHIP_FAILOVER_MAX_SPAN_MS,
-    sameConnection: true,
+    scope: 'connection',
     rising: [],
   },
 ];
@@ -205,7 +213,7 @@ describe('incident sequence rules', () => {
 
   describe.each(cases)(
     '$pattern',
-    ({ pattern, steps, alternatives, optional, spanMs, lead, sameConnection, rising }) => {
+    ({ pattern, steps, alternatives, optional, spanMs, lead, scope, rising }) => {
     const inOrder = (gapMs = MIN) => steps.map((metric, i) => event(metric, i * gapMs));
 
     it('matches its steps in order', () => {
@@ -319,14 +327,37 @@ describe('incident sequence rules', () => {
       });
     }
 
+    it('declares the scope the table expects', () => {
+      const rule = ruleFor(pattern);
+
+      expect(rule.sameConnection ?? false).toBe(scope === 'node');
+      expect(rule.sameConnectionAnyNode ?? false).toBe(scope === 'connection');
+    });
+
     it(
-      sameConnection
-        ? 'does not chain steps from different connections'
-        : 'chains steps from different nodes of the cluster',
+      scope === 'cluster'
+        ? 'chains steps from different connections of the cluster'
+        : 'does not chain steps from different connections',
       () => {
         const spread = steps.map((metric, i) => event(metric, i * MIN, `conn-${i}`));
 
-        expect(patternsOf(spread, pattern, () => 'cluster')).toEqual(sameConnection ? [] : [pattern]);
+        expect(patternsOf(spread, pattern, () => 'cluster')).toEqual(
+          scope === 'cluster' ? [pattern] : [],
+        );
+      },
+    );
+
+    it(
+      scope === 'node'
+        ? 'does not chain steps from different nodes of one connection'
+        : 'chains steps from different nodes of one connection',
+      () => {
+        const spread = steps.map((metric, i) => ({
+          ...event(metric, i * MIN),
+          nodeAddr: `10.0.0.${i + 1}:6379`,
+        }));
+
+        expect(patternsOf(spread, pattern)).toEqual(scope === 'node' ? [] : [pattern]);
       },
     );
   },
@@ -512,6 +543,47 @@ describe('incident sequence rules', () => {
       ];
 
       expect(incidentsOf(events, [ruleFor(splitBrain)])).toHaveLength(2);
+    });
+
+    describe('once the steps have left the event cache', () => {
+      const recorded = (severity: AnomalySeverity) => [
+        { metricType: MetricType.PARTIAL_MEMBERSHIP, connectionId: 'conn-a', timestamp: T0 },
+        {
+          metricType: MetricType.CLUSTER_TOPOLOGY,
+          severity,
+          connectionId: 'conn-a',
+          timestamp: T0 + MIN,
+        },
+      ];
+      // The service merges what a boundary already holds with the events it still caches,
+      // so an evicted event reaches the builder only as the step recorded earlier.
+      const startAfterEviction = (severity: AnomalySeverity) => {
+        const [incident] = new IncidentTimelineBuilder({}, (id) => id, () => [
+          ruleFor(splitBrain),
+        ]).build(
+          [event(MetricType.FAILOVER_CHURN, 6 * MIN)],
+          T0 + 20 * MIN,
+          neverRecovers,
+          [
+            {
+              scopeId: 'conn-a',
+              startedAt: T0,
+              anomalyId: 'evicted',
+              members: mergeRuleSteps(recorded(severity), []),
+            },
+          ],
+          new Map([['conn-a', T0 + MIN]]),
+        );
+        return incidentStartOf(incident.incidentId);
+      };
+
+      it('keeps a later failover in the incident of the evicted duplicate primary', () => {
+        expect(startAfterEviction(AnomalySeverity.CRITICAL)).toBe(T0);
+      });
+
+      it('starts a new incident when the evicted topology step was only a warning', () => {
+        expect(startAfterEviction(AnomalySeverity.WARNING)).toBe(T0 + 6 * MIN);
+      });
     });
 
     it('leaves membership_failover listed beside a stuck replica', () => {

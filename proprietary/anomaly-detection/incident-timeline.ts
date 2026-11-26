@@ -674,7 +674,9 @@ export class IncidentTimelineBuilder {
       if (!sequence.includes(entry.metricType)) sequence.push(entry.metricType);
     }
 
-    type Candidate = IncidentTimelineEntry & Pick<RuleStepEvent, 'anomalyType' | 'retryTrigger'>;
+    // A dropped step may have no stored severity, and a rule's minimum must see that.
+    type Candidate = Omit<IncidentTimelineEntry, 'severity'> &
+      Pick<RuleStepEvent, 'anomalyType' | 'retryTrigger' | 'severity'>;
     const dropped = prefix.map(
       (step): Candidate => ({
         anomalyId: '',
@@ -684,7 +686,7 @@ export class IncidentTimelineBuilder {
         ...(step.nodeAddr ? { nodeAddr: step.nodeAddr } : {}),
         ...(step.anomalyType ? { anomalyType: step.anomalyType } : {}),
         ...(step.retryTrigger ? { retryTrigger: step.retryTrigger } : {}),
-        severity: step.severity ?? AnomalySeverity.INFO,
+        ...(step.severity ? { severity: step.severity } : {}),
         message: '',
         recoveredAt: null,
         recoveryState: 'open',
@@ -716,7 +718,7 @@ export class IncidentTimelineBuilder {
             })),
             diagnosis: rule.diagnosis,
             recommendations: rule.recommendations,
-            severity: maxSeverity(live.map((e) => e.severity)),
+            severity: maxSeverity(live.map((e) => e.severity ?? AnomalySeverity.INFO)),
           },
         });
       }

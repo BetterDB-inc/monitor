@@ -1711,12 +1711,15 @@ describe('IncidentTimelineBuilder', () => {
   });
 
   describe('a dropped step with a minimum severity', () => {
-    const severe: SequenceRule = {
-      ...escalation,
-      minSeverity: { [MetricType.CONNECTIONS]: AnomalySeverity.CRITICAL },
-    };
-    const patternsAfterDropping = (severity?: AnomalySeverity) =>
-      new IncidentTimelineBuilder({}, () => 'conn-a', () => [severe])
+    const patternsAfterDropping = (
+      severity?: AnomalySeverity,
+      minimum = AnomalySeverity.CRITICAL,
+    ) => {
+      const severe: SequenceRule = {
+        ...escalation,
+        minSeverity: { [MetricType.CONNECTIONS]: minimum },
+      };
+      return new IncidentTimelineBuilder({}, () => 'conn-a', () => [severe])
         .build(
           [event({ id: 'held', timestamp: T0 + MIN })],
           T0 + 20 * MIN,
@@ -1739,13 +1742,24 @@ describe('IncidentTimelineBuilder', () => {
           new Map([['conn-a', T0]]),
         )
         .flatMap((incident) => incident.matchedPatterns);
+    };
 
     it('counts when its stored severity meets the minimum', () => {
-      expect(patternsAfterDropping(AnomalySeverity.CRITICAL)).toEqual([severe.pattern]);
+      expect(patternsAfterDropping(AnomalySeverity.CRITICAL)).toEqual([escalation.pattern]);
     });
 
     it.each([AnomalySeverity.WARNING, undefined])('does not count with a severity of %s', (severity) => {
       expect(patternsAfterDropping(severity)).toEqual([]);
+    });
+
+    it('counts a stored info severity against an info minimum', () => {
+      expect(patternsAfterDropping(AnomalySeverity.INFO, AnomalySeverity.INFO)).toEqual([
+        escalation.pattern,
+      ]);
+    });
+
+    it('does not count an unknown severity against an info minimum', () => {
+      expect(patternsAfterDropping(undefined, AnomalySeverity.INFO)).toEqual([]);
     });
   });
 });
