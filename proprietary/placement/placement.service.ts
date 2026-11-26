@@ -12,6 +12,7 @@ import {
   PLACEMENT_DEFAULT_MODE,
   PLACEMENT_MODES,
   PLACEMENT_SETTABLE_MODES,
+  excludedShardNodeIds,
   validatePlacementSettings,
   type PlacementMode,
   type PlacementPolicy,
@@ -53,6 +54,7 @@ import { placementBalance } from './placement-balance';
 
 const SUPPORT_CACHE_MS = 30_000;
 const POLICY_CACHE_MS = 30_000;
+const SHARD_NODES_TIMEOUT_MS = 2_000;
 
 export class PlacementModeError extends Error {
   constructor(
@@ -160,7 +162,7 @@ export class PlacementService implements OnModuleInit {
     const saved = await this.storage.savePlacementSettings(
       {
         connectionId: seedId,
-        settings: validated.settings,
+        settings: await this.withShardNodes(seedId, validated.settings),
         updatedAt: Date.now(),
         modeIfNew: this.modeOf(current, seedId),
       },
@@ -169,6 +171,33 @@ export class PlacementService implements OnModuleInit {
     if (!saved) throw new PlacementPolicyConflictError();
     this.policyCache.set(seedId, { at: Date.now(), policy: saved });
     return this.getStatus(seedId);
+  }
+
+  private async withShardNodes(
+    seedId: string,
+    settings: PlacementSettings,
+  ): Promise<PlacementSettings> {
+    if (settings.excludedShardIds.length === 0) return settings;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const nodes = await Promise.race([
+        this.registry.get(seedId).getClusterNodes(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error('CLUSTER NODES timed out')),
+            SHARD_NODES_TIMEOUT_MS,
+          );
+        }),
+      ]);
+      return {
+        ...settings,
+        excludedShardIds: excludedShardNodeIds(settings.excludedShardIds, nodes),
+      };
+    } catch {
+      return settings;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async settingsOf(

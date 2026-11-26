@@ -181,6 +181,41 @@ describe('PlacementService', () => {
       });
     });
 
+    it('stores every node of an excluded shard, and an unknown ID as given', async () => {
+      const { service, storage, registry } = await setup();
+      registry.get.mockReturnValue({
+        getCapabilities: () => ({ clusterEnabled: true, hasClusterSlotStats: true }),
+        getClusterNodes: async () => [
+          { id: 'c', master: '-' },
+          { id: 'c-replica', master: 'c' },
+          { id: 'd', master: '-' },
+        ],
+      } as never);
+      const status = await service.setSettings(
+        'seed',
+        { ...tighter, excludedShardIds: ['c', 'gone'] },
+        0,
+      );
+      expect(status.settings.excludedShardIds).toEqual(['c', 'gone', 'c-replica']);
+      expect((await storage.getPlacementPolicy('seed'))?.settings.excludedShardIds).toEqual([
+        'c',
+        'gone',
+        'c-replica',
+      ]);
+    });
+
+    it('stores the excluded shards as given when the topology cannot be read', async () => {
+      const { service, storage, registry } = await setup();
+      registry.get.mockReturnValue({
+        getCapabilities: () => ({ clusterEnabled: true, hasClusterSlotStats: true }),
+        getClusterNodes: async () => {
+          throw new Error('connection lost');
+        },
+      } as never);
+      await service.setSettings('seed', tighter, 0);
+      expect((await storage.getPlacementPolicy('seed'))?.settings.excludedShardIds).toEqual(['c']);
+    });
+
     it('stores the mode a connection runs in when its first policy is saved', async () => {
       const { service, storage } = await setup({ env: { STORAGE_TYPE: 'memory' } });
       await service.setSettings('seed', tighter, 0);

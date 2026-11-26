@@ -44,14 +44,14 @@ const placementSettingsFields = z.object({
 });
 
 export const placementSettingsSchema = placementSettingsFields.superRefine((settings, context) => {
-    if (settings.resolveRatio >= settings.triggerRatio) {
-      context.addIssue({
-        code: 'custom',
-        path: ['resolveRatio'],
-        message: 'must be below triggerRatio',
-      });
-    }
-  });
+  if (settings.resolveRatio >= settings.triggerRatio) {
+    context.addIssue({
+      code: 'custom',
+      path: ['resolveRatio'],
+      message: 'must be below triggerRatio',
+    });
+  }
+});
 
 export type PlacementSettingsResult =
   | { ok: true; settings: PlacementSettings }
@@ -134,6 +134,22 @@ export function excludedPrimaryIds(
     if (!excludedNodeIds.includes(node.id)) continue;
     const primary = node.master && node.master !== '-' ? node.master : node.id;
     excluded.add(primary);
+  }
+  return [...excluded];
+}
+
+export function excludedShardNodeIds(
+  excludedNodeIds: readonly string[],
+  nodes: ReadonlyArray<{ id: string; master: string }>,
+): string[] {
+  const primaryOf = (node: { id: string; master: string }) =>
+    node.master && node.master !== '-' ? node.master : node.id;
+  const excluded = new Set(excludedNodeIds);
+  for (const id of excludedNodeIds) {
+    const node = nodes.find((each) => each.id === id);
+    if (!node) continue;
+    const primary = primaryOf(node);
+    for (const each of nodes) if (primaryOf(each) === primary) excluded.add(each.id);
   }
   return [...excluded];
 }

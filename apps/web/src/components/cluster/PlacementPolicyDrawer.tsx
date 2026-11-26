@@ -244,7 +244,7 @@ function PolicyForm({
         <Field
           id="placement-excludedShardIds"
           label="Excluded shards"
-          hint="Shards that slots never move off or onto, one per line. Give the node ID of any node of the shard, primary or replica; the shard stays excluded after a failover."
+          hint="Shards that slots never move off or onto, one per line. Give the node ID of any node of the shard, primary or replica. Saving adds the other nodes of the shard, so it stays excluded after a failover."
         >
           <textarea
             id="placement-excludedShardIds"

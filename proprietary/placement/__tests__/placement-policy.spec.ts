@@ -2,6 +2,7 @@ import {
   DEFAULT_PLACEMENT_SETTINGS,
   defaultPlacementSettings,
   excludedPrimaryIds,
+  excludedShardNodeIds,
   readStoredPlacementSettings,
   validatePlacementSettings,
   type PlacementSettings,
@@ -216,6 +217,38 @@ describe('placement policy settings', () => {
 
     it('keeps a node it does not see', () => {
       expect(excludedPrimaryIds(['gone'], nodes)).toEqual(['gone']);
+    });
+  });
+
+  describe('excluded shard nodes', () => {
+    const nodes = [
+      { id: 'p1', master: '-' },
+      { id: 'r1', master: 'p1' },
+      { id: 'r2', master: 'p1' },
+      { id: 'p2', master: '-' },
+      { id: 'r3', master: 'p2' },
+    ];
+
+    it('adds every node of the shard of each listed node', () => {
+      expect(excludedShardNodeIds(['p1'], nodes)).toEqual(['p1', 'r1', 'r2']);
+      expect(excludedShardNodeIds(['r3'], nodes)).toEqual(['r3', 'p2']);
+    });
+
+    it('keeps an ID that is not in the topology as given', () => {
+      expect(excludedShardNodeIds(['gone', 'r1'], nodes)).toEqual(['gone', 'r1', 'p1', 'r2']);
+    });
+
+    it('keeps the shard excluded when its old primary is down after a failover', () => {
+      const stored = excludedShardNodeIds(['p1'], nodes);
+      const afterFailover = [
+        { id: 'p1', master: '-' },
+        { id: 'r1', master: '-' },
+        { id: 'r2', master: 'r1' },
+        { id: 'p2', master: '-' },
+        { id: 'r3', master: 'p2' },
+      ];
+      expect(excludedPrimaryIds(stored, afterFailover)).toContain('r1');
+      expect(excludedPrimaryIds(['p1'], afterFailover)).not.toContain('r1');
     });
   });
 });

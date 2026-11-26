@@ -982,7 +982,7 @@ Each cluster also has a placement policy, stored with its mode on the seed conne
 | `triggerRatio` | 2 | A shard over this multiple of the median load is over the trigger on the card. |
 | `resolveRatio` | 1.25 | A plan aims to bring the hot shard to or under this multiple of the projected median, and no target ends over it. Must be under `triggerRatio`. |
 | `nodeCpuLimitUsecPerSecond` | 800000 | No target ends over this CPU time per second (0.8 of a core). |
-| `excludedShardIds` | none | Shards that are never a source or a target, each given by the node ID of any of its nodes (the primary or a replica), so a shard stays excluded after a failover. A hot shard in the list gets `source_excluded`. |
+| `excludedShardIds` | none | Shards that are never a source or a target, each given by the node ID of any of its nodes (the primary or a replica). A save adds the other current nodes of the shard to the list, and a replica added later counts too, so a shard stays excluded after a failover even while its old primary is down. An ID the cluster does not know is kept as given. A hot shard in the list gets `source_excluded`. |
 | `excludedSlots` | none | Slots that never move. |
 | `maxCpuShare` | none | A share (0 to 1) of the slot CPU of the cluster that also makes a shard hot. |
 | `maxNetworkShare` | none | A share of the network traffic that makes a shard hot for advice only. |
