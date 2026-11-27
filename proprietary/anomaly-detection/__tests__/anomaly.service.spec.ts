@@ -20333,12 +20333,14 @@ describe('AnomalyService', () => {
             {
               metricType: MetricType.MEMORY_USED,
               anomalyType: AnomalyType.SPIKE,
+              severity: AnomalySeverity.WARNING,
               connectionId: 'conn-1',
               timestamp: now - 2 * MIN,
             },
             {
               metricType: MetricType.CONNECTIONS,
               anomalyType: AnomalyType.DROP,
+              severity: AnomalySeverity.WARNING,
               connectionId: 'conn-1',
               timestamp: now - MIN,
             },

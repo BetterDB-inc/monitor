@@ -3,7 +3,7 @@ import {
   RESYNC_ESCALATION_WINDOW_MS,
 } from './recovery-amplification-detector';
 import { registerSequenceRule } from './sequence-rules';
-import { AnomalyPattern, MetricType } from './types';
+import { AnomalyPattern, AnomalySeverity, MetricType } from './types';
 
 const MIN = 60_000;
 
@@ -12,6 +12,12 @@ export const RESHARD_UNDER_WRITES_MAX_SPAN_MS = 15 * MIN;
 export const RESHARD_DIVERGENCE_PRESSURE_MAX_SPAN_MS = 15 * MIN;
 export const RETRY_STORM_MAX_SPAN_MS = 10 * MIN;
 export const BACKLOG_EXHAUSTION_MAX_SPAN_MS = 30 * MIN;
+export const SPLIT_BRAIN_MAX_SPAN_MS = 15 * MIN;
+export const SPLIT_BRAIN_TOPOLOGY_LEAD_MS = 2 * MIN;
+export const HOT_SHARD_LATENCY_MAX_SPAN_MS = 15 * MIN;
+export const HOT_SHARD_LATENCY_LEAD_MS = 10 * MIN;
+export const MIGRATION_REDIRECTS_MAX_SPAN_MS = 15 * MIN;
+export const MEMBERSHIP_FAILOVER_MAX_SPAN_MS = 30 * MIN;
 
 const MEMORY_PRESSURE = [MetricType.MEMORY_USED, MetricType.MEMORY_OVERHEAD, MetricType.REPL_BUFFER_PRESSURE];
 
@@ -126,5 +132,80 @@ registerSequenceRule({
     RAISE_REPL_BACKLOG_RECOMMENDATION,
     'Check why the replica disconnected',
     'Act on backlog coverage warnings before a disconnect turns them into a full resync',
+  ],
+});
+
+registerSequenceRule({
+  pattern: AnomalyPattern.SPLIT_BRAIN,
+  steps: [
+    [MetricType.TOPOLOGY_DIVERGENCE, MetricType.PARTIAL_MEMBERSHIP],
+    [MetricType.CLUSTER_TOPOLOGY],
+  ],
+  optionalMetrics: [MetricType.REPLICATION_ROLE, MetricType.FAILOVER_CHURN, MetricType.ERROR_REPLIES],
+  directions: { [MetricType.ERROR_REPLIES]: 'rise' },
+  // A stuck replica is also a cluster_topology event, as a warning. A duplicate primary is critical.
+  minSeverity: { [MetricType.CLUSTER_TOPOLOGY]: AnomalySeverity.CRITICAL },
+  maxSpanMs: SPLIT_BRAIN_MAX_SPAN_MS,
+  // A duplicate primary is raised on the first poll that sees it, a disagreement only once confirmed.
+  leadMs: { 1: SPLIT_BRAIN_TOPOLOGY_LEAD_MS },
+  // The two rules give opposite CLUSTER FORGET advice, so one incident never lists both.
+  supersedesInIncident: [AnomalyPattern.MEMBERSHIP_FAILOVER],
+  diagnosis:
+    'Nodes disagreed on who is in the cluster, and two primaries claimed the same slots. ' +
+    'Writes accepted by the primary that loses will be dropped when the cluster converges.',
+  recommendations: [
+    'Check the network between the nodes on each side of the disagreement before you touch the cluster',
+    'Compare the configEpoch of the two primaries: the lower one is the stale side',
+    'Stop writes to the stale primary or fail it over by hand; do not run CLUSTER FORGET until both sides agree',
+  ],
+});
+
+registerSequenceRule({
+  pattern: AnomalyPattern.HOT_SHARD_LATENCY,
+  steps: [[MetricType.HOT_SHARD], [MetricType.COMMAND_P99, MetricType.RETRY_AMPLIFICATION]],
+  optionalMetrics: [MetricType.ERROR_REPLIES, MetricType.CLIENT_SATURATION],
+  directions: { [MetricType.COMMAND_P99]: 'rise', [MetricType.ERROR_REPLIES]: 'rise' },
+  maxSpanMs: HOT_SHARD_LATENCY_MAX_SPAN_MS,
+  leadMs: { 1: HOT_SHARD_LATENCY_LEAD_MS },
+  diagnosis: 'One shard carried far more load than the others, and tail latency rose with it.',
+  recommendations: [
+    'Open the hot shard and review the suggested slot rebalance',
+    'If the load sits on a few keys, move it in the application: a slot move will not help',
+    'Watch the P99 after the move; the hot shard event closes when the load evens out',
+  ],
+});
+
+registerSequenceRule({
+  pattern: AnomalyPattern.MIGRATION_REDIRECTS,
+  steps: [
+    [MetricType.SLOT_MIGRATION, MetricType.SLOT_MIGRATION_STUCK],
+    [MetricType.ERROR_REPLIES, MetricType.COMMAND_P99],
+  ],
+  optionalMetrics: [MetricType.RETRY_AMPLIFICATION],
+  directions: { [MetricType.ERROR_REPLIES]: 'rise', [MetricType.COMMAND_P99]: 'rise' },
+  maxSpanMs: MIGRATION_REDIRECTS_MAX_SPAN_MS,
+  diagnosis:
+    'A slot migration was running when errors or tail latency rose: clients are being redirected (ASK, TRYAGAIN) or waiting on keys being moved.',
+  recommendations: [
+    'Check that clients follow ASK redirects and retry TRYAGAIN with backoff',
+    'Move slots in smaller batches, or pause the migration until traffic is lower',
+    'If the migration is stuck, follow the steps in its alert; a rebalance run started from the Anomalies page can be cancelled there',
+  ],
+});
+
+registerSequenceRule({
+  pattern: AnomalyPattern.MEMBERSHIP_FAILOVER,
+  steps: [
+    [MetricType.PARTIAL_MEMBERSHIP, MetricType.GHOST_MEMBERSHIP],
+    [MetricType.FAILOVER_CHURN],
+  ],
+  optionalMetrics: [MetricType.TOPOLOGY_DIVERGENCE],
+  maxSpanMs: MEMBERSHIP_FAILOVER_MAX_SPAN_MS,
+  diagnosis:
+    'A node that only part of the cluster knows about, or that should be gone, was followed by repeated failovers.',
+  recommendations: [
+    'Find the node named in the membership event and confirm whether it should be in the cluster',
+    'Remove a node that should be gone with CLUSTER FORGET on every node, within 60 seconds',
+    'Check cluster-node-timeout is the same on every node',
   ],
 });

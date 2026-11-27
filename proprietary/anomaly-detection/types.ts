@@ -170,6 +170,12 @@ export enum AnomalySeverity {
   CRITICAL = 'critical',
 }
 
+export const SEVERITY_RANK: Record<AnomalySeverity, number> = {
+  [AnomalySeverity.INFO]: 0,
+  [AnomalySeverity.WARNING]: 1,
+  [AnomalySeverity.CRITICAL]: 2,
+};
+
 export enum AnomalyType {
   SPIKE = 'spike',
   DROP = 'drop',
@@ -196,6 +202,9 @@ export enum AnomalyPattern {
   RETRY_STORM = 'retry_storm',
   BACKLOG_EXHAUSTION = 'backlog_exhaustion',
   RESHARD_DIVERGENCE_PRESSURE = 'reshard_divergence_pressure',
+  HOT_SHARD_LATENCY = 'hot_shard_latency',
+  MIGRATION_REDIRECTS = 'migration_redirects',
+  MEMBERSHIP_FAILOVER = 'membership_failover',
   UNKNOWN = 'unknown',
 }
 

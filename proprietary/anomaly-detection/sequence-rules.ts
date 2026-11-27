@@ -1,4 +1,11 @@
-import { AnomalyEvent, AnomalyPattern, AnomalyType, MetricType } from './types';
+import {
+  AnomalyEvent,
+  AnomalyPattern,
+  AnomalySeverity,
+  AnomalyType,
+  MetricType,
+  SEVERITY_RANK,
+} from './types';
 
 export type StepDirection = 'rise' | 'drop';
 
@@ -7,17 +14,21 @@ export interface SequenceRule {
   steps: MetricType[][];
   optionalMetrics?: MetricType[];
   directions?: Readonly<Partial<Record<MetricType, StepDirection>>>;
+  /** The lowest severity at which a metric counts. An event of unknown severity does not. */
+  minSeverity?: Readonly<Partial<Record<MetricType, AnomalySeverity>>>;
   maxSpanMs: number;
   leadMs?: Readonly<Record<number, number>>;
   sameConnection?: boolean;
   carriesFirstStep?: (event: StepEvidence) => boolean;
   supersedes?: readonly AnomalyPattern[];
+  /** Replaced whenever this rule matches in the same incident, with or without a shared step. */
+  supersedesInIncident?: readonly AnomalyPattern[];
   diagnosis: string;
   recommendations: string[];
 }
 
 export type StepEvidence = Pick<AnomalyEvent, 'metricType'> &
-  Partial<Pick<AnomalyEvent, 'anomalyType' | 'retryTrigger'>>;
+  Partial<Pick<AnomalyEvent, 'anomalyType' | 'retryTrigger' | 'severity'>>;
 
 const DIRECTION_OF: Record<AnomalyType, StepDirection> = {
   [AnomalyType.SPIKE]: 'rise',
@@ -48,10 +59,17 @@ export function registerSequenceRule(rule: SequenceRule): void {
       throw new Error(`Sequence rule ${rule.pattern} sets a direction on ${metric}, which it does not use`);
     }
   }
+  for (const metric of Object.keys(rule.minSeverity ?? {})) {
+    if (!used.has(metric as MetricType)) {
+      throw new Error(
+        `Sequence rule ${rule.pattern} sets a minimum severity on ${metric}, which it does not use`,
+      );
+    }
+  }
   if (rule.carriesFirstStep && rule.steps.length < 2) {
     throw new Error(`Sequence rule ${rule.pattern} needs a second step to carry its first step`);
   }
-  if (rule.supersedes?.includes(rule.pattern)) {
+  if ([...(rule.supersedes ?? []), ...(rule.supersedesInIncident ?? [])].includes(rule.pattern)) {
     throw new Error(`Sequence rule ${rule.pattern} cannot supersede itself`);
   }
   if (rules.some((existing) => existing.pattern === rule.pattern)) {
@@ -64,12 +82,18 @@ export function leadOf(rule: SequenceRule, stepIndex: number): number {
   return rule.leadMs?.[stepIndex] ?? 0;
 }
 
+function severeEnough(rule: SequenceRule, event: StepEvidence): boolean {
+  const minimum = rule.minSeverity?.[event.metricType];
+  if (!minimum) return true;
+  return event.severity !== undefined && SEVERITY_RANK[event.severity] >= SEVERITY_RANK[minimum];
+}
+
 export function fills(
   rule: SequenceRule,
   metrics: readonly MetricType[] | undefined,
   event: StepEvidence,
 ): boolean {
-  if (!metrics?.includes(event.metricType)) return false;
+  if (!metrics?.includes(event.metricType) || !severeEnough(rule, event)) return false;
   const wanted = rule.directions?.[event.metricType];
   return !wanted || event.anomalyType === undefined || DIRECTION_OF[event.anomalyType] === wanted;
 }

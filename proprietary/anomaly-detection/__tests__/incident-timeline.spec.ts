@@ -1701,6 +1701,66 @@ describe('IncidentTimelineBuilder', () => {
         step(MetricType.CONNECTIONS, 3),
       ]);
     });
+
+    it('keeps both severities of a metric raised twice in one poll', () => {
+      const critical = { ...step(MetricType.CLUSTER_TOPOLOGY, 1), severity: AnomalySeverity.CRITICAL };
+      const warning = { ...step(MetricType.CLUSTER_TOPOLOGY, 1), severity: AnomalySeverity.WARNING };
+
+      expect(mergeRuleSteps([critical], [critical, warning])).toEqual([critical, warning]);
+    });
+  });
+
+  describe('a dropped step with a minimum severity', () => {
+    const patternsAfterDropping = (
+      severity?: AnomalySeverity,
+      minimum = AnomalySeverity.CRITICAL,
+    ) => {
+      const severe: SequenceRule = {
+        ...escalation,
+        minSeverity: { [MetricType.CONNECTIONS]: minimum },
+      };
+      return new IncidentTimelineBuilder({}, () => 'conn-a', () => [severe])
+        .build(
+          [event({ id: 'held', timestamp: T0 + MIN })],
+          T0 + 20 * MIN,
+          () => null,
+          [
+            {
+              scopeId: 'conn-a',
+              startedAt: T0,
+              anomalyId: 'z-gone',
+              members: [
+                {
+                  metricType: MetricType.CONNECTIONS,
+                  connectionId: 'conn-a',
+                  timestamp: T0,
+                  ...(severity ? { severity } : {}),
+                },
+              ],
+            },
+          ],
+          new Map([['conn-a', T0]]),
+        )
+        .flatMap((incident) => incident.matchedPatterns);
+    };
+
+    it('counts when its stored severity meets the minimum', () => {
+      expect(patternsAfterDropping(AnomalySeverity.CRITICAL)).toEqual([escalation.pattern]);
+    });
+
+    it.each([AnomalySeverity.WARNING, undefined])('does not count with a severity of %s', (severity) => {
+      expect(patternsAfterDropping(severity)).toEqual([]);
+    });
+
+    it('counts a stored info severity against an info minimum', () => {
+      expect(patternsAfterDropping(AnomalySeverity.INFO, AnomalySeverity.INFO)).toEqual([
+        escalation.pattern,
+      ]);
+    });
+
+    it('does not count an unknown severity against an info minimum', () => {
+      expect(patternsAfterDropping(undefined, AnomalySeverity.INFO)).toEqual([]);
+    });
   });
 });
 

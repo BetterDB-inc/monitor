@@ -11342,11 +11342,20 @@ export class AnomalyService
       const seen = incident.entries.flatMap((entry) => {
         const event = this.liveEventsById.get(entry.anomalyId);
         if (!event) return [];
-        const { metricType, anomalyType, retryTrigger, connectionId, nodeAddr, timestamp } = event;
+        const {
+          metricType,
+          anomalyType,
+          severity,
+          retryTrigger,
+          connectionId,
+          nodeAddr,
+          timestamp,
+        } = event;
         return [
           {
             metricType,
             anomalyType,
+            severity,
             ...(retryTrigger ? { retryTrigger } : {}),
             connectionId,
             ...(nodeAddr ? { nodeAddr } : {}),
