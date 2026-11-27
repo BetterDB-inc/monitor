@@ -3621,6 +3621,27 @@ describe('AnomalyService', () => {
         expect(rebalance()).toMatchObject({ kind: 'plan' });
       });
 
+      it('warns again about an unreadable placement policy after the connection is removed and added back', async () => {
+        spreadLoad();
+        await step(HOT, 6);
+        const warn = jest
+          .spyOn((service as any).logger, 'warn')
+          .mockImplementation(() => undefined);
+        service.setRebalancePolicyResolver(async () => {
+          throw new PlacementPolicyUnreadableError(['excludedSlots.0: too big']);
+        });
+        await step(HOT, 3);
+
+        (service as any).onConnectionRemoved('conn-a');
+        expect((service as any).rebalancePolicyWarned.has('conn-a')).toBe(false);
+        await step(HOT, 6);
+
+        const warned = warn.mock.calls.filter(([message]) =>
+          String(message).includes('No slot moves are planned for conn-a'),
+        );
+        expect(warned).toHaveLength(2);
+      });
+
       it('says in the event why moving slots will not help', async () => {
         await step(HOT, 6);
 
