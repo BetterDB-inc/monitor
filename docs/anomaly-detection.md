@@ -1002,9 +1002,9 @@ Each cluster also has a placement policy, stored with its mode on the seed conne
 | `slotCooldownDays` | 7 | How long a slot that moved stays put, except for a rollback. |
 | `noReturnDays` | 7 | How long a slot stays away from a shard it left, except for a rollback. |
 | `maxMigrationsPerHour` | 4 | Moves per hour; a move takes slots from one source to one target. |
-| `maxBytesPerHour` | 2 GiB | Bytes moved per hour, estimated from key counts and the average key size. |
+| `maxBytesPerHour` | 2 GiB | Bytes moved per hour. Moved bytes are not counted yet, so the safety checks block only a value of 0. |
 | `maintenanceWindows` | none (any time) | Days, a start time (UTC) and a duration in minutes. |
-| `abortLatencyMs` | 50 | The latency of a source or target node, held for 5 seconds, that stops a move. |
+| `abortLatencyMs` | 50 | A node of the hot shard or a target whose `PING` median of 10 is over `max(50, abortLatencyMs)` ms holds the plan back. |
 | `verifyMinutes` | 10 | How long the load is measured after a move to judge it. |
 | `verifyTolerance` | 0.5 | A move that drops the source CPU by less than this share of the projected drop counts as ineffective. |
 | `autoRollback` | on | Roll back a move that made the load worse. |
