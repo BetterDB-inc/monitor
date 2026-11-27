@@ -135,6 +135,16 @@ export function placementGate(
   const blockers: PlacementBlocker[] = [];
   const warnings: PlacementBlocker[] = [];
   const nodes = new Map(facts.nodes.map((node) => [node.id, node]));
+  const byAddress = new Map(facts.nodes.map((node) => [node.address, node.id]));
+  const named = (signal: PlacementGateSignal): PlacementGateSignal =>
+    signal.nodeId === null && signal.address
+      ? { ...signal, nodeId: byAddress.get(signal.address) ?? null }
+      : signal;
+  const openEvents = facts.openEvents.map(named);
+  const incidents = facts.incidents.map((incident) => ({
+    ...incident,
+    signals: incident.signals.map(named),
+  }));
   const name = (nodeId: string) => nodes.get(nodeId)?.address ?? nodeId;
   const raise = (
     kind: PlacementBlockerKind,
@@ -175,7 +185,7 @@ export function placementGate(
   } else if (facts.clusterStateOk === null) {
     raise('unknown', 'cluster', 'Could not read CLUSTER INFO.');
   }
-  for (const event of facts.openEvents) {
+  for (const event of openEvents) {
     const kind = CLUSTER_EVENTS[event.metricType];
     if (kind) raise(kind, 'cluster', `An open ${event.metricType} event.`);
   }
@@ -195,14 +205,14 @@ export function placementGate(
     facts.sourceTriggerFiredAt !== null &&
     signal.openedAt >= facts.sourceTriggerFiredAt;
 
-  for (const event of facts.openEvents) {
+  for (const event of openEvents) {
     const kind = NODE_EVENTS[event.metricType] ?? REPLICA_EVENTS[event.metricType];
     if (kind && event.nodeId === null) {
       raise(kind, 'cluster', `An open ${event.metricType} event on a node it does not name.`);
     }
   }
 
-  for (const incident of facts.incidents) {
+  for (const incident of incidents) {
     if (!OPEN_RECOVERY.has(incident.recovery)) continue;
     if (
       incident.signals.some(
@@ -224,7 +234,7 @@ export function placementGate(
       );
     }
     for (const node of members) {
-      const events = facts.openEvents.filter((event) => event.nodeId === node.id);
+      const events = openEvents.filter((event) => event.nodeId === node.id);
       if (node.collected) {
         for (const event of events) {
           const kind =
@@ -262,7 +272,7 @@ export function placementGate(
           node.id,
         );
       }
-      for (const incident of facts.incidents) {
+      for (const incident of incidents) {
         if (!OPEN_RECOVERY.has(incident.recovery)) continue;
         const signals = incident.signals.filter(
           (signal) =>

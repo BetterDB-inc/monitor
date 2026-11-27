@@ -424,6 +424,33 @@ describe('placementGate', () => {
     ])('reads an incident with %s', (_, change, expected) => {
       expect(kindsOf(gate(facts(change)))).toEqual(expected);
     });
+
+    const byAddress = (recovery: string, address: string) => (f: PlacementGateFacts) =>
+      f.incidents.push({
+        recovery,
+        patterns: [],
+        signals: [{ metricType: 'memory_used', nodeId: null, address, openedAt: NOW }],
+      });
+
+    it.each([
+      ['a target node', '10.0.0.3:7000', ['incident:target:t1']],
+      ['an unrelated node', '10.0.0.5:7000', []],
+      ['no node of the cluster', '10.0.0.9:7000', ['unknown:cluster:']],
+    ])('reads an incident entry that names only the address of %s', (_, address, expected) => {
+      expect(kindsOf(gate(facts(byAddress('active', address))))).toEqual(expected);
+    });
+
+    it('reads a node event that names only the address of a target node as that node', () => {
+      const built = facts((f) => {
+        f.openEvents.push({
+          metricType: 'failover_churn',
+          nodeId: null,
+          address: '10.0.0.3:7000',
+          openedAt: NOW,
+        });
+      });
+      expect(kindsOf(gate(built))).toEqual(['failover:target:t1']);
+    });
   });
 
   describe('per-shard and per-purpose rules', () => {
