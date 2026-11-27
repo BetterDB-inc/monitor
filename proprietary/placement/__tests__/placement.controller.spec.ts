@@ -79,6 +79,7 @@ describe('PlacementController policy', () => {
     [{ policy: {} }],
     [{ policy: {}, version: -1 }],
     [{ policy: {}, version: 1.5 }],
+    [{ policy: {}, version: 2_147_483_648 }],
     [null],
   ])('rejects the body %j', async (body) => {
     const controller = new PlacementController(placement() as unknown as PlacementService);
