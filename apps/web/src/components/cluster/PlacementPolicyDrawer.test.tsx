@@ -154,6 +154,32 @@ describe('PlacementPolicyDrawer', () => {
     );
   });
 
+  it('leaves a drawer opened again alone when an earlier save finishes', async () => {
+    let finish: (value: PlacementPolicySaved) => void = () => undefined;
+    const save = vi.fn(() => new Promise<PlacementPolicySaved>((done) => (finish = done)));
+    const onOpenChange = vi.fn();
+    const drawer = (open: boolean) => (
+      <PlacementPolicyDrawer
+        open={open}
+        onOpenChange={onOpenChange}
+        settings={stored}
+        version={4}
+        onSave={save}
+      />
+    );
+    const { rerender } = render(drawer(true));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    rerender(drawer(false));
+    rerender(drawer(true));
+
+    finish(saved(5));
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    await new Promise((done) => setTimeout(done, 0));
+
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
+  });
+
   it('refuses a line it cannot read before asking the server', async () => {
     const { save } = open();
     fireEvent.change(field('Maintenance windows'), { target: { value: 'Mon 02:00' } });

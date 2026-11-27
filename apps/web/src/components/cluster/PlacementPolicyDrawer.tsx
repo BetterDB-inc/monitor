@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { PlacementPolicySaved, PlacementSettings } from '@betterdb/shared';
 import { ApiError } from '../../api/client';
 import { useCanMutate } from '../../hooks/useCanMutate';
@@ -166,7 +166,15 @@ function PolicyForm({
   const [saving, setSaving] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
   const [notExpanded, setNotExpanded] = useState<string | null>(null);
+  const alive = useRef(true);
   const readOnly = !canMutate || saving;
+
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
 
   const invalid = (field: string) => {
     const ids = errors.flatMap((error, index) =>
@@ -205,6 +213,7 @@ function PolicyForm({
     setNotExpanded(null);
     try {
       const saved = await onSave(result.settings, openedAt);
+      if (!alive.current) return;
       if (saved.exclusionsExpanded) {
         onClose();
         return;
@@ -212,9 +221,9 @@ function PolicyForm({
       setOpenedAt(saved.policyVersion);
       setNotExpanded(saved.exclusionsExpandProblem ?? 'the cluster did not answer');
     } catch (err) {
-      setErrors(errorsOf(err));
+      if (alive.current) setErrors(errorsOf(err));
     } finally {
-      setSaving(false);
+      if (alive.current) setSaving(false);
     }
   };
 
