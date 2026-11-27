@@ -150,7 +150,14 @@ const BetterDbTabBody = ({ instanceName, namespace }: { instanceName: string; na
                 <TableCell>{node.role}</TableCell>
                 <TableCell sx={{ fontFamily: 'monospace' }}>{node.address}</TableCell>
                 <TableCell>{node.valkeyConnected ? 'connected' : 'disconnected'}</TableCell>
-                <TableCell>{node.cloudConnected ? 'streaming' : 'not connected'}</TableCell>
+                <TableCell>
+                  {node.cloudConnected ? 'streaming' : 'not connected'}
+                  {node.error && (
+                    <Typography variant="caption" color="error" display="block">
+                      {node.error}
+                    </Typography>
+                  )}
+                </TableCell>
               </TableRow>
             ))}
           </TableBody>

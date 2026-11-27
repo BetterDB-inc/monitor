@@ -59,7 +59,6 @@ export interface PluginServerOptions {
 
 const DNS_SUBDOMAIN = /^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$/;
 const DNS_LABEL = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
-const MAX_BODY_BYTES = 64 * 1024;
 
 // Errors the routes let through, mapped to a status: the OpenEverest client's
 // own (502 when the API is unreachable), a malformed percent-encoding in the
@@ -175,23 +174,6 @@ async function route(
   }
 
   throw new HttpError(404, 'not found');
-}
-
-async function readJson(req: http.IncomingMessage): Promise<Record<string, unknown>> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of req) {
-    size += (chunk as Buffer).length;
-    if (size > MAX_BODY_BYTES) throw new HttpError(413, 'body too large');
-    chunks.push(chunk as Buffer);
-  }
-  if (chunks.length === 0) return {};
-  try {
-    const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
-  } catch {
-    throw new HttpError(400, 'body must be JSON');
-  }
 }
 
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {

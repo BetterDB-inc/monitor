@@ -12,6 +12,8 @@ export interface NodeStatus {
   role: 'primary' | 'replica';
   valkeyConnected: boolean;
   cloudConnected: boolean;
+  /** Why this node is not streaming, when the backend knows. */
+  error?: string;
 }
 
 export interface InstanceView {
