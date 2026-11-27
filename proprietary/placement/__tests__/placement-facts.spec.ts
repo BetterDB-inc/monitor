@@ -57,7 +57,7 @@ function port(
 ) {
   return {
     placementOpenEvents: jest.fn(async () => []),
-    placementIncidents: jest.fn(async () => []),
+    placementIncidents: jest.fn(async () => ({ incidents: [], historyFrom: null })),
     readPlacementNodeFacts: jest.fn(async () => nodeFacts(nodes)),
     ...overrides,
   } satisfies PlacementFactsPort;
@@ -83,6 +83,18 @@ describe('readPlacementGateFacts', () => {
       clusterStateOk: true,
       migrations: 'none',
     });
+  });
+
+  it('warns in the gate when the incident history was read only back to a cut-off', async () => {
+    const nodes = [read('s1', 's1'), read('t1', 't1')];
+    const stub = port({
+      placementIncidents: jest.fn(async () => ({ incidents: [], historyFrom: NOW - MINUTE })),
+    });
+    const result = await gateOf(
+      readPlacementGateFacts(stub, warmed('seed', nodes), 'seed', context, NOW),
+    );
+    expect(result.allowed).toBe(true);
+    expect(result.warnings.map((each) => each.kind)).toEqual(['incident_history']);
   });
 
   it('reads a PING that timed out as unknown in the gate', async () => {
@@ -117,13 +129,18 @@ describe('readPlacementGateFacts', () => {
       placementOpenEvents: jest.fn(async () => [
         { metricType: 'persistence_child', nodeId: null, address: 't1:7000', openedAt: NOW },
       ]),
-      placementIncidents: jest.fn(async () => [
-        {
-          recovery: 'active',
-          patterns: [],
-          signals: [{ metricType: 'memory_used', nodeId: null, address: 's1:7000', openedAt: NOW }],
-        },
-      ]),
+      placementIncidents: jest.fn(async () => ({
+        incidents: [
+          {
+            recovery: 'active' as const,
+            patterns: [],
+            signals: [
+              { metricType: 'memory_used', nodeId: null, address: 's1:7000', openedAt: NOW },
+            ],
+          },
+        ],
+        historyFrom: null,
+      })),
     });
     const result = await gateOf(
       readPlacementGateFacts(stub, warmed('seed', nodes), 'seed', context, NOW),

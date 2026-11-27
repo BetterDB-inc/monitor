@@ -194,6 +194,7 @@ export type PlacementBlockerKind =
   | 'quarantined'
   | 'outside_window'
   | 'coverage'
+  | 'incident_history'
   | 'unknown';
 
 export type PlacementBlockerScope = 'cluster' | 'source' | 'target';

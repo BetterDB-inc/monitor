@@ -131,7 +131,7 @@ async function setup(options: Setup = {}) {
     placementMovedShardsSince: jest.fn((): string[] => []),
     placementJobsSince: jest.fn(() => 0),
     placementOpenEvents: jest.fn(async (): Promise<PlacementGateSignal[]> => []),
-    placementIncidents: jest.fn(async () => []),
+    placementIncidents: jest.fn(async () => ({ incidents: [], historyFrom: null })),
     readPlacementNodeFacts: jest.fn(async () => healthyNodes()),
   };
   const env = { BETTERDB_SLOT_MIGRATION: 'true', STORAGE_TYPE: 'sqlite', ...options.env };
