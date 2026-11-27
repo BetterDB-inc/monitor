@@ -114,8 +114,9 @@ describe('ShardLoadService listeners and sustain minutes', () => {
 
   function sustainAfter(service: ShardLoadService, connectionId: string, minutes: number) {
     let sample = null;
-    for (let at = 0; at <= minutes * 60_000; at += 5_000) {
-      sample = service.record(connectionId, reading({ 0: CORE * (at / 1000) }), at) ?? sample;
+    for (let at = 0; at <= 5_000 + minutes * 60_000; at += 5_000) {
+      const busySeconds = Math.max(0, at / 1000 - 5);
+      sample = service.record(connectionId, reading({ 0: CORE * busySeconds }), at) ?? sample;
     }
     return sample?.shards[0].sustainCpuUsecPerSecond ?? 0;
   }

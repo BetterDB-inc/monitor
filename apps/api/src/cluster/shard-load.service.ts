@@ -52,10 +52,6 @@ export class ShardLoadService {
     this.trackers.get(connectionId)?.setSustainMinutes(minutes);
   }
 
-  sustainWarmSince(connectionId: string, slot: number): number | null {
-    return this.trackers.get(connectionId)?.sustainWarmSince(slot) ?? null;
-  }
-
   private notify(call: (listener: ShardLoadListener) => void): void {
     for (const listener of this.listeners) {
       try {
