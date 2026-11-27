@@ -76,7 +76,17 @@ export const BLOCKED_SUBCOMMANDS: Readonly<Record<string, ReadonlySet<string>>> 
  * Check if a command is always blocked (regardless of mode).
  * Returns an error message string, or null if not blocked.
  */
+// Valkey cuts keywords at the first NUL (strcasecmp) while these checks see
+// the whole string, so a NUL in a command or sub-command is refused outright:
+// every check then agrees with what the server would run.
+const NUL_KEYWORD_MESSAGE = 'Command and sub-command names may not contain NUL bytes.';
+
+function hasNul(command: string, subCommand?: string): boolean {
+  return command.includes('\0') || (subCommand?.includes('\0') ?? false);
+}
+
 export function checkBlocked(command: string, subCommand?: string): string | null {
+  if (hasNul(command, subCommand)) return NUL_KEYWORD_MESSAGE;
   if (BLOCKED_COMMANDS.has(command)) {
     return `Command ${command} is blocked. It may block the connection or is dangerous.`;
   }
@@ -91,6 +101,7 @@ export function checkBlocked(command: string, subCommand?: string): string | nul
  * Returns an error message string, or null if allowed.
  */
 export function checkSafeMode(command: string, subCommand?: string): string | null {
+  if (hasNul(command, subCommand)) return NUL_KEYWORD_MESSAGE;
   if (!ALLOWED_COMMANDS.has(command)) {
     return `Command ${command} is not allowed in safe mode.`;
   }
@@ -164,6 +175,24 @@ export const SECRET_CONFIG_PARAMETERS: ReadonlySet<string> = new Set([
 
 export const REDACTED_CONFIG_VALUE = '<redacted>';
 
+/**
+ * Turns a secret into a short, stable tag (for instance a keyed HMAC prefix)
+ * so a redacted value still shows when it changes: ACL drift between nodes
+ * and the ACL/config change webhooks keep working. Without one, every secret
+ * becomes the same `<redacted>`.
+ */
+export type SecretFingerprint = (secret: string) => string;
+
+function redacted(secret: string, fingerprint?: SecretFingerprint): string {
+  return fingerprint ? `<redacted:${fingerprint(secret)}>` : REDACTED_CONFIG_VALUE;
+}
+
+// A value an earlier hop (the agent) already redacted is kept as it is, so
+// the Monitor's backstop does not erase the agent's fingerprint.
+function isRedacted(value: unknown): boolean {
+  return typeof value === 'string' && value.startsWith('<redacted');
+}
+
 export function isSecretConfigParameter(name: string): boolean {
   return SECRET_CONFIG_PARAMETERS.has(name.toLowerCase());
 }
@@ -174,23 +203,20 @@ export function isSecretConfigParameter(name: string): boolean {
  * (RESP3). Anything else is returned untouched. Redacting rather than denying
  * keeps `CONFIG GET *` and the Monitor's own maxmemory/eviction reads working.
  */
-export function redactConfigGetReply(reply: unknown): unknown {
+export function redactConfigGetReply(reply: unknown, fingerprint?: SecretFingerprint): unknown {
+  const redactValue = (name: unknown, value: unknown): unknown =>
+    typeof name === 'string' && isSecretConfigParameter(name) && value !== '' && !isRedacted(value)
+      ? redacted(String(value), fingerprint)
+      : value;
   if (Array.isArray(reply)) {
     if (reply.length % 2 !== 0) return reply;
     const out = reply.slice();
-    for (let i = 0; i + 1 < out.length; i += 2) {
-      const name = out[i];
-      if (typeof name === 'string' && isSecretConfigParameter(name) && out[i + 1] !== '') {
-        out[i + 1] = REDACTED_CONFIG_VALUE;
-      }
-    }
+    for (let i = 0; i + 1 < out.length; i += 2) out[i + 1] = redactValue(out[i], out[i + 1]);
     return out;
   }
   if (reply !== null && typeof reply === 'object') {
     const out: Record<string, unknown> = {};
-    for (const [name, value] of Object.entries(reply as Record<string, unknown>)) {
-      out[name] = isSecretConfigParameter(name) && value !== '' ? REDACTED_CONFIG_VALUE : value;
-    }
+    for (const [name, value] of Object.entries(reply as Record<string, unknown>)) out[name] = redactValue(name, value);
     return out;
   }
   return reply;
@@ -201,22 +227,28 @@ const ACL_PASSWORD_TOKEN = /(^|\s)[><][^\s]+/g;
 const ACL_HASH = /^[0-9a-f]{64}$/i;
 
 /** One ACL rule string (`ACL LIST` line, `ACL GETUSER` flags): hashes and passwords redacted. */
-function redactAclRule(rule: string): string {
-  return rule.replace(ACL_HASH_TOKEN, '$1#<redacted>').replace(ACL_PASSWORD_TOKEN, (match) => `${match[0] === ' ' ? ' ' : ''}${match.trim()[0]}<redacted>`);
+function redactAclRule(rule: string, fingerprint?: SecretFingerprint): string {
+  return rule
+    .replace(ACL_HASH_TOKEN, (match, lead: string) => `${lead}#${redacted(match.trim().slice(1), fingerprint)}`)
+    .replace(ACL_PASSWORD_TOKEN, (match, lead: string) => {
+      const token = match.slice(lead.length);
+      if (isRedacted(token.slice(1))) return match;
+      return `${lead}${token[0]}${redacted(token.slice(1), fingerprint)}`;
+    });
 }
 
-function redactAclList(reply: unknown): unknown {
-  return Array.isArray(reply) ? reply.map((line) => (typeof line === 'string' ? redactAclRule(line) : line)) : reply;
+function redactAclList(reply: unknown, fingerprint?: SecretFingerprint): unknown {
+  return Array.isArray(reply) ? reply.map((line) => (typeof line === 'string' ? redactAclRule(line, fingerprint) : line)) : reply;
 }
 
 // ACL GETUSER: a flat [field, value, ...] array (RESP2) or an object (RESP3);
 // `passwords` holds the hashes, and the flags/commands fields are rule text.
-function redactAclGetUser(reply: unknown): unknown {
+function redactAclGetUser(reply: unknown, fingerprint?: SecretFingerprint): unknown {
   const redactValue = (field: unknown, value: unknown): unknown => {
     if (field === 'passwords' && Array.isArray(value)) {
-      return value.map((hash) => (typeof hash === 'string' && ACL_HASH.test(hash) ? '<redacted>' : hash));
+      return value.map((hash) => (typeof hash === 'string' && ACL_HASH.test(hash) ? redacted(hash, fingerprint) : hash));
     }
-    return typeof value === 'string' ? redactAclRule(value) : value;
+    return typeof value === 'string' ? redactAclRule(value, fingerprint) : value;
   };
   if (Array.isArray(reply)) {
     if (reply.length % 2 !== 0) return reply;
@@ -238,12 +270,17 @@ function redactAclGetUser(reply: unknown): unknown {
  * LIST rules and the `passwords` of ACL GETUSER. Every other reply passes
  * through untouched, so the Monitor's ACL and config views keep working.
  */
-export function redactSensitiveReply(command: string, args: readonly string[] | undefined, reply: unknown): unknown {
+export function redactSensitiveReply(
+  command: string,
+  args: readonly string[] | undefined,
+  reply: unknown,
+  fingerprint?: SecretFingerprint,
+): unknown {
   const cmd = command.toUpperCase();
   const sub = args?.[0]?.toUpperCase();
-  if (cmd === 'CONFIG' && sub === 'GET') return redactConfigGetReply(reply);
-  if (cmd === 'ACL' && sub === 'LIST') return redactAclList(reply);
-  if (cmd === 'ACL' && sub === 'GETUSER') return redactAclGetUser(reply);
+  if (cmd === 'CONFIG' && sub === 'GET') return redactConfigGetReply(reply, fingerprint);
+  if (cmd === 'ACL' && sub === 'LIST') return redactAclList(reply, fingerprint);
+  if (cmd === 'ACL' && sub === 'GETUSER') return redactAclGetUser(reply, fingerprint);
   return reply;
 }
 
@@ -266,6 +303,7 @@ function serverToken(arg: string | undefined): string | undefined {
  * Returns an error message string, or null if allowed.
  */
 export function checkAgentReadOnly(command: string, args?: readonly string[]): string | null {
+  if (hasNul(command, args?.[0])) return AGENT_READ_ONLY_MESSAGE;
   const subCommand = serverToken(args?.[0]);
   // The same RESET sub-commands a read-only member may not run.
   if (subCommand !== undefined && MEMBER_DENIED_SUBCOMMANDS[command]?.has(subCommand)) {

@@ -1,6 +1,7 @@
 import Valkey from 'iovalkey';
 import type { KeyAnalyticsOptions, KeyDetail, KeyPatternData } from '@betterdb/shared';
 import { extractPattern, checkAgentReadOnly, checkBlocked, checkSafeMode, pruneKeyDetails, redactSensitiveReply, KEY_DETAILS_PRUNE_AT, STALE_KEY_IDLE_SECONDS } from '@betterdb/shared';
+import type { SecretFingerprint } from '@betterdb/shared';
 
 // OBJECT IDLETIME is rejected under an LFU maxmemory-policy and OBJECT FREQ
 // under any other; both errors name the LFU policy.
@@ -43,16 +44,19 @@ export class CommandExecutor {
   // holds the admin password, and a compromised or impersonated server must
   // not be able to turn that into a mutation. It overrides unsafeMode.
   private readonly readOnly: boolean;
+  // Tags each redacted secret so a change still shows (see SecretFingerprint).
+  private readonly fingerprint: SecretFingerprint | undefined;
   // Which OBJECT probe the key scan sends; flips when the server's eviction
   // policy rejects the current one (see isLfuPolicyMismatch).
   private keyScanUsesLfu = false;
 
   constructor(
     private readonly client: Valkey,
-    options?: { unsafeMode?: boolean; readOnly?: boolean },
+    options?: { unsafeMode?: boolean; readOnly?: boolean; fingerprint?: SecretFingerprint },
   ) {
     this.unsafeMode = options?.unsafeMode ?? false;
     this.readOnly = options?.readOnly ?? false;
+    this.fingerprint = options?.fingerprint;
   }
 
   isAllowed(cmd: string, args?: string[]): boolean {
@@ -95,7 +99,7 @@ export class CommandExecutor {
 
     const reply = await this.run(upperCmd, effective);
     // Read-only holds the admin user: never ship its password or hashes out.
-    return this.readOnly ? redactSensitiveReply(upperCmd, checked, reply) : reply;
+    return this.readOnly ? redactSensitiveReply(upperCmd, checked, reply, this.fingerprint) : reply;
   }
 
   private async run(upperCmd: string, effective?: (string | Buffer)[]): Promise<unknown> {

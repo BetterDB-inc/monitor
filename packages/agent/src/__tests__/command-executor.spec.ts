@@ -221,6 +221,14 @@ describe('CommandExecutor read-only', () => {
     expect(call.mock.calls[0]).toEqual(['CLIENT', 'LIST', 'ID', 'constructor']);
   });
 
+  it('tags redacted secrets with the fingerprint it was given', async () => {
+    const call = jest.fn().mockResolvedValue([`user app on #${'c'.repeat(64)} ~* +@all`]);
+    const client = { call, config: jest.fn(), info: jest.fn() } as unknown as Valkey;
+    const executor = new CommandExecutor(client, { readOnly: true, fingerprint: () => '1a2b3c4d' });
+
+    expect(await executor.execute('ACL', ['LIST'])).toEqual(['user app on #<redacted:1a2b3c4d> ~* +@all']);
+  });
+
   it('still runs reads', async () => {
     const { executor, call } = executorWith({ readOnly: true });
 

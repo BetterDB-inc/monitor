@@ -1,4 +1,4 @@
-import { checkAgentReadOnly, redactConfigGetReply, redactSensitiveReply, AGENT_READ_ONLY_MESSAGE } from '@betterdb/shared';
+import { checkAgentReadOnly, checkBlocked, checkSafeMode, redactConfigGetReply, redactSensitiveReply, AGENT_READ_ONLY_MESSAGE } from '@betterdb/shared';
 
 describe('redactSensitiveReply', () => {
   const hash = 'a'.repeat(64);
@@ -27,6 +27,45 @@ describe('redactSensitiveReply', () => {
     expect(redactSensitiveReply('ACL', ['USERS'], ['default', 'app'])).toEqual(['default', 'app']);
     expect(redactSensitiveReply('ACL', ['LOG', '10'], [['count', 1]])).toEqual([['count', 1]]);
     expect(redactSensitiveReply('INFO', ['server'], 'redis_version:7')).toBe('redis_version:7');
+  });
+});
+
+describe('redactSensitiveReply with a fingerprint', () => {
+  const hash = 'a'.repeat(64);
+  const other = 'b'.repeat(64);
+  // Stands in for the agent's keyed HMAC.
+  const fingerprint = (secret: string) => secret.slice(0, 4) + String(secret.length);
+
+  it('tags each secret so a changed hash or password still shows', () => {
+    const before = redactSensitiveReply('ACL', ['LIST'], [`user app on #${hash} ~* +@all`], fingerprint) as string[];
+    const after = redactSensitiveReply('ACL', ['LIST'], [`user app on #${other} ~* +@all`], fingerprint) as string[];
+
+    expect(before).toEqual(['user app on #<redacted:aaaa64> ~* +@all']);
+    expect(after).not.toEqual(before);
+    expect(before.join()).not.toContain(hash);
+    expect(redactSensitiveReply('CONFIG', ['GET', 'masterauth'], ['masterauth', 'secret'], fingerprint))
+      .toEqual(['masterauth', '<redacted:secr6>']);
+    expect(redactSensitiveReply('ACL', ['GETUSER', 'app'], { passwords: [hash] }, fingerprint))
+      .toEqual({ passwords: ['<redacted:aaaa64>'] });
+  });
+
+  it('keeps what the agent already redacted when the Monitor redacts again without a key', () => {
+    const fromAgent = redactSensitiveReply('ACL', ['LIST'], [`user app on #${hash} >pw ~*`], fingerprint);
+    expect(redactSensitiveReply('ACL', ['LIST'], fromAgent)).toEqual(fromAgent);
+    const config = redactSensitiveReply('CONFIG', ['GET', '*'], ['requirepass', 'pw', 'maxmemory', '0'], fingerprint);
+    expect(redactSensitiveReply('CONFIG', ['GET', '*'], config)).toEqual(config);
+  });
+});
+
+describe('NUL bytes in command names', () => {
+  it.each([
+    ['CONFIG', 'GET\0'],
+    ['CONFIG\0', 'GET'],
+    ['FLUSHALL\0', undefined],
+  ])('refuses %j %j in every check, as Valkey would read it differently', (command, sub) => {
+    expect(checkBlocked(command, sub)).toMatch(/NUL/);
+    expect(checkSafeMode(command, sub)).toMatch(/NUL/);
+    expect(checkAgentReadOnly(command, sub === undefined ? [] : [sub])).toBe(AGENT_READ_ONLY_MESSAGE);
   });
 });
 

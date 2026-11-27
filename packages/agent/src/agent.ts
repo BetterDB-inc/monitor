@@ -1,6 +1,7 @@
+import { createHmac } from 'crypto';
 import Valkey from 'iovalkey';
 import { isElastiCacheServerlessHost } from '@betterdb/shared';
-import type { AgentIdentity } from '@betterdb/shared';
+import type { AgentIdentity, SecretFingerprint } from '@betterdb/shared';
 import { WsClient } from './ws-client';
 import { CommandExecutor } from './command-executor';
 import { valkeyTlsOptions, ValkeyTlsMaterial } from './valkey-tls';
@@ -41,6 +42,18 @@ export interface AgentConfig {
    * with MOVED.
    */
   clusterReplica?: boolean;
+}
+
+/**
+ * Fingerprints redacted secrets with an HMAC keyed by the Valkey password the
+ * agent holds. The server never sees that key, so the tag reveals nothing it
+ * could test password guesses against, yet it is the same on every node of an
+ * instance (ACL drift) and changes when a secret does (change webhooks).
+ * Without a password there is no key, and secrets stay a plain <redacted>.
+ */
+export function secretFingerprint(key: string | undefined): SecretFingerprint | undefined {
+  if (!key) return undefined;
+  return (secret) => createHmac('sha256', key).update(secret).digest('hex').slice(0, 8);
 }
 
 async function boundedQuit(client: Valkey): Promise<void> {
@@ -107,8 +120,12 @@ export class Agent {
   private missedWelcomes = 0;
   private awaitingWelcome: AgentCommandMessage[] = [];
 
-  private executorOptions(): { unsafeMode: boolean; readOnly: boolean } {
-    return { unsafeMode: this.config.unsafeMode, readOnly: this.config.readOnly === true };
+  private executorOptions(): { unsafeMode: boolean; readOnly: boolean; fingerprint?: SecretFingerprint } {
+    return {
+      unsafeMode: this.config.unsafeMode,
+      readOnly: this.config.readOnly === true,
+      fingerprint: secretFingerprint(this.config.valkeyPassword),
+    };
   }
 
   private async createValkeyClient(connectionName: string): Promise<Valkey> {
