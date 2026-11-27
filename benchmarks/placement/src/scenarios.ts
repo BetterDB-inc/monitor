@@ -487,6 +487,9 @@ const blocks = (
       (nodeId === undefined || each.nodeId === nodeId),
   );
 
+const consistent = (gate: { allowed: boolean; blockers: unknown[] }) =>
+  gate.allowed === (gate.blockers.length === 0);
+
 const worldWith = (change: (world: GateWorld) => void): GateWorld => {
   const world = quietWorld();
   change(world);
@@ -506,7 +509,7 @@ export async function runB4NodeCase(entry: NodeBlockerCase): Promise<ScenarioRes
       checks.push(
         check(
           `blocks as ${entry.kind} on the ${place}`,
-          blocks(gate.blockers, entry.kind, scope, nodeId),
+          !gate.allowed && blocks(gate.blockers, entry.kind, scope, nodeId),
           detail,
         ),
       );
@@ -537,7 +540,7 @@ async function gateChecks(
     checks.push(
       check(
         name,
-        expect(gate),
+        consistent(gate) && expect(gate),
         `blockers ${describeBlockers(gate.blockers)}; warnings ${describeBlockers(gate.warnings)}`,
       ),
     );
