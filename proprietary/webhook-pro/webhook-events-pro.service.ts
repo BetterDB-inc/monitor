@@ -518,6 +518,7 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
         currentVersion: data.currentVersion,
         commands: data.commands,
         topologyRefreshCorrelated: data.topologyRefreshCorrelated,
+        basis: data.basis ?? 'cumulative',
         prefetchBatchMaxSize: data.prefetchBatchMaxSize ?? null,
         runbook: data.runbook,
         message: data.message,

@@ -54,6 +54,8 @@ describe('LatencyRegressionService', () => {
           : [],
       ),
       saveAnomalyEvent: jest.fn().mockResolvedValue('saved'),
+      // No histogram rows by default: the cumulative latencystats path.
+      getLatencyHistograms: jest.fn().mockResolvedValue([]),
     };
     webhook = {
       dispatchLatencyRegressionDetected: jest.fn().mockResolvedValue(undefined),
@@ -298,6 +300,237 @@ describe('LatencyRegressionService', () => {
 
     expect(storage.saveAnomalyEvent).not.toHaveBeenCalled();
     expect(webhook.dispatchLatencyRegressionDetected).not.toHaveBeenCalled();
+  });
+
+  it('reports the cumulative basis when the connection has no histogram rows', async () => {
+    const service = await makeService();
+    await driveUpgradeRegression(service);
+
+    const payload = webhook.dispatchLatencyRegressionDetected.mock.calls[0][0];
+    expect(payload.basis).toBe('cumulative');
+    expect(payload.runbook[0]).toContain('/metrics/latencystats/history');
+    expect(payload.runbook[0]).toContain('X-Connection-Id header set to conn-1');
+    expect(storage.getCommandStatsHistory).toHaveBeenCalledWith(
+      expect.objectContaining({ command: 'hmget' }),
+    );
+  });
+
+  it('falls back to the cumulative path when reading histograms fails', async () => {
+    storage.getLatencyHistograms.mockRejectedValue(new Error('storage down'));
+    const service = await makeService();
+    await driveUpgradeRegression(service);
+
+    const payload = webhook.dispatchLatencyRegressionDetected.mock.calls[0][0];
+    expect(payload.basis).toBe('cumulative');
+  });
+
+  describe('per-interval basis (LATENCY HISTOGRAM deltas)', () => {
+    const BUCKETS = [256, 512, 1024, 2048, 4096, 8192];
+    const CALLS_PER_MIN = 120;
+    let histograms: any[];
+    let cumulativeCalls: number;
+    let cumulative: Record<string, number>;
+
+    /** Adds one minute of traffic landing in `bucket` (cumulative bucket counts, like the server). */
+    function addHistogramMinute(bucket: number, calls = CALLS_PER_MIN) {
+      cumulativeCalls += calls;
+      for (const b of BUCKETS) cumulative[b] += b >= bucket ? calls : 0;
+      histograms.push({
+        id: `h${histograms.length}`,
+        timestamp: now,
+        connectionId: 'conn-1',
+        data: { hmget: { calls: cumulativeCalls, histogram: { ...cumulative } } },
+      });
+    }
+
+    beforeEach(() => {
+      histograms = [];
+      cumulativeCalls = 0;
+      cumulative = Object.fromEntries(BUCKETS.map((b) => [b, 0]));
+      // Same semantics as the storage adapters: filter, newest first, limit (default 1).
+      storage.getLatencyHistograms.mockImplementation(async (opts: any = {}) =>
+        histograms
+          .filter(
+            (h) =>
+              (!opts.startTime || h.timestamp >= opts.startTime) &&
+              (!opts.endTime || h.timestamp <= opts.endTime),
+          )
+          .sort((a, b) => b.timestamp - a.timestamp)
+          .slice(0, opts.limit ?? 1),
+      );
+    });
+
+    async function pollMinute(service: LatencyRegressionService, bucket: number) {
+      now += MINUTE;
+      samples.push(mkSample(200, '8.1.0')); // cumulative latencystats P99 stays flat
+      addHistogramMinute(bucket);
+      await (service as any).pollConnection(ctx());
+    }
+
+    it('fires on a recent regression the flat cumulative latencystats cannot see, with no per-command volume query', async () => {
+      const service = await makeService();
+      for (let i = 0; i < 60; i++) await pollMinute(service, 256);
+      expect(storage.saveAnomalyEvent).not.toHaveBeenCalled();
+      // The first poll has one snapshot (no interval yet) and uses the cumulative path; later polls don't.
+      storage.getCommandStatsHistory.mockClear();
+      for (let i = 0; i < 6; i++) await pollMinute(service, 4096);
+
+      expect(storage.saveAnomalyEvent).toHaveBeenCalledTimes(1);
+      const [event] = storage.saveAnomalyEvent.mock.calls[0];
+      expect(event).toMatchObject({ kind: 'sustained_degradation', commands: ['hmget'] });
+      const payload = webhook.dispatchLatencyRegressionDetected.mock.calls[0][0];
+      expect(payload.basis).toBe('interval');
+      expect(payload.commands[0].callsPerMin).toBeCloseTo(CALLS_PER_MIN, 6);
+
+      // Volume came from the histogram deltas: only the cluster refresh commands are queried.
+      const queried = storage.getCommandStatsHistory.mock.calls.map((c: any[]) => c[0].command);
+      expect(queried).not.toContain('hmget');
+    });
+
+    it('backfills 24h in pages of 240 snapshots, then reads only newer snapshots', async () => {
+      const service = await makeService();
+      now = START + 500 * MINUTE;
+      for (let i = 0; i < 500; i++) {
+        now = START + (i + 1) * MINUTE;
+        addHistogramMinute(256);
+      }
+      samples.push(mkSample(200, '8.1.0'));
+      storage.getLatencyHistograms.mockClear();
+
+      await (service as any).pollConnection(ctx());
+
+      const firstPoll = storage.getLatencyHistograms.mock.calls.map((c: any[]) => c[0]);
+      expect(firstPoll).toHaveLength(3); // 240 + 240 + 20
+      for (const opts of firstPoll) expect(opts).toMatchObject({ connectionId: 'conn-1', limit: 240 });
+      expect(firstPoll[0].endTime).toBe(now);
+      expect(firstPoll[1].endTime).toBeLessThan(firstPoll[0].endTime);
+      expect(firstPoll[2].endTime).toBeLessThan(firstPoll[1].endTime);
+
+      const lastTimestamp = histograms[histograms.length - 1].timestamp;
+      storage.getLatencyHistograms.mockClear();
+      now += MINUTE;
+      samples.push(mkSample(200, '8.1.0'));
+      addHistogramMinute(256);
+      await (service as any).pollConnection(ctx());
+
+      expect(storage.getLatencyHistograms).toHaveBeenCalledTimes(1);
+      expect(storage.getLatencyHistograms.mock.calls[0][0]).toMatchObject({
+        connectionId: 'conn-1',
+        startTime: lastTimestamp + 1,
+        limit: 10,
+      });
+    });
+
+    it('reads every piled-up snapshot instead of only the newest 10', async () => {
+      const service = await makeService();
+      await pollMinute(service, 256);
+      await pollMinute(service, 256);
+      for (let i = 0; i < 15; i++) {
+        now += MINUTE;
+        samples.push(mkSample(200, '8.1.0'));
+        addHistogramMinute(256);
+      }
+      storage.getLatencyHistograms.mockClear();
+
+      await (service as any).pollConnection(ctx());
+
+      expect(storage.getLatencyHistograms).toHaveBeenCalledTimes(2); // 10 + 5
+      const recent = (service as any).intervals.get('conn-1').points.slice(-15);
+      expect(recent).toHaveLength(15);
+      for (const p of recent) expect(p.capturedAt - p.startedAt).toBe(MINUTE);
+    });
+
+    it('falls back to cumulative when histogram rows stop arriving', async () => {
+      const service = await makeService();
+      for (let i = 0; i < 5; i++) await pollMinute(service, 256);
+      expect((service as any).basisLogged.get('conn-1')).toBe('interval');
+      storage.getCommandStatsHistory.mockClear();
+      for (let i = 0; i < 3; i++) {
+        now += MINUTE;
+        samples.push(mkSample(200, '8.1.0')); // latencystats keeps coming, histograms don't
+        await (service as any).pollConnection(ctx());
+      }
+
+      expect((service as any).basisLogged.get('conn-1')).toBe(
+        'cumulative:histogram rows are stale',
+      );
+      expect(storage.getCommandStatsHistory).toHaveBeenCalledWith(
+        expect.objectContaining({ command: 'hmget' }),
+      );
+    });
+
+    /** One minute under the 20-call minimum: a snapshot is written but yields no P99 point. */
+    async function pollQuietMinute(service: LatencyRegressionService) {
+      now += MINUTE;
+      samples.push(mkSample(200, '8.1.0'));
+      addHistogramMinute(256, 5);
+      await (service as any).pollConnection(ctx());
+    }
+
+    it('reports too few calls, not stale rows, when a busy node goes quiet', async () => {
+      const service = await makeService();
+      for (let i = 0; i < 5; i++) await pollMinute(service, 256);
+      expect((service as any).basisLogged.get('conn-1')).toBe('interval');
+
+      for (let i = 0; i < 3; i++) await pollQuietMinute(service);
+
+      expect((service as any).basisLogged.get('conn-1')).toBe(
+        'cumulative:too few calls per interval',
+      );
+    });
+
+    it('reports too few calls for a node that was never busy', async () => {
+      const service = await makeService();
+      for (let i = 0; i < 3; i++) await pollQuietMinute(service);
+
+      expect((service as any).basisLogged.get('conn-1')).toBe(
+        'cumulative:too few calls per interval',
+      );
+    });
+
+    it('logs "not enough histogram data yet" on the first poll with one snapshot', async () => {
+      const service = await makeService();
+      await pollMinute(service, 256);
+      expect((service as any).basisLogged.get('conn-1')).toBe(
+        'cumulative:not enough histogram data yet',
+      );
+    });
+
+    it('warns once while histogram reads keep failing', async () => {
+      storage.getLatencyHistograms.mockRejectedValue(new Error('bad row'));
+      const service = await makeService();
+      const warn = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined);
+      for (let i = 0; i < 3; i++) await pollMinute(service, 256);
+
+      const histogramWarns = warn.mock.calls.filter((c) =>
+        String(c[0]).includes('histogram read failed'),
+      );
+      expect(histogramWarns).toHaveLength(1);
+      expect(String(histogramWarns[0][0])).toContain('bad row');
+    });
+
+    it('points interval findings at the stored histograms, not the cumulative history', async () => {
+      const service = await makeService();
+      for (let i = 0; i < 60; i++) await pollMinute(service, 256);
+      for (let i = 0; i < 6; i++) await pollMinute(service, 4096);
+
+      const payload = webhook.dispatchLatencyRegressionDetected.mock.calls[0][0];
+      expect(payload.runbook[0]).toContain('/latency-analytics/histograms');
+      expect(payload.runbook[0]).toContain('X-Connection-Id header set to conn-1');
+      expect(payload.runbook[0]).not.toContain('Compare per-command P99 before/after');
+    });
+
+    it('forgets the interval window when the connection is removed', async () => {
+      const service = await makeService();
+      await pollMinute(service, 256);
+      await pollMinute(service, 256);
+      expect((service as any).intervals.has('conn-1')).toBe(true);
+
+      (service as any).onConnectionRemoved('conn-1');
+
+      expect((service as any).intervals.has('conn-1')).toBe(false);
+      expect((service as any).basisLogged.has('conn-1')).toBe(false);
+    });
   });
 });
 

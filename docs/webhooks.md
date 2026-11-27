@@ -687,6 +687,27 @@ Fires once per connection and reason when a footprint collection finds LMCache a
 }
 ```
 
+#### latency.regression.detected (Pro)
+
+Fires when a command's P99 latency regresses after an upgrade or degrades for a sustained period. `basis` says how the P99s were measured: `interval` (per-minute `LATENCY HISTOGRAM` deltas, estimated inside factor-2 buckets) or `cumulative` (`INFO latencystats` since server start, used when the connection has no usable histogram data; `+latency|histogram` enables `interval`). `runbook` differs by basis: cumulative findings point to `GET /metrics/latencystats/history`; interval findings point to the stored histograms instead, because that endpoint is cumulative. The first step names the `X-Connection-Id` header to send, with the ID of the affected connection (`env-default` in the example).
+
+```json
+{
+  "kind": "sustained_degradation",
+  "currentVersion": "8.1.0",
+  "commands": [
+    { "command": "hmget", "baselineP99Us": 2000, "currentP99Us": 6000, "degradationFactor": 3, "callsPerMin": 120 }
+  ],
+  "topologyRefreshCorrelated": false,
+  "basis": "interval",
+  "prefetchBatchMaxSize": null,
+  "runbook": ["This finding uses per-minute P99s from consecutive LATENCY HISTOGRAM snapshots: compare the bucket deltas of each command before and after the change via GET /latency-analytics/histograms with the X-Connection-Id header set to env-default (and startTime, endTime, limit). GET /metrics/latencystats/history is cumulative since server start and can look flat for this regression."],
+  "message": "Sustained P99 latency degradation: hmget p99 6.0ms (baseline 2.0ms, 3.0x).",
+  "timestamp": 1735689600000,
+  "instance": { "host": "valkey.example.com", "port": 6379 }
+}
+```
+
 #### retry_amplification.detected (Pro)
 
 Fires when the anomaly detector sees a self-sustaining retry loop rather than a transient blip. Polls are grouped into 60-second windows and compared with the median of the last 30 normal windows (detection starts after 10). A window is hot when commands per client are at least 1.3× baseline, ops/s at least 1.2× baseline and the client count within ±15% of baseline, while a P99 latency regression, an error-reply burst or connection churn is present. A burst shorter than 3 hot windows is treated as transient and never alerts. After 3 hot windows the event fires in one of two shapes, given in `pattern`:
