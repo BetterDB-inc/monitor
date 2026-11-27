@@ -37,6 +37,7 @@ import { AnomalyService } from '../anomaly-detection/anomaly.service';
 import type { ServedHotShardDetail } from '../anomaly-detection/hot-shard-detector';
 import {
   DEFAULT_REBALANCE_POLICY,
+  PlacementPolicyUnreadableError,
   type RebalanceExecution,
   type RebalancePolicy,
 } from '../anomaly-detection/rebalance-planner';
@@ -79,11 +80,7 @@ export class PlacementPolicyConflictError extends Error {
   }
 }
 
-export class PlacementPolicyUnreadableError extends Error {
-  constructor(readonly problems: string[]) {
-    super(`The exclusions of the stored placement policy cannot be read: ${problems.join('; ')}`);
-  }
-}
+export { PlacementPolicyUnreadableError };
 
 export interface PlacementSettingsRead {
   settings: PlacementSettings;

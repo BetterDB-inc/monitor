@@ -137,8 +137,10 @@ import {
   type ShardMemory,
   type ShardServer,
   DEFAULT_REBALANCE_POLICY,
+  PlacementPolicyUnreadableError,
   describeNoPlan,
   memoryWarnings,
+  movesExcludedBy,
   noRebalancePlan,
   planRebalances,
   shardMemoryFromInfo,
@@ -1004,6 +1006,7 @@ export class AnomalyService
     Map<string, { verdict: RebalanceVerdict; computedAt: number; ownership: string }>
   >();
   private rebalancePolicyResolver: ((seedId: string) => Promise<RebalancePolicy>) | null = null;
+  private rebalancePolicyWarned = new Map<string, string>();
   private rebalanceRuns = new Map<string, Map<string, RebalanceRun>>();
   private rebalanceStarting = new Set<string>();
   private rebalanceFollowedAt = new Map<string, number>();
@@ -7193,6 +7196,12 @@ export class AnomalyService
     return this.rebalancePolicyResolver(this.seedIdOf(connectionId) ?? connectionId);
   }
 
+  private warnRebalancePolicy(connectionId: string, message: string): void {
+    if (this.rebalancePolicyWarned.get(connectionId) === message) return;
+    this.rebalancePolicyWarned.set(connectionId, message);
+    this.logger.warn(message);
+  }
+
   private holdRebalance(connectionId: string, reason: RebalanceNoPlanReason): void {
     this.hotShardRebalance.delete(connectionId);
     const details = this.hotShardDetails.get(connectionId);
@@ -7210,7 +7219,15 @@ export class AnomalyService
     nodes: ClusterNode[],
   ): void {
     const blocker = this.rebalanceTopologyBlocker(sample, nodes);
-    if (!blocker) return;
+    if (blocker) this.holdTrackedRebalance(connectionId, timestamp, findings, blocker);
+  }
+
+  private holdTrackedRebalance(
+    connectionId: string,
+    timestamp: number,
+    findings: HotShardFinding[],
+    blocker: RebalanceNoPlanReason,
+  ): void {
     const eventIds = this.hotShardEventIds.get(connectionId);
     const held = new Map(
       findings
@@ -7240,8 +7257,18 @@ export class AnomalyService
     let stored: RebalancePolicy;
     try {
       stored = await this.rebalancePolicyFor(connectionId);
-    } catch {
-      this.holdRebalanceOnTopology(connectionId, timestamp, sample, findings, nodes);
+      this.rebalancePolicyWarned.delete(connectionId);
+    } catch (err) {
+      const unreadable = err instanceof PlacementPolicyUnreadableError;
+      this.warnRebalancePolicy(
+        connectionId,
+        unreadable
+          ? `No slot moves are planned for ${connectionId}: ${errorText(err)}`
+          : `Could not read the placement policy of ${connectionId}, so the last rebalance verdicts stand: ${errorText(err)}`,
+      );
+      if (unreadable)
+        this.holdTrackedRebalance(connectionId, timestamp, findings, 'policy_unreadable');
+      else this.holdRebalanceOnTopology(connectionId, timestamp, sample, findings, nodes);
       return;
     }
     const policy: RebalancePolicy = {
@@ -12073,7 +12100,23 @@ export class AnomalyService
         if (!remade) return changed('plan_changed');
         plan = latest;
       }
-      const failure = recheckFailure(plan, nodes);
+      let policy: RebalancePolicy;
+      try {
+        policy = await this.rebalancePolicyFor(connectionId);
+      } catch (err) {
+        return {
+          status: 'refused',
+          message: `Could not read the placement policy: ${errorText(err)}`,
+        };
+      }
+      const excluded = movesExcludedBy(plan, {
+        ...policy,
+        excludedShardIds: excludedPrimaryIds(
+          policy.excludedShardIds,
+          nodes.map((node) => ({ id: node.id, master: node.masterId ?? '-' })),
+        ),
+      });
+      const failure = recheckFailure(plan, nodes) ?? (excluded ? 'policy_excludes' : undefined);
       const source = nodes.find((node) => node.id === plan.sourceShardId);
       if (failure || !source) {
         this.hotShardRebalance.get(connectionId)?.delete(signature);
