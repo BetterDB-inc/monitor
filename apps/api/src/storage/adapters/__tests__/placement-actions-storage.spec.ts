@@ -7,8 +7,10 @@ import {
   type PlacementActionState,
   type PlacementStep,
 } from '@betterdb/shared';
+import { Client } from 'pg';
 import { SqliteAdapter } from '../sqlite.adapter';
 import { MemoryAdapter } from '../memory.adapter';
+import { PostgresAdapter } from '../postgres.adapter';
 import { adapters, type AdapterFactory } from './anomaly-storage-adapters';
 import type { StoragePort } from '../../../common/interfaces/storage-port.interface';
 
@@ -31,6 +33,19 @@ const inProcess =
     await storage.initialize();
     return { storage, cleanup: () => storage.close() };
   };
+
+function statementsOf(storage: StoragePort): () => string[] {
+  if (storage instanceof SqliteAdapter) {
+    const db = (storage as unknown as { db: { prepare: (sql: string) => unknown } }).db;
+    const prepare = jest.spyOn(db, 'prepare');
+    return () => prepare.mock.calls.map(([sql]) => String(sql));
+  }
+  if (storage instanceof PostgresAdapter) {
+    const query = jest.spyOn(Client.prototype, 'query');
+    return () => query.mock.calls.map(([sql]) => String(sql));
+  }
+  return () => [];
+}
 
 function action(id: string, overrides: Partial<PlacementAction> = {}): PlacementAction {
   return {
@@ -84,7 +99,7 @@ function step(
     cancelRequestedAt: null,
     cancelAcceptedAt: null,
     failedBeforeCancel: null,
-    bytesEstimated: 1024,
+    bytesEstimated: 1536.75,
     keysMoved: 0,
     slotsMoved: 0,
     slotCpuBefore: 12.5,
@@ -113,7 +128,10 @@ describe.each([
   beforeEach(async () => {
     ({ storage, cleanup } = await make());
   });
-  afterEach(async () => cleanup());
+  afterEach(async () => {
+    jest.restoreAllMocks();
+    await cleanup();
+  });
 
   it('stores an action with its steps and reads them back in step order', async () => {
     const stored = action('a1', {
@@ -161,6 +179,14 @@ describe.each([
     expect(await storage.acquirePlacementLock('a1', ['n1', 'n2'], 1)).toBe(true);
     expect(await storage.acquirePlacementLock('a2', ['n3', 'n2'], 2)).toBe(false);
     expect(await storage.acquirePlacementLock('a3', ['n3'], 3)).toBe(true);
+  });
+
+  it('lets one of two actions locking the same nodes in opposite order win', async () => {
+    const results = await Promise.all([
+      storage.acquirePlacementLock('a1', ['n1', 'n2', 'n3'], 1),
+      storage.acquirePlacementLock('a2', ['n3', 'n2', 'n1'], 1),
+    ]);
+    expect(results.sort()).toEqual([false, true]);
   });
 
   it('frees the lock when the action ends, and keeps it while the action is open', async () => {
@@ -245,6 +271,18 @@ describe.each([
     expect(open.map((each) => each.id).sort()).toEqual(['a0', 'a1', 'a3']);
   });
 
+  it('lists the open actions oldest first', async () => {
+    for (const [id, createdAt] of [
+      ['late', 300],
+      ['early', 100],
+      ['mid', 200],
+    ] as const) {
+      await storage.createPlacementAction(action(id, { createdAt }), []);
+    }
+    const open = await storage.listOpenPlacementActions();
+    expect(open.map((each) => each.id)).toEqual(['early', 'mid', 'late']);
+  });
+
   it('pages the actions of one connection, newest first', async () => {
     for (let index = 0; index < 5; index++) {
       await storage.createPlacementAction(
@@ -317,6 +355,18 @@ describe.each([
     });
   });
 
+  it('reads the steps since a time in action and step order', async () => {
+    await storage.createPlacementAction(action('z1'), [
+      step('z1', 0, { state: 'sending', sendingAt: 500 }),
+      step('z1', 1, { state: 'sending', sendingAt: 500 }),
+    ]);
+    await storage.createPlacementAction(action('a1'), [
+      step('a1', 0, { state: 'sending', sendingAt: 500 }),
+    ]);
+    const since = await storage.placementStepsSince('conn-a', 400);
+    expect(since.map((each) => `${each.actionId}:${each.index}`)).toEqual(['a1:0', 'z1:0', 'z1:1']);
+  });
+
   it('counts the sent steps of ended actions in the hourly jobs, as replaced runs were', async () => {
     const hourAgo = 10_000;
     await storage.createPlacementAction(
@@ -360,6 +410,38 @@ describe.each([
     expect(await storage.updatePlacementStep('a1', 0, null, {})).toEqual(sent);
   });
 
+  it('answers a create, a transition and a step update from the write, with no read after it', async () => {
+    const statements = statementsOf(storage);
+    const read = jest.spyOn(storage, 'getPlacementAction');
+
+    await storage.createPlacementAction(action('a1'), [step('a1', 0)]);
+    await storage.transitionPlacementAction('a1', ['proposed'], { state: 'approved' });
+    await storage.updatePlacementStep('a1', 0, ['planned'], { state: 'sending', sendingAt: 1 });
+
+    expect(read).not.toHaveBeenCalled();
+    expect(statements().filter((sql) => /^\s*SELECT\b/i.test(sql))).toEqual([]);
+    expect(statements().some((sql) => sql.includes('RETURNING'))).toBe(_name !== 'memory');
+  });
+
+  it('leaves a field alone when a patch sets it to undefined', async () => {
+    await storage.createPlacementAction(action('a1', { message: 'kept' }), [
+      step('a1', 0, { job: { state: 'running' } }),
+    ]);
+
+    const moved = await storage.transitionPlacementAction('a1', ['proposed'], {
+      state: 'approved',
+      message: undefined,
+    });
+    const updated = await storage.updatePlacementStep('a1', 0, null, {
+      job: undefined,
+      keysMoved: 4,
+    });
+
+    expect(moved?.message).toBe('kept');
+    expect(updated).toMatchObject({ job: { state: 'running' }, keysMoved: 4 });
+    expect((await storage.getPlacementAction('a1'))?.action.message).toBe('kept');
+  });
+
   it('prunes ended actions with their steps, keeping open and recent ones', async () => {
     await storage.createPlacementAction(action('old', { state: 'succeeded', endedAt: 100 }), [
       step('old', 0, { state: 'done', sendingAt: 50, endedAt: 90 }),
@@ -376,5 +458,7 @@ describe.each([
     expect(await storage.placementStepsSince('conn-a', 0)).toEqual([
       expect.objectContaining({ actionId: 'open' }),
     ]);
+    await storage.createPlacementAction(action('old'), []);
+    expect((await storage.getPlacementAction('old'))?.steps).toEqual([]);
   });
 });

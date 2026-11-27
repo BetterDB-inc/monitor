@@ -556,7 +556,7 @@ const PLACEMENT_ACTIONS_DDL = `
     cancel_requested_at INTEGER,
     cancel_accepted_at INTEGER,
     failed_before_cancel TEXT,
-    bytes_estimated INTEGER NOT NULL,
+    bytes_estimated REAL NOT NULL,
     keys_moved INTEGER NOT NULL,
     slots_moved INTEGER NOT NULL,
     slot_cpu_before REAL NOT NULL,
@@ -565,10 +565,6 @@ const PLACEMENT_ACTIONS_DDL = `
     ended_at INTEGER,
     PRIMARY KEY (action_id, step_index)
   );
-  CREATE INDEX IF NOT EXISTS idx_placement_steps_sending
-    ON placement_steps(sending_at);
-  CREATE INDEX IF NOT EXISTS idx_placement_steps_ended
-    ON placement_steps(ended_at);
 
   CREATE TABLE IF NOT EXISTS placement_locks (
     node_id TEXT PRIMARY KEY,

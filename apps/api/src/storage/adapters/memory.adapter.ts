@@ -175,6 +175,12 @@ function pendingProposalSubDiscriminator(p: {
   return null;
 }
 
+function definedOf<T extends object>(patch: T): Partial<T> {
+  return Object.fromEntries(
+    Object.entries(structuredClone(patch)).filter(([, value]) => value !== undefined),
+  ) as Partial<T>;
+}
+
 export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   private aclEntries: StoredAclEntry[] = [];
   private clientSnapshots: StoredClientSnapshot[] = [];
@@ -1571,9 +1577,9 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async listOpenPlacementActions(): Promise<PlacementAction[]> {
     return structuredClone(
-      [...this.placementActions.values()].filter(
-        (action) => !PLACEMENT_TERMINAL_STATES.includes(action.state),
-      ),
+      [...this.placementActions.values()]
+        .filter((action) => !PLACEMENT_TERMINAL_STATES.includes(action.state))
+        .sort((a, b) => a.createdAt - b.createdAt),
     );
   }
 
@@ -1584,7 +1590,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   ): Promise<PlacementAction | null> {
     const current = this.placementActions.get(id);
     if (!current || !from.includes(current.state)) return null;
-    const next = { ...current, ...structuredClone(patch), id, connectionId: current.connectionId };
+    const next = { ...current, ...definedOf(patch), id, connectionId: current.connectionId };
     this.placementActions.set(id, next);
     if (PLACEMENT_TERMINAL_STATES.includes(next.state)) {
       for (const [nodeId, lock] of this.placementLocks) {
@@ -1605,7 +1611,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!steps || position < 0) return null;
     const current = steps[position];
     if (from && !from.includes(current.state)) return null;
-    const next = { ...current, ...structuredClone(patch), actionId, index };
+    const next = { ...current, ...definedOf(patch), actionId, index };
     steps[position] = next;
     return structuredClone(next);
   }
@@ -1646,7 +1652,10 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
         }
       }
     }
-    return steps;
+    return steps.sort(
+      (a, b) =>
+        (a.actionId < b.actionId ? -1 : a.actionId > b.actionId ? 1 : 0) || a.index - b.index,
+    );
   }
 
   async prunePlacementActions(before: number): Promise<number> {

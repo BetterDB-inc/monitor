@@ -2898,7 +2898,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         cancel_requested_at BIGINT,
         cancel_accepted_at BIGINT,
         failed_before_cancel TEXT,
-        bytes_estimated BIGINT NOT NULL,
+        bytes_estimated DOUBLE PRECISION NOT NULL,
         keys_moved BIGINT NOT NULL,
         slots_moved INTEGER NOT NULL,
         slot_cpu_before DOUBLE PRECISION NOT NULL,
@@ -2907,10 +2907,6 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         ended_at BIGINT,
         PRIMARY KEY (action_id, step_index)
       );
-      CREATE INDEX IF NOT EXISTS idx_placement_steps_sending
-        ON placement_steps(sending_at);
-      CREATE INDEX IF NOT EXISTS idx_placement_steps_ended
-        ON placement_steps(ended_at);
 
       CREATE TABLE IF NOT EXISTS placement_locks (
         node_id TEXT PRIMARY KEY,
@@ -5052,17 +5048,18 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     now: number,
   ): Promise<boolean> {
     if (!this.pool) throw new Error('Database not initialized');
-    const unique = [...new Set(nodeIds)];
+    const unique = [...new Set(nodeIds)].sort();
     if (unique.length === 0) return true;
     try {
       await this.pool.query(
         `INSERT INTO placement_locks (node_id, action_id, acquired_at)
-         SELECT node_id, $2, $3 FROM UNNEST($1::text[]) AS node_id`,
+         SELECT node_id, $2, $3 FROM UNNEST($1::text[]) AS node_id ORDER BY node_id`,
         [unique, actionId, now],
       );
       return true;
     } catch (error) {
-      if ((error as { code?: string }).code === '23505') return false;
+      const code = (error as { code?: string }).code;
+      if (code === '23505' || code === '40P01') return false;
       throw error;
     }
   }
