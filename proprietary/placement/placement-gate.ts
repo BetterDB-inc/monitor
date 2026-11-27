@@ -79,6 +79,7 @@ const REPLICA_EVENTS: Record<string, PlacementBlockerKind> = {
 const SOURCE_SYMPTOMS = new Set(['command_p99', 'load_saturation', 'cpu_utilization']);
 
 const INCIDENT_IGNORED = new Set([
+  'cluster_state',
   'hot_shard',
   'reshard_shard_skew',
   'slot_migration',

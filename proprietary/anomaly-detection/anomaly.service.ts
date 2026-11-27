@@ -7558,7 +7558,7 @@ export class AnomalyService
           limit: OPEN_EVENT_PAGE_SIZE,
           after,
         });
-        open.push(...page);
+        open.push(...page.filter((event) => wanted.has(event.metricType)));
         if (page.length < OPEN_EVENT_PAGE_SIZE) break;
         after = page[page.length - 1];
       }
@@ -7569,7 +7569,6 @@ export class AnomalyService
           .map((event) => event.timestamp),
       );
       for (const event of open) {
-        if (!wanted.has(event.metricType)) continue;
         if (
           event.metricType === MetricType.CLUSTER_STATE &&
           (event.value === 1 || event.timestamp <= recoveredAt)
@@ -7592,10 +7591,11 @@ export class AnomalyService
   }
 
   async placementIncidents(connectionId: string): Promise<PlacementGateIncident[]> {
-    const hourAgo = Date.now() - 60 * 60_000;
-    const from = Math.min(
-      hourAgo,
-      this.placementIncidentSince.get(connectionId) ?? Date.now() - MAX_INCIDENT_LOOKBACK_MS,
+    const now = Date.now();
+    const hourAgo = now - 60 * 60_000;
+    const from = Math.max(
+      now - MAX_INCIDENT_LOOKBACK_MS,
+      Math.min(hourAgo, this.placementIncidentSince.get(connectionId) ?? hourAgo),
     );
     const incidents = await this.readIncidentTimelines(
       connectionId,
@@ -7605,8 +7605,15 @@ export class AnomalyService
       true,
     );
     const open = incidents.filter((incident) => incident.recovery.status !== 'recovered');
-    const oldest = Math.min(hourAgo, ...open.map((incident) => incident.lastEventAt));
-    this.placementIncidentSince.set(connectionId, oldest);
+    const lasting = open.filter((incident) => incident.recovery.openSignals.length > 0);
+    if (lasting.length > 0) {
+      this.placementIncidentSince.set(
+        connectionId,
+        Math.min(...lasting.map((incident) => incident.startedAt)),
+      );
+    } else {
+      this.placementIncidentSince.delete(connectionId);
+    }
     return open.map((incident) => ({
       recovery: incident.recovery.status,
       patterns: [

@@ -155,6 +155,32 @@ describe('readPlacementGateFacts', () => {
     ]);
   });
 
+  it('maps an address that two nodes share to neither of them', async () => {
+    const nodes = [read('s1', 's1'), read('t1', 't1')].map((node) => ({
+      ...node,
+      address: '10.0.0.9:7000',
+    }));
+    const stub = port(
+      {
+        placementOpenEvents: jest.fn(async () => [
+          {
+            metricType: 'persistence_child',
+            nodeId: null,
+            address: '10.0.0.9:7000',
+            openedAt: NOW,
+          },
+        ]),
+      },
+      nodes,
+    );
+    const result = await gateOf(
+      readPlacementGateFacts(stub, warmed('seed', nodes), 'seed', context, NOW),
+    );
+    expect(result.blockers.map((each) => `${each.kind}:${each.scope}:${each.nodeId}`)).toEqual([
+      'fork:cluster:undefined',
+    ]);
+  });
+
   it('gives a node the monitor does not collect only the stand-ins', async () => {
     const nodes = [read('s1', 's1'), read('t1', 't1'), read('t2', 't1', false)];
     const readNodes = jest.fn(async () => nodeFacts(nodes));
