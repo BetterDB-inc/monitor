@@ -182,6 +182,29 @@ describe.each([
   });
 });
 
+describe.each([
+  ['sqlite', () => new SqliteAdapter({ filepath: tempDbPath() })],
+  ['libsql', () => new SqliteAdapter({ url: `file:${tempDbPath()}` })],
+])('%s adapter placement settings save', (_name, make) => {
+  it('returns the row each save wrote without reading it back', async () => {
+    const storage = make();
+    await storage.initialize();
+    const readBack = jest.spyOn(
+      storage as unknown as { readPlacementPolicy(connectionId: string): unknown },
+      'readPlacementPolicy',
+    );
+    const write = { connectionId: 'conn-a', updatedAt: 3_000, modeIfNew: 'recommend' as const };
+    expect(await storage.savePlacementSettings({ ...write, settings: tighter }, 0)).toEqual(
+      stored('conn-a', 'recommend', 3_000, tighter, 1),
+    );
+    expect(
+      await storage.savePlacementSettings({ ...write, settings: DEFAULT_PLACEMENT_SETTINGS }, 1),
+    ).toEqual(stored('conn-a', 'recommend', 3_000, DEFAULT_PLACEMENT_SETTINGS, 2));
+    expect(readBack).not.toHaveBeenCalled();
+    await storage.close();
+  });
+});
+
 describe('sqlite placement policy upgrade', () => {
   it('puts connections that existed before the table on recommend', async () => {
     const filepath = tempDbPath();
