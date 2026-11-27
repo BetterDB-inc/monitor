@@ -50,6 +50,8 @@ export const DEFAULT_PLACEMENT_SETTINGS: Readonly<PlacementSettings> = Object.fr
   autoRollback: true,
 });
 
+export const PLACEMENT_RESOLVE_RATIO_CAP = 1.5;
+
 export function defaultPlacementSettings(): PlacementSettings {
   return {
     ...DEFAULT_PLACEMENT_SETTINGS,

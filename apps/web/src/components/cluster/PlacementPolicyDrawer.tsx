@@ -31,7 +31,7 @@ const NUMBER_FIELDS: { field: NumberField; label: string; hint: string; step: st
   {
     field: 'resolveRatio',
     label: 'Resolve ratio',
-    hint: 'A suggested slot move aims to bring the hot shard under this multiple of the median.',
+    hint: 'A suggested slot move aims to bring the hot shard under this multiple of the median. Must be below the trigger ratio and below 1.5.',
     step: '0.05',
   },
   {
