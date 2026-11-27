@@ -13,6 +13,7 @@ export const RESHARD_DIVERGENCE_PRESSURE_MAX_SPAN_MS = 15 * MIN;
 export const RETRY_STORM_MAX_SPAN_MS = 10 * MIN;
 export const BACKLOG_EXHAUSTION_MAX_SPAN_MS = 30 * MIN;
 export const SPLIT_BRAIN_MAX_SPAN_MS = 15 * MIN;
+export const SPLIT_BRAIN_TOPOLOGY_LEAD_MS = 2 * MIN;
 export const HOT_SHARD_LATENCY_MAX_SPAN_MS = 15 * MIN;
 export const HOT_SHARD_LATENCY_LEAD_MS = 10 * MIN;
 export const MIGRATION_REDIRECTS_MAX_SPAN_MS = 15 * MIN;
@@ -138,17 +139,19 @@ registerSequenceRule({
   pattern: AnomalyPattern.SPLIT_BRAIN,
   steps: [
     [MetricType.TOPOLOGY_DIVERGENCE, MetricType.PARTIAL_MEMBERSHIP],
-    [MetricType.CLUSTER_TOPOLOGY, MetricType.REPLICATION_ROLE],
+    [MetricType.CLUSTER_TOPOLOGY],
   ],
-  optionalMetrics: [MetricType.FAILOVER_CHURN, MetricType.ERROR_REPLIES],
+  optionalMetrics: [MetricType.REPLICATION_ROLE, MetricType.FAILOVER_CHURN, MetricType.ERROR_REPLIES],
   directions: { [MetricType.ERROR_REPLIES]: 'rise' },
   // A stuck replica is also a cluster_topology event, as a warning. A duplicate primary is critical.
   minSeverity: { [MetricType.CLUSTER_TOPOLOGY]: AnomalySeverity.CRITICAL },
   maxSpanMs: SPLIT_BRAIN_MAX_SPAN_MS,
-  sameConnectionAnyNode: true,
-  supersedes: [AnomalyPattern.MEMBERSHIP_FAILOVER],
+  // A duplicate primary is raised on the first poll that sees it, a disagreement only once confirmed.
+  leadMs: { 1: SPLIT_BRAIN_TOPOLOGY_LEAD_MS },
+  // The two rules give opposite CLUSTER FORGET advice, so one incident never lists both.
+  supersedesInIncident: [AnomalyPattern.MEMBERSHIP_FAILOVER],
   diagnosis:
-    'Nodes stopped agreeing on who is in the cluster, and then two primaries claimed the same slots or a node changed role. ' +
+    'Nodes disagreed on who is in the cluster, and two primaries claimed the same slots. ' +
     'Writes accepted by the primary that loses will be dropped when the cluster converges.',
   recommendations: [
     'Check the network between the nodes on each side of the disagreement before you touch the cluster',
@@ -164,7 +167,6 @@ registerSequenceRule({
   directions: { [MetricType.COMMAND_P99]: 'rise', [MetricType.ERROR_REPLIES]: 'rise' },
   maxSpanMs: HOT_SHARD_LATENCY_MAX_SPAN_MS,
   leadMs: { 1: HOT_SHARD_LATENCY_LEAD_MS },
-  sameConnectionAnyNode: true,
   diagnosis: 'One shard carried far more load than the others, and tail latency rose with it.',
   recommendations: [
     'Open the hot shard and review the suggested slot rebalance',
@@ -182,7 +184,6 @@ registerSequenceRule({
   optionalMetrics: [MetricType.RETRY_AMPLIFICATION],
   directions: { [MetricType.ERROR_REPLIES]: 'rise', [MetricType.COMMAND_P99]: 'rise' },
   maxSpanMs: MIGRATION_REDIRECTS_MAX_SPAN_MS,
-  sameConnectionAnyNode: true,
   diagnosis:
     'A slot migration was running when errors or tail latency rose: clients are being redirected (ASK, TRYAGAIN) or waiting on keys being moved.',
   recommendations: [
@@ -200,7 +201,6 @@ registerSequenceRule({
   ],
   optionalMetrics: [MetricType.TOPOLOGY_DIVERGENCE],
   maxSpanMs: MEMBERSHIP_FAILOVER_MAX_SPAN_MS,
-  sameConnectionAnyNode: true,
   diagnosis:
     'A node that only part of the cluster knows about, or that should be gone, was followed by repeated failovers.',
   recommendations: [

@@ -81,9 +81,7 @@ export function sameSource(a: EventSource, b: EventSource): boolean {
 }
 
 export function sourceMatches(rule: SequenceRule, a: EventSource, b: EventSource): boolean {
-  if (rule.sameConnection) return sameSource(a, b);
-  if (rule.sameConnectionAnyNode) return (a.connectionId ?? '') === (b.connectionId ?? '');
-  return true;
+  return !rule.sameConnection || sameSource(a, b);
 }
 
 function sourceKey(event: EventSource): string {
@@ -727,8 +725,9 @@ export class IncidentTimelineBuilder {
       const required = requiredOf(rule, matched);
       return found.some(
         (other) =>
-          other.rule.supersedes?.includes(match.pattern) &&
-          requiredOf(other.rule, other.matched).some((e) => required.includes(e)),
+          other.rule.supersedesInIncident?.includes(match.pattern) ||
+          (other.rule.supersedes?.includes(match.pattern) &&
+            requiredOf(other.rule, other.matched).some((e) => required.includes(e))),
       );
     };
     const sequenceMatches: IncidentSequenceMatch[] = [];

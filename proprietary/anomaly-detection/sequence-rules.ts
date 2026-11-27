@@ -19,10 +19,10 @@ export interface SequenceRule {
   maxSpanMs: number;
   leadMs?: Readonly<Record<number, number>>;
   sameConnection?: boolean;
-  /** Same connection, any node: for cluster rules whose steps come from different nodes. */
-  sameConnectionAnyNode?: boolean;
   carriesFirstStep?: (event: StepEvidence) => boolean;
   supersedes?: readonly AnomalyPattern[];
+  /** Replaced whenever this rule matches in the same incident, with or without a shared step. */
+  supersedesInIncident?: readonly AnomalyPattern[];
   diagnosis: string;
   recommendations: string[];
 }
@@ -38,11 +38,6 @@ const DIRECTION_OF: Record<AnomalyType, StepDirection> = {
 const rules: SequenceRule[] = [];
 
 export function registerSequenceRule(rule: SequenceRule): void {
-  if (rule.sameConnection && rule.sameConnectionAnyNode) {
-    throw new Error(
-      `Sequence rule ${rule.pattern} sets both sameConnection and sameConnectionAnyNode`,
-    );
-  }
   if (rule.steps.length === 0 || rule.steps.some((step) => step.length === 0)) {
     throw new Error(`Sequence rule ${rule.pattern} needs at least one metric in every step`);
   }
@@ -74,7 +69,7 @@ export function registerSequenceRule(rule: SequenceRule): void {
   if (rule.carriesFirstStep && rule.steps.length < 2) {
     throw new Error(`Sequence rule ${rule.pattern} needs a second step to carry its first step`);
   }
-  if (rule.supersedes?.includes(rule.pattern)) {
+  if ([...(rule.supersedes ?? []), ...(rule.supersedesInIncident ?? [])].includes(rule.pattern)) {
     throw new Error(`Sequence rule ${rule.pattern} cannot supersede itself`);
   }
   if (rules.some((existing) => existing.pattern === rule.pattern)) {

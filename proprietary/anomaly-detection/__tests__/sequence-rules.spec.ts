@@ -98,6 +98,12 @@ describe('sequence rule registry', () => {
     ).toThrow(/supersede itself/);
   });
 
+  it('rejects a rule that supersedes itself within an incident', () => {
+    expect(() =>
+      registry.registerSequenceRule({ ...rule, supersedesInIncident: [AnomalyPattern.BATCH_JOB] }),
+    ).toThrow(/supersede itself/);
+  });
+
   it('rejects carriesFirstStep on a one-step rule', () => {
     expect(() =>
       registry.registerSequenceRule({ ...rule, steps: [[MetricType.OPS_PER_SEC]], carriesFirstStep: () => true }),

@@ -15,6 +15,7 @@ import {
   RESHARD_UNDER_WRITES_MAX_SPAN_MS,
   RETRY_STORM_MAX_SPAN_MS,
   SPLIT_BRAIN_MAX_SPAN_MS,
+  SPLIT_BRAIN_TOPOLOGY_LEAD_MS,
 } from '../incident-sequence-rules';
 import { RESYNC_ESCALATION_WINDOW_MS } from '../recovery-amplification-detector';
 import { SequenceRule, getSequenceRules } from '../sequence-rules';
@@ -70,9 +71,6 @@ function patternsOf(events: AnomalyEvent[], pattern: AnomalyPattern, scope = (id
 const drop = (metric: MetricType, at: number, connectionId = 'conn-a') =>
   event(metric, at, connectionId, AnomalyType.DROP);
 
-/** What a rule's events must share: a node of one connection, one connection, or only the cluster. */
-type Scope = 'node' | 'connection' | 'cluster';
-
 interface RuleCase {
   pattern: AnomalyPattern;
   steps: MetricType[];
@@ -80,7 +78,7 @@ interface RuleCase {
   optional?: MetricType;
   spanMs: number;
   lead?: { step: number; ms: number };
-  scope: Scope;
+  sameConnection: boolean;
   rising: MetricType[];
 }
 
@@ -104,7 +102,7 @@ const cases: RuleCase[] = [
     optional: MetricType.EVICTED_KEYS,
     spanMs: DIVERGENCE_UNDER_PRESSURE_MAX_SPAN_MS,
     lead: { step: 2, ms: DIVERGENCE_UNDER_PRESSURE_MAX_SPAN_MS },
-    scope: 'node',
+    sameConnection: true,
     rising: WRITE_AND_MEMORY_RISES,
   },
   {
@@ -113,7 +111,7 @@ const cases: RuleCase[] = [
     alternatives: [[MetricType.RESHARD_SHARD_SKEW], [MetricType.REPLICATION_DIVERGENCE]],
     optional: MetricType.COMMAND_P99,
     spanMs: RESHARD_UNDER_WRITES_MAX_SPAN_MS,
-    scope: 'cluster',
+    sameConnection: false,
     rising: [],
   },
   {
@@ -127,7 +125,7 @@ const cases: RuleCase[] = [
     optional: MetricType.INPUT_KBPS,
     spanMs: RESHARD_DIVERGENCE_PRESSURE_MAX_SPAN_MS,
     lead: { step: 2, ms: RESHARD_DIVERGENCE_PRESSURE_MAX_SPAN_MS },
-    scope: 'node',
+    sameConnection: true,
     rising: WRITE_AND_MEMORY_RISES,
   },
   {
@@ -139,7 +137,7 @@ const cases: RuleCase[] = [
     ],
     optional: MetricType.CLIENT_LOCKOUT_RISK,
     spanMs: RETRY_STORM_MAX_SPAN_MS,
-    scope: 'node',
+    sameConnection: true,
     rising: [MetricType.COMMAND_P99, MetricType.ERROR_REPLIES, MetricType.CONNECTION_CHURN],
   },
   {
@@ -148,7 +146,7 @@ const cases: RuleCase[] = [
     alternatives: [[MetricType.BACKLOG_COVERAGE_RISK], [MetricType.RESYNC_ESCALATION]],
     spanMs: BACKLOG_EXHAUSTION_MAX_SPAN_MS,
     lead: { step: 1, ms: RESYNC_ESCALATION_WINDOW_MS },
-    scope: 'node',
+    sameConnection: true,
     rising: [],
   },
   {
@@ -156,11 +154,12 @@ const cases: RuleCase[] = [
     steps: [MetricType.TOPOLOGY_DIVERGENCE, MetricType.CLUSTER_TOPOLOGY],
     alternatives: [
       [MetricType.TOPOLOGY_DIVERGENCE, MetricType.PARTIAL_MEMBERSHIP],
-      [MetricType.CLUSTER_TOPOLOGY, MetricType.REPLICATION_ROLE],
+      [MetricType.CLUSTER_TOPOLOGY],
     ],
     optional: MetricType.FAILOVER_CHURN,
     spanMs: SPLIT_BRAIN_MAX_SPAN_MS,
-    scope: 'connection',
+    lead: { step: 1, ms: SPLIT_BRAIN_TOPOLOGY_LEAD_MS },
+    sameConnection: false,
     rising: [MetricType.ERROR_REPLIES],
   },
   {
@@ -170,7 +169,7 @@ const cases: RuleCase[] = [
     optional: MetricType.CLIENT_SATURATION,
     spanMs: HOT_SHARD_LATENCY_MAX_SPAN_MS,
     lead: { step: 1, ms: HOT_SHARD_LATENCY_LEAD_MS },
-    scope: 'connection',
+    sameConnection: false,
     rising: [MetricType.COMMAND_P99, MetricType.ERROR_REPLIES],
   },
   {
@@ -182,7 +181,7 @@ const cases: RuleCase[] = [
     ],
     optional: MetricType.RETRY_AMPLIFICATION,
     spanMs: MIGRATION_REDIRECTS_MAX_SPAN_MS,
-    scope: 'connection',
+    sameConnection: false,
     rising: [MetricType.ERROR_REPLIES, MetricType.COMMAND_P99],
   },
   {
@@ -194,7 +193,7 @@ const cases: RuleCase[] = [
     ],
     optional: MetricType.TOPOLOGY_DIVERGENCE,
     spanMs: MEMBERSHIP_FAILOVER_MAX_SPAN_MS,
-    scope: 'connection',
+    sameConnection: false,
     rising: [],
   },
 ];
@@ -213,7 +212,7 @@ describe('incident sequence rules', () => {
 
   describe.each(cases)(
     '$pattern',
-    ({ pattern, steps, alternatives, optional, spanMs, lead, scope, rising }) => {
+    ({ pattern, steps, alternatives, optional, spanMs, lead, sameConnection, rising }) => {
     const inOrder = (gapMs = MIN) => steps.map((metric, i) => event(metric, i * gapMs));
 
     it('matches its steps in order', () => {
@@ -327,37 +326,14 @@ describe('incident sequence rules', () => {
       });
     }
 
-    it('declares the scope the table expects', () => {
-      const rule = ruleFor(pattern);
-
-      expect(rule.sameConnection ?? false).toBe(scope === 'node');
-      expect(rule.sameConnectionAnyNode ?? false).toBe(scope === 'connection');
-    });
-
     it(
-      scope === 'cluster'
-        ? 'chains steps from different connections of the cluster'
-        : 'does not chain steps from different connections',
+      sameConnection
+        ? 'does not chain steps from different connections'
+        : 'chains steps from different nodes of the cluster',
       () => {
         const spread = steps.map((metric, i) => event(metric, i * MIN, `conn-${i}`));
 
-        expect(patternsOf(spread, pattern, () => 'cluster')).toEqual(
-          scope === 'cluster' ? [pattern] : [],
-        );
-      },
-    );
-
-    it(
-      scope === 'node'
-        ? 'does not chain steps from different nodes of one connection'
-        : 'chains steps from different nodes of one connection',
-      () => {
-        const spread = steps.map((metric, i) => ({
-          ...event(metric, i * MIN),
-          nodeAddr: `10.0.0.${i + 1}:6379`,
-        }));
-
-        expect(patternsOf(spread, pattern)).toEqual(scope === 'node' ? [] : [pattern]);
+        expect(patternsOf(spread, pattern, () => 'cluster')).toEqual(sameConnection ? [] : [pattern]);
       },
     );
   },
@@ -487,16 +463,94 @@ describe('incident sequence rules', () => {
       );
     });
 
-    it('keeps membership_failover when split_brain shares none of its steps', () => {
+    it('drops membership_failover when split_brain shares none of its steps', () => {
       const events = [
         event(MetricType.GHOST_MEMBERSHIP, 0),
         event(MetricType.FAILOVER_CHURN, MIN),
         event(MetricType.TOPOLOGY_DIVERGENCE, 2 * MIN),
         event(MetricType.CLUSTER_TOPOLOGY, 3 * MIN),
       ];
-      const [incident] = incidentsOf(events, getSequenceRules());
+      const incidents = incidentsOf(events, getSequenceRules());
 
-      expect(incident.matchedPatterns.slice().sort()).toEqual([membership, splitBrain].sort());
+      expect(incidents).toHaveLength(1);
+      expect(incidents[0].matchedPatterns).toEqual([splitBrain]);
+    });
+
+    it('lists only split_brain when a divergence comes before the partial membership', () => {
+      const events = [
+        event(MetricType.TOPOLOGY_DIVERGENCE, 0),
+        event(MetricType.CLUSTER_TOPOLOGY, 30_000),
+        event(MetricType.PARTIAL_MEMBERSHIP, MIN),
+        event(MetricType.FAILOVER_CHURN, 2 * MIN),
+      ];
+      const incidents = incidentsOf(events, getSequenceRules());
+
+      expect(incidents).toHaveLength(1);
+      expect(incidents[0].matchedPatterns).toEqual([splitBrain]);
+    });
+
+    it('keeps membership_failover in an incident that split_brain does not match', () => {
+      const events = [
+        event(MetricType.GHOST_MEMBERSHIP, 0),
+        event(MetricType.FAILOVER_CHURN, MIN),
+        event(MetricType.TOPOLOGY_DIVERGENCE, 40 * MIN),
+        event(MetricType.CLUSTER_TOPOLOGY, 41 * MIN),
+      ];
+
+      expect(incidentsOf(events, getSequenceRules()).map((i) => i.matchedPatterns)).toEqual([
+        [membership],
+        [splitBrain],
+      ]);
+    });
+  });
+
+  describe('split_brain steps', () => {
+    const splitBrain = AnomalyPattern.SPLIT_BRAIN;
+
+    it.each([
+      [MetricType.TOPOLOGY_DIVERGENCE, 15_000],
+      [MetricType.PARTIAL_MEMBERSHIP, 95_000],
+    ])('matches a duplicate primary raised before the %s that confirms later', (first, later) => {
+      const events = [event(MetricType.CLUSTER_TOPOLOGY, 5_000), event(first, 5_000 + later)];
+      const incidents = incidentsOf(events, [ruleFor(splitBrain)]);
+
+      expect(incidents).toHaveLength(1);
+      expect(incidents[0].matchedPatterns).toEqual([splitBrain]);
+    });
+
+    it.each([
+      ['a promotion', AnomalyType.SPIKE],
+      ['a demotion', AnomalyType.DROP],
+    ])('does not take %s as the second step', (_, direction) => {
+      const events = [
+        event(MetricType.PARTIAL_MEMBERSHIP, 0),
+        event(MetricType.REPLICATION_ROLE, MIN, 'conn-a', direction),
+      ];
+
+      expect(patternsOf(events, splitBrain)).toEqual([]);
+    });
+
+    it('reads a planned failover after a partial membership as membership_failover', () => {
+      const events = [
+        event(MetricType.PARTIAL_MEMBERSHIP, 0),
+        event(MetricType.REPLICATION_ROLE, MIN),
+        event(MetricType.FAILOVER_CHURN, 2 * MIN),
+      ];
+
+      expect(incidentsOf(events, getSequenceRules()).flatMap((i) => i.matchedPatterns)).toEqual([
+        AnomalyPattern.MEMBERSHIP_FAILOVER,
+      ]);
+    });
+
+    it('takes in a role change as an optional signal', () => {
+      const events = [
+        event(MetricType.TOPOLOGY_DIVERGENCE, 0),
+        event(MetricType.CLUSTER_TOPOLOGY, MIN),
+        event(MetricType.REPLICATION_ROLE, 2 * MIN),
+      ];
+      const [incident] = incidentsOf(events, [ruleFor(splitBrain)]);
+
+      expect(incident.sequenceMatches[0].anomalyIds).toEqual(events.map((e) => e.id));
     });
   });
 
