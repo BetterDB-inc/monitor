@@ -1336,9 +1336,11 @@ describe('PrometheusService slot stats', () => {
         clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(15_000, 5_000));
         await runSlotStats(harness);
         expect(shardLoad.getLatest('conn-1')).not.toBeNull();
+        const remove = jest.spyOn(shardLoad, 'remove');
 
         harness.service.cleanupConnectionMetrics('conn-1');
 
+        expect(remove).toHaveBeenCalledWith('conn-1');
         expect(shardLoad.getLatest('conn-1')).toBeNull();
         expect(shardLoad.record('conn-1', fanOut(20_000, 6_000).nodeStats as never, now + 5_000)).toBeNull();
       } finally {

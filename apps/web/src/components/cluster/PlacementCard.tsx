@@ -3,6 +3,7 @@ import {
   type PlacementBalance,
   type PlacementMode,
   type PlacementPolicyInvalid,
+  type PlacementSettings,
   type PlacementStatus,
 } from '@betterdb/shared';
 import { useState } from 'react';
@@ -101,11 +102,47 @@ function Support({ status }: { status: PlacementStatus }) {
 
 const BAR_HEADROOM = 1.25;
 
-function BalanceBars({ balance }: { balance: PlacementBalance | null }) {
+function clockTime(at: number): string {
+  const date = new Date(at);
+  const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (date.toDateString() === new Date().toDateString()) return time;
+  return `${date.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${time}`;
+}
+
+function SustainLine({ shard }: { shard: PlacementBalance['shards'][number] }) {
+  if (shard.sustainRatio === null) return null;
+  const baseline =
+    shard.baselineRatio === null ? '' : `, ${formatRatio(shard.baselineRatio)} over 6 hours`;
+  return (
+    <p className="text-xs text-muted-foreground">
+      {shard.trigger !== 'short_history'
+        ? `Sustained ${formatRatio(shard.sustainRatio)} the median${baseline}`
+        : shard.warmUntil === null
+          ? 'Warming up'
+          : `Warming up until ${clockTime(shard.warmUntil)}`}
+    </p>
+  );
+}
+
+function triggerSentence(balance: PlacementBalance, settings: PlacementSettings): string {
+  const share =
+    settings.maxCpuShare === null
+      ? ''
+      : `, or above ${Math.round(settings.maxCpuShare * 100)}% of the cluster CPU,`;
+  return `The trigger for slot moves fires only when the sustained load stays over ${formatRatio(balance.triggerRatio)}${share} for ${settings.sustainMinutes} minutes.`;
+}
+
+function BalanceBars({
+  balance,
+  settings,
+}: {
+  balance: PlacementBalance | null;
+  settings: PlacementSettings;
+}) {
   if (!balance) return <p className="text-muted-foreground">No per-slot load sampled yet.</p>;
   const scale = Math.max(
     balance.triggerRatio * BAR_HEADROOM,
-    ...balance.shards.map((shard) => shard.ratio ?? 0),
+    ...balance.shards.map((shard) => Math.max(shard.ratio ?? 0, shard.sustainRatio ?? 0)),
   );
   const at = (ratio: number) => `${Math.min(100, (ratio / scale) * 100)}%`;
   return (
@@ -123,6 +160,7 @@ function BalanceBars({ balance }: { balance: PlacementBalance | null }) {
               <span className="flex items-center gap-2 text-muted-foreground">
                 {shard.ratio === null ? 'No slots' : `${formatRatio(shard.ratio)} the median`}
                 {shard.overTrigger && <Badge variant="destructive">Over the trigger</Badge>}
+                {shard.trigger === 'over' && <Badge variant="destructive">Sustained</Badge>}
               </span>
             </div>
             <div className="relative h-2 rounded bg-muted" aria-hidden="true">
@@ -135,11 +173,20 @@ function BalanceBars({ balance }: { balance: PlacementBalance | null }) {
                 style={{ left: at(balance.triggerRatio) }}
               />
             </div>
+            {shard.sustainRatio !== null && (
+              <div className="h-1 rounded bg-muted" aria-hidden="true">
+                <div
+                  className={`h-1 rounded ${shard.trigger === 'over' ? 'bg-destructive' : 'bg-primary/60'}`}
+                  style={{ width: at(shard.sustainRatio) }}
+                />
+              </div>
+            )}
+            <SustainLine shard={shard} />
           </li>
         ))}
       </ul>
       <p className="text-muted-foreground">
-        {`A shard over ${formatRatio(balance.triggerRatio)} the median load is a hot shard; a slot move aims to bring it under ${formatRatio(balance.resolveRatio)}.`}
+        {`A shard over ${formatRatio(balance.triggerRatio)} the median load is a hot shard; a slot move aims to bring it under ${formatRatio(balance.resolveRatio)}. ${triggerSentence(balance, settings)}`}
       </p>
     </div>
   );
@@ -203,7 +250,7 @@ function ClusterPlacementCard({ connectionId }: { connectionId: string | undefin
               <PolicyInvalid invalid={status.policyInvalid} />
               <EffectiveMode status={status} />
               <Support status={status} />
-              <BalanceBars balance={status.balance} />
+              <BalanceBars balance={status.balance} settings={status.settings} />
               <Button size="sm" variant="outline" onClick={() => setPolicyOpen(true)}>
                 {canMutate ? 'Edit policy' : 'View policy'}
               </Button>

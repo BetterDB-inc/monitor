@@ -9,6 +9,9 @@ function shard(nodeId: string, cpuUsecPerSecond: number, overrides: Partial<Shar
     slotCount: 5461,
     measuredSlots: 5461,
     cpuUsecPerSecond,
+    sustainCpuUsecPerSecond: cpuUsecPerSecond,
+    baselineCpuUsecPerSecond: cpuUsecPerSecond,
+    sustainReset: false,
     networkBytesInPerSecond: 0,
     networkBytesOutPerSecond: 0,
     cpuShare: null,
@@ -69,6 +72,53 @@ describe('placementBalance', () => {
     const balance = placementBalance(sample([shard('a', 200_000), shard('b', 900_000)]));
     expect(balance?.shards.every((s) => !s.overTrigger)).toBe(true);
     expect(balance?.shards[0].ratio).toBeCloseTo(900 / 550);
+  });
+
+  it('gives each shard its sustain and baseline ratios and the trigger read', () => {
+    const balance = placementBalance(
+      sample([
+        shard('a', 200_000, {
+          sustainCpuUsecPerSecond: 100_000,
+          baselineCpuUsecPerSecond: 100_000,
+        }),
+        shard('b', 600_000, {
+          sustainCpuUsecPerSecond: 300_000,
+          baselineCpuUsecPerSecond: 150_000,
+        }),
+        shard('c', 200_000, {
+          sustainCpuUsecPerSecond: 100_000,
+          baselineCpuUsecPerSecond: 100_000,
+        }),
+        shard('d', 0, { slotCount: 0, sustainCpuUsecPerSecond: 0, baselineCpuUsecPerSecond: 0 }),
+      ]),
+      DEFAULT_PLACEMENT_SETTINGS,
+      (shardId) =>
+        shardId === 'b'
+          ? { state: 'over', overShare: 1, coveredMs: 1_800_000, firedAt: 40, warmUntil: null }
+          : {
+              state: 'short_history',
+              overShare: 0,
+              coveredMs: 60_000,
+              firedAt: null,
+              warmUntil: 99,
+            },
+    );
+    const row = (id: string) => balance?.shards.find((each) => each.shardId === id);
+
+    expect(row('b')).toMatchObject({
+      sustainCpuUsecPerSecond: 300_000,
+      sustainRatio: 3,
+      baselineRatio: 1.5,
+      trigger: 'over',
+      warmUntil: null,
+    });
+    expect(row('a')).toMatchObject({ sustainRatio: 1, trigger: 'short_history', warmUntil: 99 });
+    expect(row('d')).toMatchObject({
+      sustainRatio: null,
+      baselineRatio: null,
+      trigger: 'short_history',
+      warmUntil: null,
+    });
   });
 
   it('keeps the settling flag and flags nothing while slots settle', () => {

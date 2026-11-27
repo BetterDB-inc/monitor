@@ -1,5 +1,10 @@
 import { SlotStats } from '../common/types/metrics.types';
-import { NodeSlotStats, SHARD_LOAD_SMOOTHING_MS, ShardLoadTracker } from './shard-load';
+import {
+  NodeSlotStats,
+  SHARD_LOAD_BASELINE_MS,
+  SHARD_LOAD_SMOOTHING_MS,
+  ShardLoadTracker,
+} from './shard-load';
 
 type Counters = [cpuUsec: number, bytesIn: number, bytesOut: number];
 
@@ -102,14 +107,14 @@ describe('ShardLoadTracker', () => {
     expect(shardOf(sample, 'n1').cpuUsecPerSecond).toBeCloseTo(100 + weight * (200 - 100));
   });
 
-  it('leaves out a slot whose counter went backwards, then picks it up again', () => {
+  it('leaves out every slot of a node whose counter went backwards, then picks them up again', () => {
     const tracker = new ShardLoadTracker();
     tracker.observe([node('n1', { 0: [9_000, 0, 0], 1: [0, 0, 0] })], 0);
 
     const afterReset = tracker.observe([node('n1', { 0: [50, 0, 0], 1: [1_000, 0, 0] })], 1_000);
 
-    expect(shardOf(afterReset, 'n1').cpuUsecPerSecond).toBe(1_000);
-    expect(shardOf(afterReset, 'n1').measuredSlots).toBe(1);
+    expect(shardOf(afterReset, 'n1').cpuUsecPerSecond).toBe(0);
+    expect(shardOf(afterReset, 'n1').measuredSlots).toBe(0);
     expect(afterReset?.settling).toBe(true);
 
     const resumed = tracker.observe([node('n1', { 0: [250, 0, 0], 1: [1_000, 0, 0] })], 2_000);
@@ -430,5 +435,267 @@ describe('ShardLoadTracker', () => {
 
     expect(shardOf(skewedSample, 'n1').cpuShare).toBeCloseTo(0.818, 2);
     expect(shardOf(uniformSample, 'n1').cpuShare).toBeCloseTo(0.333, 2);
+  });
+});
+
+describe('ShardLoadTracker sustain and baseline', () => {
+  const CORE = 1_000_000;
+  const STEP_MS = 5_000;
+
+  function run(
+    tracker: ShardLoadTracker,
+    from: number,
+    to: number,
+    reading: (seconds: number) => NodeSlotStats[],
+  ) {
+    let sample: ReturnType<ShardLoadTracker['observe']> = null;
+    for (let at = from; at <= to; at += STEP_MS) {
+      sample = tracker.observe(reading(at / 1000), at) ?? sample;
+    }
+    return sample;
+  }
+
+  const oneCore =
+    (nodeId: string, offset = 0) =>
+    (seconds: number) => [node(nodeId, { 0: [offset + CORE * seconds, 0, 0] })];
+  const idleThenOneCore = (seconds: number) => [
+    node('n1', { 0: [CORE * Math.max(0, seconds - STEP_MS / 1000), 0, 0] }),
+  ];
+
+  it('seeds the sustain and baseline from the first measured rate', () => {
+    const tracker = new ShardLoadTracker();
+    const at = (seconds: number) => [
+      node('n1', { 0: [300_000 * seconds, 0, 0] }),
+      node('n2', { 1: [100_000 * seconds, 0, 0] }),
+      node('n3', { 2: [100_000 * seconds, 0, 0] }),
+    ];
+
+    const first = run(tracker, 0, STEP_MS, at);
+
+    expect(first?.shards.map((shard) => shard.sustainCpuUsecPerSecond)).toEqual([
+      300_000, 100_000, 100_000,
+    ]);
+    expect(first?.shards.map((shard) => shard.baselineCpuUsecPerSecond)).toEqual([
+      300_000, 100_000, 100_000,
+    ]);
+  });
+
+  it('seeds the sustain and baseline again after a restart clears them', () => {
+    const tracker = new ShardLoadTracker();
+    run(tracker, 0, 30 * 60_000, oneCore('n1', 10 * CORE));
+    tracker.observe([node('n1', { 0: [5, 0, 0] })], 30 * 60_000 + STEP_MS);
+
+    const reseeded = tracker.observe(
+      [node('n1', { 0: [5 + 300_000 * 5, 0, 0] })],
+      30 * 60_000 + 2 * STEP_MS,
+    );
+
+    expect(shardOf(reseeded, 'n1').sustainCpuUsecPerSecond).toBeCloseTo(300_000);
+    expect(shardOf(reseeded, 'n1').baselineCpuUsecPerSecond).toBeCloseTo(300_000);
+  });
+
+  it('brings a step to one core within 5% on the sustain average after 3 time constants', () => {
+    const tracker = new ShardLoadTracker();
+    const timeConstant = (30 * 60_000) / 3;
+
+    const early = run(tracker, 0, STEP_MS + timeConstant, idleThenOneCore);
+    expect(shardOf(early, 'n1').sustainCpuUsecPerSecond).toBeGreaterThan(0.6 * CORE);
+    expect(shardOf(early, 'n1').sustainCpuUsecPerSecond).toBeLessThan(0.7 * CORE);
+    expect(shardOf(early, 'n1').cpuUsecPerSecond).toBeCloseTo(CORE);
+
+    const settled = run(
+      tracker,
+      2 * STEP_MS + timeConstant,
+      STEP_MS + 3 * timeConstant,
+      idleThenOneCore,
+    );
+    expect(shardOf(settled, 'n1').sustainCpuUsecPerSecond).toBeGreaterThan(0.95 * CORE);
+  });
+
+  it('follows the sustain minutes it is given', () => {
+    const tracker = new ShardLoadTracker();
+    tracker.setSustainMinutes(60);
+
+    const sample = run(tracker, 0, STEP_MS + 10 * 60_000, idleThenOneCore);
+
+    const expected = CORE * (1 - Math.exp(-(10 * 60_000) / (20 * 60_000)));
+    expect(shardOf(sample, 'n1').sustainCpuUsecPerSecond).toBeCloseTo(expected, -3);
+  });
+
+  it('keeps the baseline on a 6 hour time constant', () => {
+    const tracker = new ShardLoadTracker();
+
+    const sample = run(tracker, 0, STEP_MS + 30 * 60_000, idleThenOneCore);
+
+    const expected = CORE * (1 - Math.exp(-(30 * 60_000) / SHARD_LOAD_BASELINE_MS));
+    expect(SHARD_LOAD_BASELINE_MS).toBe(6 * 60 * 60_000);
+    expect(shardOf(sample, 'n1').baselineCpuUsecPerSecond).toBeCloseTo(expected, -3);
+  });
+
+  it('carries the sustain and baseline of a moved slot to its new owner and clears its fast rate', () => {
+    const tracker = new ShardLoadTracker();
+    const before = (seconds: number) => [
+      node('n1', { 0: [CORE * seconds, 0, 0], 1: [0, 0, 0] }),
+      node('n2', { 2: [0, 0, 0] }),
+    ];
+    const carried = run(tracker, 0, 30 * 60_000, before);
+    const sustain = shardOf(carried, 'n1').sustainCpuUsecPerSecond;
+    const baseline = shardOf(carried, 'n1').baselineCpuUsecPerSecond;
+
+    const moved = tracker.observe(
+      [node('n1', { 1: [0, 0, 0] }), node('n2', { 0: [10, 0, 0], 2: [0, 0, 0] })],
+      30 * 60_000 + STEP_MS,
+    );
+
+    expect(shardOf(moved, 'n2').sustainCpuUsecPerSecond).toBeCloseTo(sustain);
+    expect(shardOf(moved, 'n2').baselineCpuUsecPerSecond).toBeCloseTo(baseline);
+    expect(shardOf(moved, 'n2').cpuUsecPerSecond).toBe(0);
+    expect(shardOf(moved, 'n1').sustainCpuUsecPerSecond).toBe(0);
+
+    const next = tracker.observe(
+      [node('n1', { 1: [0, 0, 0] }), node('n2', { 0: [10, 0, 0], 2: [0, 0, 0] })],
+      30 * 60_000 + 3 * STEP_MS,
+    );
+    expect(shardOf(next, 'n2').sustainCpuUsecPerSecond).toBeLessThan(sustain);
+    expect(shardOf(next, 'n2').sustainCpuUsecPerSecond).toBeGreaterThan(0.9 * sustain);
+  });
+
+  it('clears the sustain and baseline of a slot whose counters went back', () => {
+    const tracker = new ShardLoadTracker();
+    run(tracker, 0, 30 * 60_000, oneCore('n1', 10 * CORE));
+
+    const restarted = tracker.observe([node('n1', { 0: [5, 0, 0] })], 30 * 60_000 + STEP_MS);
+
+    expect(shardOf(restarted, 'n1').sustainCpuUsecPerSecond).toBe(0);
+    expect(shardOf(restarted, 'n1').baselineCpuUsecPerSecond).toBe(0);
+    expect(shardOf(restarted, 'n1').sustainReset).toBe(true);
+    const next = tracker.observe(
+      [node('n1', { 0: [5 + CORE * 5, 0, 0] })],
+      30 * 60_000 + 2 * STEP_MS,
+    );
+    expect(shardOf(next, 'n1').sustainReset).toBe(false);
+  });
+
+  it('clears every slot of a node when one slot went back before the others are read', () => {
+    const tracker = new ShardLoadTracker();
+    const before = (seconds: number) => [
+      node('n1', { 0: [CORE * seconds, 0, 0], 1: [10 * CORE + CORE * seconds, 0, 0] }),
+      node('n2', { 2: [CORE * seconds, 0, 0] }),
+    ];
+    run(tracker, 0, 30 * 60_000, before);
+    const at = 30 * 60_000 + STEP_MS;
+
+    const restarted = tracker.observe(
+      [
+        node('n1', { 0: [CORE * 4000, 0, 0], 1: [5, 0, 0] }),
+        node('n2', { 2: [(CORE * at) / 1000, 0, 0] }),
+      ],
+      at,
+    );
+    expect(shardOf(restarted, 'n2').sustainReset).toBe(false);
+    expect(shardOf(restarted, 'n2').sustainCpuUsecPerSecond).toBeCloseTo(CORE, -3);
+
+    expect(shardOf(restarted, 'n1').sustainReset).toBe(true);
+    expect(shardOf(restarted, 'n1').sustainCpuUsecPerSecond).toBe(0);
+    expect(shardOf(restarted, 'n1').baselineCpuUsecPerSecond).toBe(0);
+    expect(shardOf(restarted, 'n1').measuredSlots).toBe(0);
+
+    const reseeded = tracker.observe(
+      [
+        node('n1', { 0: [CORE * 4000 + 200_000 * 5, 0, 0], 1: [5 + 100_000 * 5, 0, 0] }),
+        node('n2', { 2: [(CORE * (at + STEP_MS)) / 1000, 0, 0] }),
+      ],
+      at + STEP_MS,
+    );
+    expect(shardOf(reseeded, 'n1').sustainCpuUsecPerSecond).toBeCloseTo(300_000);
+  });
+
+  it('does not mark a shard reset when one of its slots moves to it', () => {
+    const tracker = new ShardLoadTracker();
+    run(tracker, 0, 60_000, (seconds) => [
+      node('n1', { 0: [CORE * seconds, 0, 0] }),
+      node('n2', { 1: [0, 0, 0] }),
+    ]);
+
+    const moved = tracker.observe(
+      [node('n1', {}), node('n2', { 0: [5, 0, 0], 1: [0, 0, 0] })],
+      60_000 + STEP_MS,
+    );
+
+    expect(shardOf(moved, 'n2').sustainReset).toBe(false);
+  });
+
+  it('carries the sustain of a slot missing from every node for one sample', () => {
+    const tracker = new ShardLoadTracker();
+    const carried = run(tracker, 0, 30 * 60_000, (seconds) => [
+      node('n1', { 0: [CORE * seconds, 0, 0], 1: [0, 0, 0] }),
+      node('n2', { 2: [0, 0, 0] }),
+    ]);
+    const sustain = shardOf(carried, 'n1').sustainCpuUsecPerSecond;
+
+    const gone = tracker.observe(
+      [node('n1', { 1: [0, 0, 0] }), node('n2', { 2: [0, 0, 0] })],
+      30 * 60_000 + STEP_MS,
+    );
+    expect(gone?.settling).toBe(true);
+    expect(shardOf(gone, 'n1').sustainCpuUsecPerSecond).toBe(0);
+
+    const landed = tracker.observe(
+      [node('n1', { 1: [0, 0, 0] }), node('n2', { 0: [10, 0, 0], 2: [0, 0, 0] })],
+      30 * 60_000 + 2 * STEP_MS,
+    );
+    expect(shardOf(landed, 'n2').sustainCpuUsecPerSecond).toBeCloseTo(sustain);
+    expect(shardOf(landed, 'n2').cpuUsecPerSecond).toBe(0);
+  });
+
+  it('clears the sustain of a slot missing for two samples in a row', () => {
+    const tracker = new ShardLoadTracker();
+    run(tracker, 0, 30 * 60_000, (seconds) => [
+      node('n1', { 0: [CORE * seconds, 0, 0], 1: [0, 0, 0] }),
+      node('n2', { 2: [0, 0, 0] }),
+    ]);
+    const without = [node('n1', { 1: [0, 0, 0] }), node('n2', { 2: [0, 0, 0] })];
+    tracker.observe(without, 30 * 60_000 + STEP_MS);
+    tracker.observe(without, 30 * 60_000 + 2 * STEP_MS);
+
+    const landed = tracker.observe(
+      [node('n1', { 1: [0, 0, 0] }), node('n2', { 0: [10, 0, 0], 2: [0, 0, 0] })],
+      30 * 60_000 + 3 * STEP_MS,
+    );
+    expect(shardOf(landed, 'n2').sustainCpuUsecPerSecond).toBe(0);
+
+    const reseeded = tracker.observe(
+      [node('n1', { 1: [0, 0, 0] }), node('n2', { 0: [10 + 300_000 * 5, 0, 0], 2: [0, 0, 0] })],
+      30 * 60_000 + 4 * STEP_MS,
+    );
+    expect(shardOf(reseeded, 'n2').sustainCpuUsecPerSecond).toBeCloseTo(300_000);
+  });
+
+  it('measures a slot again only from the sample after it comes back to the same owner', () => {
+    const tracker = new ShardLoadTracker();
+    run(tracker, 0, 60_000, (seconds) => [node('n1', { 0: [CORE * seconds, 0, 0], 1: [0, 0, 0] })]);
+    tracker.observe([node('n1', { 1: [0, 0, 0] })], 60_000 + STEP_MS);
+
+    const back = tracker.observe(
+      [node('n1', { 0: [CORE * 70, 0, 0], 1: [0, 0, 0] })],
+      60_000 + 2 * STEP_MS,
+    );
+
+    expect(tracker.slotsOf('n1').map((rate) => rate.slot)).toEqual([1]);
+    expect(back?.settling).toBe(true);
+  });
+
+  it('seeds the sustain again when it starts over', () => {
+    const tracker = new ShardLoadTracker();
+    run(tracker, 0, 60_000, oneCore('n1'));
+    tracker.observe(
+      [{ nodeId: 'n1', address: '10.0.0.1:6379', stats: { 0: { key_count: 4 } } }],
+      65_000,
+    );
+    tracker.observe([node('n1', { 0: [0, 0, 0] })], 70_000);
+
+    const reseeded = tracker.observe([node('n1', { 0: [100_000 * 5, 0, 0] })], 75_000);
+
+    expect(shardOf(reseeded, 'n1').sustainCpuUsecPerSecond).toBeCloseTo(100_000);
   });
 });

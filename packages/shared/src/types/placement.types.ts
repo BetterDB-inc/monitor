@@ -124,6 +124,21 @@ export interface PlacementShardBalance {
   networkShare: number | null;
   ratio: number | null;
   overTrigger: boolean;
+  sustainCpuUsecPerSecond: number;
+  sustainRatio: number | null;
+  baselineRatio: number | null;
+  trigger: PlacementTriggerState;
+  warmUntil: number | null;
+}
+
+export type PlacementTriggerState = 'over' | 'under' | 'short_history';
+
+export interface PlacementTriggerRead {
+  state: PlacementTriggerState;
+  overShare: number;
+  coveredMs: number;
+  firedAt: number | null;
+  warmUntil: number | null;
 }
 
 export interface PlacementBalance {

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
@@ -89,6 +89,11 @@ function balance(overrides: Partial<PlacementBalance> = {}): PlacementBalance {
         networkShare: 0.5,
         ratio: 3.1,
         overTrigger: true,
+        sustainCpuUsecPerSecond: 900_000,
+        sustainRatio: 3,
+        baselineRatio: 1.5,
+        trigger: 'over',
+        warmUntil: null,
       },
       {
         shardId: 'b2',
@@ -99,6 +104,11 @@ function balance(overrides: Partial<PlacementBalance> = {}): PlacementBalance {
         networkShare: 0.25,
         ratio: 1,
         overTrigger: false,
+        sustainCpuUsecPerSecond: 300_000,
+        sustainRatio: 1,
+        baselineRatio: 1,
+        trigger: 'short_history',
+        warmUntil: new Date(2026, 10, 26, 14, 30).getTime(),
       },
       {
         shardId: 'c3',
@@ -109,6 +119,11 @@ function balance(overrides: Partial<PlacementBalance> = {}): PlacementBalance {
         networkShare: null,
         ratio: null,
         overTrigger: false,
+        sustainCpuUsecPerSecond: 0,
+        sustainRatio: null,
+        baselineRatio: null,
+        trigger: 'short_history',
+        warmUntil: null,
       },
     ],
     ...overrides,
@@ -397,7 +412,61 @@ describe('PlacementCard', () => {
     expect(rows[1]).not.toHaveTextContent('Over the trigger');
     expect(rows[2]).toHaveTextContent('No slots');
     expect(region).toHaveTextContent(
-      'A shard over 2x the median load is a hot shard; a slot move aims to bring it under 1.25x.',
+      'A shard over 2x the median load is a hot shard; a slot move aims to bring it under 1.25x. The trigger for slot moves fires only when the sustained load stays over 2x for 30 minutes.',
+    );
+  });
+
+  describe('with the clock on the day the warm-up ends or the day before', () => {
+    const warmEnd = new Date(2026, 10, 26, 14, 30);
+    const time = warmEnd.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const day = warmEnd.toLocaleDateString([], { month: 'short', day: 'numeric' });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('shows the sustained load of each shard, and when a short history is long enough', async () => {
+      vi.useFakeTimers({ toFake: ['Date'], now: new Date(2026, 10, 26, 9, 0) });
+      await show(status());
+
+      const bars = within(await card()).getByRole('list', { name: 'Load against the median' });
+      const rows = within(bars).getAllByRole('listitem');
+      expect(rows[0]).toHaveTextContent('Sustained');
+      expect(rows[0]).toHaveTextContent('Sustained 3x the median, 1.5x over 6 hours');
+      expect(rows[1]).toHaveTextContent(`Warming up until ${time}`);
+      expect(rows[1]).not.toHaveTextContent(day);
+      expect(rows[2]).not.toHaveTextContent('Sustained');
+    });
+
+    it('names the day when a warm-up ends on another day', async () => {
+      vi.useFakeTimers({ toFake: ['Date'], now: new Date(2026, 10, 25, 23, 0) });
+      await show(status());
+
+      const bars = within(await card()).getByRole('list', { name: 'Load against the median' });
+      const rows = within(bars).getAllByRole('listitem');
+      expect(rows[1]).toHaveTextContent(`Warming up until ${day}, ${time}`);
+    });
+  });
+
+  it('shows a shard with no load history yet as warming up', async () => {
+    const shards = balance().shards.map((shard) =>
+      shard.shardId === 'b2' ? { ...shard, warmUntil: null } : shard,
+    );
+    await show(status({ balance: balance({ shards }) }));
+
+    const bars = within(await card()).getByRole('list', { name: 'Load against the median' });
+    const rows = within(bars).getAllByRole('listitem');
+    expect(rows[1]).toHaveTextContent('Warming up');
+    expect(rows[1]).not.toHaveTextContent('Warming up until');
+    expect(rows[1]).not.toHaveTextContent('Sustained');
+  });
+
+  it('names the CPU share limit in the trigger sentence when one is set', async () => {
+    const base = status();
+    await show(status({ settings: { ...base.settings, maxCpuShare: 0.4 } }));
+
+    expect(await card()).toHaveTextContent(
+      'The trigger for slot moves fires only when the sustained load stays over 2x, or above 40% of the cluster CPU, for 30 minutes.',
     );
   });
 

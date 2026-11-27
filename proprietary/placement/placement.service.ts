@@ -3,6 +3,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  OnModuleDestroy,
   OnModuleInit,
   Optional,
 } from '@nestjs/common';
@@ -22,6 +23,7 @@ import {
   type PlacementStatus,
   type PlacementSupport,
   type PlacementSupportReason,
+  type PlacementTriggerRead,
 } from '@betterdb/shared';
 import type { StoragePort } from '@app/common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
@@ -54,6 +56,7 @@ import {
   type PlacementPrimaryRead,
 } from './placement-support';
 import { placementBalance } from './placement-balance';
+import { PlacementTriggers } from './placement-trigger';
 
 const SUPPORT_CACHE_MS = 30_000;
 const POLICY_CACHE_MS = 30_000;
@@ -107,7 +110,7 @@ function settingsReadOf(policy: PlacementPolicy | null): PlacementSettingsRead {
 }
 
 @Injectable()
-export class PlacementService implements OnModuleInit {
+export class PlacementService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PlacementService.name);
   private readonly invalidWarned = new Map<string, string>();
   private readonly policyCache = new Map<string, { at: number; policy: PlacementPolicy | null }>();
@@ -115,6 +118,9 @@ export class PlacementService implements OnModuleInit {
   private readonly supportCache = new Map<string, { at: number; support: PlacementSupport }>();
   private readonly supportReads = new Map<string, Promise<PlacementSupport>>();
   private readonly aclDenied = new Map<string, string | null>();
+  private readonly triggers = new PlacementTriggers();
+  private readonly policyRefreshes = new Map<string, Promise<unknown>>();
+  private stopListening: (() => void) | null = null;
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -129,6 +135,33 @@ export class PlacementService implements OnModuleInit {
 
   onModuleInit(): void {
     this.anomaly.setRebalancePolicyResolver((seedId) => this.rebalancePolicyFor(seedId));
+    this.stopListening?.();
+    this.stopListening =
+      this.shardLoad?.addListener({
+        tracking: (seedId) => this.refreshPolicy(seedId),
+        sample: (seedId, sample) => this.observeSample(seedId, sample),
+        reset: (seedId) => this.triggers.reset(seedId),
+      }) ?? null;
+  }
+
+  onModuleDestroy(): void {
+    this.stopListening?.();
+    this.stopListening = null;
+  }
+
+  private observeSample(seedId: string, sample: ShardLoadSample): void {
+    if (!this.registry.getConfig(seedId)) return;
+    const cached = this.policyCache.get(seedId);
+    if (!cached || Date.now() - cached.at >= POLICY_CACHE_MS) this.refreshPolicy(seedId);
+    this.triggers.observe(seedId, sample, this.prometheus.shardLoadStalenessMs);
+  }
+
+  private refreshPolicy(seedId: string): void {
+    if (this.policyRefreshes.has(seedId) || !this.registry.getConfig(seedId)) return;
+    const refresh = this.readPolicy(seedId)
+      .catch(() => null)
+      .finally(() => this.policyRefreshes.delete(seedId));
+    this.policyRefreshes.set(seedId, refresh);
   }
 
   async getStatus(connectionId: string): Promise<PlacementStatus> {
@@ -143,7 +176,9 @@ export class PlacementService implements OnModuleInit {
       effectiveMode: effectiveModeOf(mode, support),
       selectableModes,
       support,
-      balance: placementBalance(this.freshSample(seedId), settings),
+      balance: placementBalance(this.freshSample(seedId), settings, (shardId) =>
+        this.triggerOf(seedId, shardId),
+      ),
       settings,
       policyVersion: version,
       policyInvalid: invalid,
@@ -177,6 +212,7 @@ export class PlacementService implements OnModuleInit {
     }
     this.advancePolicy(seedId);
     this.policyCache.set(seedId, { at: Date.now(), policy: saved });
+    this.applyTriggerSettings(seedId, saved.settings);
     return {
       ...(await this.getStatus(seedId)),
       exclusionsExpanded: expansion.problem === null,
@@ -223,9 +259,20 @@ export class PlacementService implements OnModuleInit {
     const policy = await this.storage.getPlacementPolicy(seedId);
     if ((this.policyGeneration.get(seedId) ?? 0) === generation) {
       this.policyCache.set(seedId, { at: Date.now(), policy });
+      this.applyTriggerSettings(seedId, settingsReadOf(policy).settings);
     }
     this.warnInvalid(seedId, policy);
     return policy;
+  }
+
+  private applyTriggerSettings(seedId: string, settings: PlacementSettings): void {
+    this.shardLoad?.setSustainMinutes(seedId, settings.sustainMinutes);
+    this.triggers.configure(seedId, settings);
+  }
+
+  triggerOf(seedId: string, shardId: string, now = Date.now()): PlacementTriggerRead | null {
+    if (!this.shardLoad) return null;
+    return this.triggers.read(seedId, shardId, now, this.prometheus.shardLoadStalenessMs);
   }
 
   private warnInvalid(seedId: string, policy: PlacementPolicy | null): void {
@@ -395,6 +442,9 @@ export class PlacementService implements OnModuleInit {
       for (const seedId of cache.keys()) {
         if (!this.registry.getConfig(seedId)) cache.delete(seedId);
       }
+    }
+    for (const seedId of this.triggers.seeds()) {
+      if (!this.registry.getConfig(seedId)) this.triggers.forget(seedId);
     }
   }
 
