@@ -134,6 +134,27 @@ describe('readPlacementGateFacts', () => {
     ]);
   });
 
+  it('maps an address to a node whose discovered address carries the cluster bus port', async () => {
+    const nodes = [read('s1', 's1'), read('t1', 't1')].map((node) => ({
+      ...node,
+      address: `${node.address}@17000`,
+    }));
+    const stub = port(
+      {
+        placementOpenEvents: jest.fn(async () => [
+          { metricType: 'persistence_child', nodeId: null, address: 't1:7000', openedAt: NOW },
+        ]),
+      },
+      nodes,
+    );
+    const result = await gateOf(
+      readPlacementGateFacts(stub, warmed('seed', nodes), 'seed', context, NOW),
+    );
+    expect(result.blockers.map((each) => `${each.kind}:${each.scope}:${each.nodeId}`)).toEqual([
+      'fork:target:t1',
+    ]);
+  });
+
   it('gives a node the monitor does not collect only the stand-ins', async () => {
     const nodes = [read('s1', 's1'), read('t1', 't1'), read('t2', 't1', false)];
     const readNodes = jest.fn(async () => nodeFacts(nodes));
@@ -248,11 +269,19 @@ describe('PlacementEpochs', () => {
     expect(epochs.observe('seed', nodes(3), NOW + MINUTE, ['b']).get('a')).toBe(true);
   });
 
-  it('ignores a lower config epoch, and forgets nodes that left', () => {
+  it('ignores a lower config epoch, and forgets nodes unseen for 5 minutes', () => {
     const epochs = new PlacementEpochs();
     epochs.observe('seed', nodes(3), NOW - 10 * MINUTE);
     expect(epochs.observe('seed', nodes(2), NOW).get('a')).toBe(false);
+    epochs.observe('seed', [], NOW + 5 * MINUTE);
+    expect(epochs.observe('seed', nodes(2), NOW + 5 * MINUTE).get('a')).toBeNull();
+  });
+
+  it('keeps the history of a node that one read left out', () => {
+    const epochs = new PlacementEpochs();
+    epochs.observe('seed', nodes(1), NOW - 10 * MINUTE);
+    epochs.observe('seed', nodes(1), NOW - MINUTE);
     epochs.observe('seed', [], NOW);
-    expect(epochs.observe('seed', nodes(2), NOW).get('a')).toBeNull();
+    expect(epochs.observe('seed', nodes(1), NOW + MINUTE).get('a')).toBe(false);
   });
 });

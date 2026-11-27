@@ -65,6 +65,7 @@ interface EpochSeen {
   epoch: number;
   since: number;
   changedAt: number | null;
+  seenAt: number;
 }
 
 export type PlacementEpochRead = Pick<PlacementNodeRead, 'id' | 'shardId' | 'configEpoch'>;
@@ -79,20 +80,23 @@ export class PlacementEpochs {
     movedShardIds: readonly string[] = [],
   ): Map<string, boolean | null> {
     const known = this.seen.get(seedId) ?? new Map<string, EpochSeen>();
-    const next = new Map<string, EpochSeen>();
+    const next = new Map(
+      [...known].filter(([, entry]) => now - entry.seenAt < PLACEMENT_EPOCH_WINDOW_MS),
+    );
     const changed = new Map<string, boolean | null>();
     for (const node of nodes) {
       const before = known.get(node.id);
       const moved = movedShardIds.includes(node.shardId);
       const entry: EpochSeen = !before
-        ? { epoch: node.configEpoch, since: now, changedAt: null }
+        ? { epoch: node.configEpoch, since: now, changedAt: null, seenAt: now }
         : node.configEpoch > before.epoch
           ? {
               epoch: node.configEpoch,
               since: before.since,
               changedAt: moved ? before.changedAt : now,
+              seenAt: Math.max(now, before.seenAt),
             }
-          : before;
+          : { ...before, seenAt: Math.max(now, before.seenAt) };
       next.set(node.id, entry);
       if (entry.changedAt !== null && now - entry.changedAt < PLACEMENT_EPOCH_WINDOW_MS) {
         changed.set(node.id, true);
@@ -159,14 +163,22 @@ export function replicasInSyncOf(
   };
 }
 
+function clientAddressOf(address: string): string {
+  return address.split('@')[0];
+}
+
 function withNodeIds(
   signals: readonly PlacementGateSignal[],
   nodes: readonly PlacementNodeRead[],
 ): PlacementGateSignal[] {
-  const byAddress = new Map(nodes.map((node) => [node.address, node.id]));
+  const byAddress = new Map<string, string | null>();
+  for (const node of nodes) {
+    const address = clientAddressOf(node.address);
+    byAddress.set(address, byAddress.has(address) ? null : node.id);
+  }
   return signals.map((signal) =>
     signal.nodeId === null && signal.address
-      ? { ...signal, nodeId: byAddress.get(signal.address) ?? null }
+      ? { ...signal, nodeId: byAddress.get(clientAddressOf(signal.address)) ?? null }
       : signal,
   );
 }
