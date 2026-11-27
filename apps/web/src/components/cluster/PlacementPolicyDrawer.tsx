@@ -43,7 +43,7 @@ const NUMBER_FIELDS: { field: NumberField; label: string; hint: string; step: st
   {
     field: 'sustainMinutes',
     label: 'Sustain (minutes)',
-    hint: 'How long the sustained load of a shard must stay over the trigger before slots move off it.',
+    hint: 'How long the sustained load of a shard must stay over the trigger before the trigger fires. The trigger does not move slots yet.',
     step: '1',
   },
   {
@@ -88,7 +88,7 @@ const OPTIONAL_FIELDS: { field: OptionalNumberField; label: string; hint: string
   {
     field: 'maxCpuShare',
     label: 'CPU share limit',
-    hint: 'A share (0 to 1) of the sustained slot CPU of the cluster that also counts as over the trigger. Empty for none.',
+    hint: 'A share (0 to 1) of the sustained slot CPU of the cluster that also counts as over the trigger, with 3 or more shards. Empty for none.',
   },
   {
     field: 'maxNetworkShare',
@@ -362,8 +362,10 @@ export function PlacementPolicyDrawer({
         <SheetHeader>
           <SheetTitle>Placement policy</SheetTitle>
           <SheetDescription>
-            Resolve ratio, the node CPU limit and the exclusions shape suggested slot moves now. The
-            other limits are checked and saved but do not change anything yet.
+            The trigger ratio, sustain minutes and CPU share limit decide when the sustained trigger
+            fires; the trigger shows on the card and does not move slots yet. The resolve ratio, the
+            node CPU limit and the exclusions shape suggested slot moves now. The other limits are
+            checked and saved but do not change anything yet.
           </SheetDescription>
         </SheetHeader>
         {open && (

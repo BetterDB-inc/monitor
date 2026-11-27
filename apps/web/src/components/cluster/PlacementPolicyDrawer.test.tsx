@@ -71,6 +71,18 @@ describe('PlacementPolicyDrawer', () => {
     expect(screen.getByRole('switch', { name: 'Roll back worse moves' })).toBeChecked();
   });
 
+  it('names the trigger settings apart from the settings that shape moves', () => {
+    open();
+    const description = screen.getByRole('dialog', { name: 'Placement policy' });
+    expect(description).toHaveTextContent(
+      'The trigger ratio, sustain minutes and CPU share limit decide when the sustained trigger fires; the trigger shows on the card and does not move slots yet. The resolve ratio, the node CPU limit and the exclusions shape suggested slot moves now.',
+    );
+    expect(screen.getByText(/before the trigger fires/)).not.toHaveTextContent('Not applied yet');
+    expect(screen.getByText(/also counts as over the trigger/)).not.toHaveTextContent(
+      'Not applied yet',
+    );
+  });
+
   it('saves the edited policy at the version it was opened with and closes', async () => {
     const { save, onOpenChange } = open(vi.fn().mockResolvedValue(saved(5)));
     fireEvent.change(field('Trigger ratio'), { target: { value: '2.5' } });
