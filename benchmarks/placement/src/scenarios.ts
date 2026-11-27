@@ -27,6 +27,7 @@ export interface ScenarioResult {
   variant: string;
   checks: Check[];
   pass: boolean;
+  firesByDay?: number[];
 }
 
 const MODES = ['observe', 'recommend', 'approve', 'auto'] as const;
@@ -405,6 +406,15 @@ export const B3_CASES: B3Case[] = [
     maxFiresPerDay: 0,
   },
   {
+    variant: 'daily 2-h peak at 3x, no samples from minute 15 to 108 of it, 15 s poll',
+    peakMinutes: 120,
+    peakFactor: 3,
+    pollSeconds: 15,
+    days: 3,
+    gap: { fromMinute: 15, toMinute: 108 },
+    maxFiresPerDay: 0,
+  },
+  {
     variant: 'daily 5-min spike at 10x, 15 s poll',
     peakMinutes: 5,
     peakFactor: 10,
@@ -450,7 +460,7 @@ export function runB3Case(entry: B3Case): ScenarioResult {
       ),
     );
   }
-  return result('B3', entry.variant, checks);
+  return { ...result('B3', entry.variant, checks), firesByDay: run.firesByDay };
 }
 
 export async function runAll(): Promise<ScenarioResult[]> {
