@@ -12,6 +12,7 @@ import {
 import { parseActivityRetentionDays } from '../activity/activity-config';
 import { isCloudModeValue } from '../common/utils/cloud-mode';
 import { isNegativeEnvValue } from '../common/utils/env-bool';
+import { DEFAULT_MAX_BYTE_CAP, DEFAULT_MAX_LINE_CAP } from '../monitor/capture-limits';
 import { parseAllowedCidrs, parseAllowedHosts } from '../common/utils/outbound-url-guard';
 import { DEFAULT_AUTH_BROKER_URL, isTrueFlag, normalizeOptionalUrl } from './env-normalize';
 
@@ -62,6 +63,27 @@ const allowlistEnv = (parse: (raw: string) => unknown) =>
         ctx.addIssue({ code: z.ZodIssueCode.custom, message: (error as Error).message });
       }
     });
+
+// Monitor capture limits. Exported so the capture service and reconciler parse
+// these exactly as boot validation does (e.g. `1e8` is 100000000, not 1).
+export const monitorMaxByteCapSchema = z.coerce
+  .number()
+  .int()
+  .min(1)
+  .default(DEFAULT_MAX_BYTE_CAP);
+export const monitorMaxLineCapSchema = z.coerce
+  .number()
+  .int()
+  .min(1)
+  .default(DEFAULT_MAX_LINE_CAP);
+/**
+ * Unset/blank → undefined, meaning "decide from STORAGE_TYPE" (see
+ * resolveReconcileOnStartup); otherwise false for false/0/no/off, else true.
+ */
+export const monitorCaptureReconcileOnStartupSchema = z
+  .string()
+  .optional()
+  .transform((v) => (v === undefined || v.trim() === '' ? undefined : !isNegativeEnvValue(v)));
 
 /**
  * Environment variable validation schema
@@ -314,6 +336,13 @@ export const envSchema = z
     MONITOR_PERSISTENCE_STALL_SEC: z.coerce.number().int().min(1).default(60),
     MONITOR_PERSISTENCE_WARN_SEC: z.coerce.number().int().min(1).default(120),
     MONITOR_PERSISTENCE_CRIT_SEC: z.coerce.number().int().min(1).default(600),
+
+    // Capture session limits. Reconcile-on-startup fails capture rows left
+    // 'running' by a previous process (default: on for sqlite/memory, off for
+    // shared storage); the max caps bound manual captures.
+    MONITOR_CAPTURE_RECONCILE_ON_STARTUP: monitorCaptureReconcileOnStartupSchema,
+    MONITOR_MAX_BYTE_CAP: monitorMaxByteCapSchema,
+    MONITOR_MAX_LINE_CAP: monitorMaxLineCapSchema,
 
     // Sentinel loop-stall / TILT RTT-proxy thresholds (valkey-sentinel-tilt-repro).
     // Defaults bracket the 2000ms sentinel_tilt_trigger: warn well below it so the

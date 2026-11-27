@@ -143,6 +143,7 @@ import type {
   CaptureSessionQueryOptions,
   StoredCaptureChunk,
   CaptureSessionPatch,
+  CaptureSessionStatus,
   CaptureTriggerStatus,
   StoredCaptureTrigger,
   CaptureTriggerQueryOptions,
@@ -152,6 +153,27 @@ import type {
   ScheduledCapturePatch,
 } from '@betterdb/shared';
 import type { AgentToken, ClusterNodeRef, TokenType } from '@betterdb/shared';
+
+/**
+ * Totals over stored capture chunks. byteCount uses CaptureWriter's accounting
+ * (line bytes + 1 per line), i.e. SUM(chunk bytes) + one per chunk, so it equals
+ * what the writer would have finalized for every flushed line.
+ */
+export interface CaptureChunkTotals {
+  lastTs: number;
+  byteCount: number;
+  lineCount: number;
+}
+
+export interface CaptureChunkStats extends CaptureChunkTotals {
+  /** Per node id; chunks without a node id count only in the overall totals. */
+  byNode: Record<string, CaptureChunkTotals>;
+}
+
+export interface UpdateCaptureSessionOptions {
+  /** Compare-and-set: apply the patch only while the stored status equals this. */
+  ifStatus?: CaptureSessionStatus;
+}
 
 // Anomaly Event Types
 export type AnomalyKind = 'upgrade_regression' | 'sustained_degradation';
@@ -940,11 +962,18 @@ export interface StoragePort {
 
   // Monitor Capture Session Methods - connectionId required for writes, optional filter for reads
   saveCaptureSession(session: StoredCaptureSession, connectionId: string): Promise<string>;
-  updateCaptureSession(id: string, patch: CaptureSessionPatch): Promise<boolean>;
+  /** Returns false when no row matched (missing id, or `ifStatus` did not match). */
+  updateCaptureSession(
+    id: string,
+    patch: CaptureSessionPatch,
+    options?: UpdateCaptureSessionOptions,
+  ): Promise<boolean>;
   getCaptureSession(id: string): Promise<StoredCaptureSession | null>;
   getCaptureSessions(options?: CaptureSessionQueryOptions): Promise<StoredCaptureSession[]>;
   saveCaptureChunk(chunk: StoredCaptureChunk): Promise<number>;
   getCaptureChunks(sessionId: string): Promise<StoredCaptureChunk[]>;
+  /** Max last_ts and byte/line totals over a session's chunks, overall and per node. Null when no chunks. Chunk bytes are never loaded. */
+  getCaptureChunkStats(sessionId: string): Promise<CaptureChunkStats | null>;
 
   // Monitor Capture Trigger Methods (Pro+)
   saveCaptureTrigger(trigger: StoredCaptureTrigger): Promise<string>;

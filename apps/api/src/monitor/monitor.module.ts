@@ -6,6 +6,7 @@ import { StorageModule } from '../storage/storage.module';
 import { TopologyModule } from '../topology/topology.module';
 import { WebhooksModule } from '../webhooks/webhooks.module';
 import { AclChecker } from './acl-checker';
+import { CaptureSessionReconciler } from './capture-session-reconciler';
 import { CaptureScheduler } from './capture-scheduler';
 import { CaptureTriggerRegistry } from './capture-trigger-registry';
 import { CrossReferenceEngine } from './cross-reference.engine';
@@ -29,6 +30,7 @@ import { TailGateway } from './tail.gateway';
   providers: [
     AclChecker,
     CaptureScheduler,
+    CaptureSessionReconciler,
     CaptureTriggerRegistry,
     CrossReferenceEngine,
     HealthGateService,

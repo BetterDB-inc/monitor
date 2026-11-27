@@ -94,7 +94,8 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  onModuleInit(): void {
+  async onModuleInit(): Promise<void> {
+    await this.captureService.whenReady();
     if (!this.autoStart) {
       return;
     }
