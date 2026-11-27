@@ -53,6 +53,7 @@ import type {
   PlacementStep,
   PlacementStepPatch,
   PlacementStepState,
+  PlacementStepRead,
   SessionNamespace,
   KvCacheEngineSample,
   KvCacheEngineSource,
@@ -874,7 +875,7 @@ export interface StoragePort {
     write: PlacementSettingsWrite,
     expectedVersion: number,
   ): Promise<PlacementPolicy | null>;
-  createPlacementAction(action: PlacementAction, steps: PlacementStep[]): Promise<void>;
+  createPlacementAction(action: PlacementAction, steps: PlacementStep[]): Promise<PlacementAction>;
   getPlacementAction(
     id: string,
   ): Promise<{ action: PlacementAction; steps: PlacementStep[] } | null>;
@@ -896,7 +897,7 @@ export interface StoragePort {
   ): Promise<PlacementStep | null>;
   acquirePlacementLock(actionId: string, nodeIds: readonly string[], now: number): Promise<boolean>;
   freeOrphanedPlacementLocks(): Promise<number>;
-  placementStepsSince(connectionId: string, since: number): Promise<PlacementStep[]>;
+  placementStepsSince(connectionId: string, since: number): Promise<PlacementStepRead[]>;
   prunePlacementActions(before: number): Promise<number>;
   saveKvCacheFootprintSnapshot(snapshot: KvCacheFootprintSnapshot): Promise<void>;
   getKvCacheFootprintSnapshots(query: KvCacheFootprintQuery): Promise<KvCacheFootprintSnapshot[]>;

@@ -24,6 +24,7 @@ import type {
   PlacementStep,
   PlacementStepPatch,
   PlacementStepState,
+  PlacementStepRead,
 } from '@betterdb/shared';
 import {
   PLACEMENT_ACTION_COLUMNS,
@@ -32,6 +33,7 @@ import {
   placementColumns,
   placementCursor,
   placementFromRow,
+  placementStepReadOf,
   placementPageLimit,
 } from './placement-action-rows';
 import type {
@@ -546,6 +548,7 @@ const PLACEMENT_ACTIONS_DDL = `
     state TEXT NOT NULL,
     source_node_id TEXT NOT NULL,
     target_node_id TEXT NOT NULL,
+    target_shard_id TEXT NOT NULL,
     target_addr TEXT NOT NULL,
     ranges TEXT NOT NULL,
     jobs_before TEXT,
@@ -683,11 +686,14 @@ function insertPlacementRow(
   db: Database.Database,
   table: string,
   values: { columns: string[]; params: unknown[] },
-): void {
-  db.prepare(
-    `INSERT INTO ${table} (${values.columns.join(', ')})
-     VALUES (${values.columns.map(() => '?').join(', ')})`,
-  ).run(...values.params);
+): Record<string, unknown> {
+  return db
+    .prepare(
+      `INSERT INTO ${table} (${values.columns.join(', ')})
+       VALUES (${values.columns.map(() => '?').join(', ')})
+       RETURNING *`,
+    )
+    .get(...values.params) as Record<string, unknown>;
 }
 
 function rebuildWithNullableColumns(
@@ -4930,11 +4936,14 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return row ? this.placementPolicyOfRow(row) : null;
   }
 
-  async createPlacementAction(action: PlacementAction, steps: PlacementStep[]): Promise<void> {
+  async createPlacementAction(
+    action: PlacementAction,
+    steps: PlacementStep[],
+  ): Promise<PlacementAction> {
     const db = this.db;
     if (!db) throw new Error('Database not initialized');
-    db.transaction(() => {
-      insertPlacementRow(
+    return db.transaction(() => {
+      const row = insertPlacementRow(
         db,
         'placement_actions',
         placementColumns(PLACEMENT_ACTION_COLUMNS, action),
@@ -4942,6 +4951,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       for (const step of steps) {
         insertPlacementRow(db, 'placement_steps', placementColumns(PLACEMENT_STEP_COLUMNS, step));
       }
+      return placementFromRow(PLACEMENT_ACTION_COLUMNS, row);
     })();
   }
 
@@ -5027,20 +5037,17 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       'connectionId',
     ]);
     return db.transaction(() => {
-      const result = db
+      const row = db
         .prepare(
           `UPDATE placement_actions SET ${set.columns.map((column) => `${column} = ?`).join(', ')}
-           WHERE id = ? AND state IN (${from.map(() => '?').join(', ')})`,
+           WHERE id = ? AND state IN (${from.map(() => '?').join(', ')})
+           RETURNING *`,
         )
-        .run(...set.params, id, ...from);
-      if (result.changes === 0) return null;
+        .get(...set.params, id, ...from) as Record<string, unknown> | undefined;
+      if (!row) return null;
       if (PLACEMENT_TERMINAL_STATES.includes(patch.state)) {
         db.prepare('DELETE FROM placement_locks WHERE action_id = ?').run(id);
       }
-      const row = db.prepare('SELECT * FROM placement_actions WHERE id = ?').get(id) as Record<
-        string,
-        unknown
-      >;
       return placementFromRow(PLACEMENT_ACTION_COLUMNS, row);
     })();
   }
@@ -5058,25 +5065,18 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       'actionId',
       'index',
     ]);
-    return db.transaction(() => {
-      if (set.columns.length > 0 || from) {
-        const assignments = set.columns.length
-          ? set.columns.map((column) => `${column} = ?`).join(', ')
-          : 'state = state';
-        const stateCheck = from ? ` AND state IN (${from.map(() => '?').join(', ')})` : '';
-        const result = db
-          .prepare(
-            `UPDATE placement_steps SET ${assignments}
-             WHERE action_id = ? AND step_index = ?${stateCheck}`,
-          )
-          .run(...set.params, actionId, index, ...(from ?? []));
-        if (result.changes === 0) return null;
-      }
-      const row = db
-        .prepare('SELECT * FROM placement_steps WHERE action_id = ? AND step_index = ?')
-        .get(actionId, index) as Record<string, unknown> | undefined;
-      return row ? placementFromRow(PLACEMENT_STEP_COLUMNS, row) : null;
-    })();
+    const assignments = set.columns.length
+      ? set.columns.map((column) => `${column} = ?`).join(', ')
+      : 'state = state';
+    const stateCheck = from ? ` AND state IN (${from.map(() => '?').join(', ')})` : '';
+    const row = db
+      .prepare(
+        `UPDATE placement_steps SET ${assignments}
+         WHERE action_id = ? AND step_index = ?${stateCheck}
+         RETURNING *`,
+      )
+      .get(...set.params, actionId, index, ...(from ?? [])) as Record<string, unknown> | undefined;
+    return row ? placementFromRow(PLACEMENT_STEP_COLUMNS, row) : null;
   }
 
   async acquirePlacementLock(
@@ -5115,18 +5115,18 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       .run(...PLACEMENT_TERMINAL_STATES).changes;
   }
 
-  async placementStepsSince(connectionId: string, since: number): Promise<PlacementStep[]> {
+  async placementStepsSince(connectionId: string, since: number): Promise<PlacementStepRead[]> {
     if (!this.db) throw new Error('Database not initialized');
     const rows = this.db
       .prepare(
-        `SELECT s.* FROM placement_steps s
+        `SELECT s.*, a.source_shard_id AS action_source_shard_id FROM placement_steps s
          JOIN placement_actions a ON a.id = s.action_id
-         WHERE a.connection_id = ?
-           AND (s.sending_at >= ? OR (s.state = 'done' AND s.ended_at >= ?))
+         WHERE a.connection_id = ? AND s.sending_at IS NOT NULL
+           AND (s.sending_at >= ? OR s.ended_at IS NULL OR s.ended_at >= ?)
          ORDER BY s.action_id, s.step_index`,
       )
       .all(connectionId, since, since) as Record<string, unknown>[];
-    return rows.map((row) => placementFromRow(PLACEMENT_STEP_COLUMNS, row));
+    return rows.map((row) => placementStepReadOf(row));
   }
 
   async prunePlacementActions(before: number): Promise<number> {

@@ -324,6 +324,7 @@ export interface PlacementStep {
   state: PlacementStepState;
   sourceNodeId: string;
   targetNodeId: string;
+  targetShardId: string;
   targetAddr: string;
   ranges: [number, number][];
   jobsBefore: string[] | null;
@@ -358,3 +359,7 @@ export type PlacementActionPatch = Partial<Omit<PlacementAction, 'id' | 'connect
 };
 
 export type PlacementStepPatch = Partial<Omit<PlacementStep, 'actionId' | 'index'>>;
+
+export interface PlacementStepRead extends PlacementStep {
+  sourceShardId: string;
+}

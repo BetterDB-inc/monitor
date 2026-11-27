@@ -76,6 +76,7 @@ function step(
     state: 'planned',
     sourceNodeId: 'n1',
     targetNodeId: `n${index + 2}`,
+    targetShardId: `shard-${index + 2}`,
     targetAddr: `10.0.0.${index + 2}:7000`,
     ranges: [[index * 10, index * 10 + 9]],
     jobsBefore: null,
@@ -125,7 +126,7 @@ describe.each([
       },
     });
     const steps = [step('a1', 1), step('a1', 0, { jobsBefore: ['j0'] })];
-    await storage.createPlacementAction(stored, steps);
+    expect(await storage.createPlacementAction(stored, steps)).toEqual(stored);
 
     const read = await storage.getPlacementAction('a1');
     expect(read?.action).toEqual(stored);
@@ -294,20 +295,69 @@ describe.each([
     ]);
   });
 
-  it('reads the steps sent or finished since a time, for one connection', async () => {
+  it('reads the steps sent, still open or ended since a time, for one connection', async () => {
     await storage.createPlacementAction(action('a1'), [
       step('a1', 0, { state: 'sending', sendingAt: 500 }),
       step('a1', 1, { state: 'done', sendingAt: 100, endedAt: 600 }),
       step('a1', 2, { state: 'done', sendingAt: 100, endedAt: 300 }),
       step('a1', 3, { state: 'failed', sendingAt: 100, endedAt: 700 }),
       step('a1', 4),
+      step('a1', 5, { state: 'running', sendingAt: 100 }),
+      step('a1', 6, { state: 'cancelled', endedAt: 800 }),
     ]);
     await storage.createPlacementAction(action('b1', { connectionId: 'conn-b' }), [
       step('b1', 0, { state: 'sending', sendingAt: 900 }),
     ]);
 
     const since = await storage.placementStepsSince('conn-a', 400);
-    expect(since.map((each) => each.index).sort()).toEqual([0, 1]);
+    expect(since.map((each) => each.index).sort()).toEqual([0, 1, 3, 5]);
+    expect(since.find((each) => each.index === 5)).toEqual({
+      ...step('a1', 5, { state: 'running', sendingAt: 100 }),
+      sourceShardId: 'n1',
+    });
+  });
+
+  it('counts the sent steps of ended actions in the hourly jobs, as replaced runs were', async () => {
+    const hourAgo = 10_000;
+    await storage.createPlacementAction(
+      action('replaced', { state: 'failed', startedAt: hourAgo + 100, endedAt: hourAgo + 400 }),
+      [
+        step('replaced', 0, { state: 'done', sendingAt: hourAgo + 100, endedAt: hourAgo + 300 }),
+        step('replaced', 1, { state: 'failed', sendingAt: hourAgo + 200, endedAt: hourAgo + 400 }),
+        step('replaced', 2, { state: 'cancelled', endedAt: hourAgo + 400 }),
+      ],
+    );
+    await storage.createPlacementAction(
+      action('active', { state: 'running', startedAt: hourAgo + 500 }),
+      [step('active', 0, { state: 'running', sendingAt: hourAgo + 500 }), step('active', 1)],
+    );
+    await storage.createPlacementAction(
+      action('older', { state: 'succeeded', startedAt: hourAgo - 900, endedAt: hourAgo - 100 }),
+      [step('older', 0, { state: 'done', sendingAt: hourAgo - 900, endedAt: hourAgo - 100 })],
+    );
+
+    const steps = await storage.placementStepsSince('conn-a', hourAgo);
+    const jobsUsed = steps.filter((each) => (each.sendingAt ?? -1) >= hourAgo).length;
+    expect(jobsUsed).toBe(3);
+    expect([...new Set(steps.flatMap((each) => [each.sourceShardId, each.targetShardId]))]).toEqual(
+      ['n1', 'shard-2', 'shard-3'],
+    );
+  });
+
+  it('answers a transition and a step update with the row it wrote', async () => {
+    await storage.createPlacementAction(action('a1'), [step('a1', 0)]);
+
+    const moved = await storage.transitionPlacementAction('a1', ['proposed'], {
+      state: 'approved',
+      approvedAt: 2_000,
+    });
+    expect(moved).toEqual(action('a1', { state: 'approved', approvedAt: 2_000 }));
+    const sent = await storage.updatePlacementStep('a1', 0, ['planned'], {
+      state: 'sending',
+      sendingAt: 2_100,
+    });
+    expect(sent).toEqual(step('a1', 0, { state: 'sending', sendingAt: 2_100 }));
+    expect(await storage.updatePlacementStep('a1', 0, null, {})).toEqual(sent);
   });
 
   it('prunes ended actions with their steps, keeping open and recent ones', async () => {

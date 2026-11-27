@@ -24,6 +24,7 @@ import type {
   PlacementStep,
   PlacementStepPatch,
   PlacementStepState,
+  PlacementStepRead,
 } from '@betterdb/shared';
 import {
   PLACEMENT_ACTION_COLUMNS,
@@ -32,6 +33,7 @@ import {
   placementColumns,
   placementCursor,
   placementFromRow,
+  placementStepReadOf,
   placementPageLimit,
 } from './placement-action-rows';
 import type {
@@ -343,12 +345,14 @@ async function insertPlacementRow(
   client: PoolClient,
   table: string,
   values: { columns: string[]; params: unknown[] },
-): Promise<void> {
-  await client.query(
+): Promise<Record<string, unknown>> {
+  const result = await client.query(
     `INSERT INTO ${table} (${values.columns.join(', ')})
-     VALUES (${values.columns.map((_, index) => `$${index + 1}`).join(', ')})`,
+     VALUES (${values.columns.map((_, index) => `$${index + 1}`).join(', ')})
+     RETURNING *`,
     values.params,
   );
+  return result.rows[0];
 }
 
 export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
@@ -2886,6 +2890,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         state TEXT NOT NULL,
         source_node_id TEXT NOT NULL,
         target_node_id TEXT NOT NULL,
+        target_shard_id TEXT NOT NULL,
         target_addr TEXT NOT NULL,
         ranges TEXT NOT NULL,
         jobs_before TEXT,
@@ -4900,9 +4905,12 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return row ? this.placementPolicyFromRow(row) : null;
   }
 
-  async createPlacementAction(action: PlacementAction, steps: PlacementStep[]): Promise<void> {
-    await this.inPlacementTransaction(async (client) => {
-      await insertPlacementRow(
+  async createPlacementAction(
+    action: PlacementAction,
+    steps: PlacementStep[],
+  ): Promise<PlacementAction> {
+    return this.inPlacementTransaction(async (client) => {
+      const row = await insertPlacementRow(
         client,
         'placement_actions',
         placementColumns(PLACEMENT_ACTION_COLUMNS, action),
@@ -4914,6 +4922,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
           placementColumns(PLACEMENT_STEP_COLUMNS, step),
         );
       }
+      return placementFromRow(PLACEMENT_ACTION_COLUMNS, row);
     });
   }
 
@@ -5069,17 +5078,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return result.rowCount ?? 0;
   }
 
-  async placementStepsSince(connectionId: string, since: number): Promise<PlacementStep[]> {
+  async placementStepsSince(connectionId: string, since: number): Promise<PlacementStepRead[]> {
     if (!this.pool) throw new Error('Database not initialized');
     const result = await this.pool.query(
-      `SELECT s.* FROM placement_steps s
+      `SELECT s.*, a.source_shard_id AS action_source_shard_id FROM placement_steps s
        JOIN placement_actions a ON a.id = s.action_id
-       WHERE a.connection_id = $1
-         AND (s.sending_at >= $2 OR (s.state = 'done' AND s.ended_at >= $2))
+       WHERE a.connection_id = $1 AND s.sending_at IS NOT NULL
+         AND (s.sending_at >= $2 OR s.ended_at IS NULL OR s.ended_at >= $2)
        ORDER BY s.action_id, s.step_index`,
       [connectionId, since],
     );
-    return result.rows.map((row) => placementFromRow(PLACEMENT_STEP_COLUMNS, row));
+    return result.rows.map((row) => placementStepReadOf(row));
   }
 
   async prunePlacementActions(before: number): Promise<number> {

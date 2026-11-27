@@ -1,4 +1,4 @@
-import type { PlacementAction, PlacementStep } from '@betterdb/shared';
+import type { PlacementAction, PlacementStep, PlacementStepRead } from '@betterdb/shared';
 
 type ColumnKind = 'text' | 'nullableText' | 'json' | 'number' | 'nullableNumber';
 
@@ -38,6 +38,7 @@ export const PLACEMENT_STEP_COLUMNS: ColumnMap<PlacementStep> = {
   state: ['state', 'text'],
   sourceNodeId: ['source_node_id', 'text'],
   targetNodeId: ['target_node_id', 'text'],
+  targetShardId: ['target_shard_id', 'text'],
   targetAddr: ['target_addr', 'text'],
   ranges: ['ranges', 'json'],
   jobsBefore: ['jobs_before', 'json'],
@@ -97,6 +98,13 @@ export function placementFromRow<T extends object>(
     value[key] = fromColumn(kind, row[column]);
   }
   return value as T;
+}
+
+export function placementStepReadOf(row: Record<string, unknown>): PlacementStepRead {
+  return {
+    ...placementFromRow(PLACEMENT_STEP_COLUMNS, row),
+    sourceShardId: String(row.action_source_shard_id),
+  };
 }
 
 export function placementPageLimit(limit: number | undefined): number {

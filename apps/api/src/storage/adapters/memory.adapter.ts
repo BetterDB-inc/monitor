@@ -150,6 +150,7 @@ import type {
   PlacementStep,
   PlacementStepPatch,
   PlacementStepState,
+  PlacementStepRead,
   KvCacheEngineSample,
   KvCacheFootprintSnapshot,
   KvCacheSettings,
@@ -1517,7 +1518,10 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   private placementSteps = new Map<string, PlacementStep[]>();
   private placementLocks = new Map<string, { actionId: string; acquiredAt: number }>();
 
-  async createPlacementAction(action: PlacementAction, steps: PlacementStep[]): Promise<void> {
+  async createPlacementAction(
+    action: PlacementAction,
+    steps: PlacementStep[],
+  ): Promise<PlacementAction> {
     if (this.placementActions.has(action.id)) {
       throw new Error(`Placement action ${action.id} already exists`);
     }
@@ -1526,6 +1530,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       action.id,
       structuredClone(steps).sort((a, b) => a.index - b.index),
     );
+    return structuredClone(action);
   }
 
   async getPlacementAction(
@@ -1628,16 +1633,16 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return freed;
   }
 
-  async placementStepsSince(connectionId: string, since: number): Promise<PlacementStep[]> {
-    const steps: PlacementStep[] = [];
+  async placementStepsSince(connectionId: string, since: number): Promise<PlacementStepRead[]> {
+    const steps: PlacementStepRead[] = [];
     for (const action of this.placementActions.values()) {
       if (action.connectionId !== connectionId) continue;
       for (const each of this.placementSteps.get(action.id) ?? []) {
         if (
-          (each.sendingAt !== null && each.sendingAt >= since) ||
-          (each.state === 'done' && each.endedAt !== null && each.endedAt >= since)
+          each.sendingAt !== null &&
+          (each.sendingAt >= since || each.endedAt === null || each.endedAt >= since)
         ) {
-          steps.push(structuredClone(each));
+          steps.push({ ...structuredClone(each), sourceShardId: action.sourceShardId });
         }
       }
     }
