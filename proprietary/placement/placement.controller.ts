@@ -10,7 +10,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiHeader, ApiOperation } from '@nestjs/swagger';
-import { PLACEMENT_MODES, type PlacementMode, type PlacementStatus } from '@betterdb/shared';
+import { PLACEMENT_MODES, type PlacementMode, type PlacementPolicySaved, type PlacementStatus } from '@betterdb/shared';
 import { LicenseGuard, RequiresFeature, Feature } from '@proprietary/licenses';
 import { AgentTokenGuard } from '@app/common/guards/agent-token.guard';
 import { ConnectionId, CONNECTION_ID_HEADER } from '@app/common/decorators';
@@ -62,7 +62,7 @@ export class PlacementController {
   async setPolicy(
     @ConnectionId({ required: true }) connectionId: string,
     @Body() body: unknown,
-  ): Promise<PlacementStatus> {
+  ): Promise<PlacementPolicySaved> {
     const parsed = parsePolicyBody(body);
     if (!parsed) {
       throw new BadRequestException('policy and a whole version number of 0 or more are required');

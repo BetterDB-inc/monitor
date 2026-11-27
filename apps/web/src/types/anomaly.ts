@@ -125,6 +125,7 @@ export type RebalanceNoPlanReason =
   | 'cluster_hot'
   | 'no_target'
   | 'source_excluded'
+  | 'policy_unreadable'
   | 'unhealthy_node'
   | 'migration_running'
   | 'settling'
@@ -219,7 +220,11 @@ export interface RebalanceExecution {
   blockedBy?: RebalanceExecutionBlocker;
 }
 
-export type RebalanceRecheckFailure = 'slots_moved' | 'source_unhealthy' | 'target_unhealthy';
+export type RebalanceRecheckFailure =
+  | 'slots_moved'
+  | 'source_unhealthy'
+  | 'target_unhealthy'
+  | 'policy_excludes';
 
 export type RebalanceJobState =
   | 'starting'

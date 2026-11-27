@@ -13,7 +13,6 @@ import {
   runAll,
   runB8Case,
 } from '../src/scenarios';
-import { runPeaks } from '../src/sustain';
 import {
   GATE_FIRED_AT,
   GATE_PLACES,
@@ -24,14 +23,23 @@ import {
 } from '../src/gate';
 import { simulate } from '../src/simulate';
 
-const everyScenario = runAll();
+let all: ReturnType<typeof runAll> | undefined;
+const everyScenario = () => (all ??= runAll());
+
+async function firesOf(variant: string): Promise<number[] | undefined> {
+  const scenario = (await everyScenario()).find(
+    (each) => each.id === 'B3' && each.variant === variant,
+  );
+  assert.ok(scenario, `no B3 scenario ${variant}`);
+  return scenario.firesByDay;
+}
 
 test('the product files match the pin', () => {
   assert.doesNotThrow(() => checkPin());
 });
 
 test('every scenario passes', async () => {
-  const failed = (await everyScenario)
+  const failed = (await everyScenario())
     .filter((scenario) => !scenario.pass)
     .map(
       (scenario) =>
@@ -71,7 +79,7 @@ test('the hot slot is the one the model loads', () => {
 });
 
 test('the hash-tag variants run with and without LFU', async () => {
-  const variants = (await everyScenario)
+  const variants = (await everyScenario())
     .filter((scenario) => scenario.id === 'B2')
     .map((scenario) => scenario.variant);
   assert.deepEqual(variants, ['single hot key', 'hash tag, no LFU', 'hash tag, LFU']);
@@ -151,18 +159,18 @@ test('the tags are kept when the frequency read fails, as in the service', async
   );
 });
 
-test('a daily 20-min peak never fires the trigger and a 2-h peak fires once a day', () => {
+test('a daily 20-min peak never fires the trigger and a 2-h peak fires once a day', async () => {
   const [short, , long] = B3_CASES;
-  assert.deepEqual(runPeaks({ ...short, days: 2 }).firesByDay, [0, 0]);
-  assert.deepEqual(runPeaks({ ...long, days: 2 }).firesByDay, [1, 1]);
+  assert.deepEqual(await firesOf(short.variant), Array(short.days).fill(0));
+  assert.deepEqual(await firesOf(long.variant), Array(long.days).fill(1));
 });
 
-test('a poll gap in a short peak does not fire the trigger, and heavy bursts do', () => {
-  const [, , , gap, spike, bursts] = B3_CASES;
-  assert.deepEqual(runPeaks({ ...gap, days: 1 }).firesByDay, [0]);
-  assert.deepEqual(runPeaks({ ...gap, gap: undefined, days: 1 }).firesByDay, [0]);
-  assert.deepEqual(runPeaks({ ...spike, days: 1 }).firesByDay, [0]);
-  assert.deepEqual(runPeaks({ ...bursts, days: 1 }).firesByDay, [1]);
+test('a poll gap does not count as measured, and heavy bursts fire the trigger', async () => {
+  const [, , , shortGap, longGap, spike, bursts] = B3_CASES;
+  assert.deepEqual(await firesOf(shortGap.variant), Array(shortGap.days).fill(0));
+  assert.deepEqual(await firesOf(longGap.variant), Array(longGap.days).fill(0));
+  assert.deepEqual(await firesOf(spike.variant), Array(spike.days).fill(0));
+  assert.deepEqual(await firesOf(bursts.variant), Array(bursts.days).fill(1));
 });
 
 test('a blocker on a node outside the plan never holds it back, and on the plan it does', async () => {
@@ -192,7 +200,7 @@ test('the hot shard command_p99 holds the move back only when it opened before t
 });
 
 test('every B4 scenario is in the run', async () => {
-  const variants = (await everyScenario).filter((scenario) => scenario.id === 'B4').length;
+  const variants = (await everyScenario()).filter((scenario) => scenario.id === 'B4').length;
   assert.equal(variants, NODE_BLOCKER_CASES.length + 4);
 });
 

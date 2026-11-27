@@ -20,6 +20,7 @@ import {
   type PlacementMode,
   type PlacementPolicy,
   type PlacementPolicyInvalid,
+  type PlacementPolicySaved,
   type PlacementRecommendation,
   type PlacementSettings,
   type PlacementStatus,
@@ -36,10 +37,12 @@ import type { ShardLoadSample } from '@app/cluster/shard-load';
 import { ClusterMetricsService } from '@app/cluster/cluster-metrics.service';
 import { WORKSPACE_CONFIG, type WorkspaceConfig } from '@app/auth/workspace-config';
 import { isManagedProviderBuild } from '@app/monitor/provider-detector';
+import { withTimeout } from '@app/common/utils/with-timeout';
 import { AnomalyService } from '../anomaly-detection/anomaly.service';
 import type { ServedHotShardDetail } from '../anomaly-detection/hot-shard-detector';
 import {
   DEFAULT_REBALANCE_POLICY,
+  PlacementPolicyUnreadableError,
   type RebalanceExecution,
   type RebalancePlan,
   type RebalancePolicy,
@@ -88,11 +91,7 @@ export class PlacementPolicyConflictError extends Error {
   }
 }
 
-export class PlacementPolicyUnreadableError extends Error {
-  constructor(readonly problems: string[]) {
-    super(`The exclusions of the stored placement policy cannot be read: ${problems.join('; ')}`);
-  }
-}
+export { PlacementPolicyUnreadableError };
 
 export interface PlacementGateSubject {
   sourceShardId: string;
@@ -229,15 +228,16 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
     connectionId: string,
     input: unknown,
     version: number,
-  ): Promise<PlacementStatus> {
+  ): Promise<PlacementPolicySaved> {
     const validated = validatePlacementSettings(input);
     if (!validated.ok) throw new PlacementPolicyError(validated.errors);
     const seedId = this.seedOf(connectionId);
     const current = await this.storage.getPlacementPolicy(seedId);
+    const expansion = await this.withShardNodes(seedId, validated.settings);
     const saved = await this.storage.savePlacementSettings(
       {
         connectionId: seedId,
-        settings: await this.withShardNodes(seedId, validated.settings),
+        settings: expansion.settings,
         updatedAt: Date.now(),
         modeIfNew: this.modeOf(current, seedId),
       },
@@ -247,41 +247,42 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
     this.advancePolicy(seedId);
     this.policyCache.set(seedId, { at: Date.now(), policy: saved });
     this.applyTriggerSettings(seedId, saved.settings);
-    return this.getStatus(seedId);
+    return {
+      ...(await this.getStatus(seedId)),
+      exclusionsExpanded: expansion.problem === null,
+      exclusionsExpandProblem: expansion.problem,
+    };
   }
 
   private async withShardNodes(
     seedId: string,
     settings: PlacementSettings,
-  ): Promise<PlacementSettings> {
-    if (settings.excludedShardIds.length === 0) return settings;
-    let timer: NodeJS.Timeout | undefined;
+  ): Promise<{ settings: PlacementSettings; problem: string | null }> {
+    if (settings.excludedShardIds.length === 0) return { settings, problem: null };
     try {
-      const nodes = await Promise.race([
+      const nodes = await withTimeout(
         this.registry.get(seedId).getClusterNodes(),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(
-            () => reject(new Error('CLUSTER NODES timed out')),
-            SHARD_NODES_TIMEOUT_MS,
-          );
-        }),
-      ]);
+        SHARD_NODES_TIMEOUT_MS,
+        `CLUSTER NODES did not answer within ${SHARD_NODES_TIMEOUT_MS / 1000} s`,
+      );
       return {
-        ...settings,
-        excludedShardIds: excludedShardNodeIds(settings.excludedShardIds, nodes),
+        settings: {
+          ...settings,
+          excludedShardIds: excludedShardNodeIds(settings.excludedShardIds, nodes),
+        },
+        problem: null,
       };
-    } catch {
-      return settings;
-    } finally {
-      clearTimeout(timer);
+    } catch (err) {
+      const problem = err instanceof Error ? err.message : String(err);
+      this.logger.warn(
+        `The placement policy of ${seedId} was saved with the excluded shards as typed: the other nodes of each shard were not added (${problem}).`,
+      );
+      return { settings, problem };
     }
   }
 
-  async settingsOf(
-    seedId: string,
-    { fresh = false }: { fresh?: boolean } = {},
-  ): Promise<PlacementSettingsRead> {
-    return settingsReadOf(fresh ? await this.readPolicy(seedId) : await this.cachedPolicy(seedId));
+  async settingsOf(seedId: string): Promise<PlacementSettingsRead> {
+    return settingsReadOf(await this.cachedPolicy(seedId));
   }
 
   async rebalancePolicyFor(seedId: string): Promise<RebalancePolicy> {

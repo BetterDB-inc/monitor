@@ -17,7 +17,11 @@ export const REBALANCE_RUN_KEPT_MS = 60 * 60_000;
 export const REBALANCE_FOLLOW_MS = 5_000;
 export const REBALANCE_CANCEL_PENDING_MS = 10_000;
 
-export type RebalanceRecheckFailure = 'slots_moved' | 'source_unhealthy' | 'target_unhealthy';
+export type RebalanceRecheckFailure =
+  | 'slots_moved'
+  | 'source_unhealthy'
+  | 'target_unhealthy'
+  | 'policy_excludes';
 
 export interface ConfirmedMove {
   targetShardId: string;

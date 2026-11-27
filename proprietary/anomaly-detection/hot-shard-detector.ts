@@ -70,6 +70,10 @@ export function hotShardRatio(cpuUsecPerSecond: number, cpuMedian: number): numb
   return cpuUsecPerSecond / Math.max(cpuMedian, NEAR_IDLE_CPU_USEC_PER_SECOND);
 }
 
+export function hotShardShare(cpuUsecPerSecond: number, cpuTotal: number, shards: number): number {
+  return cpuUsecPerSecond / Math.max(cpuTotal, shards * NEAR_IDLE_CPU_USEC_PER_SECOND);
+}
+
 export function hotShardSignature(shardId: string): string {
   return `hot_shard:${shardId}`;
 }

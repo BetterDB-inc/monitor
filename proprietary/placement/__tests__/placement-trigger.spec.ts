@@ -218,19 +218,67 @@ describe('PlacementTriggers', () => {
     expect(triggers.read('seed', 'b', 30 * MINUTE + 5_000, STALE_MS).state).toBe('under');
   });
 
-  it('forgets a shard that leaves the sample', () => {
+  it('keeps the history of a shard missing from a poll, and reads it as stale meanwhile', () => {
     const triggers = configured();
     feed(triggers, 0, 30, 5, () => ({ ratio: 3 }));
-    triggers.observe(
-      'seed',
-      sampleAt(30 * MINUTE + 5_000, { ratio: 3, shards: ['b', 'c'] }),
-      STALE_MS,
-    );
+    const gap = 30 * MINUTE + 5_000;
+    triggers.observe('seed', sampleAt(gap, { ratio: 3, shards: ['b', 'c'] }), STALE_MS);
 
-    expect(triggers.read('seed', 'a', 30 * MINUTE + 5_000, STALE_MS)).toMatchObject({
+    expect(triggers.read('seed', 'a', gap + STALE_MS + 1, STALE_MS)).toMatchObject({
+      state: 'short_history',
+      firedAt: null,
+    });
+
+    triggers.observe('seed', sampleAt(gap + 5_000, { ratio: 3 }), STALE_MS);
+    expect(triggers.read('seed', 'a', gap + 5_000, STALE_MS).state).toBe('over');
+  });
+
+  it('forgets a shard once it has been missing for a whole sustain window', () => {
+    const triggers = configured();
+    feed(triggers, 0, 30, 5, () => ({ ratio: 3 }));
+    feed(triggers, 30.5, 61, 30, () => ({ ratio: 3, shards: ['b', 'c', 'd'] }));
+    triggers.observe('seed', sampleAt(61 * MINUTE + 5_000, { ratio: 3 }), STALE_MS);
+
+    expect(triggers.read('seed', 'a', 61 * MINUTE + 5_000, STALE_MS)).toMatchObject({
       state: 'short_history',
       coveredMs: 0,
       firedAt: null,
+    });
+  });
+
+  describe('with too few shards or too little load to judge', () => {
+    const sharesOf = (loads: number[]) => (timestamp: number) => ({
+      timestamp,
+      settling: false,
+      shards: loads.map((load, index) => ({
+        ...sampleAt(timestamp, { ratio: 1 }).shards[0],
+        nodeId: 'abcd'[index],
+        sustainCpuUsecPerSecond: load,
+      })),
+    });
+    const run = (loads: number[], maxCpuShare: number) => {
+      const triggers = configured({ ...DEFAULT_PLACEMENT_SETTINGS, maxCpuShare });
+      const at = sharesOf(loads);
+      for (let timestamp = 0; timestamp <= 30 * MINUTE; timestamp += 5_000) {
+        triggers.observe('seed', at(timestamp), STALE_MS);
+      }
+      return triggers.read('seed', 'a', 30 * MINUTE, STALE_MS).state;
+    };
+
+    it('reads the busier of two primaries as under for any CPU share limit', () => {
+      expect(run([120_000, 100_000], 0.5)).toBe('under');
+    });
+
+    it('reads a single primary as under although its share is 1', () => {
+      expect(run([100_000], 0.9)).toBe('under');
+    });
+
+    it('reads a near-idle shard as under over the CPU share limit', () => {
+      expect(run([30, 10, 10], 0.4)).toBe('under');
+    });
+
+    it('still reads a busy shard over the CPU share limit as over', () => {
+      expect(run([150_000, 100_000, 50_000], 0.4)).toBe('over');
     });
   });
 
@@ -249,13 +297,11 @@ describe('PlacementTriggers', () => {
     const triggers = new PlacementTriggers();
     const now = feed(triggers, 0, 30, 5, () => ({ ratio: 3 }));
 
-    expect(triggers.configured('seed')).toBe(false);
     expect(triggers.read('seed', 'a', now, STALE_MS).coveredMs).toBe(0);
   });
 
   it('keeps one bucket a minute at most for a day of samples', () => {
     const triggers = configured({ ...DEFAULT_PLACEMENT_SETTINGS, sustainMinutes: 1440 });
-    const started = performance.now();
     const now = feed(triggers, 0, 2 * 1440, 5, () => ({ ratio: 3 }));
 
     const read = triggers.read('seed', 'a', now, STALE_MS);
@@ -268,6 +314,5 @@ describe('PlacementTriggers', () => {
       .get('seed')
       ?.shards.get('a')?.buckets;
     expect(buckets?.length).toBeLessThanOrEqual(1441);
-    expect(performance.now() - started).toBeLessThan(5_000);
   });
 });

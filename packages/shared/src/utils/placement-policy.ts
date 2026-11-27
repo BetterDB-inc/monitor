@@ -1,10 +1,12 @@
 import { z } from 'zod';
 import {
   DEFAULT_PLACEMENT_SETTINGS,
+  PLACEMENT_RESOLVE_RATIO_CAP,
   defaultPlacementSettings,
   type PlacementPolicyInvalid,
   type PlacementSettings,
 } from '../types/placement.types';
+import { primaryIdOf } from './cluster-node-state';
 
 const CLUSTER_SLOTS = 16384;
 const MINUTES_PER_DAY = 24 * 60;
@@ -43,12 +45,17 @@ const placementSettingsFields = z.object({
   autoRollback: z.boolean(),
 });
 
-const RATIO_PROBLEM = 'must be below triggerRatio';
+function ratioProblem(triggerRatio: number, resolveRatio: number): string | null {
+  if (resolveRatio >= triggerRatio) return 'must be below triggerRatio';
+  if (resolveRatio >= PLACEMENT_RESOLVE_RATIO_CAP) {
+    return `must be below ${PLACEMENT_RESOLVE_RATIO_CAP}, the ratio at which a hot shard event closes`;
+  }
+  return null;
+}
 
 export const placementSettingsSchema = placementSettingsFields.superRefine((settings, context) => {
-  if (settings.resolveRatio >= settings.triggerRatio) {
-    context.addIssue({ code: 'custom', path: ['resolveRatio'], message: RATIO_PROBLEM });
-  }
+  const problem = ratioProblem(settings.triggerRatio, settings.resolveRatio);
+  if (problem) context.addIssue({ code: 'custom', path: ['resolveRatio'], message: problem });
 });
 
 export type PlacementSettingsResult =
@@ -67,8 +74,9 @@ function ratioProblems(input: unknown): string[] {
   const fields = input as Record<string, unknown>;
   const trigger = placementSettingsFields.shape.triggerRatio.safeParse(fields.triggerRatio);
   const resolve = placementSettingsFields.shape.resolveRatio.safeParse(fields.resolveRatio);
-  if (!trigger.success || !resolve.success || resolve.data < trigger.data) return [];
-  return [`resolveRatio: ${RATIO_PROBLEM}`];
+  if (!trigger.success || !resolve.success) return [];
+  const problem = ratioProblem(trigger.data, resolve.data);
+  return problem ? [`resolveRatio: ${problem}`] : [];
 }
 
 export function validatePlacementSettings(input: unknown): PlacementSettingsResult {
@@ -141,8 +149,7 @@ export function excludedPrimaryIds(
   const excluded = new Set(excludedNodeIds);
   for (const node of nodes) {
     if (!excludedNodeIds.includes(node.id)) continue;
-    const primary = node.master && node.master !== '-' ? node.master : node.id;
-    excluded.add(primary);
+    excluded.add(primaryIdOf(node));
   }
   return [...excluded];
 }
@@ -151,14 +158,12 @@ export function excludedShardNodeIds(
   excludedNodeIds: readonly string[],
   nodes: ReadonlyArray<{ id: string; master: string }>,
 ): string[] {
-  const primaryOf = (node: { id: string; master: string }) =>
-    node.master && node.master !== '-' ? node.master : node.id;
   const excluded = new Set(excludedNodeIds);
   for (const id of excludedNodeIds) {
     const node = nodes.find((each) => each.id === id);
     if (!node) continue;
-    const primary = primaryOf(node);
-    for (const each of nodes) if (primaryOf(each) === primary) excluded.add(each.id);
+    const primary = primaryIdOf(node);
+    for (const each of nodes) if (primaryIdOf(each) === primary) excluded.add(each.id);
   }
   return [...excluded];
 }

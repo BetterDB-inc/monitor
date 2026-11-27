@@ -18,6 +18,26 @@ export interface RebalancePolicy {
   excludedSlots: readonly number[];
 }
 
+export class PlacementPolicyUnreadableError extends Error {
+  constructor(readonly problems: string[]) {
+    super(`The exclusions of the stored placement policy cannot be read: ${problems.join('; ')}`);
+  }
+}
+
+export function movesExcludedBy(plan: RebalancePlan, policy: RebalancePolicy): boolean {
+  const shards = new Set(policy.excludedShardIds);
+  const slots = new Set(policy.excludedSlots);
+  if (shards.has(plan.sourceShardId)) return true;
+  return plan.moves.some(
+    (move) =>
+      shards.has(move.targetShardId) ||
+      move.ranges.some(([from, to]) => {
+        for (let slot = from; slot <= to; slot += 1) if (slots.has(slot)) return true;
+        return false;
+      }),
+  );
+}
+
 export const DEFAULT_REBALANCE_POLICY: RebalancePolicy = {
   pinnedSlotShare: 0.2,
   nodeCpuLimitUsecPerSecond: 800_000,
@@ -58,7 +78,8 @@ export type RebalanceNoPlanReason =
   | 'too_many_targets'
   | 'covered_by_other_plan'
   | 'conflicts_with_other_plan'
-  | 'source_excluded';
+  | 'source_excluded'
+  | 'policy_unreadable';
 
 export interface RebalanceCoveringShard {
   shardId: string;

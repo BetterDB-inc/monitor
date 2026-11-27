@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
@@ -218,9 +218,11 @@ describe('PlacementCard', () => {
   });
 
   it('saves the policy from the drawer at the version it read', async () => {
-    setPolicy.mockResolvedValue(
-      status({ settings: { ...DEFAULT_PLACEMENT_SETTINGS, triggerRatio: 3 }, policyVersion: 4 }),
-    );
+    setPolicy.mockResolvedValue({
+      ...status({ settings: { ...DEFAULT_PLACEMENT_SETTINGS, triggerRatio: 3 }, policyVersion: 4 }),
+      exclusionsExpanded: true,
+      exclusionsExpandProblem: null,
+    });
     const client = await show(status());
 
     fireEvent.click(within(await card()).getByRole('button', { name: 'Edit policy' }));
@@ -415,17 +417,36 @@ describe('PlacementCard', () => {
     );
   });
 
-  it('shows the sustained load of each shard, and when a short history is long enough', async () => {
-    await show(status());
+  describe('with the clock on the day the warm-up ends or the day before', () => {
+    const warmEnd = new Date(2026, 10, 26, 14, 30);
+    const time = warmEnd.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const day = warmEnd.toLocaleDateString([], { month: 'short', day: 'numeric' });
 
-    const bars = within(await card()).getByRole('list', { name: 'Load against the median' });
-    const rows = within(bars).getAllByRole('listitem');
-    expect(rows[0]).toHaveTextContent('Sustained');
-    expect(rows[0]).toHaveTextContent('Sustained 3x the median, 1.5x over 6 hours');
-    expect(rows[1]).toHaveTextContent(
-      `Warming up until ${new Date(2026, 10, 26, 14, 30).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`,
-    );
-    expect(rows[2]).not.toHaveTextContent('Sustained');
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('shows the sustained load of each shard, and when a short history is long enough', async () => {
+      vi.useFakeTimers({ toFake: ['Date'], now: new Date(2026, 10, 26, 9, 0) });
+      await show(status());
+
+      const bars = within(await card()).getByRole('list', { name: 'Load against the median' });
+      const rows = within(bars).getAllByRole('listitem');
+      expect(rows[0]).toHaveTextContent('Sustained');
+      expect(rows[0]).toHaveTextContent('Sustained 3x the median, 1.5x over 6 hours');
+      expect(rows[1]).toHaveTextContent(`Warming up until ${time}`);
+      expect(rows[1]).not.toHaveTextContent(day);
+      expect(rows[2]).not.toHaveTextContent('Sustained');
+    });
+
+    it('names the day when a warm-up ends on another day', async () => {
+      vi.useFakeTimers({ toFake: ['Date'], now: new Date(2026, 10, 25, 23, 0) });
+      await show(status());
+
+      const bars = within(await card()).getByRole('list', { name: 'Load against the median' });
+      const rows = within(bars).getAllByRole('listitem');
+      expect(rows[1]).toHaveTextContent(`Warming up until ${day}, ${time}`);
+    });
   });
 
   it('shows a shard with no load history yet as warming up', async () => {

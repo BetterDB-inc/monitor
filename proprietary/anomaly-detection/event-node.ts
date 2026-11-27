@@ -1,4 +1,4 @@
-import type { ClusterNodeRef } from '@betterdb/shared';
+import { primaryIdOf, type ClusterNodeRef } from '@betterdb/shared';
 import { buildNodeDirectory, resolveNodeRef, type NodeDirectory } from '@app/cluster/node-ref';
 import type { ClusterNode } from '@app/common/types/metrics.types';
 import { isReadOnlyReplicaRole } from '@app/database/parsers/replication-info.parser';
@@ -35,14 +35,10 @@ interface NodeView {
   directory?: NodeDirectory;
 }
 
-function shardHolderOf(node: ClusterNode): string {
-  return node.master && node.master !== '-' ? node.master : node.id;
-}
-
 function withShardDataOf(nodes: readonly ClusterNode[], source: readonly ClusterNode[]): ClusterNode[] {
   const known = new Map(source.map((node) => [node.id, node]));
   return nodes.map((node) => {
-    const shardId = node.shardId ?? known.get(shardHolderOf(node))?.shardId;
+    const shardId = node.shardId ?? known.get(primaryIdOf(node))?.shardId;
     const availabilityZone = node.availabilityZone ?? known.get(node.id)?.availabilityZone;
     return {
       ...node,

@@ -110,6 +110,8 @@ const NO_PLAN_REASONS: Record<
   too_many_targets: 'This load would have to be spread over too many shards for one suggestion.',
   no_target: 'No other primary can take slots.',
   source_excluded: 'The placement policy excludes this shard, so no slots move off it.',
+  policy_unreadable:
+    'The excluded shards or slots of the placement policy cannot be read, so no slots move until an admin saves the policy again.',
   unhealthy_node:
     'A primary that owns slots is failed or suspect. A suggestion comes back when it is healthy again.',
   migration_running:
@@ -281,6 +283,8 @@ const REFUSED: Record<RebalanceRecheckFailure | 'plan_changed' | 'no_plan', stri
   slots_moved: 'The hot shard no longer owns these slots. A new suggestion follows.',
   source_unhealthy: 'The hot shard is not a healthy primary now.',
   target_unhealthy: 'A target shard is not a healthy primary now.',
+  policy_excludes:
+    'The placement policy now excludes a shard or a slot of this suggestion. A new suggestion follows.',
 };
 
 function refusal(err: unknown): string {

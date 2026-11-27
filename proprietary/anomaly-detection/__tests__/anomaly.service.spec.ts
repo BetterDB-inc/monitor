@@ -6,7 +6,7 @@ import { RESHARD_MARKER_STALL_MS, RESHARD_PERSIST_POLLS } from '../reshard-press
 import { RESYNC_ESCALATION_WINDOW_MS } from '../recovery-amplification-detector';
 import { judgeSlotMigrations, type SlotMigrationWatch } from '../slot-migration-detector';
 import { AnomalyService } from '../anomaly.service';
-import { DEFAULT_REBALANCE_POLICY } from '../rebalance-planner';
+import { DEFAULT_REBALANCE_POLICY, PlacementPolicyUnreadableError } from '../rebalance-planner';
 import { IncidentTimelineBuilder, incidentIdFor, incidentStartOf, signalKey } from '../incident-timeline';
 import { ReplicaSlotAnomaly, replicaSlotSignature } from '../replica-slot-state-detector';
 import { MetricBuffer } from '../metric-buffer';
@@ -3596,6 +3596,31 @@ describe('AnomalyService', () => {
         expect(rebalance()).toMatchObject({ kind: 'plan', moves: [{ ranges: [[100, 107]] }] });
       });
 
+      it('holds with no plan and warns once while the exclusions of the placement policy cannot be read', async () => {
+        spreadLoad();
+        await step(HOT, 6);
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+        const warn = jest
+          .spyOn((service as any).logger, 'warn')
+          .mockImplementation(() => undefined);
+
+        service.setRebalancePolicyResolver(async () => {
+          throw new PlacementPolicyUnreadableError(['excludedSlots.0: too big']);
+        });
+        await step(HOT, 3);
+
+        expect(rebalance()).toMatchObject({ kind: 'no_plan', reason: 'policy_unreadable' });
+        const warned = warn.mock.calls.filter(([message]) =>
+          String(message).includes('No slot moves are planned for conn-a'),
+        );
+        expect(warned).toHaveLength(1);
+
+        service.setRebalancePolicyResolver(async () => DEFAULT_REBALANCE_POLICY);
+        await step(HOT);
+
+        expect(rebalance()).toMatchObject({ kind: 'plan' });
+      });
+
       it('says in the event why moving slots will not help', async () => {
         await step(HOT, 6);
 
@@ -5187,6 +5212,70 @@ describe('AnomalyService', () => {
               false,
             );
             expect(execution()).toEqual({ available: false, blockedBy: 'plan_outdated' });
+          });
+
+          it('refuses a plan made before the placement policy excluded one of its slots', async () => {
+            enable();
+            const { calls } = await planned();
+            service.setRebalancePolicyResolver(async () => ({
+              ...DEFAULT_REBALANCE_POLICY,
+              excludedSlots: [105],
+            }));
+
+            const result = await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN);
+
+            expect(result).toMatchObject({
+              status: 'changed',
+              reason: 'policy_excludes',
+              rebalance: {
+                kind: 'plan',
+                execution: { available: false, blockedBy: 'plan_outdated' },
+              },
+            });
+            expect(calls).toEqual([]);
+          });
+
+          it('refuses a plan whose target the placement policy now excludes through a replica', async () => {
+            enable();
+            const { calls, discovery } = await planned();
+            const isolated = (discovery as any).discoverNodesIsolated as jest.Mock;
+            const answer = isolated.getMockImplementation()!;
+            isolated.mockImplementation(async () => [
+              ...(await answer()),
+              {
+                id: 'r0000000',
+                address: '10.0.0.8:6379',
+                role: 'replica',
+                masterId: 'b0000000',
+                state: 'healthy',
+                flags: ['slave'],
+                slots: [],
+              },
+            ]);
+            service.setRebalancePolicyResolver(async () => ({
+              ...DEFAULT_REBALANCE_POLICY,
+              excludedShardIds: ['r0000000'],
+            }));
+
+            expect(await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN)).toMatchObject({
+              status: 'changed',
+              reason: 'policy_excludes',
+            });
+            expect(calls).toEqual([]);
+          });
+
+          it('refuses to run while the placement policy cannot be read', async () => {
+            enable();
+            const { calls } = await planned();
+            service.setRebalancePolicyResolver(async () => {
+              throw new Error('db down');
+            });
+
+            expect(await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN)).toEqual({
+              status: 'refused',
+              message: 'Could not read the placement policy: db down',
+            });
+            expect(calls).toEqual([]);
           });
 
           it('refuses while a slot migration runs on the cluster', async () => {
