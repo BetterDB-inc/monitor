@@ -466,6 +466,26 @@ describe('PlacementService', () => {
       }
     });
 
+    it('does not warn about the excluded shards of a save refused at an old version', async () => {
+      const { service, registry } = await setup();
+      await service.setSettings('seed', DEFAULT_PLACEMENT_SETTINGS, 0);
+      registry.get.mockReturnValue({
+        getCapabilities: () => ({ clusterEnabled: true, hasClusterSlotStats: true }),
+        getClusterNodes: async () => {
+          throw new Error('connection lost');
+        },
+      } as never);
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      try {
+        await expect(service.setSettings('seed', tighter, 0)).rejects.toThrow(
+          PlacementPolicyConflictError,
+        );
+        expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('were not added'));
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
     it('saves the excluded shards as typed and says so when CLUSTER NODES takes over 2 s', async () => {
       jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
       const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);

@@ -1735,6 +1735,7 @@ export class AnomalyService
     this.hotShardSince.delete(connectionId);
     this.hotShardKeys.delete(connectionId);
     this.hotShardRebalance.delete(connectionId);
+    this.rebalancePolicyWarned.delete(connectionId);
     this.rebalanceRuns.delete(connectionId);
     this.rebalanceFollowedAt.delete(connectionId);
     this.slotMigrationReadOnPoll.delete(connectionId);
