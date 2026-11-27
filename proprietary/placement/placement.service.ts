@@ -209,11 +209,8 @@ export class PlacementService implements OnModuleInit {
     }
   }
 
-  async settingsOf(
-    seedId: string,
-    { fresh = false }: { fresh?: boolean } = {},
-  ): Promise<PlacementSettingsRead> {
-    return settingsReadOf(fresh ? await this.readPolicy(seedId) : await this.cachedPolicy(seedId));
+  async settingsOf(seedId: string): Promise<PlacementSettingsRead> {
+    return settingsReadOf(await this.cachedPolicy(seedId));
   }
 
   async rebalancePolicyFor(seedId: string): Promise<RebalancePolicy> {

@@ -407,14 +407,14 @@ describe('PlacementService', () => {
       jest
         .spyOn(storage, 'getPlacementPolicy')
         .mockImplementationOnce(() => new Promise((done) => (finish = done)));
-      const slow = service.settingsOf('seed', { fresh: true });
+      const slow = service.getStatus('seed');
       await service.setSettings('seed', tighter, 0);
       finish(before);
-      expect((await slow).version).toBe(0);
+      expect((await slow).policyVersion).toBe(0);
       expect((await resolve('seed')).excludedSlots).toEqual([7]);
     });
 
-    it('reads the settings with their version, and fresh past the half-minute cache', async () => {
+    it('reads the settings with their version from the half-minute cache', async () => {
       const { service, storage } = await setup();
       expect(await service.settingsOf('seed')).toEqual({
         settings: DEFAULT_PLACEMENT_SETTINGS,
@@ -427,12 +427,12 @@ describe('PlacementService', () => {
       );
 
       expect((await service.settingsOf('seed')).version).toBe(0);
-      expect(await service.settingsOf('seed', { fresh: true })).toEqual({
+      expect((await service.getStatus('seed')).policyVersion).toBe(1);
+      expect(await service.settingsOf('seed')).toEqual({
         settings: tighter,
         version: 1,
         invalid: null,
       });
-      expect((await service.settingsOf('seed')).version).toBe(1);
     });
 
     it('maps the settings the planner uses over the planner defaults', () => {
