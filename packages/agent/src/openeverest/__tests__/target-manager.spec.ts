@@ -9,7 +9,7 @@ class FakeTarget {
   stopped = false;
   settingsChanges = 0;
 
-  constructor(readonly options: { ref: { cluster: string; namespace: string; instance: string }; clusterId?: string }) {
+  constructor(readonly options: { ref: { cluster: string; namespace: string; instance: string }; clusterId?: string; fingerprintKey?: Buffer }) {
     mockTargets.push(this);
   }
 
@@ -49,6 +49,7 @@ class FakeKube {
   namespace = 'everest-system';
   objects = new Map<string, Obj[]>();
   configMap: Obj | null = null;
+  fingerprint: Obj | null = null;
   kubeSystem: { uid?: string; failWith?: number | 'network'; failTimes?: number } = { uid: 'cluster-uid' };
   watchers = new Map<string, Array<(e: { type: string; object: Obj }) => void>>();
   patches: Array<{ path: string; body: unknown }> = [];
@@ -69,6 +70,10 @@ class FakeKube {
       }
       return { metadata: { name: 'kube-system', uid: this.kubeSystem.uid } };
     }
+    if (path.endsWith('/secrets/fingerprint')) {
+      if (!this.fingerprint) throw new KubeApiError(404, path, 'not found');
+      return JSON.parse(JSON.stringify(this.fingerprint));
+    }
     if (path.endsWith('/configmaps/targets')) {
       if (!this.configMap) throw new KubeApiError(404, path, 'not found');
       return JSON.parse(JSON.stringify(this.configMap));
@@ -83,6 +88,10 @@ class FakeKube {
     if (path.endsWith('/configmaps')) {
       this.configMap = { ...body, metadata: { ...body.metadata, resourceVersion: '1' } };
       return this.configMap;
+    }
+    if (path === SECRETS && body.metadata.name === 'fingerprint') {
+      this.fingerprint = body;
+      return body;
     }
     const items = this.objects.get(this.collection(path)) ?? [];
     items.push(body);
@@ -140,6 +149,7 @@ function config(overrides: Partial<OpenEverestConfig> = {}): OpenEverestConfig {
     everestApiUrl: 'http://everest',
     settingsSecret: 'settings',
     targetsConfigMap: 'targets',
+    fingerprintSecret: 'fingerprint',
     watchNamespaces: [],
     localCluster: 'main',
     rediscoverIntervalMs: 60_000,
@@ -165,6 +175,26 @@ beforeEach(() => {
 });
 
 describe('TargetManager opt-ins', () => {
+  it('hands every target the key from its own Secret, created once and kept across restarts', async () => {
+    const kube = new FakeKube();
+    kube.objects.set(INSTANCES, [instance('db', 'orders'), instance('db', 'sessions')]);
+    kube.configMap = { metadata: { name: 'targets', resourceVersion: '1' }, data: { main__db__orders: '{}', main__db__sessions: '{}' } };
+    const first = build(kube).manager;
+    await first.start();
+    await flush();
+    await first.stop();
+    const restarted = build(kube).manager;
+    await restarted.start();
+    await flush();
+
+    const keys = mockTargets.map((t) => t.options.fingerprintKey?.toString('hex'));
+    expect(kube.fingerprint?.metadata.name).toBe('fingerprint');
+    expect(keys).toHaveLength(4);
+    expect(new Set(keys).size).toBe(1);
+    expect(keys[0]).toHaveLength(64);
+    await restarted.stop();
+  });
+
   it('prunes opt-ins whose Instance no longer exists once the informers have listed', async () => {
     const kube = new FakeKube();
     kube.objects.set(INSTANCES, [instance('db', 'orders')]);

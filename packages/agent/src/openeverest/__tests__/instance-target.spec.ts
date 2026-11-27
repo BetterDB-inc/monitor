@@ -20,7 +20,7 @@ const agentState = {
 class FakeAgent {
   stopped = false;
   cloudError: string | undefined;
-  constructor(readonly config: { valkeyHost: string; valkeyPort: number; clusterReplica?: boolean; identity: { node: string; nodeName?: string } }) {}
+  constructor(readonly config: { valkeyHost: string; valkeyPort: number; clusterReplica?: boolean; readOnly?: boolean; fingerprintKey?: Buffer; identity: { node: string; nodeName?: string } }) {}
   async start(): Promise<void> {
     agentState.starts.push(this);
     agentState.inFlight += 1;
@@ -85,7 +85,7 @@ function shard(id: string, role: 'master' | 'replica', index: number) {
   return ['slots', [0, 100], 'nodes', [['id', id, 'port', 6379, 'ip', `10.0.0.${index}`, 'endpoint', host, 'hostname', host, 'role', role, 'health', 'online']]];
 }
 
-function build(options: { startConcurrency?: number } = {}) {
+function build(options: { startConcurrency?: number; fingerprintKey?: Buffer } = {}) {
   const logs: string[] = [];
   const target = new InstanceTarget({
     ref: { cluster: 'main', namespace: 'db', instance: 'orders' },
@@ -115,6 +115,23 @@ beforeEach(() => {
 
 afterEach(() => {
   jest.useRealTimers();
+});
+
+describe('InstanceTarget node agents', () => {
+  it('starts every node read-only with the fingerprint key of the plugin, never one derived from the password', async () => {
+    valkeyState.shards = [shard('aaa', 'master', 0), shard('bbb', 'master', 1)];
+    const key = Buffer.alloc(32, 9);
+    const { target } = build({ fingerprintKey: key });
+    target.setConnectionSecret('orders-conn');
+    await settle();
+
+    expect(agentState.starts).toHaveLength(2);
+    for (const agent of agentState.starts) {
+      expect(agent.config.readOnly).toBe(true);
+      expect(agent.config.fingerprintKey).toBe(key);
+    }
+    await target.stop();
+  });
 });
 
 describe('InstanceTarget status', () => {

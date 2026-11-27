@@ -63,8 +63,10 @@ and every write on these connections. No pod is restarted and no database CR is 
 | `replicaCount` | `1` | Keep at 1: a second pod would open duplicate connections. |
 
 `helm.sh/resource-policy` is not set on the settings Secret or the targets ConfigMap: values set
-inline are re-applied on every upgrade, and the ConfigMap the backend creates is not managed by the
-chart at all (it survives `helm upgrade` and is removed by `helm uninstall` only by hand).
+inline are re-applied on every upgrade, and the ConfigMap and the `<release>-fingerprint` Secret
+the backend creates are not managed by the chart at all (they survive `helm upgrade` and are
+removed after `helm uninstall` only by hand). Deleting the fingerprint Secret makes the plugin
+generate a new key on its next start, which changes every redacted-secret tag once.
 
 ## Checks
 

@@ -46,6 +46,8 @@ export interface InstanceTargetOptions {
   settings: () => CloudSettings | null;
   clusterId?: string;
   cloudCa?: string;
+  /** Key the node agents tag redacted secrets with. */
+  fingerprintKey?: Buffer;
   rediscoverIntervalMs: number;
   log: (message: string) => void;
   /** How many node agents start at once; unreachable nodes take a connect timeout each. */
@@ -354,6 +356,7 @@ export class InstanceTarget {
       readOnly: true,
       clusterReplica: node.role === 'replica',
       cloudCa: this.options.cloudCa,
+      fingerprintKey: this.options.fingerprintKey,
       logPrefix: `${this.tag.slice(0, -1)}/${name}]`,
     });
     try {

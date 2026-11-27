@@ -17,6 +17,8 @@ export interface OpenEverestConfig {
   settingsSecret: string;
   /** ConfigMap in the plugin namespace recording which instances are enabled. */
   targetsConfigMap: string;
+  /** Secret in the plugin namespace the backend creates to hold the key that tags redacted secrets. */
+  fingerprintSecret: string;
   /** Namespaces to watch for Instances and Secrets; empty means the whole cluster. */
   watchNamespaces: string[];
   /**
@@ -68,6 +70,7 @@ export function loadOpenEverestConfig(env: NodeJS.ProcessEnv = process.env): Ope
     everestApiUrl: everestApiUrl(env),
     settingsSecret: env.BETTERDB_SETTINGS_SECRET || 'betterdb-openeverest-settings',
     targetsConfigMap: env.BETTERDB_TARGETS_CONFIGMAP || 'betterdb-openeverest-targets',
+    fingerprintSecret: env.BETTERDB_FINGERPRINT_SECRET || 'betterdb-openeverest-fingerprint',
     watchNamespaces,
     localCluster: env.OPENEVEREST_CLUSTER_NAME || 'main',
     cloudCa: caFile ? readFileSync(caFile, 'utf8') : undefined,

@@ -63,6 +63,8 @@ spec:
               value: {{ include "betterdb-openeverest.settingsSecretName" . | quote }}
             - name: BETTERDB_TARGETS_CONFIGMAP
               value: {{ include "betterdb-openeverest.targetsConfigMapName" . | quote }}
+            - name: BETTERDB_FINGERPRINT_SECRET
+              value: {{ include "betterdb-openeverest.fingerprintSecretName" . | quote }}
             {{- with .Values.watchNamespaces }}
             - name: WATCH_NAMESPACES
               value: {{ join "," . | quote }}

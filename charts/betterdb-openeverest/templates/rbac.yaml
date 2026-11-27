@@ -87,9 +87,10 @@ subjects:
 ---
 {{- /*
 The plugin's own state, in its own namespace: the opt-in ConfigMap it creates
-and updates, and the settings Secret it reads (never writes: the URL and token
-come from the Helm release). `create` cannot be limited by resourceNames, so
-it is granted on configmaps; every other verb is pinned by name.
+and updates, the fingerprint-key Secret it creates once and then only reads,
+and the settings Secret it reads (never writes: the URL and token come from
+the Helm release). `create` cannot be limited by resourceNames, so it is
+granted on configmaps and secrets; every other verb is pinned by name.
 */}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -108,7 +109,11 @@ rules:
     resourceNames: [{{ include "betterdb-openeverest.settingsSecretName" . | quote }}]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
-    resources: ["configmaps"]
+    resources: ["secrets"]
+    resourceNames: [{{ include "betterdb-openeverest.fingerprintSecretName" . | quote }}]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
     verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

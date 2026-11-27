@@ -2,6 +2,7 @@ import { EverestClient, InstanceRef } from './everest-client';
 import { Informer, KubeApiError, KubeClient, KubeObject, sleep } from './kube-client';
 import { InstanceTarget, CloudSettings, TargetStatus } from './instance-target';
 import { TargetStore, targetKey } from './target-store';
+import { loadFingerprintKey } from './fingerprint-key';
 import { HttpError, InstanceView, PluginBackend, SettingsView } from './plugin-server';
 import type { OpenEverestConfig } from './config';
 import { decodeSecretValue, SecretLike } from './connection-secret';
@@ -43,6 +44,7 @@ export class TargetManager implements PluginBackend {
   private settingsFromSecret: CloudSettings | null = null;
   private settingsKey = '';
   private clusterId: string | undefined;
+  private fingerprintKey: Buffer | undefined;
   private started = false;
   // Enable, disable and informer-driven removal of one instance run one at a
   // time, so two mutations can never leave the map and the ConfigMap apart.
@@ -58,6 +60,9 @@ export class TargetManager implements PluginBackend {
     // before it is known (or known to be unavailable).
     this.clusterId = await this.readClusterId();
     log(`Kubernetes cluster id: ${this.clusterId ?? 'unavailable'}`);
+    // Without the key the node agents would tag secrets differently after
+    // each restart, so a failure here fails the start and is retried.
+    this.fingerprintKey ??= await loadFingerprintKey(kube, config.fingerprintSecret);
 
     // A retried start() must not leave the previous attempt's informers running.
     await this.settingsInformer?.stop();
@@ -230,6 +235,7 @@ export class TargetManager implements PluginBackend {
         settings: () => this.currentSettings(),
         clusterId: this.clusterId,
         cloudCa: this.options.config.cloudCa,
+        fingerprintKey: this.fingerprintKey,
         rediscoverIntervalMs: this.options.config.rediscoverIntervalMs,
         log: this.options.log,
       });

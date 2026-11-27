@@ -490,13 +490,14 @@ describe('Agent.onWsOpen - hello', () => {
 describe('secretFingerprint', () => {
   it('is stable for one key, differs per secret and per key, and hides the secret', () => {
     const { secretFingerprint } = jest.requireActual('../agent') as typeof import('../agent');
-    const a = secretFingerprint('instance-password')!;
-    const b = secretFingerprint('another-password')!;
+    const a = secretFingerprint(Buffer.alloc(32, 1))!;
+    const b = secretFingerprint(Buffer.alloc(32, 2))!;
 
     expect(a('hash-1')).toBe(a('hash-1'));
     expect(a('hash-1')).toMatch(/^[0-9a-f]{8}$/);
     expect(a('hash-1')).not.toBe(a('hash-2'));
     expect(a('hash-1')).not.toBe(b('hash-1'));
-    expect(secretFingerprint('')).toBeUndefined();
+    expect(secretFingerprint(undefined)).toBeUndefined();
+    expect(secretFingerprint(Buffer.alloc(0))).toBeUndefined();
   });
 });

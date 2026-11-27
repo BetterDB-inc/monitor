@@ -251,6 +251,10 @@ acl_list="$(node scripts/e2e/cli-command.mjs "http://localhost:$MONITOR_PORT" "$
 printf '%s\n' "$acl_list" | cut -c1-300
 printf '%s' "$acl_list" | grep -qE '#[0-9a-f]{64}' && die "ACL LIST leaked a password hash through the CLI"
 printf '%s' "$acl_list" | grep -qE '#<redacted:[0-9a-f]{8}>' || die "ACL LIST through the CLI shows no fingerprinted hash: $acl_list"
+acl_tags="$(printf '%s' "$acl_list" | grep -oE '<redacted:[0-9a-f]{8}>' | sort -u | tr '\n' ' ')"
+fp_key_len="$(kubectl -n "$OE_NAMESPACE" get secret betterdb-openeverest-fingerprint -o jsonpath='{.data.key}' | base64 -d | wc -c)"
+[ "$fp_key_len" -eq 32 ] || die "the fingerprint Secret holds a $fp_key_len-byte key, expected 32"
+echo "fingerprint key: 32 random bytes in betterdb-openeverest-fingerprint; tags: $acl_tags"
 
 log "Checking the settings cannot be changed through the plugin API"
 code="$(plugin settings-put | head -n1)"
@@ -329,6 +333,9 @@ for _ in $(seq 1 30); do
 done
 [ "${st:-}" = "true monitoring" ] || die "after a restart the plugin reports: ${st:-nothing}"
 wait_for_agents "$expected_nodes"
+tags_after="$(node scripts/e2e/cli-command.mjs "http://localhost:$MONITOR_PORT" "$first_id" ACL LIST | grep -oE '<redacted:[0-9a-f]{8}>' | sort -u | tr '\n' ' ')"
+[ "$tags_after" = "$acl_tags" ] || die "redaction tags changed across a plugin restart: '$acl_tags' then '$tags_after'"
+echo "redaction tags unchanged across the restart"
 plugin off | grep -q '"enabled":false' || die "disable after restart failed"
 wait_for_agents 0
 

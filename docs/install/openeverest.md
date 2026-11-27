@@ -109,6 +109,7 @@ plugin for every POST/PUT reaching the backend.
 | cluster-wide | `namespaces` (`kube-system` only) | get | Take the namespace UID as a stable cluster id. |
 | plugin namespace | its targets ConfigMap | get, list, watch, update, patch (+ create, which cannot be scoped by name) | Remember which instances are enabled. |
 | plugin namespace | its settings Secret | get, list, watch | Read the BetterDB URL and token. Helm writes this Secret (`betterdb.url`/`betterdb.token`, or your own `betterdb.existingSecret`); the plugin never does. |
+| plugin namespace | its fingerprint Secret (`<release>-fingerprint`) | get (+ create, which cannot be scoped by name) | Hold the random key that tags redacted secrets. Created once on first start and never rewritten. |
 
 It has **no write access to any database CR**. Instances are never modified and no pod is
 restarted.

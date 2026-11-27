@@ -104,6 +104,14 @@ ConfigMap recording which instances are enabled; created by the backend.
 {{- end -}}
 
 {{/*
+Secret holding the random key that tags redacted secrets; created by the
+backend on first start and never rendered here, so no upgrade replaces it.
+*/}}
+{{- define "betterdb-openeverest.fingerprintSecretName" -}}
+{{- printf "%s-fingerprint" (include "betterdb-openeverest.fullname" .) -}}
+{{- end -}}
+
+{{/*
 Path of the CA bundle for the BetterDB WebSocket inside the container, or
 empty when none is configured.
 */}}

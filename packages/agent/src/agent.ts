@@ -42,17 +42,22 @@ export interface AgentConfig {
    * with MOVED.
    */
   clusterReplica?: boolean;
+  /**
+   * Key for the tags on redacted secrets (see secretFingerprint). Must be
+   * random and unknown to the server; without one, secrets stay a plain
+   * <redacted>.
+   */
+  fingerprintKey?: Buffer;
 }
 
 /**
- * Fingerprints redacted secrets with an HMAC keyed by the Valkey password the
- * agent holds. The server never sees that key, so the tag reveals nothing it
- * could test password guesses against, yet it is the same on every node of an
- * instance (ACL drift) and changes when a secret does (change webhooks).
- * Without a password there is no key, and secrets stay a plain <redacted>.
+ * Fingerprints redacted secrets with an HMAC under a random key the server
+ * never sees, so a tag gives it nothing to test password guesses against, yet
+ * it is the same wherever the secret is (ACL drift) and changes when the
+ * secret does (change webhooks). Without a key, secrets stay a plain <redacted>.
  */
-export function secretFingerprint(key: string | undefined): SecretFingerprint | undefined {
-  if (!key) return undefined;
+export function secretFingerprint(key: Buffer | undefined): SecretFingerprint | undefined {
+  if (!key || key.length === 0) return undefined;
   return (secret) => createHmac('sha256', key).update(secret).digest('hex').slice(0, 8);
 }
 
@@ -124,7 +129,7 @@ export class Agent {
     return {
       unsafeMode: this.config.unsafeMode,
       readOnly: this.config.readOnly === true,
-      fingerprint: secretFingerprint(this.config.valkeyPassword),
+      fingerprint: secretFingerprint(this.config.fingerprintKey),
     };
   }
 
