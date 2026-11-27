@@ -1,22 +1,24 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import type {
-  PlacementBalance,
-  PlacementMode,
-  PlacementStatus,
-  PlacementSupportIssue,
-  PlacementSupportReason,
+import {
+  DEFAULT_PLACEMENT_SETTINGS,
+  type PlacementBalance,
+  type PlacementMode,
+  type PlacementStatus,
+  type PlacementSupportIssue,
+  type PlacementSupportReason,
 } from '@betterdb/shared';
 
-const { get, setMode, canMutate, license } = vi.hoisted(() => ({
+const { get, setMode, setPolicy, canMutate, license } = vi.hoisted(() => ({
   get: vi.fn(),
   setMode: vi.fn(),
+  setPolicy: vi.fn(),
   canMutate: vi.fn(() => true),
   license: { licensed: true },
 }));
 
-vi.mock('../../api/placement', () => ({ placementApi: { get, setMode } }));
+vi.mock('../../api/placement', () => ({ placementApi: { get, setMode, setPolicy } }));
 vi.mock('../../hooks/useCanMutate', () => ({ useCanMutate: canMutate }));
 vi.mock('../../hooks/useLicense', () => ({
   useLicense: () => ({ license: null, hasFeature: () => license.licensed }),
@@ -121,6 +123,9 @@ function status(overrides: Partial<PlacementStatus> = {}): PlacementStatus {
     selectableModes: ['observe', 'recommend'],
     support: support([FLAG_OFF]),
     balance: balance(),
+    settings: DEFAULT_PLACEMENT_SETTINGS,
+    policyVersion: 3,
+    policyInvalid: null,
     ...overrides,
   };
 }
@@ -166,6 +171,88 @@ describe('PlacementCard', () => {
     expect(modeButton(region, 'Approve')).toBeDisabled();
     expect(modeButton(region, 'Auto')).toBeDisabled();
     expect(region).toHaveTextContent('Approve and Auto come in a later release.');
+  });
+
+  it('warns that the stored policy is invalid and lists the problems', async () => {
+    await show(
+      status({
+        policyInvalid: {
+          problems: ['resolveRatio: must be under triggerRatio'],
+          exclusionsReadable: true,
+        },
+      }),
+    );
+
+    const alert = within(await card()).getByRole('alert');
+    expect(alert).toHaveTextContent('The stored placement policy is invalid.');
+    expect(alert).toHaveTextContent('resolveRatio: must be under triggerRatio');
+    expect(alert).toHaveTextContent('the exclusions are kept');
+  });
+
+  it('says no slot moves are suggested while the exclusions cannot be read', async () => {
+    await show(
+      status({
+        policyInvalid: { problems: ['excludedSlots: expected array'], exclusionsReadable: false },
+      }),
+    );
+
+    expect(within(await card()).getByRole('alert')).toHaveTextContent(
+      'no slot moves are suggested until the policy is saved again',
+    );
+  });
+
+  it('saves the policy from the drawer at the version it read', async () => {
+    setPolicy.mockResolvedValue({
+      ...status({ settings: { ...DEFAULT_PLACEMENT_SETTINGS, triggerRatio: 3 }, policyVersion: 4 }),
+      exclusionsExpanded: true,
+      exclusionsExpandProblem: null,
+    });
+    const client = await show(status());
+
+    fireEvent.click(within(await card()).getByRole('button', { name: 'Edit policy' }));
+    fireEvent.change(screen.getByLabelText('Trigger ratio'), { target: { value: '3' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(setPolicy).toHaveBeenCalledWith(
+        'conn-1',
+        { ...DEFAULT_PLACEMENT_SETTINGS, triggerRatio: 3 },
+        3,
+      ),
+    );
+    await waitFor(() =>
+      expect(client.getQueryData<PlacementStatus>(['placement', 'conn-1'])?.policyVersion).toBe(4),
+    );
+    await waitFor(() => expect(screen.queryByLabelText('Trigger ratio')).not.toBeInTheDocument());
+  });
+
+  it('drops an open draft when the card switches to a cluster it already read', async () => {
+    get.mockResolvedValue(status());
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(['placement', 'conn-2'], status({ policyVersion: 3 }));
+    const at = (connectionId: string) => (
+      <QueryClientProvider client={client}>
+        <PlacementCard connectionId={connectionId} />
+      </QueryClientProvider>
+    );
+    const { rerender } = render(at('conn-1'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit policy' }));
+    fireEvent.change(screen.getByLabelText('Trigger ratio'), { target: { value: '3' } });
+
+    rerender(at('conn-2'));
+
+    expect(screen.queryByLabelText('Trigger ratio')).not.toBeInTheDocument();
+    expect(setPolicy).not.toHaveBeenCalled();
+  });
+
+  it('lets a member view the policy without saving it', async () => {
+    canMutate.mockReturnValue(false);
+    await show(status());
+
+    fireEvent.click(within(await card()).getByRole('button', { name: 'View policy' }));
+
+    expect(screen.getByLabelText('Trigger ratio')).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument();
   });
 
   it('saves a new mode on the cluster', async () => {

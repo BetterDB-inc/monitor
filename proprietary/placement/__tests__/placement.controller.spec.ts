@@ -6,7 +6,13 @@ import type { Actor } from '@betterdb/shared';
 import { MutationGuard, READ_ONLY_MESSAGE } from '@app/auth/guards/mutation.guard';
 import { WORKSPACE_CONFIG, type WorkspaceConfig } from '@app/auth/workspace-config';
 import { PlacementController, McpPlacementController } from '../placement.controller';
-import { PlacementModeError, PlacementService } from '../placement.service';
+import { DEFAULT_PLACEMENT_SETTINGS } from '@betterdb/shared';
+import {
+  PlacementModeError,
+  PlacementPolicyConflictError,
+  PlacementPolicyError,
+  PlacementService,
+} from '../placement.service';
 
 jest.mock('@proprietary/licenses', () => ({
   LicenseGuard: class {
@@ -24,6 +30,7 @@ function placement() {
   return {
     getStatus: jest.fn().mockResolvedValue(status),
     setMode: jest.fn().mockResolvedValue(status),
+    setSettings: jest.fn().mockResolvedValue(status),
   };
 }
 
@@ -53,6 +60,50 @@ describe('PlacementController', () => {
     const controller = new PlacementController(service as unknown as PlacementService);
     await expect(controller.setMode('c1', { mode: 'recommend' })).rejects.toMatchObject({
       response: { message: 'Slot placement needs cluster mode.', blockedBy: 'not_cluster' },
+    });
+  });
+});
+
+describe('PlacementController policy', () => {
+  it('saves the policy at the version it read', async () => {
+    const service = placement();
+    const controller = new PlacementController(service as unknown as PlacementService);
+    await expect(
+      controller.setPolicy('c1', { policy: DEFAULT_PLACEMENT_SETTINGS, version: 3 }),
+    ).resolves.toBe(status);
+    expect(service.setSettings).toHaveBeenCalledWith('c1', DEFAULT_PLACEMENT_SETTINGS, 3);
+  });
+
+  it.each([
+    [{}],
+    [{ policy: {} }],
+    [{ policy: {}, version: -1 }],
+    [{ policy: {}, version: 1.5 }],
+    [null],
+  ])('rejects the body %j', async (body) => {
+    const controller = new PlacementController(placement() as unknown as PlacementService);
+    await expect(controller.setPolicy('c1', body)).rejects.toThrow(BadRequestException);
+  });
+
+  it('answers 400 with the validation errors', async () => {
+    const service = placement();
+    service.setSettings.mockRejectedValue(
+      new PlacementPolicyError(['resolveRatio: must be below triggerRatio']),
+    );
+    const controller = new PlacementController(service as unknown as PlacementService);
+    await expect(controller.setPolicy('c1', { policy: {}, version: 0 })).rejects.toMatchObject({
+      status: 400,
+      response: { errors: ['resolveRatio: must be below triggerRatio'] },
+    });
+  });
+
+  it('answers 409 when the policy changed since it was read', async () => {
+    const service = placement();
+    service.setSettings.mockRejectedValue(new PlacementPolicyConflictError());
+    const controller = new PlacementController(service as unknown as PlacementService);
+    await expect(controller.setPolicy('c1', { policy: {}, version: 0 })).rejects.toMatchObject({
+      status: 409,
+      response: { reason: 'version_conflict' },
     });
   });
 });
@@ -117,6 +168,22 @@ describe('PlacementController roles', () => {
     expect(res.statusCode).toBe(403);
     expect(res.json().message).toBe(READ_ONLY_MESSAGE);
     expect(service.setMode).not.toHaveBeenCalled();
+  });
+
+  it('refuses a member changing the policy and lets an admin', async () => {
+    const putPolicy = () =>
+      app.inject({
+        method: 'PUT',
+        url: '/anomaly/placement/policy',
+        headers: { 'x-connection-id': 'c1' },
+        payload: { policy: DEFAULT_PLACEMENT_SETTINGS, version: 0 },
+      });
+    signedIn = actor('member');
+    expect((await putPolicy()).statusCode).toBe(403);
+    expect(service.setSettings).not.toHaveBeenCalled();
+    signedIn = actor('admin');
+    expect((await putPolicy()).statusCode).toBe(200);
+    expect(service.setSettings).toHaveBeenCalledWith('c1', DEFAULT_PLACEMENT_SETTINGS, 0);
   });
 
   it('lets a member read the status and an admin change the mode', async () => {

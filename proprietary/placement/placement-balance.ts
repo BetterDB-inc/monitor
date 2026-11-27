@@ -1,17 +1,17 @@
-import type { PlacementBalance, PlacementShardBalance } from '@betterdb/shared';
-import type { ShardLoadSample } from '@app/cluster/shard-load';
 import {
-  HOT_SHARD_MIN_PRIMARIES,
-  HOT_SHARD_RAISE_FACTOR,
-  hotShardRatio,
-} from '../anomaly-detection/hot-shard-detector';
-import { DEFAULT_REBALANCE_POLICY } from '../anomaly-detection/rebalance-planner';
+  DEFAULT_PLACEMENT_SETTINGS,
+  type PlacementBalance,
+  type PlacementSettings,
+  type PlacementShardBalance,
+} from '@betterdb/shared';
+import type { ShardLoadSample } from '@app/cluster/shard-load';
+import { HOT_SHARD_MIN_PRIMARIES, hotShardRatio } from '../anomaly-detection/hot-shard-detector';
 import { median } from '../latency-regression/regression-detector';
 
-export const PLACEMENT_TRIGGER_RATIO = HOT_SHARD_RAISE_FACTOR;
-export const PLACEMENT_RESOLVE_RATIO = DEFAULT_REBALANCE_POLICY.resolveRatio;
-
-export function placementBalance(sample: ShardLoadSample | null): PlacementBalance | null {
+export function placementBalance(
+  sample: ShardLoadSample | null,
+  settings: PlacementSettings = DEFAULT_PLACEMENT_SETTINGS,
+): PlacementBalance | null {
   if (!sample) return null;
   const owning = sample.shards.filter((shard) => shard.slotCount > 0);
   const cpuMedian = owning.length > 0 ? median(owning.map((shard) => shard.cpuUsecPerSecond)) : 0;
@@ -26,7 +26,7 @@ export function placementBalance(sample: ShardLoadSample | null): PlacementBalan
       cpuShare: shard.cpuShare,
       networkShare: shard.networkShare,
       ratio,
-      overTrigger: judged && ratio !== null && ratio >= PLACEMENT_TRIGGER_RATIO,
+      overTrigger: judged && ratio !== null && ratio >= settings.triggerRatio,
     };
   });
   shards.sort((a, b) => (b.ratio ?? -1) - (a.ratio ?? -1));
@@ -34,8 +34,8 @@ export function placementBalance(sample: ShardLoadSample | null): PlacementBalan
     sampledAt: sample.timestamp,
     settling: sample.settling,
     medianCpuUsecPerSecond: cpuMedian,
-    triggerRatio: PLACEMENT_TRIGGER_RATIO,
-    resolveRatio: PLACEMENT_RESOLVE_RATIO,
+    triggerRatio: settings.triggerRatio,
+    resolveRatio: settings.resolveRatio,
     shards,
   };
 }

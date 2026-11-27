@@ -43,6 +43,8 @@ import type {
   ReadinessDimensionKey,
   ScalingReadinessSettings,
   PlacementPolicy,
+  PlacementModeWrite,
+  PlacementSettingsWrite,
   SessionNamespace,
   KvCacheEngineSample,
   KvCacheEngineSource,
@@ -859,7 +861,11 @@ export interface StoragePort {
   saveScalingReadinessSettings(settings: ScalingReadinessSettings): Promise<ScalingReadinessSettings>;
 
   getPlacementPolicy(connectionId: string): Promise<PlacementPolicy | null>;
-  savePlacementPolicy(policy: PlacementPolicy): Promise<PlacementPolicy>;
+  savePlacementMode(write: PlacementModeWrite): Promise<PlacementPolicy>;
+  savePlacementSettings(
+    write: PlacementSettingsWrite,
+    expectedVersion: number,
+  ): Promise<PlacementPolicy | null>;
   saveKvCacheFootprintSnapshot(snapshot: KvCacheFootprintSnapshot): Promise<void>;
   getKvCacheFootprintSnapshots(query: KvCacheFootprintQuery): Promise<KvCacheFootprintSnapshot[]>;
   pruneOldKvCacheFootprintSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number>;

@@ -7,7 +7,13 @@ import { otelSpanCap, otelSpanCapCheckInterval, otelSpanLowWaterMark } from '../
 import * as path from 'path';
 import * as fs from 'fs';
 import { randomUUID } from 'crypto';
-import { parseSshTunnel, parseMembership, parseTlsConfig, parseNodeAvailabilityZones } from '@betterdb/shared';
+import {
+  parseSshTunnel,
+  parseMembership,
+  parseTlsConfig,
+  parseNodeAvailabilityZones,
+  readStoredPlacementSettings,
+} from '@betterdb/shared';
 import type {
   StoredScalingReadinessScore,
   ScalingReadinessScoreQuery,
@@ -25,6 +31,8 @@ import type {
   ScalingReadinessSettings,
   PlacementPolicy,
   PlacementMode,
+  PlacementModeWrite,
+  PlacementSettingsWrite,
   KvCacheEngineSample,
   KvCacheFootprintSnapshot,
   KvCacheModelFootprint,
@@ -1941,9 +1949,20 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         CREATE TABLE IF NOT EXISTS placement_policies (
           connection_id TEXT PRIMARY KEY,
           mode TEXT NOT NULL,
+          policy TEXT,
+          version INTEGER NOT NULL DEFAULT 0,
           updated_at INTEGER NOT NULL
         );
       `);
+      const columns = new Set(
+        (db.prepare('PRAGMA table_info(placement_policies)').all() as { name: string }[]).map(
+          (c) => c.name,
+        ),
+      );
+      if (!columns.has('policy')) db.exec('ALTER TABLE placement_policies ADD COLUMN policy TEXT');
+      if (!columns.has('version')) {
+        db.exec('ALTER TABLE placement_policies ADD COLUMN version INTEGER NOT NULL DEFAULT 0');
+      }
       if (existedBefore || !this.tableExists('connections')) return;
       this.ensureConnectionsSchema();
       db.prepare(
@@ -4698,14 +4717,37 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async getPlacementPolicy(connectionId: string): Promise<PlacementPolicy | null> {
     if (!this.db) throw new Error('Database not initialized');
-    const row = this.db
-      .prepare('SELECT connection_id, mode, updated_at FROM placement_policies WHERE connection_id = ?')
-      .get(connectionId) as { connection_id: string; mode: PlacementMode; updated_at: number } | undefined;
-    if (!row) return null;
-    return { connectionId: row.connection_id, mode: row.mode, updatedAt: row.updated_at };
+    return this.readPlacementPolicy(connectionId);
   }
 
-  async savePlacementPolicy(policy: PlacementPolicy): Promise<PlacementPolicy> {
+  private readPlacementPolicy(connectionId: string): PlacementPolicy | null {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db
+      .prepare(
+        'SELECT connection_id, mode, policy, version, updated_at FROM placement_policies WHERE connection_id = ?',
+      )
+      .get(connectionId) as
+      | {
+          connection_id: string;
+          mode: PlacementMode;
+          policy: string | null;
+          version: number;
+          updated_at: number;
+        }
+      | undefined;
+    if (!row) return null;
+    const { settings, invalid } = readStoredPlacementSettings(row.policy);
+    return {
+      connectionId: row.connection_id,
+      mode: row.mode,
+      settings,
+      version: row.version,
+      updatedAt: row.updated_at,
+      ...(invalid ? { invalid } : {}),
+    };
+  }
+
+  async savePlacementMode(write: PlacementModeWrite): Promise<PlacementPolicy> {
     if (!this.db) throw new Error('Database not initialized');
     this.db
       .prepare(
@@ -4715,8 +4757,39 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
            mode = excluded.mode,
            updated_at = excluded.updated_at`,
       )
-      .run(policy.connectionId, policy.mode, policy.updatedAt);
-    return policy;
+      .run(write.connectionId, write.mode, write.updatedAt);
+    const saved = this.readPlacementPolicy(write.connectionId);
+    if (!saved) throw new Error('Placement policy was not saved');
+    return saved;
+  }
+
+  async savePlacementSettings(
+    write: PlacementSettingsWrite,
+    expectedVersion: number,
+  ): Promise<PlacementPolicy | null> {
+    if (!this.db) throw new Error('Database not initialized');
+    const policy = JSON.stringify(write.settings);
+    const result =
+      expectedVersion === 0
+        ? this.db
+            .prepare(
+              `INSERT INTO placement_policies (connection_id, mode, policy, version, updated_at)
+               VALUES (?, ?, ?, 1, ?)
+               ON CONFLICT(connection_id) DO UPDATE SET
+                 policy = excluded.policy,
+                 version = 1,
+                 updated_at = excluded.updated_at
+               WHERE placement_policies.version = 0`,
+            )
+            .run(write.connectionId, write.modeIfNew, policy, write.updatedAt)
+        : this.db
+            .prepare(
+              `UPDATE placement_policies SET policy = ?, version = version + 1, updated_at = ?
+               WHERE connection_id = ? AND version = ?`,
+            )
+            .run(policy, write.updatedAt, write.connectionId, expectedVersion);
+    if (result.changes === 0) return null;
+    return this.readPlacementPolicy(write.connectionId);
   }
 
   private kvCacheSnapshotFromRow(r: Record<string, any>): KvCacheFootprintSnapshot {

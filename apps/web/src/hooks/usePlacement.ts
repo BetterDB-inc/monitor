@@ -1,6 +1,12 @@
 import { useEffect } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { Feature, type PlacementMode, type PlacementStatus } from '@betterdb/shared';
+import {
+  Feature,
+  type PlacementMode,
+  type PlacementPolicySaved,
+  type PlacementSettings,
+  type PlacementStatus,
+} from '@betterdb/shared';
 import { placementApi } from '../api/placement';
 import { useLicense } from './useLicense';
 import { usePolling } from './usePolling';
@@ -33,7 +39,22 @@ export function usePlacement(connectionId: string | undefined, enabled = true) {
     },
   });
 
+  const { mutateAsync: savePolicyAt, reset: resetPolicy } = useMutation<
+    PlacementPolicySaved,
+    Error,
+    { settings: PlacementSettings; version: number }
+  >({
+    mutationFn: ({ settings, version }) =>
+      placementApi.setPolicy(connectionId as string, settings, version),
+    onSuccess: async (status) => {
+      await queryClient.cancelQueries({ queryKey: placementQueryKey(connectionId) });
+      queryClient.setQueryData<PlacementStatus>(placementQueryKey(connectionId), status);
+      await queryClient.invalidateQueries({ queryKey: ['open-hot-shards', connectionId] });
+    },
+  });
+
   useEffect(() => reset, [connectionId, reset]);
+  useEffect(() => resetPolicy, [connectionId, resetPolicy]);
 
   return {
     licensed,
@@ -44,5 +65,7 @@ export function usePlacement(connectionId: string | undefined, enabled = true) {
     },
     saving: isPending,
     modeError,
+    savePolicy: (settings: PlacementSettings, version: number) =>
+      savePolicyAt({ settings, version }),
   };
 }

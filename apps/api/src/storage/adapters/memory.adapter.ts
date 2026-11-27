@@ -99,6 +99,7 @@ import type {
   AppendProposalAuditInput,
 } from '@betterdb/shared';
 import {
+  defaultPlacementSettings,
   PROPOSAL_DEFAULT_EXPIRY_MS,
   variantPayloadSchemaFor,
   MEMORY_PROPOSAL_DEFAULT_EXPIRY_MS,
@@ -137,6 +138,8 @@ import type {
   ReadinessDimensionKey,
   ScalingReadinessSettings,
   PlacementPolicy,
+  PlacementModeWrite,
+  PlacementSettingsWrite,
   KvCacheEngineSample,
   KvCacheFootprintSnapshot,
   KvCacheSettings,
@@ -1467,12 +1470,37 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async getPlacementPolicy(connectionId: string): Promise<PlacementPolicy | null> {
     const policy = this.placementPolicies.get(connectionId);
-    return policy ? { ...policy } : null;
+    return policy ? structuredClone(policy) : null;
   }
 
-  async savePlacementPolicy(policy: PlacementPolicy): Promise<PlacementPolicy> {
-    this.placementPolicies.set(policy.connectionId, { ...policy });
-    return policy;
+  async savePlacementMode(write: PlacementModeWrite): Promise<PlacementPolicy> {
+    const current = this.placementPolicies.get(write.connectionId);
+    const policy: PlacementPolicy = {
+      connectionId: write.connectionId,
+      mode: write.mode,
+      settings: current?.settings ?? defaultPlacementSettings(),
+      version: current?.version ?? 0,
+      updatedAt: write.updatedAt,
+    };
+    this.placementPolicies.set(write.connectionId, policy);
+    return structuredClone(policy);
+  }
+
+  async savePlacementSettings(
+    write: PlacementSettingsWrite,
+    expectedVersion: number,
+  ): Promise<PlacementPolicy | null> {
+    const current = this.placementPolicies.get(write.connectionId);
+    if ((current?.version ?? 0) !== expectedVersion) return null;
+    const policy: PlacementPolicy = {
+      connectionId: write.connectionId,
+      mode: current?.mode ?? write.modeIfNew,
+      settings: structuredClone(write.settings),
+      version: expectedVersion + 1,
+      updatedAt: write.updatedAt,
+    };
+    this.placementPolicies.set(write.connectionId, policy);
+    return structuredClone(policy);
   }
 
   private kvCacheSnapshots: KvCacheFootprintSnapshot[] = [];

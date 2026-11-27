@@ -1,15 +1,15 @@
 {
-  "commit": "119c9772",
+  "commit": "935dbff4",
   "files": {
     "apps/api/src/cluster/shard-load.ts": "c35f4133520681e8e52b509969787d3df5000b2a02280ffcde9f1584597bf0a1",
     "apps/api/src/monitor/provider-detector.ts": "3aaed64f0e2351d973cb864b3e058a834d130358fbcb3ad8eb7b93782d34a935",
     "proprietary/anomaly-detection/hash-tag-advisor.ts": "a1c3c7d6d9a7add396116dc48abc8ffa9961fa901582b2a954846e392ad70eee",
     "proprietary/anomaly-detection/hot-shard-detector.ts": "4a32e7bf3359d06c1963274d5ac55a24b6201f3ca8dc26dc9dbab1812f58d3c8",
     "proprietary/anomaly-detection/hot-shard-keys.ts": "165eefe9930b1a83b1e2ce4babf242010625620495c6d2784d771a3eee24c394",
-    "proprietary/anomaly-detection/rebalance-planner.ts": "2159626a5e5d37447a9b8e03eb90c492346de75a7db7cdee97b65c13f914d603",
-    "proprietary/placement/placement-balance.ts": "b2d4e30a19df3ab654c86804e2acd1da2607e1c2499608d960ed2bdb43db7430",
+    "proprietary/anomaly-detection/rebalance-planner.ts": "b4bc03db19190bc2d19fec65b4aa1f94c518c89153873de8e2437e6bb2c0d4d0",
+    "proprietary/placement/placement-balance.ts": "343d01ad8583a3e5214d46978d3db405c5977886c31957ba6fd01158c88364c8",
     "proprietary/placement/placement-primaries.ts": "af1e4c2fe5a86d29a4acb9b7a374a296520f70fe8a4774af678a309af4785c25",
     "proprietary/placement/placement-support.ts": "7807d67fcc17f44858ce8d5429850f0dec1d55b41c465b9995025f62bca72c77",
-    "proprietary/placement/placement.service.ts": "9864b6d2fb0a0c6fe4312832ed25f5581f5ecf4729b6014e864c00bde13b3378"
+    "proprietary/placement/placement.service.ts": "b39430080917c3fbc7c65827ba446b0d62edd7d8792d75caaca427b91812d98b"
   }
 }

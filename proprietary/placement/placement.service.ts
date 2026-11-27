@@ -1,10 +1,24 @@
-import { Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  Logger,
+  NotFoundException,
+  OnModuleInit,
+  Optional,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
+  DEFAULT_PLACEMENT_SETTINGS,
   PLACEMENT_DEFAULT_MODE,
   PLACEMENT_MODES,
   PLACEMENT_SETTABLE_MODES,
+  excludedShardNodeIds,
+  validatePlacementSettings,
   type PlacementMode,
+  type PlacementPolicy,
+  type PlacementPolicyInvalid,
+  type PlacementPolicySaved,
+  type PlacementSettings,
   type PlacementStatus,
   type PlacementSupport,
   type PlacementSupportReason,
@@ -18,9 +32,15 @@ import type { ShardLoadSample } from '@app/cluster/shard-load';
 import { ClusterMetricsService } from '@app/cluster/cluster-metrics.service';
 import { WORKSPACE_CONFIG, type WorkspaceConfig } from '@app/auth/workspace-config';
 import { isManagedProviderBuild } from '@app/monitor/provider-detector';
+import { withTimeout } from '@app/common/utils/with-timeout';
 import { AnomalyService } from '../anomaly-detection/anomaly.service';
 import type { ServedHotShardDetail } from '../anomaly-detection/hot-shard-detector';
-import type { RebalanceExecution } from '../anomaly-detection/rebalance-planner';
+import {
+  DEFAULT_REBALANCE_POLICY,
+  PlacementPolicyUnreadableError,
+  type RebalanceExecution,
+  type RebalancePolicy,
+} from '../anomaly-detection/rebalance-planner';
 import type {
   ConfirmedMove,
   RebalanceRunActor,
@@ -36,6 +56,8 @@ import {
 import { placementBalance } from './placement-balance';
 
 const SUPPORT_CACHE_MS = 30_000;
+const POLICY_CACHE_MS = 30_000;
+const SHARD_NODES_TIMEOUT_MS = 2_000;
 
 export class PlacementModeError extends Error {
   constructor(
@@ -46,8 +68,50 @@ export class PlacementModeError extends Error {
   }
 }
 
+export class PlacementPolicyError extends Error {
+  constructor(readonly errors: string[]) {
+    super(`The placement policy is not valid: ${errors.join('; ')}`);
+  }
+}
+
+export class PlacementPolicyConflictError extends Error {
+  constructor() {
+    super('The placement policy changed since it was read');
+  }
+}
+
+export { PlacementPolicyUnreadableError };
+
+export interface PlacementSettingsRead {
+  settings: PlacementSettings;
+  version: number;
+  invalid: PlacementPolicyInvalid | null;
+}
+
+export function rebalancePolicyOf(settings: PlacementSettings): RebalancePolicy {
+  return {
+    ...DEFAULT_REBALANCE_POLICY,
+    nodeCpuLimitUsecPerSecond: settings.nodeCpuLimitUsecPerSecond,
+    resolveRatio: settings.resolveRatio,
+    excludedShardIds: settings.excludedShardIds,
+    excludedSlots: settings.excludedSlots,
+  };
+}
+
+function settingsReadOf(policy: PlacementPolicy | null): PlacementSettingsRead {
+  return {
+    settings: policy?.settings ?? DEFAULT_PLACEMENT_SETTINGS,
+    version: policy?.version ?? 0,
+    invalid: policy?.invalid ?? null,
+  };
+}
+
 @Injectable()
-export class PlacementService {
+export class PlacementService implements OnModuleInit {
+  private readonly logger = new Logger(PlacementService.name);
+  private readonly invalidWarned = new Map<string, string>();
+  private readonly policyCache = new Map<string, { at: number; policy: PlacementPolicy | null }>();
+  private readonly policyGeneration = new Map<string, number>();
   private readonly supportCache = new Map<string, { at: number; support: PlacementSupport }>();
   private readonly supportReads = new Map<string, Promise<PlacementSupport>>();
   private readonly aclDenied = new Map<string, string | null>();
@@ -63,9 +127,15 @@ export class PlacementService {
     @Optional() private readonly clusterMetrics?: ClusterMetricsService,
   ) {}
 
+  onModuleInit(): void {
+    this.anomaly.setRebalancePolicyResolver((seedId) => this.rebalancePolicyFor(seedId));
+  }
+
   async getStatus(connectionId: string): Promise<PlacementStatus> {
     const seedId = this.seedOf(connectionId);
-    const [mode, support] = await Promise.all([this.storedMode(seedId), this.support(seedId)]);
+    const [policy, support] = await Promise.all([this.readPolicy(seedId), this.support(seedId)]);
+    const mode = this.modeOf(policy, seedId);
+    const { settings, version, invalid } = settingsReadOf(policy);
     const selectableModes = PLACEMENT_SETTABLE_MODES.filter((each) => support.modes[each].available);
     return {
       connectionId: seedId,
@@ -73,8 +143,115 @@ export class PlacementService {
       effectiveMode: effectiveModeOf(mode, support),
       selectableModes,
       support,
-      balance: placementBalance(this.freshSample(seedId)),
+      balance: placementBalance(this.freshSample(seedId), settings),
+      settings,
+      policyVersion: version,
+      policyInvalid: invalid,
     };
+  }
+
+  async setSettings(
+    connectionId: string,
+    input: unknown,
+    version: number,
+  ): Promise<PlacementPolicySaved> {
+    const validated = validatePlacementSettings(input);
+    if (!validated.ok) throw new PlacementPolicyError(validated.errors);
+    const seedId = this.seedOf(connectionId);
+    const current = await this.storage.getPlacementPolicy(seedId);
+    const expansion = await this.withShardNodes(seedId, validated.settings);
+    const saved = await this.storage.savePlacementSettings(
+      {
+        connectionId: seedId,
+        settings: expansion.settings,
+        updatedAt: Date.now(),
+        modeIfNew: this.modeOf(current, seedId),
+      },
+      version,
+    );
+    if (!saved) throw new PlacementPolicyConflictError();
+    if (expansion.problem !== null) {
+      this.logger.warn(
+        `The placement policy of ${seedId} was saved with the excluded shards as typed: the other nodes of each shard were not added (${expansion.problem}).`,
+      );
+    }
+    this.advancePolicy(seedId);
+    this.policyCache.set(seedId, { at: Date.now(), policy: saved });
+    return {
+      ...(await this.getStatus(seedId)),
+      exclusionsExpanded: expansion.problem === null,
+      exclusionsExpandProblem: expansion.problem,
+    };
+  }
+
+  private async withShardNodes(
+    seedId: string,
+    settings: PlacementSettings,
+  ): Promise<{ settings: PlacementSettings; problem: string | null }> {
+    if (settings.excludedShardIds.length === 0) return { settings, problem: null };
+    try {
+      const nodes = await withTimeout(
+        this.registry.get(seedId).getClusterNodes(),
+        SHARD_NODES_TIMEOUT_MS,
+        `CLUSTER NODES did not answer within ${SHARD_NODES_TIMEOUT_MS / 1000} s`,
+      );
+      return {
+        settings: {
+          ...settings,
+          excludedShardIds: excludedShardNodeIds(settings.excludedShardIds, nodes),
+        },
+        problem: null,
+      };
+    } catch (err) {
+      return { settings, problem: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  async settingsOf(seedId: string): Promise<PlacementSettingsRead> {
+    return settingsReadOf(await this.cachedPolicy(seedId));
+  }
+
+  async rebalancePolicyFor(seedId: string): Promise<RebalancePolicy> {
+    const { settings, invalid } = await this.settingsOf(seedId);
+    if (invalid && !invalid.exclusionsReadable)
+      throw new PlacementPolicyUnreadableError(invalid.problems);
+    return rebalancePolicyOf(settings);
+  }
+
+  private async readPolicy(seedId: string): Promise<PlacementPolicy | null> {
+    const generation = this.policyGeneration.get(seedId) ?? 0;
+    const policy = await this.storage.getPlacementPolicy(seedId);
+    if ((this.policyGeneration.get(seedId) ?? 0) === generation) {
+      this.policyCache.set(seedId, { at: Date.now(), policy });
+    }
+    this.warnInvalid(seedId, policy);
+    return policy;
+  }
+
+  private warnInvalid(seedId: string, policy: PlacementPolicy | null): void {
+    if (!policy?.invalid) {
+      this.invalidWarned.delete(seedId);
+      return;
+    }
+    const key = `${policy.version}:${policy.invalid.problems.join('; ')}`;
+    if (this.invalidWarned.get(seedId) === key) return;
+    this.invalidWarned.set(seedId, key);
+    this.logger.warn(
+      `The stored placement policy of ${seedId} (version ${policy.version}) does not validate: ${policy.invalid.problems.join('; ')}. ` +
+        (policy.invalid.exclusionsReadable
+          ? 'The fields it could not read use their defaults until it is saved again.'
+          : 'Its exclusions cannot be read, so no slot moves are planned until it is saved again.'),
+    );
+  }
+
+  private async cachedPolicy(seedId: string): Promise<PlacementPolicy | null> {
+    const cached = this.policyCache.get(seedId);
+    if (cached && Date.now() - cached.at < POLICY_CACHE_MS) return cached.policy;
+    return this.readPolicy(seedId);
+  }
+
+  private advancePolicy(seedId: string): void {
+    this.policyGeneration.set(seedId, (this.policyGeneration.get(seedId) ?? 0) + 1);
   }
 
   async setMode(connectionId: string, mode: PlacementMode): Promise<PlacementStatus> {
@@ -88,7 +265,9 @@ export class PlacementService {
       const issue = support.issues.find((each) => each.reason === state.blockedBy);
       throw new PlacementModeError(issue?.detail ?? `The ${mode} mode is not supported here`, state.blockedBy);
     }
-    await this.storage.savePlacementPolicy({ connectionId: seedId, mode, updatedAt: Date.now() });
+    await this.storage.savePlacementMode({ connectionId: seedId, mode, updatedAt: Date.now() });
+    this.advancePolicy(seedId);
+    this.policyCache.delete(seedId);
     return this.getStatus(seedId);
   }
 
@@ -170,8 +349,11 @@ export class PlacementService {
   }
 
   private async storedMode(seedId: string): Promise<PlacementMode> {
-    const stored = (await this.storage.getPlacementPolicy(seedId))?.mode;
-    if (stored) return stored;
+    return this.modeOf(await this.storage.getPlacementPolicy(seedId), seedId);
+  }
+
+  private modeOf(policy: PlacementPolicy | null, seedId: string): PlacementMode {
+    if (policy) return policy.mode;
     return this.memoryStorage() && this.clusterEnabled(seedId) ? 'recommend' : PLACEMENT_DEFAULT_MODE;
   }
 
@@ -202,7 +384,14 @@ export class PlacementService {
   }
 
   private forgetRemovedConnections(): void {
-    for (const cache of [this.supportCache, this.supportReads, this.aclDenied]) {
+    for (const cache of [
+      this.supportCache,
+      this.supportReads,
+      this.aclDenied,
+      this.policyCache,
+      this.policyGeneration,
+      this.invalidWarned,
+    ]) {
       for (const seedId of cache.keys()) {
         if (!this.registry.getConfig(seedId)) cache.delete(seedId);
       }

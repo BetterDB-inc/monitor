@@ -7,7 +7,13 @@ import { POSTGRES_LEGACY_ANOMALY_BACKFILL } from './anomaly-kind-backfill';
 import { toIncidentBoundary } from './incident-boundary-row';
 import { otelSpanCap, otelSpanCapCheckInterval, otelSpanLowWaterMark } from '../otel-span-cap';
 import { randomUUID } from 'crypto';
-import { parseSshTunnel, parseMembership, parseTlsConfig, parseNodeAvailabilityZones } from '@betterdb/shared';
+import {
+  parseSshTunnel,
+  parseMembership,
+  parseTlsConfig,
+  parseNodeAvailabilityZones,
+  readStoredPlacementSettings,
+} from '@betterdb/shared';
 import type {
   StoredScalingReadinessScore,
   ScalingReadinessScoreQuery,
@@ -22,6 +28,8 @@ import type {
   ReadinessDimension,
   ScalingReadinessSettings,
   PlacementPolicy,
+  PlacementModeWrite,
+  PlacementSettingsWrite,
   KvCacheEngineSample,
   KvCacheFootprintSnapshot,
   KvCacheModelFootprint,
@@ -1643,8 +1651,15 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         CREATE TABLE IF NOT EXISTS placement_policies (
           connection_id TEXT PRIMARY KEY,
           mode TEXT NOT NULL,
+          policy TEXT,
+          version INTEGER NOT NULL DEFAULT 0,
           updated_at BIGINT NOT NULL
         )
+      `);
+      await client.query(`
+        ALTER TABLE placement_policies
+          ADD COLUMN IF NOT EXISTS policy TEXT,
+          ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 0
       `);
       if (existed.rowCount === 0) {
         await client.query(
@@ -4683,25 +4698,66 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
   async getPlacementPolicy(connectionId: string): Promise<PlacementPolicy | null> {
     if (!this.pool) throw new Error('Database not initialized');
     const result = await this.pool.query(
-      'SELECT connection_id, mode, updated_at FROM placement_policies WHERE connection_id = $1',
+      'SELECT connection_id, mode, policy, version, updated_at FROM placement_policies WHERE connection_id = $1',
       [connectionId],
     );
     const row = result.rows[0];
-    if (!row) return null;
-    return { connectionId: row.connection_id, mode: row.mode, updatedAt: Number(row.updated_at) };
+    return row ? this.placementPolicyFromRow(row) : null;
   }
 
-  async savePlacementPolicy(policy: PlacementPolicy): Promise<PlacementPolicy> {
+  private placementPolicyFromRow(row: Record<string, any>): PlacementPolicy {
+    const { settings, invalid } = readStoredPlacementSettings(row.policy);
+    return {
+      connectionId: row.connection_id,
+      mode: row.mode,
+      settings,
+      version: Number(row.version),
+      updatedAt: Number(row.updated_at),
+      ...(invalid ? { invalid } : {}),
+    };
+  }
+
+  async savePlacementMode(write: PlacementModeWrite): Promise<PlacementPolicy> {
     if (!this.pool) throw new Error('Database not initialized');
-    await this.pool.query(
+    const result = await this.pool.query(
       `INSERT INTO placement_policies (connection_id, mode, updated_at)
        VALUES ($1, $2, $3)
        ON CONFLICT (connection_id) DO UPDATE SET
          mode = EXCLUDED.mode,
-         updated_at = EXCLUDED.updated_at`,
-      [policy.connectionId, policy.mode, policy.updatedAt],
+         updated_at = EXCLUDED.updated_at
+       RETURNING connection_id, mode, policy, version, updated_at`,
+      [write.connectionId, write.mode, write.updatedAt],
     );
-    return policy;
+    return this.placementPolicyFromRow(result.rows[0]);
+  }
+
+  async savePlacementSettings(
+    write: PlacementSettingsWrite,
+    expectedVersion: number,
+  ): Promise<PlacementPolicy | null> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const policy = JSON.stringify(write.settings);
+    const result =
+      expectedVersion === 0
+        ? await this.pool.query(
+            `INSERT INTO placement_policies (connection_id, mode, policy, version, updated_at)
+             VALUES ($1, $2, $3, 1, $4)
+             ON CONFLICT (connection_id) DO UPDATE SET
+               policy = EXCLUDED.policy,
+               version = 1,
+               updated_at = EXCLUDED.updated_at
+             WHERE placement_policies.version = 0
+             RETURNING connection_id, mode, policy, version, updated_at`,
+            [write.connectionId, write.modeIfNew, policy, write.updatedAt],
+          )
+        : await this.pool.query(
+            `UPDATE placement_policies SET policy = $1, version = version + 1, updated_at = $2
+             WHERE connection_id = $3 AND version = $4
+             RETURNING connection_id, mode, policy, version, updated_at`,
+            [policy, write.updatedAt, write.connectionId, expectedVersion],
+          );
+    const row = result.rows[0];
+    return row ? this.placementPolicyFromRow(row) : null;
   }
 
   private kvCacheSnapshotFromRow(r: Record<string, any>): KvCacheFootprintSnapshot {
