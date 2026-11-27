@@ -205,6 +205,11 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
       version,
     );
     if (!saved) throw new PlacementPolicyConflictError();
+    if (expansion.problem !== null) {
+      this.logger.warn(
+        `The placement policy of ${seedId} was saved with the excluded shards as typed: the other nodes of each shard were not added (${expansion.problem}).`,
+      );
+    }
     this.advancePolicy(seedId);
     this.policyCache.set(seedId, { at: Date.now(), policy: saved });
     this.applyTriggerSettings(seedId, saved.settings);
@@ -234,11 +239,7 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
         problem: null,
       };
     } catch (err) {
-      const problem = err instanceof Error ? err.message : String(err);
-      this.logger.warn(
-        `The placement policy of ${seedId} was saved with the excluded shards as typed: the other nodes of each shard were not added (${problem}).`,
-      );
-      return { settings, problem };
+      return { settings, problem: err instanceof Error ? err.message : String(err) };
     }
   }
 
