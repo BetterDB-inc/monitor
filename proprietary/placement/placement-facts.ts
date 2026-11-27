@@ -67,6 +67,7 @@ type PlacementGateContext = Pick<
 >;
 
 interface EpochSeen {
+  shardId: string;
   epoch: number;
   since: number;
   changedAt: number | null;
@@ -91,17 +92,24 @@ export class PlacementEpochs {
     const changed = new Map<string, boolean | null>();
     for (const node of nodes) {
       const before = known.get(node.id);
-      const moved = movedShardIds.includes(node.shardId);
+      const ours = before?.shardId === node.shardId && movedShardIds.includes(node.shardId);
       const entry: EpochSeen = !before
-        ? { epoch: node.configEpoch, since: now, changedAt: null, seenAt: now }
+        ? {
+            shardId: node.shardId,
+            epoch: node.configEpoch,
+            since: now,
+            changedAt: null,
+            seenAt: now,
+          }
         : node.configEpoch > before.epoch
           ? {
+              shardId: node.shardId,
               epoch: node.configEpoch,
               since: before.since,
-              changedAt: moved ? before.changedAt : now,
+              changedAt: ours ? before.changedAt : now,
               seenAt: Math.max(now, before.seenAt),
             }
-          : { ...before, seenAt: Math.max(now, before.seenAt) };
+          : { ...before, shardId: node.shardId, seenAt: Math.max(now, before.seenAt) };
       next.set(node.id, entry);
       if (entry.changedAt !== null && now - entry.changedAt < PLACEMENT_EPOCH_WINDOW_MS) {
         changed.set(node.id, true);
