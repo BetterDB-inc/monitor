@@ -441,6 +441,14 @@ describe('placementGate', () => {
       ],
       ['an ignored signal that names no node', incident('active', [['hot_shard', null, NOW]]), []],
       [
+        'cluster state changes, which the live cluster state read judges',
+        incident('degraded', [
+          ['cluster_state', null, NOW - 60_000],
+          ['cluster_state', 's1', NOW],
+        ]),
+        [],
+      ],
+      [
         'a failover incident on the target',
         incident('active', [['replication_role', 't1', NOW]], ['node_failover']),
         ['failover:target:t1', 'incident:target:t1'],
