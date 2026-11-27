@@ -5022,6 +5022,88 @@ describe('AnomalyService', () => {
             ]);
           });
 
+          it('pages the open events by cursor across the whole cluster scope', async () => {
+            jest
+              .spyOn(service as any, 'scopeConnectionIds')
+              .mockReturnValue(['conn-a', 'conn-peer']);
+            const row = (connectionId: string, n: number) => ({
+              id: `${connectionId}-${n}`,
+              connectionId,
+              metricType: 'persistence_child',
+              timestamp: 1_000 - n,
+              nodeAddr: '10.0.0.2:6379',
+            });
+            storage.getAnomalyEvents.mockImplementation(async ({ connectionId, after }) =>
+              connectionId === 'conn-a' && !after
+                ? Array.from({ length: 500 }, (_, n) => row('conn-a', n))
+                : connectionId === 'conn-a'
+                  ? [row('conn-a', 500)]
+                  : [row('conn-peer', 0)],
+            );
+
+            const signals = await service.placementOpenEvents('conn-a');
+
+            expect(signals).toHaveLength(502);
+            const calls = storage.getAnomalyEvents.mock.calls.map(([query]) => query);
+            expect(calls.every((query) => query.offset === undefined)).toBe(true);
+            expect(calls[1]).toMatchObject({ connectionId: 'conn-a', after: row('conn-a', 499) });
+            expect(calls[2]).toMatchObject({ connectionId: 'conn-peer', after: undefined });
+          });
+
+          it('names the replica of a divergence event by its address when no node was stamped', async () => {
+            storage.getAnomalyEvents.mockResolvedValue([
+              {
+                metricType: 'replication_divergence',
+                timestamp: 5,
+                replicaAddr: '10.0.0.4:6379',
+              },
+            ]);
+
+            await expect(service.placementOpenEvents('conn-a')).resolves.toEqual([
+              {
+                metricType: 'replication_divergence',
+                nodeId: null,
+                address: '10.0.0.4:6379',
+                openedAt: 5,
+              },
+            ]);
+          });
+
+          it('takes no open cluster state event as a failure once a later one recovered', async () => {
+            const state = (value: number, timestamp: number) => ({
+              metricType: 'cluster_state',
+              value,
+              timestamp,
+            });
+            storage.getAnomalyEvents.mockResolvedValue([state(0, 1), state(1, 2)]);
+            await expect(service.placementOpenEvents('conn-a')).resolves.toEqual([]);
+
+            storage.getAnomalyEvents.mockResolvedValue([state(0, 1), state(1, 2), state(0, 3)]);
+            await expect(service.placementOpenEvents('conn-a')).resolves.toEqual([
+              { metricType: 'cluster_state', nodeId: null, openedAt: 3 },
+            ]);
+          });
+
+          it('fails the incident read when the incident boundaries cannot be read', async () => {
+            storage.getIncidentBoundaries.mockRejectedValue(new Error('db down'));
+            await expect(service.placementIncidents('conn-a')).rejects.toThrow('db down');
+          });
+
+          it('fails the incident read when the incident history scan stops early', async () => {
+            let n = 0;
+            storage.getAnomalyEvents.mockImplementation(async ({ limit }) =>
+              Array.from({ length: limit }, () => ({
+                id: `e${n++}`,
+                connectionId: 'conn-a',
+                metricType: 'memory_used',
+                timestamp: clock - 60_000,
+              })),
+            );
+            await expect(service.placementIncidents('conn-a')).rejects.toThrow(
+              'the incident history stopped',
+            );
+          });
+
           it('names the node of each incident signal, by address or by the connection it came from', async () => {
             (service as any).connectionRegistry.noteObservedNodeId('conn-b', 'b0000000');
             const entry = (connectionId: string, extra: object) => ({
@@ -5097,6 +5179,7 @@ describe('AnomalyService', () => {
               clock - lookback,
               undefined,
               Number.MAX_SAFE_INTEGER,
+              true,
             );
 
             read.mockResolvedValueOnce([]);
@@ -5106,6 +5189,7 @@ describe('AnomalyService', () => {
               open.lastEventAt,
               undefined,
               Number.MAX_SAFE_INTEGER,
+              true,
             );
 
             read.mockResolvedValueOnce([]);
@@ -5115,6 +5199,7 @@ describe('AnomalyService', () => {
               clock - 60 * 60_000,
               undefined,
               Number.MAX_SAFE_INTEGER,
+              true,
             );
           });
 
