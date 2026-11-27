@@ -1017,7 +1017,6 @@ export class AnomalyService
   private rebalancePolicyWarned = new Map<string, string>();
   private rebalanceRuns = new Map<string, Map<string, RebalanceRun>>();
   private replacedRebalanceRuns = new Map<string, RebalanceRun[]>();
-  private placementIncidentSince = new Map<string, number>();
   private clusterNodesObserver:
     | ((connectionId: string, nodes: readonly ClusterNode[], at: number) => void)
     | null = null;
@@ -1743,7 +1742,6 @@ export class AnomalyService
     this.rebalancePolicyWarned.delete(connectionId);
     this.rebalanceRuns.delete(connectionId);
     this.replacedRebalanceRuns.delete(connectionId);
-    this.placementIncidentSince.delete(connectionId);
     this.rebalanceFollowedAt.delete(connectionId);
     this.slotMigrationReadOnPoll.delete(connectionId);
     this.hotKeyNoteLogged.delete(connectionId);
@@ -7593,20 +7591,20 @@ export class AnomalyService
 
   async placementIncidents(connectionId: string): Promise<PlacementGateIncident[]> {
     const hourAgo = Date.now() - 60 * 60_000;
-    const from = Math.min(
-      hourAgo,
-      this.placementIncidentSince.get(connectionId) ?? Date.now() - MAX_INCIDENT_LOOKBACK_MS,
-    );
+    const [oldestOpen] = await this.storage.getAnomalyEvents({
+      scope: this.scopeFilter(connectionId),
+      resolved: false,
+      order: 'asc',
+      limit: 1,
+    });
     const incidents = await this.readIncidentTimelines(
       connectionId,
-      from,
+      Math.min(hourAgo, oldestOpen?.timestamp ?? hourAgo),
       undefined,
       Number.MAX_SAFE_INTEGER,
       true,
     );
     const open = incidents.filter((incident) => incident.recovery.status !== 'recovered');
-    const oldest = Math.min(hourAgo, ...open.map((incident) => incident.lastEventAt));
-    this.placementIncidentSince.set(connectionId, oldest);
     return open.map((incident) => ({
       recovery: incident.recovery.status,
       patterns: [
@@ -12182,7 +12180,18 @@ export class AnomalyService
       after = page[page.length - 1];
     }
     if (strict) {
-      throw new Error(`the incident history stopped at ${events.length} events`);
+      const [hidden] = await this.storage.getAnomalyEvents({
+        startTime,
+        endTime: events[events.length - 1].timestamp,
+        scope,
+        resolved: false,
+        limit: 1,
+      });
+      if (hidden) {
+        throw new Error(
+          `the incident history stopped at ${events.length} events, before an open event`,
+        );
+      }
     }
     this.logger.warn(
       `Incident history for ${scope?.id ?? 'all connections'} stopped at ${events.length} events`,
