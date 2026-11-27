@@ -13,7 +13,27 @@ import {
   parseTlsConfig,
   parseNodeAvailabilityZones,
   readStoredPlacementSettings,
+  PLACEMENT_TERMINAL_STATES,
 } from '@betterdb/shared';
+import type {
+  PlacementAction,
+  PlacementActionListParams,
+  PlacementActionPage,
+  PlacementActionPatch,
+  PlacementActionState,
+  PlacementStep,
+  PlacementStepPatch,
+  PlacementStepState,
+} from '@betterdb/shared';
+import {
+  PLACEMENT_ACTION_COLUMNS,
+  PLACEMENT_STEP_COLUMNS,
+  parsePlacementCursor,
+  placementColumns,
+  placementCursor,
+  placementFromRow,
+  placementPageLimit,
+} from './placement-action-rows';
 import type {
   StoredScalingReadinessScore,
   ScalingReadinessScoreQuery,
@@ -460,6 +480,102 @@ const ACL_AUDIT_INDEXES = `
   CREATE INDEX IF NOT EXISTS idx_acl_connection_captured ON acl_audit(connection_id, captured_at);
 `;
 
+const ACTIVITY_EVENTS_COLUMNS = `
+  id TEXT PRIMARY KEY,
+  occurred_at INTEGER NOT NULL,
+  actor_user_id TEXT NOT NULL,
+  actor_email TEXT NOT NULL,
+  actor_via TEXT NOT NULL CHECK (actor_via IN ('session', 'token', 'cli', 'system', 'anonymous')),
+  token_id TEXT,
+  action TEXT NOT NULL,
+  target_type TEXT,
+  target_id TEXT,
+  connection_id TEXT,
+  status_code INTEGER NOT NULL,
+  ip TEXT NOT NULL,
+  details TEXT NOT NULL
+`;
+
+const ACTIVITY_EVENTS_INDEXES = `
+  CREATE INDEX IF NOT EXISTS idx_activity_events_occurred
+    ON activity_events(occurred_at);
+  CREATE INDEX IF NOT EXISTS idx_activity_events_actor
+    ON activity_events(actor_user_id, occurred_at);
+  CREATE INDEX IF NOT EXISTS idx_activity_events_connection
+    ON activity_events(connection_id, occurred_at);
+`;
+
+const PLACEMENT_ACTIONS_DDL = `
+  CREATE TABLE IF NOT EXISTS placement_actions (
+    id TEXT PRIMARY KEY,
+    connection_id TEXT NOT NULL,
+    cluster_nodes TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    state TEXT NOT NULL,
+    mode_at_creation TEXT NOT NULL,
+    plan TEXT,
+    policy_snapshot TEXT NOT NULL,
+    policy_version INTEGER NOT NULL,
+    gate_decisions TEXT NOT NULL,
+    approved_by TEXT,
+    load_before TEXT,
+    load_projected TEXT,
+    load_measured TEXT,
+    verdict TEXT,
+    source_shard_id TEXT NOT NULL,
+    rollback_of TEXT,
+    rolled_back_by TEXT,
+    created_at INTEGER NOT NULL,
+    approved_at INTEGER,
+    started_at INTEGER,
+    ended_at INTEGER,
+    verified_at INTEGER,
+    anomaly_event_ids TEXT NOT NULL,
+    message TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_placement_actions_connection
+    ON placement_actions(connection_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_placement_actions_source_shard
+    ON placement_actions(source_shard_id);
+  CREATE INDEX IF NOT EXISTS idx_placement_actions_state
+    ON placement_actions(state);
+
+  CREATE TABLE IF NOT EXISTS placement_steps (
+    action_id TEXT NOT NULL,
+    step_index INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    source_node_id TEXT NOT NULL,
+    target_node_id TEXT NOT NULL,
+    target_addr TEXT NOT NULL,
+    ranges TEXT NOT NULL,
+    jobs_before TEXT,
+    job TEXT,
+    cancel_requested_at INTEGER,
+    cancel_accepted_at INTEGER,
+    failed_before_cancel TEXT,
+    bytes_estimated INTEGER NOT NULL,
+    keys_moved INTEGER NOT NULL,
+    slots_moved INTEGER NOT NULL,
+    slot_cpu_before REAL NOT NULL,
+    sending_at INTEGER,
+    started_at INTEGER,
+    ended_at INTEGER,
+    PRIMARY KEY (action_id, step_index)
+  );
+  CREATE INDEX IF NOT EXISTS idx_placement_steps_sending
+    ON placement_steps(sending_at);
+  CREATE INDEX IF NOT EXISTS idx_placement_steps_ended
+    ON placement_steps(ended_at);
+
+  CREATE TABLE IF NOT EXISTS placement_locks (
+    node_id TEXT PRIMARY KEY,
+    action_id TEXT NOT NULL,
+    acquired_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_placement_locks_action
+    ON placement_locks(action_id);
+`;
+
 const SLOW_LOG_ENTRIES_COLUMNS = `
   pk INTEGER PRIMARY KEY AUTOINCREMENT,
   slowlog_id INTEGER NOT NULL,
@@ -559,6 +675,21 @@ function populatedDbsCte(where: string): string {
   `;
 }
 
+const TERMINAL_PLACEHOLDERS = PLACEMENT_TERMINAL_STATES.map(() => '?').join(', ');
+
+class PlacementLockTaken extends Error {}
+
+function insertPlacementRow(
+  db: Database.Database,
+  table: string,
+  values: { columns: string[]; params: unknown[] },
+): void {
+  db.prepare(
+    `INSERT INTO ${table} (${values.columns.join(', ')})
+     VALUES (${values.columns.map(() => '?').join(', ')})`,
+  ).run(...values.params);
+}
+
 function rebuildWithNullableColumns(
   db: Database.Database,
   table: string,
@@ -573,7 +704,16 @@ function rebuildWithNullableColumns(
   if (!existing.some((c) => nullable.includes(c.name) && c.notnull === 1)) {
     return;
   }
+  rebuildTable(db, table, columnsDdl, indexesDdl);
+}
 
+function rebuildTable(
+  db: Database.Database,
+  table: string,
+  columnsDdl: string,
+  indexesDdl: string,
+): void {
+  const existing = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
   const rebuilt = `${table}_rebuild`;
   db.transaction(() => {
     db.exec(`DROP TABLE IF EXISTS ${rebuilt}`);
@@ -728,6 +868,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       const placementPoliciesExisted = this.tableExists('placement_policies');
       this.createSchema();
       this.ensurePlacementPolicies(placementPoliciesExisted);
+      this.ensureActivityActorVia();
       // Run migrations for existing databases
       this.runMigrations();
       this.ensureLogRunIdUniqueIndexes();
@@ -1949,6 +2090,16 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return !!this.db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(name);
   }
 
+  private ensureActivityActorVia(): void {
+    const db = this.db;
+    if (!db) return;
+    const table = db
+      .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'activity_events'`)
+      .get() as { sql: string } | undefined;
+    if (!table || table.sql.includes("'anonymous'")) return;
+    rebuildTable(db, 'activity_events', ACTIVITY_EVENTS_COLUMNS, ACTIVITY_EVENTS_INDEXES);
+  }
+
   private ensurePlacementPolicies(existedBefore: boolean): void {
     const db = this.db;
     if (!db) return;
@@ -2728,28 +2879,10 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         expires_at INTEGER NOT NULL
       );
 
-      CREATE TABLE IF NOT EXISTS activity_events (
-        id TEXT PRIMARY KEY,
-        occurred_at INTEGER NOT NULL,
-        actor_user_id TEXT NOT NULL,
-        actor_email TEXT NOT NULL,
-        actor_via TEXT NOT NULL CHECK (actor_via IN ('session', 'token', 'cli')),
-        token_id TEXT,
-        action TEXT NOT NULL,
-        target_type TEXT,
-        target_id TEXT,
-        connection_id TEXT,
-        status_code INTEGER NOT NULL,
-        ip TEXT NOT NULL,
-        details TEXT NOT NULL
-      );
+      CREATE TABLE IF NOT EXISTS activity_events (${ACTIVITY_EVENTS_COLUMNS});
+      ${ACTIVITY_EVENTS_INDEXES}
 
-      CREATE INDEX IF NOT EXISTS idx_activity_events_occurred
-        ON activity_events(occurred_at);
-      CREATE INDEX IF NOT EXISTS idx_activity_events_actor
-        ON activity_events(actor_user_id, occurred_at);
-      CREATE INDEX IF NOT EXISTS idx_activity_events_connection
-        ON activity_events(connection_id, occurred_at);
+      ${PLACEMENT_ACTIONS_DDL}
     `);
 
     // Idempotent migration for deployments that ran the PR 19 schema before
@@ -4795,6 +4928,221 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
             .get(policy, write.updatedAt, write.connectionId, expectedVersion)
     ) as PlacementPolicyRow | undefined;
     return row ? this.placementPolicyOfRow(row) : null;
+  }
+
+  async createPlacementAction(action: PlacementAction, steps: PlacementStep[]): Promise<void> {
+    const db = this.db;
+    if (!db) throw new Error('Database not initialized');
+    db.transaction(() => {
+      insertPlacementRow(
+        db,
+        'placement_actions',
+        placementColumns(PLACEMENT_ACTION_COLUMNS, action),
+      );
+      for (const step of steps) {
+        insertPlacementRow(db, 'placement_steps', placementColumns(PLACEMENT_STEP_COLUMNS, step));
+      }
+    })();
+  }
+
+  async getPlacementAction(
+    id: string,
+  ): Promise<{ action: PlacementAction; steps: PlacementStep[] } | null> {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db.prepare('SELECT * FROM placement_actions WHERE id = ?').get(id) as
+      | Record<string, unknown>
+      | undefined;
+    if (!row) return null;
+    const steps = this.db
+      .prepare('SELECT * FROM placement_steps WHERE action_id = ? ORDER BY step_index ASC')
+      .all(id) as Record<string, unknown>[];
+    return {
+      action: placementFromRow(PLACEMENT_ACTION_COLUMNS, row),
+      steps: steps.map((step) => placementFromRow(PLACEMENT_STEP_COLUMNS, step)),
+    };
+  }
+
+  async listPlacementActions(
+    connectionId: string,
+    params: PlacementActionListParams,
+  ): Promise<PlacementActionPage> {
+    if (!this.db) throw new Error('Database not initialized');
+    const limit = placementPageLimit(params.limit);
+    const where = ['connection_id = ?'];
+    const args: unknown[] = [connectionId];
+    if (params.states) {
+      if (params.states.length === 0) return { items: [], nextCursor: null };
+      where.push(`state IN (${params.states.map(() => '?').join(', ')})`);
+      args.push(...params.states);
+    }
+    if (params.from !== undefined) {
+      where.push('created_at >= ?');
+      args.push(params.from);
+    }
+    if (params.to !== undefined) {
+      where.push('created_at <= ?');
+      args.push(params.to);
+    }
+    if (params.cursor) {
+      const after = parsePlacementCursor(params.cursor);
+      where.push('(created_at < ? OR (created_at = ? AND id < ?))');
+      args.push(after.createdAt, after.createdAt, after.id);
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM placement_actions WHERE ${where.join(' AND ')}
+         ORDER BY created_at DESC, id DESC LIMIT ?`,
+      )
+      .all(...args, limit + 1) as Record<string, unknown>[];
+    const items = rows
+      .slice(0, limit)
+      .map((row) => placementFromRow(PLACEMENT_ACTION_COLUMNS, row));
+    return {
+      items,
+      nextCursor: rows.length > limit ? placementCursor(items[items.length - 1]) : null,
+    };
+  }
+
+  async listOpenPlacementActions(): Promise<PlacementAction[]> {
+    if (!this.db) throw new Error('Database not initialized');
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM placement_actions WHERE state NOT IN (${TERMINAL_PLACEHOLDERS})
+         ORDER BY created_at ASC`,
+      )
+      .all(...PLACEMENT_TERMINAL_STATES) as Record<string, unknown>[];
+    return rows.map((row) => placementFromRow(PLACEMENT_ACTION_COLUMNS, row));
+  }
+
+  async transitionPlacementAction(
+    id: string,
+    from: readonly PlacementActionState[],
+    patch: PlacementActionPatch,
+  ): Promise<PlacementAction | null> {
+    const db = this.db;
+    if (!db) throw new Error('Database not initialized');
+    if (from.length === 0) return null;
+    const set = placementColumns<PlacementAction>(PLACEMENT_ACTION_COLUMNS, patch, [
+      'id',
+      'connectionId',
+    ]);
+    return db.transaction(() => {
+      const result = db
+        .prepare(
+          `UPDATE placement_actions SET ${set.columns.map((column) => `${column} = ?`).join(', ')}
+           WHERE id = ? AND state IN (${from.map(() => '?').join(', ')})`,
+        )
+        .run(...set.params, id, ...from);
+      if (result.changes === 0) return null;
+      if (PLACEMENT_TERMINAL_STATES.includes(patch.state)) {
+        db.prepare('DELETE FROM placement_locks WHERE action_id = ?').run(id);
+      }
+      const row = db.prepare('SELECT * FROM placement_actions WHERE id = ?').get(id) as Record<
+        string,
+        unknown
+      >;
+      return placementFromRow(PLACEMENT_ACTION_COLUMNS, row);
+    })();
+  }
+
+  async updatePlacementStep(
+    actionId: string,
+    index: number,
+    from: readonly PlacementStepState[] | null,
+    patch: PlacementStepPatch,
+  ): Promise<PlacementStep | null> {
+    const db = this.db;
+    if (!db) throw new Error('Database not initialized');
+    if (from && from.length === 0) return null;
+    const set = placementColumns<PlacementStep>(PLACEMENT_STEP_COLUMNS, patch, [
+      'actionId',
+      'index',
+    ]);
+    return db.transaction(() => {
+      if (set.columns.length > 0 || from) {
+        const assignments = set.columns.length
+          ? set.columns.map((column) => `${column} = ?`).join(', ')
+          : 'state = state';
+        const stateCheck = from ? ` AND state IN (${from.map(() => '?').join(', ')})` : '';
+        const result = db
+          .prepare(
+            `UPDATE placement_steps SET ${assignments}
+             WHERE action_id = ? AND step_index = ?${stateCheck}`,
+          )
+          .run(...set.params, actionId, index, ...(from ?? []));
+        if (result.changes === 0) return null;
+      }
+      const row = db
+        .prepare('SELECT * FROM placement_steps WHERE action_id = ? AND step_index = ?')
+        .get(actionId, index) as Record<string, unknown> | undefined;
+      return row ? placementFromRow(PLACEMENT_STEP_COLUMNS, row) : null;
+    })();
+  }
+
+  async acquirePlacementLock(
+    actionId: string,
+    nodeIds: readonly string[],
+    now: number,
+  ): Promise<boolean> {
+    const db = this.db;
+    if (!db) throw new Error('Database not initialized');
+    try {
+      db.transaction(() => {
+        for (const nodeId of new Set(nodeIds)) {
+          const result = db
+            .prepare(
+              'INSERT OR IGNORE INTO placement_locks (node_id, action_id, acquired_at) VALUES (?, ?, ?)',
+            )
+            .run(nodeId, actionId, now);
+          if (result.changes === 0) throw new PlacementLockTaken();
+        }
+      })();
+      return true;
+    } catch (error) {
+      if (error instanceof PlacementLockTaken) return false;
+      throw error;
+    }
+  }
+
+  async freeOrphanedPlacementLocks(): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+    return this.db
+      .prepare(
+        `DELETE FROM placement_locks WHERE action_id NOT IN (
+           SELECT id FROM placement_actions WHERE state NOT IN (${TERMINAL_PLACEHOLDERS})
+         )`,
+      )
+      .run(...PLACEMENT_TERMINAL_STATES).changes;
+  }
+
+  async placementStepsSince(connectionId: string, since: number): Promise<PlacementStep[]> {
+    if (!this.db) throw new Error('Database not initialized');
+    const rows = this.db
+      .prepare(
+        `SELECT s.* FROM placement_steps s
+         JOIN placement_actions a ON a.id = s.action_id
+         WHERE a.connection_id = ?
+           AND (s.sending_at >= ? OR (s.state = 'done' AND s.ended_at >= ?))
+         ORDER BY s.action_id, s.step_index`,
+      )
+      .all(connectionId, since, since) as Record<string, unknown>[];
+    return rows.map((row) => placementFromRow(PLACEMENT_STEP_COLUMNS, row));
+  }
+
+  async prunePlacementActions(before: number): Promise<number> {
+    const db = this.db;
+    if (!db) throw new Error('Database not initialized');
+    const ended = `SELECT id FROM placement_actions
+      WHERE state IN (${TERMINAL_PLACEHOLDERS}) AND ended_at IS NOT NULL AND ended_at < ?`;
+    return db.transaction(() => {
+      db.prepare(`DELETE FROM placement_steps WHERE action_id IN (${ended})`).run(
+        ...PLACEMENT_TERMINAL_STATES,
+        before,
+      );
+      return db
+        .prepare(`DELETE FROM placement_actions WHERE id IN (${ended})`)
+        .run(...PLACEMENT_TERMINAL_STATES, before).changes;
+    })();
   }
 
   private kvCacheSnapshotFromRow(r: Record<string, any>): KvCacheFootprintSnapshot {

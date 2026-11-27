@@ -98,8 +98,10 @@ import type {
   UpdateProposalStatusInput,
   AppendProposalAuditInput,
 } from '@betterdb/shared';
+import { parsePlacementCursor, placementCursor, placementPageLimit } from './placement-action-rows';
 import {
   defaultPlacementSettings,
+  PLACEMENT_TERMINAL_STATES,
   PROPOSAL_DEFAULT_EXPIRY_MS,
   variantPayloadSchemaFor,
   MEMORY_PROPOSAL_DEFAULT_EXPIRY_MS,
@@ -140,6 +142,14 @@ import type {
   PlacementPolicy,
   PlacementModeWrite,
   PlacementSettingsWrite,
+  PlacementAction,
+  PlacementActionListParams,
+  PlacementActionPage,
+  PlacementActionPatch,
+  PlacementActionState,
+  PlacementStep,
+  PlacementStepPatch,
+  PlacementStepState,
   KvCacheEngineSample,
   KvCacheFootprintSnapshot,
   KvCacheSettings,
@@ -1501,6 +1511,153 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     };
     this.placementPolicies.set(write.connectionId, policy);
     return structuredClone(policy);
+  }
+
+  private placementActions = new Map<string, PlacementAction>();
+  private placementSteps = new Map<string, PlacementStep[]>();
+  private placementLocks = new Map<string, { actionId: string; acquiredAt: number }>();
+
+  async createPlacementAction(action: PlacementAction, steps: PlacementStep[]): Promise<void> {
+    if (this.placementActions.has(action.id)) {
+      throw new Error(`Placement action ${action.id} already exists`);
+    }
+    this.placementActions.set(action.id, structuredClone(action));
+    this.placementSteps.set(
+      action.id,
+      structuredClone(steps).sort((a, b) => a.index - b.index),
+    );
+  }
+
+  async getPlacementAction(
+    id: string,
+  ): Promise<{ action: PlacementAction; steps: PlacementStep[] } | null> {
+    const action = this.placementActions.get(id);
+    if (!action) return null;
+    return {
+      action: structuredClone(action),
+      steps: structuredClone(this.placementSteps.get(id) ?? []),
+    };
+  }
+
+  async listPlacementActions(
+    connectionId: string,
+    params: PlacementActionListParams,
+  ): Promise<PlacementActionPage> {
+    const limit = placementPageLimit(params.limit);
+    const after = params.cursor ? parsePlacementCursor(params.cursor) : null;
+    const matching = [...this.placementActions.values()]
+      .filter(
+        (action) =>
+          action.connectionId === connectionId &&
+          (!params.states || params.states.includes(action.state)) &&
+          (params.from === undefined || action.createdAt >= params.from) &&
+          (params.to === undefined || action.createdAt <= params.to) &&
+          (!after ||
+            action.createdAt < after.createdAt ||
+            (action.createdAt === after.createdAt && action.id < after.id)),
+      )
+      .sort((a, b) => b.createdAt - a.createdAt || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+    const items = matching.slice(0, limit);
+    return {
+      items: structuredClone(items),
+      nextCursor: matching.length > limit ? placementCursor(items[items.length - 1]) : null,
+    };
+  }
+
+  async listOpenPlacementActions(): Promise<PlacementAction[]> {
+    return structuredClone(
+      [...this.placementActions.values()].filter(
+        (action) => !PLACEMENT_TERMINAL_STATES.includes(action.state),
+      ),
+    );
+  }
+
+  async transitionPlacementAction(
+    id: string,
+    from: readonly PlacementActionState[],
+    patch: PlacementActionPatch,
+  ): Promise<PlacementAction | null> {
+    const current = this.placementActions.get(id);
+    if (!current || !from.includes(current.state)) return null;
+    const next = { ...current, ...structuredClone(patch), id, connectionId: current.connectionId };
+    this.placementActions.set(id, next);
+    if (PLACEMENT_TERMINAL_STATES.includes(next.state)) {
+      for (const [nodeId, lock] of this.placementLocks) {
+        if (lock.actionId === id) this.placementLocks.delete(nodeId);
+      }
+    }
+    return structuredClone(next);
+  }
+
+  async updatePlacementStep(
+    actionId: string,
+    index: number,
+    from: readonly PlacementStepState[] | null,
+    patch: PlacementStepPatch,
+  ): Promise<PlacementStep | null> {
+    const steps = this.placementSteps.get(actionId);
+    const position = steps?.findIndex((each) => each.index === index) ?? -1;
+    if (!steps || position < 0) return null;
+    const current = steps[position];
+    if (from && !from.includes(current.state)) return null;
+    const next = { ...current, ...structuredClone(patch), actionId, index };
+    steps[position] = next;
+    return structuredClone(next);
+  }
+
+  async acquirePlacementLock(
+    actionId: string,
+    nodeIds: readonly string[],
+    now: number,
+  ): Promise<boolean> {
+    if (nodeIds.some((nodeId) => this.placementLocks.has(nodeId))) return false;
+    for (const nodeId of new Set(nodeIds))
+      this.placementLocks.set(nodeId, { actionId, acquiredAt: now });
+    return true;
+  }
+
+  async freeOrphanedPlacementLocks(): Promise<number> {
+    let freed = 0;
+    for (const [nodeId, lock] of this.placementLocks) {
+      const action = this.placementActions.get(lock.actionId);
+      if (!action || PLACEMENT_TERMINAL_STATES.includes(action.state)) {
+        this.placementLocks.delete(nodeId);
+        freed++;
+      }
+    }
+    return freed;
+  }
+
+  async placementStepsSince(connectionId: string, since: number): Promise<PlacementStep[]> {
+    const steps: PlacementStep[] = [];
+    for (const action of this.placementActions.values()) {
+      if (action.connectionId !== connectionId) continue;
+      for (const each of this.placementSteps.get(action.id) ?? []) {
+        if (
+          (each.sendingAt !== null && each.sendingAt >= since) ||
+          (each.state === 'done' && each.endedAt !== null && each.endedAt >= since)
+        ) {
+          steps.push(structuredClone(each));
+        }
+      }
+    }
+    return steps;
+  }
+
+  async prunePlacementActions(before: number): Promise<number> {
+    let pruned = 0;
+    for (const [id, action] of this.placementActions) {
+      if (
+        PLACEMENT_TERMINAL_STATES.includes(action.state) &&
+        action.endedAt !== null &&
+        action.endedAt < before
+      ) {
+        this.placementActions.delete(id);
+        this.placementSteps.delete(id);
+        pruned++;
+      }
+    }
+    return pruned;
   }
 
   private kvCacheSnapshots: KvCacheFootprintSnapshot[] = [];

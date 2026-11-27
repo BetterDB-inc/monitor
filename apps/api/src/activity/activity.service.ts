@@ -119,4 +119,10 @@ export class ActivityService {
     const boundary = now - this.config.retentionDays * DAY_MS;
     return this.storage.getActivityRepository().prune(boundary);
   }
+
+  async prunePlacementActions(now: number = Date.now()): Promise<number> {
+    return this.storage.prunePlacementActions(
+      now - this.config.placementActionRetentionDays * DAY_MS,
+    );
+  }
 }

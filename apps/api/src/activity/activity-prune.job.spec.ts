@@ -9,8 +9,11 @@ import {
 import { ActivityPruneJob, PRUNE_INTERVAL_MS } from './activity-prune.job';
 import { ActivityService } from './activity.service';
 
-function serviceWith(prune: jest.Mock): ActivityService {
-  return { prune } as unknown as ActivityService;
+function serviceWith(
+  prune: jest.Mock,
+  prunePlacementActions: jest.Mock = jest.fn().mockResolvedValue(0),
+): ActivityService {
+  return { prune, prunePlacementActions } as unknown as ActivityService;
 }
 
 function configWith(mode: WorkspaceMode): WorkspaceConfig {
@@ -44,15 +47,45 @@ describe('ActivityPruneJob', () => {
     expect(prune).toHaveBeenCalledTimes(2);
   });
 
-  it('never prunes when the workspace is disabled', async () => {
+  it('prunes placement actions with the activity events, every 24 hours', async () => {
     const prune = jest.fn().mockResolvedValue(0);
-    const job = new ActivityPruneJob(serviceWith(prune), configWith('disabled'));
+    const placement = jest.fn().mockResolvedValue(0);
+    const job = new ActivityPruneJob(serviceWith(prune, placement));
+    job.onApplicationBootstrap();
+    await flushMicrotasks();
+    expect(placement).toHaveBeenCalledTimes(1);
+    await jest.advanceTimersByTimeAsync(PRUNE_INTERVAL_MS);
+    expect(placement).toHaveBeenCalledTimes(2);
+    job.onModuleDestroy();
+  });
+
+  it('prunes only placement actions when the workspace is disabled', async () => {
+    const prune = jest.fn().mockResolvedValue(0);
+    const placement = jest.fn().mockResolvedValue(0);
+    const job = new ActivityPruneJob(serviceWith(prune, placement), configWith('disabled'));
     job.onApplicationBootstrap();
     await flushMicrotasks();
     await jest.advanceTimersByTimeAsync(PRUNE_INTERVAL_MS);
     expect(prune).not.toHaveBeenCalled();
-    expect(jest.getTimerCount()).toBe(0);
+    expect(placement).toHaveBeenCalledTimes(2);
     job.onModuleDestroy();
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
+  it('prunes placement actions when the activity prune fails', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {
+      return undefined;
+    });
+    const prune = jest.fn().mockRejectedValue(new Error('locked'));
+    const placement = jest.fn().mockResolvedValue(0);
+    const job = new ActivityPruneJob(serviceWith(prune, placement));
+    job.onApplicationBootstrap();
+    await flushMicrotasks();
+    await flushMicrotasks();
+    expect(placement).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Activity prune failed: locked'));
+    job.onModuleDestroy();
+    warn.mockRestore();
   });
 
   it('prunes in cloud mode', async () => {

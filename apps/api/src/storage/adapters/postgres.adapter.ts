@@ -1,4 +1,4 @@
-import { Client, ClientBase, ClientConfig, Pool, PoolConfig } from 'pg';
+import { Client, ClientBase, ClientConfig, Pool, PoolClient, PoolConfig } from 'pg';
 import { KV_CACHE_SAMPLE_COUNTER_COLUMNS } from './kv-cache-sample-columns';
 import { isTrueFlag } from '../../config/env-normalize';
 import { chunkedPostgresDelete } from './postgres-chunked-delete';
@@ -13,7 +13,27 @@ import {
   parseTlsConfig,
   parseNodeAvailabilityZones,
   readStoredPlacementSettings,
+  PLACEMENT_TERMINAL_STATES,
 } from '@betterdb/shared';
+import type {
+  PlacementAction,
+  PlacementActionListParams,
+  PlacementActionPage,
+  PlacementActionPatch,
+  PlacementActionState,
+  PlacementStep,
+  PlacementStepPatch,
+  PlacementStepState,
+} from '@betterdb/shared';
+import {
+  PLACEMENT_ACTION_COLUMNS,
+  PLACEMENT_STEP_COLUMNS,
+  parsePlacementCursor,
+  placementColumns,
+  placementCursor,
+  placementFromRow,
+  placementPageLimit,
+} from './placement-action-rows';
 import type {
   StoredScalingReadinessScore,
   ScalingReadinessScoreQuery,
@@ -319,6 +339,18 @@ function populatedDbsCte(where: string): string {
   `;
 }
 
+async function insertPlacementRow(
+  client: PoolClient,
+  table: string,
+  values: { columns: string[]; params: unknown[] },
+): Promise<void> {
+  await client.query(
+    `INSERT INTO ${table} (${values.columns.join(', ')})
+     VALUES (${values.columns.map((_, index) => `$${index + 1}`).join(', ')})`,
+    values.params,
+  );
+}
+
 export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
   private pool: Pool | null = null;
   private ready: boolean = false;
@@ -542,6 +574,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
           await this.migrateConnectionId();
           await this.createSchema();
           await this.ensurePlacementPolicies();
+          await this.ensureActivityActorVia();
           if (!(await this.hasAnomalyKindColumn())) await this.addAnomalyKindColumn();
           await this.ensureOtelIngestedIndex();
           await this.migrateLogSourceKeys();
@@ -1635,6 +1668,44 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         `[postgres] ${skipped} pending memory proposal(s) left unkeyed during backfill — ` +
           `already duplicates of another pending row, or an unparseable payload.`,
       );
+    }
+  }
+
+  private async ensureActivityActorVia(): Promise<void> {
+    if (!this.pool) return;
+    await this.inPlacementTransaction(async (client) => {
+      const checks = await client.query(
+        `SELECT c.conname, pg_get_constraintdef(c.oid) AS def
+         FROM pg_constraint c
+         JOIN pg_class t ON c.conrelid = t.oid
+         JOIN pg_namespace n ON n.oid = t.relnamespace
+         WHERE t.relname = 'activity_events' AND n.nspname = current_schema() AND c.contype = 'c'`,
+      );
+      const viaChecks = checks.rows.filter((row) => String(row.def).includes('actor_via'));
+      if (viaChecks.some((row) => String(row.def).includes("'anonymous'"))) return;
+      for (const row of viaChecks) {
+        await client.query(`ALTER TABLE activity_events DROP CONSTRAINT "${row.conname}"`);
+      }
+      await client.query(
+        `ALTER TABLE activity_events ADD CONSTRAINT activity_events_actor_via_check
+         CHECK (actor_via IN ('session', 'token', 'cli', 'system', 'anonymous'))`,
+      );
+    });
+  }
+
+  private async inPlacementTransaction<T>(work: (client: PoolClient) => Promise<T>): Promise<T> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await work(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
     }
   }
 
@@ -2757,7 +2828,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         occurred_at BIGINT NOT NULL,
         actor_user_id TEXT NOT NULL,
         actor_email TEXT NOT NULL,
-        actor_via VARCHAR(20) NOT NULL CHECK (actor_via IN ('session', 'token', 'cli')),
+        actor_via VARCHAR(20) NOT NULL CHECK (actor_via IN ('session', 'token', 'cli', 'system', 'anonymous')),
         token_id TEXT,
         action TEXT NOT NULL,
         target_type TEXT,
@@ -2774,6 +2845,75 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         ON activity_events(actor_user_id, occurred_at);
       CREATE INDEX IF NOT EXISTS idx_activity_events_connection
         ON activity_events(connection_id, occurred_at);
+
+      CREATE TABLE IF NOT EXISTS placement_actions (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        cluster_nodes TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        state TEXT NOT NULL,
+        mode_at_creation TEXT NOT NULL,
+        plan TEXT,
+        policy_snapshot TEXT NOT NULL,
+        policy_version INTEGER NOT NULL,
+        gate_decisions TEXT NOT NULL,
+        approved_by TEXT,
+        load_before TEXT,
+        load_projected TEXT,
+        load_measured TEXT,
+        verdict TEXT,
+        source_shard_id TEXT NOT NULL,
+        rollback_of TEXT,
+        rolled_back_by TEXT,
+        created_at BIGINT NOT NULL,
+        approved_at BIGINT,
+        started_at BIGINT,
+        ended_at BIGINT,
+        verified_at BIGINT,
+        anomaly_event_ids TEXT NOT NULL,
+        message TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_placement_actions_connection
+        ON placement_actions(connection_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_placement_actions_source_shard
+        ON placement_actions(source_shard_id);
+      CREATE INDEX IF NOT EXISTS idx_placement_actions_state
+        ON placement_actions(state);
+
+      CREATE TABLE IF NOT EXISTS placement_steps (
+        action_id TEXT NOT NULL,
+        step_index INTEGER NOT NULL,
+        state TEXT NOT NULL,
+        source_node_id TEXT NOT NULL,
+        target_node_id TEXT NOT NULL,
+        target_addr TEXT NOT NULL,
+        ranges TEXT NOT NULL,
+        jobs_before TEXT,
+        job TEXT,
+        cancel_requested_at BIGINT,
+        cancel_accepted_at BIGINT,
+        failed_before_cancel TEXT,
+        bytes_estimated BIGINT NOT NULL,
+        keys_moved BIGINT NOT NULL,
+        slots_moved INTEGER NOT NULL,
+        slot_cpu_before DOUBLE PRECISION NOT NULL,
+        sending_at BIGINT,
+        started_at BIGINT,
+        ended_at BIGINT,
+        PRIMARY KEY (action_id, step_index)
+      );
+      CREATE INDEX IF NOT EXISTS idx_placement_steps_sending
+        ON placement_steps(sending_at);
+      CREATE INDEX IF NOT EXISTS idx_placement_steps_ended
+        ON placement_steps(ended_at);
+
+      CREATE TABLE IF NOT EXISTS placement_locks (
+        node_id TEXT PRIMARY KEY,
+        action_id TEXT NOT NULL,
+        acquired_at BIGINT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_placement_locks_action
+        ON placement_locks(action_id);
     `);
   }
 
@@ -4758,6 +4898,204 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
           );
     const row = result.rows[0];
     return row ? this.placementPolicyFromRow(row) : null;
+  }
+
+  async createPlacementAction(action: PlacementAction, steps: PlacementStep[]): Promise<void> {
+    await this.inPlacementTransaction(async (client) => {
+      await insertPlacementRow(
+        client,
+        'placement_actions',
+        placementColumns(PLACEMENT_ACTION_COLUMNS, action),
+      );
+      for (const step of steps) {
+        await insertPlacementRow(
+          client,
+          'placement_steps',
+          placementColumns(PLACEMENT_STEP_COLUMNS, step),
+        );
+      }
+    });
+  }
+
+  async getPlacementAction(
+    id: string,
+  ): Promise<{ action: PlacementAction; steps: PlacementStep[] } | null> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const action = await this.pool.query('SELECT * FROM placement_actions WHERE id = $1', [id]);
+    if (action.rowCount === 0) return null;
+    const steps = await this.pool.query(
+      'SELECT * FROM placement_steps WHERE action_id = $1 ORDER BY step_index ASC',
+      [id],
+    );
+    return {
+      action: placementFromRow(PLACEMENT_ACTION_COLUMNS, action.rows[0]),
+      steps: steps.rows.map((row) => placementFromRow(PLACEMENT_STEP_COLUMNS, row)),
+    };
+  }
+
+  async listPlacementActions(
+    connectionId: string,
+    params: PlacementActionListParams,
+  ): Promise<PlacementActionPage> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const limit = placementPageLimit(params.limit);
+    const args: unknown[] = [connectionId];
+    const where = ['connection_id = $1'];
+    const arg = (value: unknown) => {
+      args.push(value);
+      return `$${args.length}`;
+    };
+    if (params.states) {
+      if (params.states.length === 0) return { items: [], nextCursor: null };
+      where.push(`state = ANY(${arg(params.states)}::text[])`);
+    }
+    if (params.from !== undefined) where.push(`created_at >= ${arg(params.from)}`);
+    if (params.to !== undefined) where.push(`created_at <= ${arg(params.to)}`);
+    if (params.cursor) {
+      const after = parsePlacementCursor(params.cursor);
+      const createdAt = arg(after.createdAt);
+      where.push(
+        `(created_at < ${createdAt} OR (created_at = ${createdAt} AND id < ${arg(after.id)}))`,
+      );
+    }
+    const result = await this.pool.query(
+      `SELECT * FROM placement_actions WHERE ${where.join(' AND ')}
+       ORDER BY created_at DESC, id DESC LIMIT ${arg(limit + 1)}`,
+      args,
+    );
+    const items = result.rows
+      .slice(0, limit)
+      .map((row) => placementFromRow(PLACEMENT_ACTION_COLUMNS, row));
+    return {
+      items,
+      nextCursor: result.rows.length > limit ? placementCursor(items[items.length - 1]) : null,
+    };
+  }
+
+  async listOpenPlacementActions(): Promise<PlacementAction[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      `SELECT * FROM placement_actions WHERE NOT (state = ANY($1::text[])) ORDER BY created_at ASC`,
+      [PLACEMENT_TERMINAL_STATES],
+    );
+    return result.rows.map((row) => placementFromRow(PLACEMENT_ACTION_COLUMNS, row));
+  }
+
+  async transitionPlacementAction(
+    id: string,
+    from: readonly PlacementActionState[],
+    patch: PlacementActionPatch,
+  ): Promise<PlacementAction | null> {
+    if (from.length === 0) return null;
+    const set = placementColumns<PlacementAction>(PLACEMENT_ACTION_COLUMNS, patch, [
+      'id',
+      'connectionId',
+    ]);
+    return this.inPlacementTransaction(async (client) => {
+      const assignments = set.columns.map((column, index) => `${column} = $${index + 1}`);
+      const result = await client.query(
+        `UPDATE placement_actions SET ${assignments.join(', ')}
+         WHERE id = $${set.params.length + 1} AND state = ANY($${set.params.length + 2}::text[])
+         RETURNING *`,
+        [...set.params, id, from],
+      );
+      if (result.rowCount === 0) return null;
+      if (PLACEMENT_TERMINAL_STATES.includes(patch.state)) {
+        await client.query('DELETE FROM placement_locks WHERE action_id = $1', [id]);
+      }
+      return placementFromRow(PLACEMENT_ACTION_COLUMNS, result.rows[0]);
+    });
+  }
+
+  async updatePlacementStep(
+    actionId: string,
+    index: number,
+    from: readonly PlacementStepState[] | null,
+    patch: PlacementStepPatch,
+  ): Promise<PlacementStep | null> {
+    if (!this.pool) throw new Error('Database not initialized');
+    if (from && from.length === 0) return null;
+    const set = placementColumns<PlacementStep>(PLACEMENT_STEP_COLUMNS, patch, [
+      'actionId',
+      'index',
+    ]);
+    const args: unknown[] = [...set.params, actionId, index];
+    const assignments = set.columns.length
+      ? set.columns.map((column, position) => `${column} = $${position + 1}`).join(', ')
+      : 'state = state';
+    let stateCheck = '';
+    if (from) {
+      args.push(from);
+      stateCheck = ` AND state = ANY($${args.length}::text[])`;
+    }
+    const result = await this.pool.query(
+      `UPDATE placement_steps SET ${assignments}
+       WHERE action_id = $${set.params.length + 1} AND step_index = $${set.params.length + 2}${stateCheck}
+       RETURNING *`,
+      args,
+    );
+    return result.rowCount === 0 ? null : placementFromRow(PLACEMENT_STEP_COLUMNS, result.rows[0]);
+  }
+
+  async acquirePlacementLock(
+    actionId: string,
+    nodeIds: readonly string[],
+    now: number,
+  ): Promise<boolean> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const unique = [...new Set(nodeIds)];
+    if (unique.length === 0) return true;
+    try {
+      await this.pool.query(
+        `INSERT INTO placement_locks (node_id, action_id, acquired_at)
+         SELECT node_id, $2, $3 FROM UNNEST($1::text[]) AS node_id`,
+        [unique, actionId, now],
+      );
+      return true;
+    } catch (error) {
+      if ((error as { code?: string }).code === '23505') return false;
+      throw error;
+    }
+  }
+
+  async freeOrphanedPlacementLocks(): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      `DELETE FROM placement_locks WHERE action_id NOT IN (
+         SELECT id FROM placement_actions WHERE NOT (state = ANY($1::text[]))
+       )`,
+      [PLACEMENT_TERMINAL_STATES],
+    );
+    return result.rowCount ?? 0;
+  }
+
+  async placementStepsSince(connectionId: string, since: number): Promise<PlacementStep[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      `SELECT s.* FROM placement_steps s
+       JOIN placement_actions a ON a.id = s.action_id
+       WHERE a.connection_id = $1
+         AND (s.sending_at >= $2 OR (s.state = 'done' AND s.ended_at >= $2))
+       ORDER BY s.action_id, s.step_index`,
+      [connectionId, since],
+    );
+    return result.rows.map((row) => placementFromRow(PLACEMENT_STEP_COLUMNS, row));
+  }
+
+  async prunePlacementActions(before: number): Promise<number> {
+    return this.inPlacementTransaction(async (client) => {
+      const ended = await client.query(
+        `DELETE FROM placement_actions
+         WHERE state = ANY($1::text[]) AND ended_at IS NOT NULL AND ended_at < $2
+         RETURNING id`,
+        [PLACEMENT_TERMINAL_STATES, before],
+      );
+      if (ended.rowCount === 0) return 0;
+      await client.query('DELETE FROM placement_steps WHERE action_id = ANY($1::text[])', [
+        ended.rows.map((row) => row.id),
+      ]);
+      return ended.rowCount ?? 0;
+    });
   }
 
   private kvCacheSnapshotFromRow(r: Record<string, any>): KvCacheFootprintSnapshot {

@@ -19,7 +19,7 @@ describe('ActivityService', () => {
   beforeEach(async () => {
     storage = new MemoryAdapter();
     await storage.initialize();
-    service = new ActivityService(storage, { retentionDays: 90 });
+    service = new ActivityService(storage, { retentionDays: 90, placementActionRetentionDays: 30 });
   });
 
   afterEach(async () => {
@@ -120,5 +120,12 @@ describe('ActivityService', () => {
     const now = 100 * 24 * 60 * 60 * 1000;
     expect(await service.prune(now)).toBe(3);
     expect(prune).toHaveBeenCalledWith(now - 90 * 24 * 60 * 60 * 1000);
+  });
+
+  it('prunes placement actions older than their own retention window', async () => {
+    const prune = jest.spyOn(storage, 'prunePlacementActions').mockResolvedValue(2);
+    const now = 100 * 24 * 60 * 60 * 1000;
+    expect(await service.prunePlacementActions(now)).toBe(2);
+    expect(prune).toHaveBeenCalledWith(now - 30 * 24 * 60 * 60 * 1000);
   });
 });

@@ -22,9 +22,6 @@ export class ActivityPruneJob implements OnApplicationBootstrap, OnModuleDestroy
   ) {}
 
   onApplicationBootstrap(): void {
-    if (this.config?.mode === 'disabled') {
-      return;
-    }
     void this.runOnce();
     this.timer = setInterval(() => {
       void this.runOnce();
@@ -41,14 +38,23 @@ export class ActivityPruneJob implements OnApplicationBootstrap, OnModuleDestroy
   }
 
   private async runOnce(): Promise<void> {
+    if (this.config?.mode !== 'disabled') {
+      await this.prune('Activity', 'activity event', () => this.activity.prune());
+    }
+    await this.prune('Placement action', 'placement action', () =>
+      this.activity.prunePlacementActions(),
+    );
+  }
+
+  private async prune(label: string, noun: string, run: () => Promise<number>): Promise<void> {
     try {
-      const removed = await this.activity.prune();
+      const removed = await run();
       if (removed > 0) {
-        this.logger.log(`Pruned ${removed} activity event(s)`);
+        this.logger.log(`Pruned ${removed} ${noun}(s)`);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.logger.warn(`Activity prune failed: ${message}`);
+      this.logger.warn(`${label} prune failed: ${message}`);
     }
   }
 }

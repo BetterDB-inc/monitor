@@ -263,6 +263,17 @@ describe('envSchema', () => {
     );
   });
 
+  describe('PLACEMENT_ACTION_RETENTION_DAYS validation', () => {
+    it('should accept a whole number of days or a blank value', () => {
+      expect(envSchema.safeParse({ PLACEMENT_ACTION_RETENTION_DAYS: '365' }).success).toBe(true);
+      expect(envSchema.safeParse({ PLACEMENT_ACTION_RETENTION_DAYS: ' ' }).success).toBe(true);
+    });
+
+    it.each(['1e2', '0', '-5', '90days'])('should reject %s', (value) => {
+      expect(envSchema.safeParse({ PLACEMENT_ACTION_RETENTION_DAYS: value }).success).toBe(false);
+    });
+  });
+
   describe('boolean transforms', () => {
     it('should transform AI_ENABLED to true when "true"', () => {
       const result = envSchema.safeParse({ AI_ENABLED: 'true' });

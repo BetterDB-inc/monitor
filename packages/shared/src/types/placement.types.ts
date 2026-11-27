@@ -1,3 +1,5 @@
+import type { ActorVia } from './workspace';
+
 export type PlacementMode = 'observe' | 'recommend' | 'approve' | 'auto';
 
 export const PLACEMENT_MODES: readonly PlacementMode[] = ['observe', 'recommend', 'approve', 'auto'];
@@ -216,3 +218,143 @@ export interface PlacementPolicySaved extends PlacementStatus {
   exclusionsExpanded: boolean;
   exclusionsExpandProblem: string | null;
 }
+
+export type PlacementActionKind = 'spread' | 'rollback';
+
+export type PlacementActionState =
+  | 'proposed'
+  | 'approved'
+  | 'running'
+  | 'verifying'
+  | 'succeeded'
+  | 'ineffective'
+  | 'inconclusive'
+  | 'rejected'
+  | 'expired'
+  | 'aborted'
+  | 'aborted_pending'
+  | 'failed'
+  | 'rolling_back'
+  | 'rolled_back'
+  | 'rollback_blocked'
+  | 'rollback_failed';
+
+export const PLACEMENT_OPEN_STATES: readonly PlacementActionState[] = [
+  'proposed',
+  'approved',
+  'running',
+  'verifying',
+  'rolling_back',
+];
+
+export const PLACEMENT_TERMINAL_STATES: readonly PlacementActionState[] = [
+  'succeeded',
+  'ineffective',
+  'inconclusive',
+  'rejected',
+  'expired',
+  'aborted',
+  'aborted_pending',
+  'failed',
+  'rolled_back',
+  'rollback_blocked',
+  'rollback_failed',
+];
+
+export type PlacementStepState =
+  | 'planned'
+  | 'sending'
+  | 'running'
+  | 'done'
+  | 'failed'
+  | 'cancelled';
+
+export interface PlacementApprover {
+  source: 'ui' | 'mcp' | 'system';
+  userId: string;
+  email: string;
+  via: ActorVia;
+  tokenId: string | null;
+}
+
+export interface PlacementGateDecision {
+  at: number;
+  stepIndex: number | null;
+  result: PlacementGateResult;
+}
+
+export interface PlacementAction {
+  id: string;
+  connectionId: string;
+  clusterNodes: string[];
+  kind: PlacementActionKind;
+  state: PlacementActionState;
+  modeAtCreation: PlacementMode;
+  plan: unknown;
+  settingsSnapshot: PlacementSettings;
+  policyVersion: number;
+  gateDecisions: PlacementGateDecision[];
+  approvedBy: PlacementApprover | null;
+  loadBefore: unknown | null;
+  loadProjected: unknown | null;
+  loadMeasured: unknown | null;
+  verdict: unknown | null;
+  sourceShardId: string;
+  rollbackOf: string | null;
+  rolledBackBy: string | null;
+  createdAt: number;
+  approvedAt: number | null;
+  startedAt: number | null;
+  endedAt: number | null;
+  verifiedAt: number | null;
+  anomalyEventIds: string[];
+  message: string | null;
+}
+
+export interface PlacementStepJob {
+  jobName?: string;
+  state: string;
+  phase?: string;
+  message?: string;
+}
+
+export interface PlacementStep {
+  actionId: string;
+  index: number;
+  state: PlacementStepState;
+  sourceNodeId: string;
+  targetNodeId: string;
+  targetAddr: string;
+  ranges: [number, number][];
+  jobsBefore: string[] | null;
+  job: PlacementStepJob | null;
+  cancelRequestedAt: number | null;
+  cancelAcceptedAt: number | null;
+  failedBeforeCancel: string[] | null;
+  bytesEstimated: number;
+  keysMoved: number;
+  slotsMoved: number;
+  slotCpuBefore: number;
+  sendingAt: number | null;
+  startedAt: number | null;
+  endedAt: number | null;
+}
+
+export interface PlacementActionListParams {
+  states?: PlacementActionState[];
+  from?: number;
+  to?: number;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface PlacementActionPage {
+  items: PlacementAction[];
+  nextCursor: string | null;
+}
+
+export type PlacementActionPatch = Partial<Omit<PlacementAction, 'id' | 'connectionId'>> & {
+  state: PlacementActionState;
+};
+
+export type PlacementStepPatch = Partial<Omit<PlacementStep, 'actionId' | 'index'>>;

@@ -2,7 +2,7 @@ export type WorkspaceRole = 'admin' | 'member';
 
 export type WorkspaceMode = 'disabled' | 'self-hosted' | 'cloud';
 
-export type ActorVia = 'session' | 'token' | 'cli';
+export type ActorVia = 'session' | 'token' | 'cli' | 'system' | 'anonymous';
 
 export interface Actor {
   userId: string;
