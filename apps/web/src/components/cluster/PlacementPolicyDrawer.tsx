@@ -61,13 +61,13 @@ const NUMBER_FIELDS: { field: NumberField; label: string; hint: string; step: st
   {
     field: 'maxMigrationsPerHour',
     label: 'Moves per hour',
-    hint: 'Not applied yet. Each move takes slots from one source to one target.',
+    hint: 'The safety checks hold a plan back when its moves would go over this in an hour. Each move takes slots from one source to one target.',
     step: '1',
   },
   {
     field: 'abortLatencyMs',
     label: 'Abort latency (ms)',
-    hint: 'Not applied yet. The latency of a source or target node, held for 5 seconds, that stops a move.',
+    hint: 'The safety checks hold a plan back while a source or target node answers PING slower than this, 50 ms at least. Stopping a running move comes later.',
     step: '1',
   },
   {
@@ -241,7 +241,7 @@ function PolicyForm({
         <Field
           id="placement-maxBytesPerHour"
           label="GiB moved per hour"
-          hint="Not applied yet. An estimate from key counts and the average key size; big keys make it wrong."
+          hint="Moved bytes are not counted yet, so only 0 holds every plan back. An estimate from key counts and the average key size; big keys make it wrong."
         >
           <Input
             id="placement-maxBytesPerHour"
@@ -256,7 +256,7 @@ function PolicyForm({
         <Field
           id="placement-maintenanceWindows"
           label="Maintenance windows"
-          hint="Not applied yet. One per line: days, start time (UTC) and minutes, for example Mon,Tue 02:00 120. Empty means any time."
+          hint="A plan outside every window carries a warning. One per line: days, start time (UTC) and minutes, for example Mon,Tue 02:00 120. Empty means any time."
         >
           <textarea
             id="placement-maintenanceWindows"
@@ -364,8 +364,9 @@ export function PlacementPolicyDrawer({
           <SheetDescription>
             The trigger ratio, sustain minutes and CPU share limit decide when the sustained trigger
             fires; the trigger shows on the card and does not move slots yet. The resolve ratio, the
-            node CPU limit and the exclusions shape suggested slot moves now. The other limits are
-            checked and saved but do not change anything yet.
+            node CPU limit and the exclusions shape suggested slot moves now. The safety checks read
+            the moves per hour, the GiB moved per hour, the abort latency and the maintenance
+            windows. The other limits are checked and saved but do not change anything yet.
           </SheetDescription>
         </SheetHeader>
         {open && (

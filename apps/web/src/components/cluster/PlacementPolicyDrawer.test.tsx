@@ -81,6 +81,12 @@ describe('PlacementPolicyDrawer', () => {
     expect(screen.getByText(/also counts as over the trigger/)).not.toHaveTextContent(
       'Not applied yet',
     );
+    expect(description).toHaveTextContent(
+      'The safety checks read the moves per hour, the GiB moved per hour, the abort latency and the maintenance windows.',
+    );
+    for (const hint of [/go over this in an hour/, /PING slower/, /only 0 holds/, /every window/]) {
+      expect(screen.getByText(hint)).not.toHaveTextContent('Not applied yet');
+    }
   });
 
   it('saves the edited policy at the version it was opened with and closes', async () => {
