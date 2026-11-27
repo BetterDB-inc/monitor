@@ -1016,6 +1016,11 @@ export class AnomalyService
   private rebalancePolicyResolver: ((seedId: string) => Promise<RebalancePolicy>) | null = null;
   private rebalancePolicyWarned = new Map<string, string>();
   private rebalanceRuns = new Map<string, Map<string, RebalanceRun>>();
+  private replacedRebalanceRuns = new Map<string, RebalanceRun[]>();
+  private placementIncidentSince = new Map<string, number>();
+  private clusterNodesObserver:
+    | ((connectionId: string, nodes: readonly ClusterNode[], at: number) => void)
+    | null = null;
   private rebalanceStarting = new Set<string>();
   private rebalanceFollowedAt = new Map<string, number>();
   private cancelsInFlight = new Map<string, { count: number; requestedBefore?: number }>();
@@ -1737,6 +1742,8 @@ export class AnomalyService
     this.hotShardRebalance.delete(connectionId);
     this.rebalancePolicyWarned.delete(connectionId);
     this.rebalanceRuns.delete(connectionId);
+    this.replacedRebalanceRuns.delete(connectionId);
+    this.placementIncidentSince.delete(connectionId);
     this.rebalanceFollowedAt.delete(connectionId);
     this.slotMigrationReadOnPoll.delete(connectionId);
     this.hotKeyNoteLogged.delete(connectionId);
@@ -2578,6 +2585,7 @@ export class AnomalyService
         }
         if (nodes || !readsTopology) await this.detectSlotMigrations(ctx, timestamp);
         await this.followRebalanceRunsOnPoll(ctx.connectionId, timestamp, nodes);
+        if (nodes) this.clusterNodesObserver?.(ctx.connectionId, nodes, timestamp);
         if (nodes) {
           // A slot-owning primary with no synced replica (#714). Runs in both
           // topology modes, and is not held back during a rolling update: that
@@ -7200,6 +7208,12 @@ export class AnomalyService
     this.rebalancePolicyResolver = resolve;
   }
 
+  setClusterNodesObserver(
+    observe: ((connectionId: string, nodes: readonly ClusterNode[], at: number) => void) | null,
+  ): void {
+    this.clusterNodesObserver = observe;
+  }
+
   private async rebalancePolicyFor(connectionId: string): Promise<RebalancePolicy> {
     if (!this.rebalancePolicyResolver) return DEFAULT_REBALANCE_POLICY;
     return this.rebalancePolicyResolver(this.seedIdOf(connectionId) ?? connectionId);
@@ -7481,12 +7495,23 @@ export class AnomalyService
 
   placementPlans(connectionId: string): RebalancePlan[] {
     return [...(this.hotShardRebalance.get(connectionId)?.values() ?? [])].flatMap((kept) =>
-      kept.verdict.kind === 'plan' ? [kept.verdict] : [],
+      kept.verdict.kind === 'plan'
+        ? [{ ...kept.verdict, execution: this.rebalanceExecution(connectionId, kept.verdict) }]
+        : [],
     );
   }
 
+  private placementRunsOf(connectionId: string, now: number): RebalanceRun[] {
+    const replaced = (this.replacedRebalanceRuns.get(connectionId) ?? []).filter((run) =>
+      isRunKept(run, now),
+    );
+    if (replaced.length > 0) this.replacedRebalanceRuns.set(connectionId, replaced);
+    else this.replacedRebalanceRuns.delete(connectionId);
+    return [...replaced, ...(this.rebalanceRuns.get(connectionId)?.values() ?? [])];
+  }
+
   placementMovedShardsSince(connectionId: string, since: number): string[] {
-    const runs = [...(this.rebalanceRuns.get(connectionId)?.values() ?? [])];
+    const runs = this.placementRunsOf(connectionId, Date.now());
     return [
       ...new Set(
         runs
@@ -7505,8 +7530,7 @@ export class AnomalyService
   }
 
   placementJobsSince(connectionId: string, since: number): number {
-    const runs = this.rebalanceRuns.get(connectionId)?.values() ?? [];
-    return [...runs].reduce(
+    return this.placementRunsOf(connectionId, Date.now()).reduce(
       (total, run) => total + (run.startedAt >= since ? run.jobs.length : 0),
       0,
     );
@@ -7544,16 +7568,21 @@ export class AnomalyService
   }
 
   async placementIncidents(connectionId: string): Promise<PlacementGateIncident[]> {
-    const now = Date.now();
+    const hourAgo = Date.now() - 60 * 60_000;
+    const from = Math.min(
+      hourAgo,
+      this.placementIncidentSince.get(connectionId) ?? Date.now() - MAX_INCIDENT_LOOKBACK_MS,
+    );
     const incidents = await this.readIncidentTimelines(
       connectionId,
-      now - 24 * 60 * 60_000,
+      from,
       undefined,
-      50,
+      Number.MAX_SAFE_INTEGER,
     );
-    return incidents
-      .filter((incident) => incident.recovery.status !== 'recovered')
-      .map((incident) => ({
+    const open = incidents.filter((incident) => incident.recovery.status !== 'recovered');
+    const oldest = Math.min(hourAgo, ...open.map((incident) => incident.lastEventAt));
+    this.placementIncidentSince.set(connectionId, oldest);
+    return open.map((incident) => ({
         recovery: incident.recovery.status,
         patterns: [
           ...incident.matchedPatterns,
@@ -12306,6 +12335,15 @@ export class AnomalyService
       const record = () => {
         const run = startRun(plan, startedBy, Date.now(), jobsBefore);
         const runs = this.rebalanceRuns.get(connectionId) ?? new Map<string, RebalanceRun>();
+        const replaced = runs.get(plan.sourceShardId);
+        if (replaced) {
+          this.replacedRebalanceRuns.set(connectionId, [
+            ...(this.replacedRebalanceRuns.get(connectionId) ?? []).filter((each) =>
+              isRunKept(each, run.startedAt),
+            ),
+            { ...replaced, endedAt: replaced.endedAt ?? run.startedAt },
+          ]);
+        }
         runs.set(plan.sourceShardId, run);
         this.rebalanceRuns.set(connectionId, runs);
         this.slotMigrationCheckedAt.delete(connectionId);

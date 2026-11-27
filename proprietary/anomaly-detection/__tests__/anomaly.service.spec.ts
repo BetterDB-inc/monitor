@@ -5034,6 +5034,7 @@ describe('AnomalyService', () => {
             jest.spyOn(service as any, 'readIncidentTimelines').mockResolvedValue([
               {
                 recovery: { status: 'active' },
+                lastEventAt: 7,
                 matchedPatterns: ['node_failover'],
                 sequenceMatches: [],
                 entries: [
@@ -5046,6 +5047,7 @@ describe('AnomalyService', () => {
               },
               {
                 recovery: { status: 'recovered' },
+                lastEventAt: 7,
                 matchedPatterns: [],
                 sequenceMatches: [],
                 entries: [entry('conn-a', {})],
@@ -5071,6 +5073,98 @@ describe('AnomalyService', () => {
             ]);
           });
 
+          it('reads incidents back to the oldest open one, with no cap', async () => {
+            const lookback = 30 * 24 * 60 * 60_000;
+            const read = jest.spyOn(service as any, 'readIncidentTimelines');
+            const open = {
+              recovery: { status: 'degraded' },
+              lastEventAt: clock - 30 * 60 * 60_000,
+            };
+            const timeline = (status: string, lastEventAt: number) => ({
+              recovery: { status },
+              lastEventAt,
+              matchedPatterns: [],
+              sequenceMatches: [],
+              entries: [],
+            });
+            read.mockResolvedValueOnce([
+              ...Array.from({ length: 60 }, () => timeline('recovered', clock - 60_000)),
+              timeline(open.recovery.status, open.lastEventAt),
+            ]);
+            expect(await service.placementIncidents('conn-a')).toHaveLength(1);
+            expect(read).toHaveBeenLastCalledWith(
+              'conn-a',
+              clock - lookback,
+              undefined,
+              Number.MAX_SAFE_INTEGER,
+            );
+
+            read.mockResolvedValueOnce([]);
+            await service.placementIncidents('conn-a');
+            expect(read).toHaveBeenLastCalledWith(
+              'conn-a',
+              open.lastEventAt,
+              undefined,
+              Number.MAX_SAFE_INTEGER,
+            );
+
+            read.mockResolvedValueOnce([]);
+            await service.placementIncidents('conn-a');
+            expect(read).toHaveBeenLastCalledWith(
+              'conn-a',
+              clock - 60 * 60_000,
+              undefined,
+              Number.MAX_SAFE_INTEGER,
+            );
+          });
+
+          it('counts an earlier run on the same shard in the hourly budget', async () => {
+            enable();
+            await planned();
+            const earlier = {
+              sourceShardId: 'a0000000',
+              sourceAddr: ADDRS[0],
+              startedBy: ADMIN,
+              startedAt: clock - 20 * 60_000,
+              endedAt: clock - 10 * 60_000,
+              projectedRatio: 1,
+              jobsBefore: [],
+              state: 'succeeded',
+              jobs: [
+                {
+                  targetShardId: 'c0000000',
+                  targetAddr: ADDRS[2],
+                  ranges: [[110, 111]],
+                  state: 'succeeded',
+                },
+              ],
+            };
+            (service as any).rebalanceRuns.set('conn-a', new Map([['a0000000', earlier]]));
+
+            expect(await service.runRebalance('conn-a', 'a0000000', MOVES, ADMIN)).toMatchObject({
+              status: 'started',
+            });
+
+            expect(service.placementJobsSince('conn-a', clock - 60 * 60_000)).toBe(2);
+            expect(service.placementMovedShardsSince('conn-a', clock - 15 * 60_000).sort()).toEqual(
+              ['a0000000', 'b0000000', 'c0000000'],
+            );
+            clock += 61 * 60_000;
+            expect(service.placementJobsSince('conn-a', clock - 60 * 60_000)).toBe(0);
+          });
+
+          it('hands each poll that read CLUSTER NODES to the cluster nodes observer', async () => {
+            const observe = jest.fn();
+            service.setClusterNodesObserver(observe);
+            spreadLoad();
+            await step(HOT, 1);
+            expect(observe).toHaveBeenCalledWith(
+              'conn-a',
+              expect.arrayContaining([expect.objectContaining({ id: 'a0000000' })]),
+              expect.any(Number),
+            );
+          });
+
           it('offers no run when the plan has no Valkey 9 command', async () => {
             enable();
             spreadLoad();
@@ -5081,6 +5175,10 @@ describe('AnomalyService', () => {
             await step(HOT, 6);
 
             expect(execution()).toEqual({ available: false, blockedBy: 'unsupported_server' });
+            expect(service.placementPlans('conn-a')[0]?.execution).toEqual({
+              available: false,
+              blockedBy: 'unsupported_server',
+            });
           });
 
           it('sends one MIGRATESLOTS to the source and holds the plan while it runs', async () => {
