@@ -290,7 +290,7 @@ describe('slot rebalance runs across a monitor restart', () => {
     expect(await storedRuns()).toHaveLength(1);
   });
 
-  it('reads the stored runs again on the next poll after a failed read', async () => {
+  it('reads the stored runs again once the retry delay after a failed read passed', async () => {
     await start(monitor());
     const service = monitor();
     jest
@@ -300,6 +300,9 @@ describe('slot rebalance runs across a monitor restart', () => {
     await poll(service);
     expect(await service.followRebalanceRuns(CONN)).toEqual([]);
 
+    const { delayMs } = (service as any).rebalanceRunsRetry.get(CONN);
+    const real = Date.now;
+    jest.spyOn(Date, 'now').mockImplementation(() => real() + delayMs + 1);
     await poll(service);
     expect(await service.followRebalanceRuns(CONN)).toHaveLength(1);
   });
@@ -478,5 +481,196 @@ describe('slot rebalance runs across a monitor restart', () => {
     expect(await storedRuns()).toMatchObject([{ id: first.id, state: 'succeeded' }]);
     expect((service as any).rebalanceRunSaved.has(first.id)).toBe(false);
     expect((service as any).rebalanceRunUnsaved.has(first.id)).toBe(false);
+  });
+
+  it('waits longer between reads of the stored runs while storage keeps failing', async () => {
+    const service = monitor();
+    const read = jest
+      .spyOn(storage, 'getLatestRebalanceRunPerShard')
+      .mockRejectedValue(new Error('database is locked'));
+
+    await poll(service);
+    await poll(service);
+    expect(read).toHaveBeenCalledTimes(1);
+
+    const retry = (service as any).rebalanceRunsRetry.get(CONN);
+    const real = Date.now;
+    jest.spyOn(Date, 'now').mockImplementation(() => real() + retry.delayMs + 1);
+    await poll(service);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect((service as any).rebalanceRunsRetry.get(CONN).delayMs).toBe(retry.delayMs * 2);
+  });
+
+  it('follows a cancel that was sent but not answered before a restart as accepted', async () => {
+    const before = monitor();
+    await start(before);
+    report.jobViews = [LISTED];
+    report.migrations = [{ jobName: 'job-1' }];
+    await follow(before);
+    // The process stopped after it stored the cancel as requested, before the server answered.
+    const [row] = await storedRuns();
+    const requestedAt = Date.now() - 60_000;
+    await storage.saveRebalanceRun({
+      ...row,
+      updatedAt: row.updatedAt + 1,
+      payload: JSON.stringify({
+        ...JSON.parse(row.payload),
+        cancelRequestedAt: requestedAt,
+        failedBeforeCancel: [],
+      }),
+    });
+    const after = monitor();
+    await poll(after);
+    // The cancel took: the target lists its import as failed and the hot shard still owns the slots.
+    report.jobViews = [];
+    report.migrations = [];
+    report.failed = [
+      { jobName: 'job-1', message: 'cancelled', sourceNodeId: 'src', targetNodeId: 'tgt', slotRange: '0-99' },
+    ];
+
+    expect(await follow(after)).toMatchObject([
+      { state: 'cancelled', jobs: [{ state: 'cancelled' }] },
+    ]);
+  });
+
+  it('does not keep a failed save to retry for a connection that was removed', async () => {
+    const service = monitor();
+    await start(service);
+    let fail!: (err: Error) => void;
+    jest
+      .spyOn(storage, 'saveRebalanceRun')
+      .mockImplementationOnce(() => new Promise<void>((_, reject) => (fail = reject)));
+    report.jobViews = [LISTED];
+    (service as any).rebalanceFollowedAt.clear();
+    await service.followRebalanceRuns(CONN);
+
+    (service as any).onConnectionRemoved(CONN);
+    (service as any).connectionRegistry.getConfig.mockReturnValue(undefined);
+    fail(new Error('database is locked'));
+    await saved(service);
+
+    expect((service as any).rebalanceRunUnsaved.size).toBe(0);
+  });
+
+  it('keeps saving a run when the clock steps back', async () => {
+    const service = monitor();
+    const real = Date.now;
+    jest.spyOn(Date, 'now').mockImplementation(() => real() + 60_000);
+    await start(service);
+    const [first] = await storedRuns();
+
+    // The clock steps back a minute; the next change of the run must still be stored.
+    jest.spyOn(Date, 'now').mockImplementation(real);
+    report.jobViews = [LISTED];
+    await follow(service);
+
+    const [row] = await storedRuns();
+    expect(row.updatedAt).toBeGreaterThan(first.updatedAt);
+    expect(JSON.parse(row.payload).jobs[0]).toMatchObject({ jobName: 'job-1', state: 'running' });
+  });
+
+  it('drops the save stamp of a run a new run replaced', async () => {
+    const service = monitor();
+    await start(service);
+    const [first] = await storedRuns();
+    expect((service as any).rebalanceRunUpdatedAt.has(first.id)).toBe(true);
+
+    const runs = (service as any).rebalanceRuns.get(CONN);
+    const current = runs.get('src');
+    (service as any).putRun(CONN, runs, { ...current, startedAt: current.startedAt + 1 });
+    await saved(service);
+
+    expect((service as any).rebalanceRunUpdatedAt.has(first.id)).toBe(false);
+  });
+
+  it('drops the save stamp of a run that expired', async () => {
+    const service = monitor();
+    await start(service);
+    const [first] = await storedRuns();
+    report.finishedJobs = ['job-1'];
+    slots = { src: [[100, 8191]], tgt: [[0, 99], [8192, 16383]] };
+    await follow(service);
+
+    const real = Date.now;
+    jest.spyOn(Date, 'now').mockImplementation(() => real() + 2 * REBALANCE_RUN_KEPT_MS);
+    expect(await follow(service)).toEqual([]);
+
+    expect((service as any).rebalanceRunUpdatedAt.has(first.id)).toBe(false);
+  });
+
+  it('keeps the save stamp of an expired run while its failed save waits to be retried', async () => {
+    const service = monitor();
+    await start(service);
+    const [first] = await storedRuns();
+    const save = jest
+      .spyOn(storage, 'saveRebalanceRun')
+      .mockRejectedValue(new Error('database is locked'));
+    report.finishedJobs = ['job-1'];
+    slots = { src: [[100, 8191]], tgt: [[0, 99], [8192, 16383]] };
+    await follow(service);
+
+    const real = Date.now;
+    jest.spyOn(Date, 'now').mockImplementation(() => real() + 2 * REBALANCE_RUN_KEPT_MS);
+    await follow(service);
+    expect((service as any).rebalanceRunUpdatedAt.has(first.id)).toBe(true);
+
+    save.mockRestore();
+    await follow(service);
+    expect((service as any).rebalanceRunUpdatedAt.has(first.id)).toBe(false);
+    expect((await storedRuns())[0]).toMatchObject({ id: first.id, state: 'succeeded' });
+  });
+
+  describe('history of a run whose load was still to be measured', () => {
+    const storeSucceeded = async (endedAgoMs: number) => {
+      const endedAt = Date.now() - endedAgoMs;
+      const run = {
+        sourceShardId: 'src',
+        sourceAddr: '10.0.0.1:6379',
+        startedBy: ADMIN,
+        startedAt: endedAt - 1000,
+        endedAt,
+        projectedRatio: 1.2,
+        jobs: [],
+        jobsBefore: [],
+        state: 'succeeded' as const,
+      };
+      await storage.saveRebalanceRun({
+        id: rebalanceRunId(CONN, run),
+        connectionId: CONN,
+        sourceShardId: 'src',
+        state: run.state,
+        startedAt: run.startedAt,
+        endedAt,
+        updatedAt: endedAt,
+        payload: JSON.stringify(run),
+      });
+    };
+
+    it('says it could not be measured once the wait passed', async () => {
+      await storeSucceeded(20 * 60_000);
+      const [run] = await monitor().getRebalanceRunHistory(CONN, 0, 50);
+      expect(run).toMatchObject({ state: 'succeeded', outcomeUnavailable: true });
+      expect(JSON.parse((await storedRuns())[0].payload)).not.toHaveProperty('outcomeUnavailable');
+    });
+
+    it('is still measured within the wait', async () => {
+      await storeSucceeded(60_000);
+      const [run] = await monitor().getRebalanceRunHistory(CONN, 0, 50);
+      expect(run).not.toHaveProperty('outcomeUnavailable');
+    });
+
+    it('shows a run in memory as memory has it', async () => {
+      const service = monitor();
+      await start(service);
+      report.finishedJobs = ['job-1'];
+      slots = { src: [[100, 8191]], tgt: [[0, 99], [8192, 16383]] };
+      await follow(service);
+      const real = Date.now;
+      jest.spyOn(Date, 'now').mockImplementation(() => real() + 20 * 60_000);
+
+      const [run] = await service.getRebalanceRunHistory(CONN, 0, 50);
+      const live = (service as any).rebalanceRuns.get(CONN).get('src');
+      expect(run.outcomeUnavailable).toBe(live.outcomeUnavailable);
+    });
   });
 });

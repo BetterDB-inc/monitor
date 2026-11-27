@@ -937,7 +937,11 @@ export interface StoragePort {
    * after `since`, newest first. One row per shard, with no limit across shards.
    */
   getLatestRebalanceRunPerShard(connectionId: string, since: number): Promise<StoredRebalanceRun[]>;
-  /** Deletes runs that ended before the cutoff. A run without `endedAt` is never deleted. */
+  /**
+   * Deletes runs that ended before the cutoff, and runs that never ended and started more than
+   * REBALANCE_UNENDED_PRUNE_MARGIN_MS before it: a run whose last save never landed. Adoption looks
+   * back 30 days at most, so such a row is never picked up again.
+   */
   pruneOldRebalanceRuns(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   // AI Cache/Memory Sample Methods (AI Cache & Memory observability) - connectionId required for writes

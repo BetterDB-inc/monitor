@@ -4,7 +4,7 @@ import type {
   StoredRebalanceRun,
 } from '../../../common/interfaces/storage-port.interface';
 import { chunkedPostgresDelete } from '../postgres-chunked-delete';
-import { rebalanceRunLimit } from './rebalance-run.memory.repository';
+import { rebalanceRunLimit, unendedCutoff } from './rebalance-run.memory.repository';
 
 /** `pg` returns BIGINT columns as strings. */
 interface RebalanceRunRow {
@@ -89,15 +89,17 @@ export class RebalanceRunPostgresRepository {
     return rows.map(toStoredRun);
   }
   async pruneOldRebalanceRuns(cutoffTimestamp: number, connectionId?: string): Promise<number> {
-    const ended = 'ended_at IS NOT NULL AND ended_at < $1';
+    const expired =
+      '((ended_at IS NOT NULL AND ended_at < $1) OR (ended_at IS NULL AND started_at < $2))';
+    const params = [cutoffTimestamp, unendedCutoff(cutoffTimestamp)];
     if (connectionId) {
       return chunkedPostgresDelete(
         this.pool,
         'slot_rebalance_runs',
-        `${ended} AND connection_id = $2`,
-        [cutoffTimestamp, connectionId],
+        `${expired} AND connection_id = $3`,
+        [...params, connectionId],
       );
     }
-    return chunkedPostgresDelete(this.pool, 'slot_rebalance_runs', ended, [cutoffTimestamp]);
+    return chunkedPostgresDelete(this.pool, 'slot_rebalance_runs', expired, params);
   }
 }

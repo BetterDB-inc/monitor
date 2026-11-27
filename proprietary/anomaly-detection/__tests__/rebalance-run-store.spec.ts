@@ -119,6 +119,16 @@ describe('rebalance run store', () => {
       expect(runsToAdopt([broken, row(run())], NOW, REBALANCE_RUN_KEPT_MS)).toEqual([run()]);
     });
 
+    it('takes a cancel stored as requested but not answered as accepted', () => {
+      const [value] = adopted(run({ cancelRequestedAt: NOW - 30_000 }));
+      expect(value.cancelAcceptedAt).toBe(NOW - 30_000);
+    });
+
+    it('keeps the time a cancel was accepted', () => {
+      const [value] = adopted(run({ cancelRequestedAt: NOW - 30_000, cancelAcceptedAt: NOW - 29_000 }));
+      expect(value.cancelAcceptedAt).toBe(NOW - 29_000);
+    });
+
     it('starts the unread timer of a job again', () => {
       const [job] = run().jobs;
 

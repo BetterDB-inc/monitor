@@ -167,6 +167,7 @@ import {
   sameMoves,
   startRun,
   withOutcome,
+  REBALANCE_OUTCOME_WAIT_MS,
   REBALANCE_RUN_KEPT_MS,
 } from './slot-rebalance-run';
 import {
@@ -859,6 +860,16 @@ interface RetryAmplificationReport {
   rearm: () => void;
 }
 
+/**
+ * A stored run no process follows any more. One that succeeded while its load was still to be
+ * measured would otherwise read as being measured for good: past the wait it could not be.
+ */
+function storedRunAsOf(run: RebalanceRun | null, now: number): RebalanceRun | null {
+  if (!run || run.state !== 'succeeded' || run.outcome || run.outcomeUnavailable) return run;
+  if (run.endedAt === undefined || now - run.endedAt < REBALANCE_OUTCOME_WAIT_MS) return run;
+  return { ...run, outcomeUnavailable: true };
+}
+
 @Injectable()
 export class AnomalyService
   extends MultiConnectionPoller
@@ -1015,6 +1026,10 @@ export class AnomalyService
   private rebalanceStarting = new Set<string>();
   private rebalanceFollowedAt = new Map<string, number>();
   private rebalanceRunsAdopted = new Set<string>();
+  /** As openEventsRetry: when the stored runs of a connection may be read again after a failure. */
+  private rebalanceRunsRetry = new Map<string, { at: number; delayMs: number }>();
+  /** Run id to the `updatedAt` of its last save, so its saves stay strictly increasing. */
+  private rebalanceRunUpdatedAt = new Map<string, number>();
   /** Run id to the fingerprint last handed to storage. */
   private rebalanceRunSaved = new Map<string, string>();
   /** Run id to the tail of its chain of saves. */
@@ -1744,6 +1759,10 @@ export class AnomalyService
     this.rebalanceRuns.delete(connectionId);
     this.rebalanceFollowedAt.delete(connectionId);
     this.rebalanceRunsAdopted.delete(connectionId);
+    this.rebalanceRunsRetry.delete(connectionId);
+    for (const runId of this.rebalanceRunUpdatedAt.keys()) {
+      if (runId.startsWith(`${connectionId}:`)) this.rebalanceRunUpdatedAt.delete(runId);
+    }
     for (const runId of this.rebalanceRunSaved.keys()) {
       if (runId.startsWith(`${connectionId}:`)) this.rebalanceRunSaved.delete(runId);
     }
@@ -3027,6 +3046,8 @@ export class AnomalyService
   private async adoptRebalanceRuns(connectionId: string, timestamp: number): Promise<void> {
     if (this.rebalanceRunsAdopted.has(connectionId)) return;
     if (!this.connectionRegistry.getConfig(connectionId)) return;
+    const retry = this.rebalanceRunsRetry.get(connectionId);
+    if (retry && timestamp < retry.at) return;
     try {
       // One row per source shard: a limit across shards could leave out a running run.
       const rows = await this.storage.getLatestRebalanceRunPerShard(
@@ -3042,9 +3063,13 @@ export class AnomalyService
           return !current || current.startedAt < run.startedAt;
         })
         .slice(0, REBALANCE_ADOPT_LIMIT);
+      const storedUpdatedAt = new Map(rows.map((row) => [row.id, row.updatedAt]));
       for (const run of adopted) {
+        const id = rebalanceRunId(connectionId, run);
         runs.set(run.sourceShardId, run);
-        this.rebalanceRunSaved.set(rebalanceRunId(connectionId, run), persistedFingerprint(run));
+        this.rebalanceRunSaved.set(id, persistedFingerprint(run));
+        const updatedAt = storedUpdatedAt.get(id);
+        if (updatedAt !== undefined) this.rebalanceRunUpdatedAt.set(id, updatedAt);
       }
       if (adopted.length > 0) {
         this.rebalanceRuns.set(connectionId, runs);
@@ -3054,7 +3079,13 @@ export class AnomalyService
         }
       }
       this.rebalanceRunsAdopted.add(connectionId);
+      this.rebalanceRunsRetry.delete(connectionId);
     } catch (err) {
+      const delayMs = Math.min(
+        (retry?.delayMs ?? this.getIntervalMs()) * 2,
+        OPEN_EVENTS_MAX_RETRY_MS,
+      );
+      this.rebalanceRunsRetry.set(connectionId, { at: timestamp + delayMs, delayMs });
       this.logger.warn(
         `Could not read the stored slot rebalance runs of ${connectionId}: ${errorText(err)}`,
       );
@@ -12159,8 +12190,9 @@ export class AnomalyService
         run,
       ]),
     );
+    const now = Date.now();
     return rows
-      .map((row) => live.get(row.id) ?? fromStoredRun(row))
+      .map((row) => live.get(row.id) ?? storedRunAsOf(fromStoredRun(row), now))
       .filter((run): run is RebalanceRun => run !== null)
       .map(runView);
   }
@@ -12169,7 +12201,7 @@ export class AnomalyService
   private putRun(connectionId: string, runs: Map<string, RebalanceRun>, run: RebalanceRun): void {
     const replaced = runs.get(run.sourceShardId);
     if (replaced && replaced.startedAt !== run.startedAt) {
-      this.rebalanceRunSaved.delete(rebalanceRunId(connectionId, replaced));
+      this.forgetRetiredRun(rebalanceRunId(connectionId, replaced));
     }
     runs.set(run.sourceShardId, run);
     this.saveRun(connectionId, run);
@@ -12184,7 +12216,7 @@ export class AnomalyService
     this.rebalanceRunSaved.set(id, fingerprint);
     const previous = this.rebalanceRunSaving.get(id) ?? Promise.resolve();
     const next: Promise<void> = previous
-      .then(() => this.storage.saveRebalanceRun(toStoredRun(connectionId, run, Date.now())))
+      .then(() => this.storage.saveRebalanceRun(toStoredRun(connectionId, run, this.saveStamp(id))))
       .then(() => {
         // The saves of a run are chained, so an entry here is from an earlier, older save.
         this.rebalanceRunUnsaved.delete(id);
@@ -12192,7 +12224,8 @@ export class AnomalyService
       .catch((err) => {
         // Forgotten, so that the next follow of the run saves it again.
         if (this.rebalanceRunSaved.get(id) === fingerprint) this.rebalanceRunSaved.delete(id);
-        this.keepUnsaved(id, connectionId, run);
+        // A removed connection is not polled again, so its retry would never run.
+        if (this.connectionRegistry.getConfig(connectionId)) this.keepUnsaved(id, connectionId, run);
         this.logger.warn(`Could not save the slot rebalance run ${id}: ${errorText(err)}`);
       })
       .finally(() => {
@@ -12202,9 +12235,32 @@ export class AnomalyService
         // without a failure to retry, its fingerprint has nothing left to deduplicate.
         if (!this.holdsRun(connectionId, run) && !this.rebalanceRunUnsaved.has(id)) {
           this.rebalanceRunSaved.delete(id);
+          this.rebalanceRunUpdatedAt.delete(id);
         }
       });
     this.rebalanceRunSaving.set(id, next);
+  }
+
+  /**
+   * The `updatedAt` of the next save of a run. Storage ignores a save older than the stored row, so
+   * a clock that steps back must not make a later save look older; the saves of a run are chained,
+   * so this runs in their order.
+   */
+  private saveStamp(id: string): number {
+    const stamp = Math.max(Date.now(), (this.rebalanceRunUpdatedAt.get(id) ?? 0) + 1);
+    this.rebalanceRunUpdatedAt.set(id, stamp);
+    return stamp;
+  }
+
+  /**
+   * For a run that left memory. Its save stamp is kept while a save of it is in flight or waits to
+   * be retried, so that save stays newer than the stored row; the save's settling drops it then.
+   */
+  private forgetRetiredRun(id: string): void {
+    this.rebalanceRunSaved.delete(id);
+    if (!this.rebalanceRunSaving.has(id) && !this.rebalanceRunUnsaved.has(id)) {
+      this.rebalanceRunUpdatedAt.delete(id);
+    }
   }
 
   private holdsRun(connectionId: string, run: RebalanceRun): boolean {
@@ -12270,7 +12326,7 @@ export class AnomalyService
     for (const [sourceShardId, run] of runs) {
       if (isRunKept(run, now)) continue;
       runs.delete(sourceShardId);
-      this.rebalanceRunSaved.delete(rebalanceRunId(connectionId, run));
+      this.forgetRetiredRun(rebalanceRunId(connectionId, run));
     }
     this.retryUnsavedRuns(connectionId);
     const running = [...runs.values()].filter((run) => run.state === 'running');

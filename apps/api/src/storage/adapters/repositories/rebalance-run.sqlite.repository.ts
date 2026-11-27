@@ -4,7 +4,7 @@ import type {
   StoredRebalanceRun,
 } from '../../../common/interfaces/storage-port.interface';
 import { chunkedSqliteDelete } from '../sqlite-chunked-delete';
-import { rebalanceRunLimit } from './rebalance-run.memory.repository';
+import { rebalanceRunLimit, unendedCutoff } from './rebalance-run.memory.repository';
 
 interface RebalanceRunRow {
   id: string;
@@ -100,13 +100,15 @@ export class RebalanceRunSqliteRepository {
     return rows.map(toStoredRun);
   }
   async pruneOldRebalanceRuns(cutoffTimestamp: number, connectionId?: string): Promise<number> {
-    const ended = 'ended_at IS NOT NULL AND ended_at < ?';
+    const expired =
+      '((ended_at IS NOT NULL AND ended_at < ?) OR (ended_at IS NULL AND started_at < ?))';
+    const params = [cutoffTimestamp, unendedCutoff(cutoffTimestamp)];
     if (connectionId) {
-      return chunkedSqliteDelete(this.db, 'slot_rebalance_runs', `${ended} AND connection_id = ?`, [
-        cutoffTimestamp,
+      return chunkedSqliteDelete(this.db, 'slot_rebalance_runs', `${expired} AND connection_id = ?`, [
+        ...params,
         connectionId,
       ]);
     }
-    return chunkedSqliteDelete(this.db, 'slot_rebalance_runs', ended, [cutoffTimestamp]);
+    return chunkedSqliteDelete(this.db, 'slot_rebalance_runs', expired, params);
   }
 }

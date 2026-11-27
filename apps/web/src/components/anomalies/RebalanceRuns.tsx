@@ -135,14 +135,10 @@ function CancelRun({ run, connectionId }: { run: RebalanceRun; connectionId: str
   );
 }
 
-function describeHistoryRatio(run: RebalanceRun): string {
-  const projected = `Projected ${formatRatio(run.projectedRatio)} the median for the hot shard`;
-  return run.outcome
-    ? `${projected}; measured ${formatRatio(run.outcome.actualRatio)}.`
-    : `${projected}; not measured.`;
-}
 
 function HistoryEntry({ run }: { run: RebalanceRun }) {
+  // As on the live card, so that a run that did not succeed or is still measured says no ratio.
+  const outcome = describeOutcome(run);
   const ended =
     run.endedAt === undefined ? '' : `, ended ${new Date(run.endedAt).toLocaleString()}`;
   return (
@@ -156,7 +152,7 @@ function HistoryEntry({ run }: { run: RebalanceRun }) {
         Started by {run.startedBy.email ?? 'an admin'} at {new Date(run.startedAt).toLocaleString()}
         {ended}.
       </p>
-      <p>{describeHistoryRatio(run)}</p>
+      {outcome && <p>{outcome}</p>}
     </li>
   );
 }

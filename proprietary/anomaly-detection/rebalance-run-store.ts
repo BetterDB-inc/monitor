@@ -61,6 +61,15 @@ const withoutReadTimers = (run: RebalanceRun): RebalanceRun => ({
 });
 
 /**
+ * A cancel stored as requested but not answered was sent by a process that is gone, so no answer
+ * will come: it is followed as accepted, as a cancel that did not answer in time is.
+ */
+const withCancelSettled = (run: RebalanceRun): RebalanceRun =>
+  run.cancelRequestedAt !== undefined && run.cancelAcceptedAt === undefined
+    ? { ...run, cancelAcceptedAt: run.cancelRequestedAt }
+    : run;
+
+/**
  * The runs to put back into memory: the latest run of each source shard, when it is still
  * running or ended less than `keptMs` ago.
  */
@@ -80,5 +89,5 @@ export function runsToAdopt(
     .filter(
       (run) => run.state === 'running' || (run.endedAt !== undefined && now - run.endedAt < keptMs),
     )
-    .map(withoutReadTimers);
+    .map((run) => withCancelSettled(withoutReadTimers(run)));
 }

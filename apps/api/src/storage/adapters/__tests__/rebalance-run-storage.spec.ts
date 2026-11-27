@@ -135,4 +135,14 @@ describe.each<[string, AdapterFactory]>(adapters)('slot rebalance run storage (%
     await storage.saveRebalanceRun(stored({ connectionId: OTHER, sourceShardId: 'x', startedAt: 500 }));
     expect(await storage.getLatestRebalanceRunPerShard(CONN, 100)).toEqual([]);
   });
+  it('prunes a run that never ended once it started well before the adoption window', async () => {
+    const DAY = 24 * 60 * 60_000;
+    const cutoff = 100 * DAY;
+    await storage.saveRebalanceRun(stored({ sourceShardId: 'stale', startedAt: cutoff - 31 * DAY }));
+    await storage.saveRebalanceRun(stored({ sourceShardId: 'kept', startedAt: cutoff - 29 * DAY }));
+    expect(await storage.pruneOldRebalanceRuns(cutoff)).toBe(1);
+    expect(await shardsListed()).toEqual(['kept']);
+    expect(await storage.pruneOldRebalanceRuns(cutoff + 2 * DAY, OTHER)).toBe(0);
+    expect(await storage.pruneOldRebalanceRuns(cutoff + 2 * DAY, CONN)).toBe(1);
+  });
 });

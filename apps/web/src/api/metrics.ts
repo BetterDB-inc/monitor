@@ -485,10 +485,8 @@ export const metricsApi = {
 
   getRebalanceRuns: () => fetchApi<RebalanceRun[]>('/anomaly/slot-rebalance'),
 
-  getRebalanceRunHistory: (since?: number) =>
-    fetchApi<RebalanceRun[]>(
-      `/anomaly/slot-rebalance?history=true${since === undefined ? '' : `&since=${since}`}`,
-    ),
+  getRebalanceRunHistory: () =>
+    fetchApi<RebalanceRun[]>('/anomaly/slot-rebalance?history=true'),
 
   cancelRebalance: (sourceShardId: string) =>
     fetchApi<RebalanceRun>('/anomaly/slot-rebalance/cancel', {

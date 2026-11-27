@@ -236,6 +236,14 @@ describe('RebalanceRuns', () => {
       expect(within(entry).queryByRole('button')).toBeNull();
     });
 
+    it('gives no ratio for a run that did not succeed, as the live card does', async () => {
+      getRebalanceRunHistory.mockResolvedValue([run({ state: 'failed', endedAt: 5_000 })]);
+      await show([], { showHistory: true });
+      fireEvent.click(await toggle());
+      const entry = await screen.findByRole('listitem');
+      expect(entry).not.toHaveTextContent('not measured');
+      expect(entry).not.toHaveTextContent('Projected');
+    });
     it('says so when no run was stored', async () => {
       getRebalanceRunHistory.mockResolvedValue([]);
       await show([], { showHistory: true });

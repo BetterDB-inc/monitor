@@ -5,6 +5,13 @@ import type {
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 500;
+/**
+ * How long before the retention cutoff a run that never ended must have started to be pruned.
+ * At least the 30 days adoption looks back, so a run that may still be adopted is kept.
+ */
+export const REBALANCE_UNENDED_PRUNE_MARGIN_MS = 30 * 24 * 60 * 60_000;
+export const unendedCutoff = (cutoffTimestamp: number): number =>
+  cutoffTimestamp - REBALANCE_UNENDED_PRUNE_MARGIN_MS;
 
 export const rebalanceRunLimit = (limit?: number): number =>
   Math.min(Math.max(1, Math.floor(limit ?? DEFAULT_LIMIT)), MAX_LIMIT);
@@ -45,7 +52,11 @@ export class RebalanceRunMemoryRepository {
   async pruneOldRebalanceRuns(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     let pruned = 0;
     for (const [id, run] of this.runs) {
-      if (run.endedAt === null || run.endedAt >= cutoffTimestamp) continue;
+      const expired =
+        run.endedAt === null
+          ? run.startedAt < unendedCutoff(cutoffTimestamp)
+          : run.endedAt < cutoffTimestamp;
+      if (!expired) continue;
       if (connectionId && run.connectionId !== connectionId) continue;
       this.runs.delete(id);
       pruned += 1;
