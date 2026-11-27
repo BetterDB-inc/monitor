@@ -719,6 +719,38 @@ describe('PlacementService', () => {
       expect((await resolve('seed')).excludedSlots).toEqual([7]);
     });
 
+    it('answers a save from the row it wrote, even when a read after it fails', async () => {
+      const { service, storage } = await setup();
+      const settings = { ...tighter, excludedShardIds: [] };
+      jest
+        .spyOn(storage, 'getPlacementPolicy')
+        .mockResolvedValueOnce(null)
+        .mockRejectedValue(new Error('db down'));
+      await expect(service.setSettings('seed', settings, 0)).resolves.toMatchObject({
+        settings,
+        policyVersion: 1,
+      });
+    });
+
+    it('publishes no policy read that finishes after its seed was removed', async () => {
+      const { service, storage, configs, shardLoad } = await setup();
+      let finish: (policy: PlacementPolicy | null) => void = () => undefined;
+      jest
+        .spyOn(storage, 'getPlacementPolicy')
+        .mockImplementationOnce(() => new Promise((done) => (finish = done)));
+      const slow = service.getStatus('seed');
+      delete configs.seed;
+      finish({
+        connectionId: 'seed',
+        mode: 'recommend',
+        settings: { ...DEFAULT_PLACEMENT_SETTINGS, sustainMinutes: 45 },
+        version: 1,
+        updatedAt: 1,
+      });
+      await slow.catch(() => undefined);
+      expect(shardLoad.setSustainMinutes).not.toHaveBeenCalledWith('seed', 45);
+    });
+
     it('reads the settings with their version from the half-minute cache', async () => {
       const { service, storage } = await setup();
       expect(await service.settingsOf('seed')).toEqual({
@@ -974,6 +1006,65 @@ describe('PlacementService', () => {
           ],
         });
         expect(anomaly.runRebalance).not.toHaveBeenCalled();
+      });
+
+      it('answers an unknown gate and runs nothing when the safety checks cannot be read', async () => {
+        const { service, storage, anomaly } = await setup();
+        await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+        jest
+          .spyOn(storage, 'getPlacementPolicy')
+          .mockResolvedValueOnce(await storage.getPlacementPolicy('seed'))
+          .mockRejectedValue(new Error('db down'));
+        await expect(service.runRebalance('seed', 'a', moves, actor)).resolves.toEqual({
+          status: 'blocked',
+          blockedBy: 'gate',
+          blockers: [
+            { kind: 'unknown', scope: 'cluster', detail: 'Could not run the safety checks.' },
+          ],
+        });
+        expect(anomaly.runRebalance).not.toHaveBeenCalled();
+      });
+
+      it('checks a run against the hourly limit saved on another instance', async () => {
+        const { service, storage, anomaly } = await setup();
+        await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+        anomaly.placementJobsSince.mockReturnValue(1);
+        await service.getStatus('seed');
+        await storage.savePlacementSettings(
+          {
+            connectionId: 'seed',
+            settings: { ...DEFAULT_PLACEMENT_SETTINGS, maxMigrationsPerHour: 1 },
+            updatedAt: 2,
+            modeIfNew: 'recommend',
+          },
+          0,
+        );
+        await expect(service.runRebalance('seed', 'a', moves, actor)).resolves.toEqual({
+          status: 'blocked',
+          blockedBy: 'gate',
+          blockers: [expect.objectContaining({ kind: 'budget', scope: 'cluster' })],
+        });
+        expect(anomaly.runRebalance).not.toHaveBeenCalled();
+      });
+
+      it('reads the gate again once the policy is saved, not the verdict from before', async () => {
+        const { service, storage, anomaly } = await setup();
+        await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+        anomaly.placementJobsSince.mockReturnValue(1);
+        anomaly.placementPlans.mockReturnValue([
+          { kind: 'plan', sourceShardId: 'a', moves } as unknown as RebalancePlan,
+        ]);
+        const before = await service.getStatus('seed');
+        expect(before.recommendations[0].gate.allowed).toBe(true);
+        const saved = await service.setSettings(
+          'seed',
+          { ...DEFAULT_PLACEMENT_SETTINGS, maxMigrationsPerHour: 1 },
+          0,
+        );
+        expect(saved.recommendations[0].gate).toMatchObject({
+          allowed: false,
+          blockers: [expect.objectContaining({ kind: 'budget' })],
+        });
       });
 
       it('takes the trigger time of a stored action over the live trigger', async () => {
