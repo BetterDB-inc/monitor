@@ -2,6 +2,7 @@ import {
   PLACEMENT_MODES,
   type PlacementBalance,
   type PlacementMode,
+  type PlacementBlocker,
   type PlacementPolicyInvalid,
   type PlacementSettings,
   type PlacementStatus,
@@ -208,6 +209,59 @@ function PolicyInvalid({ invalid }: { invalid: PlacementPolicyInvalid | null }) 
   );
 }
 
+function BlockerList({
+  label,
+  items,
+  className,
+}: {
+  label: string;
+  items: PlacementBlocker[];
+  className: string;
+}) {
+  if (items.length === 0) return null;
+  return (
+    <ul aria-label={label} className={`list-disc pl-5 ${className}`}>
+      {items.map((item) => (
+        <li key={`${item.kind} ${item.scope} ${item.nodeId ?? ''}`}>{item.detail}</li>
+      ))}
+    </ul>
+  );
+}
+
+function Recommendations({ status }: { status: PlacementStatus }) {
+  if (status.recommendations.length === 0) return null;
+  const address = (shardId: string) =>
+    status.balance?.shards.find((shard) => shard.shardId === shardId)?.address ?? shardId;
+  return (
+    <ul aria-label="Suggested slot moves" className="space-y-2">
+      {status.recommendations.map((recommendation) => (
+        <li key={recommendation.sourceShardId} className="space-y-1">
+          <p>
+            {`Move slots from ${address(recommendation.sourceShardId)} to ${recommendation.targetShardIds.map(address).join(', ')}.`}
+          </p>
+          {recommendation.gate.allowed ? (
+            <p className="text-muted-foreground">Would run now.</p>
+          ) : (
+            <>
+              <p className="text-muted-foreground">Waits for:</p>
+              <BlockerList
+                label="Placement blockers"
+                items={recommendation.gate.blockers}
+                className="text-muted-foreground"
+              />
+            </>
+          )}
+          <BlockerList
+            label="Placement warnings"
+            items={recommendation.gate.warnings}
+            className="text-yellow-600 dark:text-yellow-500"
+          />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export function PlacementCard({ connectionId }: { connectionId: string | undefined }) {
   return <ClusterPlacementCard key={connectionId ?? ''} connectionId={connectionId} />;
 }
@@ -248,6 +302,7 @@ function ClusterPlacementCard({ connectionId }: { connectionId: string | undefin
               <EffectiveMode status={status} />
               <Support status={status} />
               <BalanceBars balance={status.balance} settings={status.settings} />
+              <Recommendations status={status} />
               <Button size="sm" variant="outline" onClick={() => setPolicyOpen(true)}>
                 {canMutate ? 'Edit policy' : 'View policy'}
               </Button>

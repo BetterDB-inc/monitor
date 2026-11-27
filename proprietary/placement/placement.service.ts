@@ -20,6 +20,7 @@ import {
   type PlacementMode,
   type PlacementPolicy,
   type PlacementPolicyInvalid,
+  type PlacementRecommendation,
   type PlacementSettings,
   type PlacementStatus,
   type PlacementSupport,
@@ -197,6 +198,7 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
     const mode = this.modeOf(policy, seedId);
     const { settings, version, invalid } = settingsReadOf(policy);
     const selectableModes = PLACEMENT_SETTABLE_MODES.filter((each) => support.modes[each].available);
+    const recommendations = mode === 'observe' ? [] : await this.recommendationsOf(seedId);
     return {
       connectionId: seedId,
       mode,
@@ -209,7 +211,18 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
       settings,
       policyVersion: version,
       policyInvalid: invalid,
+      recommendations,
     };
+  }
+
+  private recommendationsOf(seedId: string): Promise<PlacementRecommendation[]> {
+    return Promise.all(
+      this.anomaly.placementPlans(seedId).map(async (plan) => ({
+        sourceShardId: plan.sourceShardId,
+        targetShardIds: targetsOf(plan.moves),
+        gate: await this.cachedGate(seedId, plan),
+      })),
+    );
   }
 
   async setSettings(

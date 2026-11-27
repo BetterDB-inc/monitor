@@ -160,6 +160,13 @@ export interface PlacementStatus {
   settings: PlacementSettings;
   policyVersion: number;
   policyInvalid: PlacementPolicyInvalid | null;
+  recommendations: PlacementRecommendation[];
+}
+
+export interface PlacementRecommendation {
+  sourceShardId: string;
+  targetShardIds: string[];
+  gate: PlacementGateResult;
 }
 
 export type PlacementBlockerKind =

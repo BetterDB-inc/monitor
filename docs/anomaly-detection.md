@@ -952,7 +952,7 @@ Before you start one:
 
 #### Placement modes
 
-Each cluster has a placement mode, shown with its support and the load of every shard in the **Slot placement** card on the Cluster page. The mode is stored on the cluster's seed connection, so every node connection of the cluster shares it.
+Each cluster has a placement mode, shown with its support and the load of every shard in the **Slot placement** card on the Cluster page. Outside Observe, `GET /anomaly/placement` also lists in `recommendations` each slot-move plan held now, with its `sourceShardId`, `targetShardIds` and the `gate` of [Safety checks](#safety-checks); the card says per plan "Would run now" or "Waits for:" with the blockers. The mode is stored on the cluster's seed connection, so every node connection of the cluster shares it.
 
 | Mode | What it does |
 | --- | --- |

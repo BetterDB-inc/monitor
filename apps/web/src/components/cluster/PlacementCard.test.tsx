@@ -141,6 +141,7 @@ function status(overrides: Partial<PlacementStatus> = {}): PlacementStatus {
     settings: DEFAULT_PLACEMENT_SETTINGS,
     policyVersion: 3,
     policyInvalid: null,
+    recommendations: [],
     ...overrides,
   };
 }
@@ -455,6 +456,49 @@ describe('PlacementCard', () => {
     expect(await card()).toHaveTextContent(
       'Slots changed owner and the load is still being measured.',
     );
+  });
+
+  it('says whether each suggested move would run now or what it waits for', async () => {
+    const fork = {
+      kind: 'fork' as const,
+      scope: 'target' as const,
+      nodeId: 'c3',
+      detail: '10.0.0.3:6379 is saving to disk in a fork.',
+    };
+    const window = {
+      kind: 'outside_window' as const,
+      scope: 'cluster' as const,
+      detail: 'Outside every maintenance window.',
+    };
+    await show(
+      status({
+        recommendations: [
+          {
+            sourceShardId: 'a1',
+            targetShardIds: ['b2'],
+            gate: { allowed: true, blockers: [], warnings: [window] },
+          },
+          {
+            sourceShardId: 'b2',
+            targetShardIds: ['c3'],
+            gate: { allowed: false, blockers: [fork], warnings: [] },
+          },
+        ],
+      }),
+    );
+
+    const moves = within(await card()).getByRole('list', { name: 'Suggested slot moves' });
+    const [ready, waiting] = [...moves.children] as HTMLElement[];
+    expect(ready).toHaveTextContent('Move slots from 10.0.0.1:6379 to 10.0.0.2:6379.');
+    expect(ready).toHaveTextContent('Would run now.');
+    expect(within(ready).getByRole('list', { name: 'Placement warnings' })).toHaveTextContent(
+      'Outside every maintenance window.',
+    );
+    expect(waiting).toHaveTextContent('Waits for:');
+    expect(within(waiting).getByRole('list', { name: 'Placement blockers' })).toHaveTextContent(
+      '10.0.0.3:6379 is saving to disk in a fork.',
+    );
+    expect(waiting).not.toHaveTextContent('Would run now.');
   });
 
   it('says when no load has been sampled yet', async () => {

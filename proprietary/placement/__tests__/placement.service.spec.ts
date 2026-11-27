@@ -177,6 +177,40 @@ describe('PlacementService', () => {
     expect(status.support.issues).toEqual([]);
   });
 
+  it('lists each held plan with its safety checks outside Observe', async () => {
+    const { service, storage, anomaly } = await setup();
+    anomaly.placementPlans.mockReturnValue([
+      {
+        kind: 'plan',
+        sourceShardId: 'a',
+        moves: [
+          { targetShardId: 'b', ranges: [[0, 5]] },
+          { targetShardId: 'c', ranges: [[6, 9]] },
+          { targetShardId: 'b', ranges: [[10, 12]] },
+        ],
+      } as unknown as RebalancePlan,
+    ]);
+    anomaly.placementOpenEvents.mockResolvedValue([
+      { metricType: 'persistence_child', nodeId: 'c', openedAt: Date.now() },
+    ]);
+    expect((await service.getStatus('seed')).recommendations).toEqual([]);
+    expect(anomaly.readPlacementNodeFacts).not.toHaveBeenCalled();
+
+    await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+    expect((await service.getStatus('seed')).recommendations).toEqual([
+      {
+        sourceShardId: 'a',
+        targetShardIds: ['b', 'c'],
+        gate: {
+          allowed: false,
+          blockers: [expect.objectContaining({ kind: 'fork', scope: 'target', nodeId: 'c' })],
+          warnings: [],
+        },
+      },
+    ]);
+    expect(anomaly.placementPlans).toHaveBeenCalledWith('seed');
+  });
+
   it('reads the sustained trigger of each shard from the samples it was handed', async () => {
     const { service, feed } = await setup();
     const now = Date.now();
