@@ -5,7 +5,7 @@
 #   docker build -f Dockerfile -t betterdb-agent ../..
 
 # ---- Build shared dependency ----
-FROM node:20-alpine AS shared-build
+FROM node:26-alpine AS shared-build
 WORKDIR /build/shared
 COPY packages/shared/package.json packages/shared/tsconfig.json ./
 COPY packages/shared/src ./src
@@ -19,7 +19,7 @@ RUN npm install --ignore-scripts && npm run build
 # "Cannot find module '@betterdb/shared'". shared's own dep, zod, is kept EXTERNAL
 # (declared in the agent's dependencies) and installed in the production stage, so
 # esbuild leaves it as a require() and it stays visible to vulnerability scanners.
-FROM node:20-alpine AS agent-build
+FROM node:26-alpine AS agent-build
 WORKDIR /build/agent
 
 COPY packages/agent/package.json packages/agent/tsconfig.json ./
@@ -41,7 +41,12 @@ COPY packages/agent/src ./src
 RUN npm run build
 
 # ---- Production image ----
-FROM node:20-alpine
+FROM node:26-alpine
+
+# Apply the latest Alpine security patches (the base image lags behind fixed
+# openssl/zlib/busybox releases).
+RUN apk upgrade --no-cache
+
 WORKDIR /app
 
 # Install the declared runtime dependencies (AWS SDK, iovalkey, ws, zod);
@@ -65,6 +70,11 @@ COPY --from=agent-build /build/agent/dist ./dist
 # error and we assert on that, independent of its exit code.
 RUN node dist/index.js 2>&1 | grep -q "BETTERDB_TOKEN" \
     || (echo "agent smoke test failed: entrypoint did not boot cleanly" && exit 1)
+
+# The image runs via `node` directly, so drop the npm CLI bundled in the base image
+# now that dependencies are installed - it only contributes CVEs from its own
+# vendored dependencies (tar, glob, minimatch, sigstore, ...).
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 # Run as non-root
 RUN addgroup -S agent && adduser -S agent -G agent
