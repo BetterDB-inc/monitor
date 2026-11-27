@@ -472,7 +472,7 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
     purpose: PlacementGatePurpose,
     options: PlacementGateOptions = {},
   ): Promise<PlacementGateResult> {
-    const read = await readPlacementCluster(this.anomaly, connectionId, [
+    const read = await readPlacementCluster(this.anomaly, this.seedOf(connectionId), [
       subject.sourceShardId,
       ...subject.targetShardIds,
     ]);
@@ -494,10 +494,10 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
     const facts = placementGateFactsOf(
       read,
       this.epochs,
-      connectionId,
+      seedId,
       {
         budget: {
-          jobsUsed: this.anomaly.placementJobsSince(connectionId, now - BUDGET_WINDOW_MS),
+          jobsUsed: this.anomaly.placementJobsSince(seedId, now - BUDGET_WINDOW_MS),
           bytesUsed: 0,
         },
         paused: false,
@@ -512,7 +512,7 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
         quarantinedShardIds: [],
         cooldownLeftSlots: null,
         movedShardIds: this.anomaly.placementMovedShardsSince(
-          connectionId,
+          seedId,
           now - PLACEMENT_EPOCH_WINDOW_MS,
         ),
       },
@@ -542,7 +542,7 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
     if (missing.length === 0) return Promise.all(gates as Promise<PlacementGateResult>[]);
     const cluster = readPlacementCluster(
       this.anomaly,
-      connectionId,
+      this.clusterOf(connectionId),
       missing.flatMap((plan) => [plan.sourceShardId, ...targetsOf(plan.moves)]),
     );
     return Promise.all(
@@ -562,14 +562,15 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
       targetShardIds: targetsOf(plan.moves),
       moveCount: plan.moves.length,
     };
+    const owns = () => this.gateReads.get(cacheKey)?.read === read;
     const read = cluster
       .then((shared) => this.judgeGate(connectionId, subject, 'approve', shared))
       .then((gate) => {
-        this.gateCache.set(cacheKey, { at: Date.now(), key, gate });
+        if (owns()) this.gateCache.set(cacheKey, { at: Date.now(), key, gate });
         return gate;
       })
       .catch((): PlacementGateResult => {
-        this.gateCache.delete(cacheKey);
+        if (owns()) this.gateCache.delete(cacheKey);
         return unreadableGate();
       })
       .finally(() => {
@@ -580,8 +581,11 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
   }
 
   private gateKeyFor(connectionId: string, plan: RebalancePlan): string {
-    const seedId = this.registry.getConfig(connectionId)?.membership?.seedId ?? connectionId;
-    return `${this.policyGeneration.get(seedId) ?? 0}\u0000${gateKeyOf(plan)}`;
+    return `${this.policyGeneration.get(this.clusterOf(connectionId)) ?? 0}\u0000${gateKeyOf(plan)}`;
+  }
+
+  private clusterOf(connectionId: string): string {
+    return this.registry.getConfig(connectionId)?.membership?.seedId ?? connectionId;
   }
 
   private seedOf(connectionId: string): string {
