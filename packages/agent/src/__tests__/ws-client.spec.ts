@@ -111,6 +111,67 @@ describe('WsClient reconnects', () => {
     client.close();
   });
 
+  it('keeps slowing down while opens are not acknowledged, and starts over once marked healthy', () => {
+    const client = new WsClient({
+      url: 'ws://monitor',
+      token: 'token',
+      onMessage: jest.fn(),
+      onOpen: jest.fn(),
+      onClose: jest.fn(),
+      onError: jest.fn(),
+      resetBackoffOnOpen: false,
+      maxReconnectDelayMs: 300_000,
+    });
+    client.connect();
+    // Each socket opens but is never acknowledged: 1 s, 2 s, 4 s, 8 s ...
+    for (const delay of [1000, 2000, 4000, 8000]) {
+      const socket = mockSockets[mockSockets.length - 1];
+      socket.emit('open');
+      socket.emit('close', 4000, Buffer.from('Welcome timeout'));
+      jest.advanceTimersByTime(delay - 1);
+      const before = mockSockets.length;
+      jest.advanceTimersByTime(1);
+      expect(mockSockets.length).toBe(before + 1);
+    }
+
+    // Acknowledged: the next drop reconnects after a second again.
+    const socket = mockSockets[mockSockets.length - 1];
+    socket.emit('open');
+    client.markHealthy();
+    socket.emit('close', 1006, Buffer.from(''));
+    jest.advanceTimersByTime(1000);
+    expect(mockSockets).toHaveLength(6);
+    client.close();
+  });
+
+  it('caps the unacknowledged backoff at the given maximum', () => {
+    const client = new WsClient({
+      url: 'ws://monitor',
+      token: 'token',
+      onMessage: jest.fn(),
+      onOpen: jest.fn(),
+      onClose: jest.fn(),
+      onError: jest.fn(),
+      resetBackoffOnOpen: false,
+      maxReconnectDelayMs: 300_000,
+    });
+    client.connect();
+    for (let i = 0; i < 12; i++) {
+      const socket = mockSockets[mockSockets.length - 1];
+      socket.emit('open');
+      socket.emit('close', 4000, Buffer.from('Welcome timeout'));
+      jest.advanceTimersByTime(300_000);
+    }
+    const sockets = mockSockets.length;
+    mockSockets[sockets - 1].emit('open');
+    mockSockets[sockets - 1].emit('close', 4000, Buffer.from('Welcome timeout'));
+    jest.advanceTimersByTime(299_999);
+    expect(mockSockets).toHaveLength(sockets);
+    jest.advanceTimersByTime(1);
+    expect(mockSockets).toHaveLength(sockets + 1);
+    client.close();
+  });
+
   it('waits the longest delay when another agent uses its token', () => {
     const client = build();
     client.connect();

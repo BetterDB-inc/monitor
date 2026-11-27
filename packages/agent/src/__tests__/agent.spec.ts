@@ -21,6 +21,7 @@ jest.mock('../ws-client', () => ({
     connect: jest.fn(),
     close: jest.fn(),
     dropConnection: jest.fn(),
+    markHealthy: jest.fn(),
     send: jest.fn(),
     isOpen: jest.fn(() => true),
   })),
@@ -228,7 +229,7 @@ describe('Agent on the cloud side', () => {
   });
 
   function wsOf(agent: Agent) {
-    return (agent as any).wsClient as { close: jest.Mock; dropConnection: jest.Mock; send: jest.Mock; isOpen?: jest.Mock };
+    return (agent as any).wsClient as { close: jest.Mock; dropConnection: jest.Mock; markHealthy: jest.Mock; send: jest.Mock; isOpen?: jest.Mock };
   }
 
   it('reconnects when an identified hello is not acknowledged in time, and says so in its status', async () => {
@@ -260,6 +261,77 @@ describe('Agent on the cloud side', () => {
     await jest.advanceTimersByTimeAsync(60_000);
     expect(wsOf(agent).dropConnection).toHaveBeenCalledTimes(1);
     expect(wsOf(agent).close).not.toHaveBeenCalled();
+  });
+
+  it('answers no command before the welcome, then runs the held ones once welcomed', async () => {
+    const agent = new Agent({ ...PASSWORD_CONFIG, identity }) as any;
+    agent.valkeyConnected = true;
+    const execute = jest.fn().mockResolvedValue('PONG');
+    agent.executor = { execute };
+    agent.onWsOpen();
+    wsOf(agent).send.mockClear();
+
+    await agent.onWsMessage(JSON.stringify({ id: 'c1', type: 'command', cmd: 'PING' }));
+    expect(execute).not.toHaveBeenCalled();
+    expect(wsOf(agent).send).not.toHaveBeenCalled();
+
+    await agent.onWsMessage(JSON.stringify({ type: 'welcome', serverVersion: '0.57.0', identity: true, readOnly: true }));
+    await jest.advanceTimersByTimeAsync(0);
+
+    expect(execute).toHaveBeenCalledWith('PING', undefined, undefined);
+    expect(JSON.parse(wsOf(agent).send.mock.calls[0][0])).toMatchObject({ id: 'c1', type: 'response', data: 'PONG' });
+    expect(wsOf(agent).markHealthy).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives an old Monitor that never welcomes no node data, and drops what it asked for', async () => {
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const agent = new Agent({ ...PASSWORD_CONFIG, identity }) as any;
+    agent.valkeyConnected = true;
+    const execute = jest.fn().mockResolvedValue('PONG');
+    agent.executor = { execute };
+    agent.onWsOpen();
+    wsOf(agent).send.mockClear();
+
+    await agent.onWsMessage(JSON.stringify({ id: 'c1', type: 'command', cmd: 'INFO' }));
+    await jest.advanceTimersByTimeAsync(15_000);
+    agent.onWsClose(4000, 'Welcome timeout');
+    agent.onWsOpen();
+    await agent.onWsMessage(JSON.stringify({ type: 'welcome', serverVersion: '0.57.0', identity: true, readOnly: true }));
+    await jest.advanceTimersByTimeAsync(0);
+
+    // The command from the unacknowledged socket is never run, even later.
+    expect(execute).not.toHaveBeenCalled();
+    expect(wsOf(agent).markHealthy).toHaveBeenCalledTimes(1);
+  });
+
+  it('says the server is likely too old after a few unacknowledged connections, but keeps retrying', async () => {
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const agent = new Agent({ ...PASSWORD_CONFIG, identity }) as any;
+    for (let i = 0; i < 3; i++) {
+      agent.onWsOpen();
+      await jest.advanceTimersByTimeAsync(15_000);
+      agent.onWsClose(4000, 'Welcome timeout');
+    }
+
+    expect(agent.getStatus().cloudError).toMatch(/too old.*after 3 connections; still retrying/);
+    expect(wsOf(agent).dropConnection).toHaveBeenCalledTimes(3);
+    expect(wsOf(agent).close).not.toHaveBeenCalled();
+    expect(wsOf(agent).markHealthy).not.toHaveBeenCalled();
+
+    // A Monitor that was only slow clears it as soon as it welcomes.
+    agent.onWsOpen();
+    await agent.onWsMessage(JSON.stringify({ type: 'welcome', serverVersion: '0.57.0', identity: true, readOnly: true }));
+    expect(agent.getStatus().cloudError).toBeUndefined();
+  });
+
+  it('backs off identified nodes until welcomed and lets classic agents reset on open', () => {
+    const { WsClient } = jest.requireMock('../ws-client') as { WsClient: jest.Mock };
+    WsClient.mockClear();
+    new Agent({ ...PASSWORD_CONFIG, identity });
+    new Agent(PASSWORD_CONFIG);
+
+    expect(WsClient.mock.calls[0][0]).toMatchObject({ resetBackoffOnOpen: false, maxReconnectDelayMs: 300_000 });
+    expect(WsClient.mock.calls[1][0].resetBackoffOnOpen).toBeUndefined();
   });
 
   it('is content once the server welcomes the identity', async () => {

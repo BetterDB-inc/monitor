@@ -15,6 +15,15 @@ export interface WsClientOptions {
   onOpen: () => void;
   onClose: (code: number, reason: string) => void;
   onError: (err: Error) => void;
+  /**
+   * Whether an open socket counts as a successful connection (the default).
+   * When false, the backoff only resets on markHealthy(): a server that
+   * accepts the socket but never acknowledges the client keeps slowing the
+   * retries down instead of being hit again every second.
+   */
+  resetBackoffOnOpen?: boolean;
+  /** Longest delay between reconnects; defaults to 30 s. */
+  maxReconnectDelayMs?: number;
 }
 
 export class WsClient {
@@ -41,7 +50,7 @@ export class WsClient {
     });
 
     this.ws.on('open', () => {
-      this.reconnectAttempt = 0;
+      if (this.options.resetBackoffOnOpen !== false) this.reconnectAttempt = 0;
       this.startHeartbeat();
       this.options.onOpen();
     });
@@ -92,6 +101,11 @@ export class WsClient {
     return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
   }
 
+  /** The server acknowledged this connection: the next reconnect starts from the shortest delay. */
+  markHealthy(): void {
+    this.reconnectAttempt = 0;
+  }
+
   /** Closes the current socket only; the usual backoff connects again. */
   dropConnection(code: number, reason: string): void {
     this.ws?.close(code, reason);
@@ -140,9 +154,10 @@ export class WsClient {
   private scheduleReconnect(replaced: boolean): void {
     if (this.closed) return;
 
+    const maxDelay = this.options.maxReconnectDelayMs ?? MAX_RECONNECT_DELAY_MS;
     const delay = replaced
       ? MAX_RECONNECT_DELAY_MS
-      : Math.min(1000 * Math.pow(2, this.reconnectAttempt), MAX_RECONNECT_DELAY_MS);
+      : Math.min(1000 * Math.pow(2, this.reconnectAttempt), maxDelay);
     this.reconnectAttempt++;
     console.log(`${this.tag} Reconnecting in ${delay}ms (attempt ${this.reconnectAttempt})`);
 

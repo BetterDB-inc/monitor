@@ -59,6 +59,15 @@ const WELCOME_TIMEOUT_MS = 15_000;
 export const NO_WELCOME_MESSAGE =
   `BetterDB did not acknowledge this node within ${WELCOME_TIMEOUT_MS / 1000} s, reconnecting ` +
   `(a Monitor older than ${MIN_MONITOR_VERSION} never does)`;
+// After this many unacknowledged connections in a row the status says the
+// server is most likely too old; the agent keeps retrying at the longest delay,
+// so a Monitor that was only slow or restarting still picks the node up.
+const MISSED_WELCOMES_BEFORE_LEGACY = 3;
+// Identified agents back off this far between unacknowledged connections.
+const IDENTIFIED_MAX_RECONNECT_DELAY_MS = 5 * 60_000;
+// Commands that arrive before the welcome wait for it; an old Monitor that
+// never sends one gets no node data, so it cannot mix nodes in one connection.
+const MAX_COMMANDS_AWAITING_WELCOME = 256;
 // A node that accepts the connection but never answers INFO must not hang
 // start() (and whoever awaits it) forever.
 const STARTUP_TIMEOUT_MS = 15_000;
@@ -92,6 +101,11 @@ export class Agent {
   // understand identities, or another agent already streaming this node.
   private cloudError: string | undefined;
   private welcomeTimer: ReturnType<typeof setTimeout> | null = null;
+  // Whether the server acknowledged the current socket; always true for
+  // agents without an identity, which predate the welcome.
+  private welcomed = false;
+  private missedWelcomes = 0;
+  private awaitingWelcome: AgentCommandMessage[] = [];
 
   private executorOptions(): { unsafeMode: boolean; readOnly: boolean } {
     return { unsafeMode: this.config.unsafeMode, readOnly: this.config.readOnly === true };
@@ -253,6 +267,9 @@ export class Agent {
       onMessage: (data) => this.onWsMessage(data),
       onClose: (code, reason) => this.onWsClose(code, reason),
       onError: (err) => console.error(`${this.tag} WS error: ${err.message}`),
+      // An identified node is only connected once BetterDB welcomes it; until
+      // then the retries keep slowing down (see retryWithoutWelcome).
+      ...(config.identity ? { resetBackoffOnOpen: false, maxReconnectDelayMs: IDENTIFIED_MAX_RECONNECT_DELAY_MS } : {}),
     });
   }
 
@@ -423,6 +440,7 @@ export class Agent {
     };
     if (this.config.identity) hello.identity = this.config.identity;
     if (this.config.readOnly) hello.readOnly = true;
+    this.welcomed = !this.config.identity;
     this.wsClient.send(JSON.stringify(hello));
     // An identified hello needs the server to say it understood the identity.
     // A server from before AgentWelcomeMessage never does, but neither does a
@@ -437,23 +455,39 @@ export class Agent {
 
   private retryWithoutWelcome(): void {
     this.welcomeTimer = null;
-    this.cloudError = NO_WELCOME_MESSAGE;
-    console.warn(`${this.tag} ${NO_WELCOME_MESSAGE}`);
+    this.missedWelcomes += 1;
+    // A Monitor older than MIN_MONITOR_VERSION registers every node under the
+    // token's id and never welcomes; past a few misses that is the likely
+    // cause, but keep retrying (slowly) in case it was only busy.
+    this.cloudError = this.missedWelcomes >= MISSED_WELCOMES_BEFORE_LEGACY
+      ? `${LEGACY_SERVER_MESSAGE} (no acknowledgement after ${this.missedWelcomes} connections; still retrying)`
+      : NO_WELCOME_MESSAGE;
+    console.warn(`${this.tag} ${this.cloudError}`);
+    this.awaitingWelcome = [];
     this.wsClient.dropConnection(4000, 'Welcome timeout');
   }
 
   private onWelcome(msg: AgentWelcomeMessage): void {
     this.clearWelcomeTimer();
     if (this.config.identity && msg.identity !== true) {
+      this.awaitingWelcome = [];
       this.giveUpOnCloud(LEGACY_SERVER_MESSAGE);
       return;
     }
+    this.welcomed = true;
+    this.missedWelcomes = 0;
     this.cloudError = undefined;
+    this.wsClient.markHealthy();
+    const pending = this.awaitingWelcome;
+    this.awaitingWelcome = [];
+    for (const command of pending) void this.handleCommand(command);
   }
 
   private onWsClose(code: number, reason: string): void {
     console.log(`${this.tag} WS closed: ${code} ${reason}`);
     this.clearWelcomeTimer();
+    // Their replies would have nowhere to go.
+    this.awaitingWelcome = [];
     // 4003: the server kept another connection for this id. For an identified
     // node that is a second agent on the same instance; the reconnect loop
     // keeps trying at its slowest pace, and the status says why.
@@ -495,6 +529,14 @@ export class Agent {
     }
 
     if (msg.type === 'command') {
+      // Nothing about the node leaves before the server confirmed which node
+      // it files it under: an old Monitor would mix nodes in one connection.
+      if (!this.welcomed) {
+        if (this.awaitingWelcome.length < MAX_COMMANDS_AWAITING_WELCOME) {
+          this.awaitingWelcome.push(msg as AgentCommandMessage);
+        }
+        return;
+      }
       await this.handleCommand(msg as AgentCommandMessage);
     }
   }
