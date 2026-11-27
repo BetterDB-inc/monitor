@@ -6,6 +6,7 @@ import {
 } from '@betterdb/shared';
 import { MemoryAdapter } from '@app/storage/adapters/memory.adapter';
 import type { ShardLoadSample } from '@app/cluster/shard-load';
+import type { ClusterNode } from '@app/common/types/metrics.types';
 import type { ShardLoadListener } from '@app/cluster/shard-load.service';
 import {
   PlacementService,
@@ -43,6 +44,32 @@ function healthyNodes(): PlacementNodeFacts {
     replication: each({ replicasInSync: true }),
     pingP50Ms: each(1),
   };
+}
+
+function withUncollectedReplica(epoch: number): PlacementNodeFacts {
+  const facts = healthyNodes();
+  facts.nodes.push({
+    id: 'b2',
+    address: 'b2:7000',
+    role: 'replica',
+    state: 'healthy',
+    shardId: 'b',
+    collected: false,
+    configEpoch: epoch,
+  });
+  facts.persistence.b2 = { forkRunning: false };
+  facts.pingP50Ms.b2 = 1;
+  return facts;
+}
+
+function polledNodes(replicaEpoch: number): ClusterNode[] {
+  const primary = (id: string) => ({ id, flags: ['master'], master: '-', configEpoch: 1 });
+  return [
+    primary('a'),
+    primary('b'),
+    primary('c'),
+    { id: 'b2', flags: ['slave'], master: 'b', configEpoch: replicaEpoch },
+  ] as unknown as ClusterNode[];
 }
 
 function primaries(): PlacementPrimaryRead[] {
@@ -99,6 +126,7 @@ async function setup(options: Setup = {}) {
     readPlacementPrimaries: jest.fn(async () => (options.primaries === undefined ? primaries() : options.primaries)),
     runRebalance: jest.fn(),
     setRebalancePolicyResolver: jest.fn(),
+    setClusterNodesObserver: jest.fn(),
     placementPlans: jest.fn((): RebalancePlan[] => []),
     placementMovedShardsSince: jest.fn((): string[] => []),
     placementJobsSince: jest.fn(() => 0),
@@ -188,6 +216,7 @@ describe('PlacementService', () => {
           { targetShardId: 'c', ranges: [[6, 9]] },
           { targetShardId: 'b', ranges: [[10, 12]] },
         ],
+        execution: { available: false, blockedBy: 'plan_outdated' },
       } as unknown as RebalancePlan,
     ]);
     anomaly.placementOpenEvents.mockResolvedValue([
@@ -206,9 +235,29 @@ describe('PlacementService', () => {
           blockers: [expect.objectContaining({ kind: 'fork', scope: 'target', nodeId: 'c' })],
           warnings: [],
         },
+        execution: { available: false, blockedBy: 'plan_outdated' },
       },
     ]);
     expect(anomaly.placementPlans).toHaveBeenCalledWith('seed');
+  });
+
+  it('reads the cluster once for every plan it lists', async () => {
+    const { service, storage, anomaly } = await setup();
+    await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+    const plan = (sourceShardId: string, from: number) =>
+      ({
+        kind: 'plan',
+        sourceShardId,
+        moves: [{ targetShardId: 'c', ranges: [[from, from + 3]] }],
+        execution: { available: true },
+      }) as unknown as RebalancePlan;
+    anomaly.placementPlans.mockReturnValue([plan('a', 0), plan('b', 10)]);
+    const { recommendations } = await service.getStatus('seed');
+    expect(recommendations.map((each) => each.gate.allowed)).toEqual([true, true]);
+    expect(anomaly.readPlacementNodeFacts).toHaveBeenCalledTimes(1);
+    expect(anomaly.readPlacementNodeFacts).toHaveBeenCalledWith('seed', ['a', 'c', 'b']);
+    expect(anomaly.placementOpenEvents).toHaveBeenCalledTimes(1);
+    expect(anomaly.placementIncidents).toHaveBeenCalledTimes(1);
   });
 
   it('reads the sustained trigger of each shard from the samples it was handed', async () => {
@@ -928,29 +977,54 @@ describe('PlacementService', () => {
         expect(pinned.allowed).toBe(true);
       });
 
+      it('dates a config epoch raise by the poll that saw it', async () => {
+        const { service, anomaly } = await setup();
+        const now = Date.now();
+        const subject = { sourceShardId: 'a', targetShardIds: ['b'] };
+        anomaly.readPlacementNodeFacts.mockResolvedValue(withUncollectedReplica(1));
+        await service.gateFor('seed', subject, 'approve', { now: now - 30 * 60_000 });
+        const observe = anomaly.setClusterNodesObserver.mock.calls[0][0] as (
+          connectionId: string,
+          nodes: ClusterNode[],
+          at: number,
+        ) => void;
+        observe('seed', polledNodes(1), now - 25 * 60_000);
+        observe('seed', polledNodes(2), now - 19 * 60_000);
+
+        anomaly.readPlacementNodeFacts.mockResolvedValue(withUncollectedReplica(2));
+        const later = await service.gateFor('seed', subject, 'approve', { now });
+        expect(later.blockers).toEqual([]);
+      });
+
+      it('follows no polls of a connection whose checks were never read', async () => {
+        const { service, anomaly } = await setup();
+        const now = Date.now();
+        const observe = anomaly.setClusterNodesObserver.mock.calls[0][0] as (
+          connectionId: string,
+          nodes: ClusterNode[],
+          at: number,
+        ) => void;
+        observe('seed', polledNodes(1), now - 10 * 60_000);
+        anomaly.readPlacementNodeFacts.mockResolvedValue(withUncollectedReplica(1));
+        const first = await service.gateFor(
+          'seed',
+          { sourceShardId: 'a', targetShardIds: ['b'] },
+          'approve',
+          { now },
+        );
+        expect(first.blockers).toEqual([
+          expect.objectContaining({ kind: 'unknown', scope: 'target', nodeId: 'b2' }),
+        ]);
+      });
+
       it('reads a config epoch our own slot move raised as no failover', async () => {
         const { service, anomaly } = await setup();
         const now = Date.now();
-        const withReplica = (epoch: number): PlacementNodeFacts => {
-          const facts = healthyNodes();
-          facts.nodes.push({
-            id: 'b2',
-            address: 'b2:7000',
-            role: 'replica',
-            state: 'healthy',
-            shardId: 'b',
-            collected: false,
-            configEpoch: epoch,
-          });
-          facts.persistence.b2 = { forkRunning: false };
-          facts.pingP50Ms.b2 = 1;
-          return facts;
-        };
         const subject = { sourceShardId: 'a', targetShardIds: ['b'] };
-        anomaly.readPlacementNodeFacts.mockResolvedValue(withReplica(1));
+        anomaly.readPlacementNodeFacts.mockResolvedValue(withUncollectedReplica(1));
         await service.gateFor('seed', subject, 'approve', { now: now - 10 * 60_000 });
 
-        anomaly.readPlacementNodeFacts.mockResolvedValue(withReplica(2));
+        anomaly.readPlacementNodeFacts.mockResolvedValue(withUncollectedReplica(2));
         anomaly.placementMovedShardsSince.mockReturnValue(['a', 'b']);
         const ours = await service.gateFor('seed', subject, 'approve', { now });
         expect(ours.blockers).toEqual([]);
@@ -959,7 +1033,7 @@ describe('PlacementService', () => {
           now - 5 * 60_000,
         );
 
-        anomaly.readPlacementNodeFacts.mockResolvedValue(withReplica(3));
+        anomaly.readPlacementNodeFacts.mockResolvedValue(withUncollectedReplica(3));
         anomaly.placementMovedShardsSince.mockReturnValue([]);
         const theirs = await service.gateFor('seed', subject, 'approve', { now: now + 60_000 });
         expect(theirs.blockers).toEqual([

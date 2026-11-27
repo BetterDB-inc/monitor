@@ -158,6 +158,17 @@ describe('readPlacementGateFacts', () => {
       expect.objectContaining({ kind: 'failover', scope: 'target', nodeId: 't2' }),
     ]);
   });
+
+  it('keeps the config epochs seen so far when the cluster nodes cannot be read', async () => {
+    const nodes = [read('s1', 's1'), read('t1', 't1'), read('t2', 't1', false)];
+    const readNodes = jest.fn(async () => nodeFacts(nodes));
+    const stub = port({ readPlacementNodeFacts: readNodes }, nodes);
+    const epochs = warmed('seed', nodes);
+    readNodes.mockRejectedValueOnce(new Error('timed out'));
+    await readPlacementGateFacts(stub, epochs, 'seed', context, NOW);
+    const facts = await readPlacementGateFacts(stub, epochs, 'seed', context, NOW + MINUTE);
+    expect(facts.nodes.find((node) => node.id === 't2')?.epochChanged).toBe(false);
+  });
 });
 
 describe('reads of one node', () => {

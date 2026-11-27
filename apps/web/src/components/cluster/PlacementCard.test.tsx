@@ -498,18 +498,26 @@ describe('PlacementCard', () => {
             sourceShardId: 'a1',
             targetShardIds: ['b2'],
             gate: { allowed: true, blockers: [], warnings: [window] },
+            execution: { available: true },
           },
           {
             sourceShardId: 'b2',
             targetShardIds: ['c3'],
             gate: { allowed: false, blockers: [fork], warnings: [] },
+            execution: { available: true },
+          },
+          {
+            sourceShardId: 'c3',
+            targetShardIds: ['a1'],
+            gate: { allowed: true, blockers: [], warnings: [] },
+            execution: { available: false, blockedBy: 'plan_outdated' },
           },
         ],
       }),
     );
 
     const moves = within(await card()).getByRole('list', { name: 'Suggested slot moves' });
-    const [ready, waiting] = [...moves.children] as HTMLElement[];
+    const [ready, waiting, outdated] = [...moves.children] as HTMLElement[];
     expect(ready).toHaveTextContent('Move slots from 10.0.0.1:6379 to 10.0.0.2:6379.');
     expect(ready).toHaveTextContent('Would run now.');
     expect(within(ready).getByRole('list', { name: 'Placement warnings' })).toHaveTextContent(
@@ -520,6 +528,10 @@ describe('PlacementCard', () => {
       '10.0.0.3:6379 is saving to disk in a fork.',
     );
     expect(waiting).not.toHaveTextContent('Would run now.');
+    expect(outdated).toHaveTextContent(
+      'The slots or the nodes changed since this suggestion was made. A new one follows.',
+    );
+    expect(outdated).not.toHaveTextContent('Would run now.');
   });
 
   it('says when no load has been sampled yet', async () => {

@@ -38,6 +38,7 @@ import { ClusterMetricsService } from '@app/cluster/cluster-metrics.service';
 import { WORKSPACE_CONFIG, type WorkspaceConfig } from '@app/auth/workspace-config';
 import { isManagedProviderBuild } from '@app/monitor/provider-detector';
 import { withTimeout } from '@app/common/utils/with-timeout';
+import type { ClusterNode } from '@app/common/types/metrics.types';
 import { AnomalyService } from '../anomaly-detection/anomaly.service';
 import type { ServedHotShardDetail } from '../anomaly-detection/hot-shard-detector';
 import {
@@ -62,7 +63,12 @@ import {
 import { placementBalance } from './placement-balance';
 import { PlacementTriggers } from './placement-trigger';
 import { PLACEMENT_EPOCH_WINDOW_MS, placementGate } from './placement-gate';
-import { PlacementEpochs, readPlacementGateFacts } from './placement-facts';
+import {
+  PlacementEpochs,
+  placementGateFactsOf,
+  readPlacementCluster,
+  type PlacementClusterRead,
+} from './placement-facts';
 
 const SUPPORT_CACHE_MS = 30_000;
 const POLICY_CACHE_MS = 30_000;
@@ -162,6 +168,9 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
 
   onModuleInit(): void {
     this.anomaly.setRebalancePolicyResolver((seedId) => this.rebalancePolicyFor(seedId));
+    this.anomaly.setClusterNodesObserver((connectionId, nodes, at) =>
+      this.observeEpochs(connectionId, nodes, at),
+    );
     this.stopListening?.();
     this.stopListening =
       this.shardLoad?.addListener({
@@ -174,6 +183,26 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
   onModuleDestroy(): void {
     this.stopListening?.();
     this.stopListening = null;
+    this.anomaly.setClusterNodesObserver(null);
+  }
+
+  private observeEpochs(connectionId: string, nodes: readonly ClusterNode[], at: number): void {
+    if (!this.epochs.has(connectionId)) return;
+    const reads = nodes.flatMap((node) => {
+      if (node.flags.includes('master')) {
+        return [{ id: node.id, shardId: node.id, configEpoch: node.configEpoch }];
+      }
+      if (node.flags.includes('slave') || node.flags.includes('replica')) {
+        return [{ id: node.id, shardId: node.master, configEpoch: node.configEpoch }];
+      }
+      return [];
+    });
+    this.epochs.observe(
+      connectionId,
+      reads,
+      at,
+      this.anomaly.placementMovedShardsSince(connectionId, at - PLACEMENT_EPOCH_WINDOW_MS),
+    );
   }
 
   private observeSample(seedId: string, sample: ShardLoadSample): void {
@@ -214,14 +243,15 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  private recommendationsOf(seedId: string): Promise<PlacementRecommendation[]> {
-    return Promise.all(
-      this.anomaly.placementPlans(seedId).map(async (plan) => ({
-        sourceShardId: plan.sourceShardId,
-        targetShardIds: targetsOf(plan.moves),
-        gate: await this.cachedGate(seedId, plan),
-      })),
-    );
+  private async recommendationsOf(seedId: string): Promise<PlacementRecommendation[]> {
+    const plans = this.anomaly.placementPlans(seedId);
+    const gates = await this.cachedGates(seedId, plans);
+    return plans.map((plan, index) => ({
+      sourceShardId: plan.sourceShardId,
+      targetShardIds: targetsOf(plan.moves),
+      gate: gates[index],
+      execution: plan.execution ?? { available: false },
+    }));
   }
 
   async setSettings(
@@ -398,17 +428,22 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
       );
     }
     if (mode !== null) {
-      return Promise.all(
-        shards.map(async (shard) => {
-          const plan = shard.rebalance;
-          if (plan?.kind !== 'plan' || plan.execution?.available !== true) return shard;
-          const gate = await this.cachedGate(connectionId, plan);
-          const execution: RebalanceExecution = gate.allowed
-            ? plan.execution
-            : { available: false, blockedBy: 'gate' };
-          return { ...shard, rebalance: { ...plan, execution, gate } };
-        }),
+      const runnable = shards.flatMap((shard) =>
+        shard.rebalance?.kind === 'plan' && shard.rebalance.execution?.available === true
+          ? [shard.rebalance]
+          : [],
       );
+      const gates = await this.cachedGates(connectionId, runnable);
+      return shards.map((shard) => {
+        const plan = shard.rebalance;
+        const index = runnable.findIndex((each) => each === plan);
+        if (plan?.kind !== 'plan' || index === -1) return shard;
+        const gate = gates[index];
+        const execution: RebalanceExecution = gate.allowed
+          ? { available: true }
+          : { available: false, blockedBy: 'gate' };
+        return { ...shard, rebalance: { ...plan, execution, gate } };
+      });
     }
     const execution: RebalanceExecution = { available: false };
     return shards.map((shard) =>
@@ -422,6 +457,20 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
     connectionId: string,
     subject: PlacementGateSubject,
     purpose: PlacementGatePurpose,
+    options: PlacementGateOptions = {},
+  ): Promise<PlacementGateResult> {
+    const read = await readPlacementCluster(this.anomaly, connectionId, [
+      subject.sourceShardId,
+      ...subject.targetShardIds,
+    ]);
+    return this.judgeGate(connectionId, subject, purpose, read, options);
+  }
+
+  private async judgeGate(
+    connectionId: string,
+    subject: PlacementGateSubject,
+    purpose: PlacementGatePurpose,
+    read: PlacementClusterRead,
     { now = Date.now(), ...options }: PlacementGateOptions = {},
   ): Promise<PlacementGateResult> {
     const seedId = this.seedOf(connectionId);
@@ -429,8 +478,8 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
       this.settingsOf(seedId),
       this.readOnlySupport(seedId),
     ]);
-    const facts = await readPlacementGateFacts(
-      this.anomaly,
+    const facts = placementGateFactsOf(
+      read,
       this.epochs,
       connectionId,
       {
@@ -459,21 +508,44 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
     return placementGate({ ...facts, unreadable }, settings, now, purpose);
   }
 
-  private async cachedGate(
+  private cachedGates(
+    connectionId: string,
+    plans: readonly RebalancePlan[],
+  ): Promise<PlacementGateResult[]> {
+    const now = Date.now();
+    const known = (plan: RebalancePlan): Promise<PlacementGateResult> | null => {
+      const key = gateKeyOf(plan);
+      const cacheKey = `${connectionId}\u0000${plan.sourceShardId}`;
+      const cached = this.gateCache.get(cacheKey);
+      if (cached && cached.key === key && now - cached.at < GATE_CACHE_MS) {
+        return Promise.resolve(cached.gate);
+      }
+      const reading = this.gateReads.get(cacheKey);
+      return reading && reading.key === key ? reading.read : null;
+    };
+    const gates = plans.map(known);
+    const missing = plans.filter((_, index) => gates[index] === null);
+    if (missing.length === 0) return Promise.all(gates as Promise<PlacementGateResult>[]);
+    const cluster = readPlacementCluster(
+      this.anomaly,
+      connectionId,
+      missing.flatMap((plan) => [plan.sourceShardId, ...targetsOf(plan.moves)]),
+    );
+    return Promise.all(
+      plans.map((plan, index) => gates[index] ?? this.gateFromCluster(connectionId, plan, cluster)),
+    );
+  }
+
+  private gateFromCluster(
     connectionId: string,
     plan: RebalancePlan,
+    cluster: Promise<PlacementClusterRead>,
   ): Promise<PlacementGateResult> {
     const key = gateKeyOf(plan);
     const cacheKey = `${connectionId}\u0000${plan.sourceShardId}`;
-    const cached = this.gateCache.get(cacheKey);
-    if (cached && cached.key === key && Date.now() - cached.at < GATE_CACHE_MS) return cached.gate;
-    const reading = this.gateReads.get(cacheKey);
-    if (reading && reading.key === key) return reading.read;
-    const read = this.gateFor(
-      connectionId,
-      { sourceShardId: plan.sourceShardId, targetShardIds: targetsOf(plan.moves) },
-      'approve',
-    )
+    const subject = { sourceShardId: plan.sourceShardId, targetShardIds: targetsOf(plan.moves) };
+    const read = cluster
+      .then((shared) => this.judgeGate(connectionId, subject, 'approve', shared))
       .then((gate) => {
         this.gateCache.set(cacheKey, { at: Date.now(), key, gate });
         return gate;

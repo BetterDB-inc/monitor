@@ -11,7 +11,8 @@ import { useState } from 'react';
 import { useCanMutate } from '../../hooks/useCanMutate';
 import { usePlacement } from '../../hooks/usePlacement';
 import { RebalanceSuggestion } from '../anomalies/RebalanceSuggestion';
-import { formatRatio } from '../anomalies/anomaly-display';
+import { REBALANCE_BLOCKED, formatRatio } from '../anomalies/anomaly-display';
+import type { RebalanceExecutionBlocker } from '../../types/anomaly';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
@@ -225,7 +226,9 @@ function BlockerList({
   return (
     <ul aria-label={label} className={`list-disc pl-5 ${className}`}>
       {items.map((item) => (
-        <li key={`${item.kind} ${item.scope} ${item.nodeId ?? ''}`}>{item.detail}</li>
+        <li key={`${item.kind} ${item.scope} ${item.nodeId ?? ''} ${item.detail}`}>
+          {item.detail}
+        </li>
       ))}
     </ul>
   );
@@ -242,8 +245,16 @@ function Recommendations({ status }: { status: PlacementStatus }) {
           <p>
             {`Move slots from ${address(recommendation.sourceShardId)} to ${recommendation.targetShardIds.map(address).join(', ')}.`}
           </p>
+          {!recommendation.execution.available && (
+            <p className="text-muted-foreground">
+              {REBALANCE_BLOCKED[recommendation.execution.blockedBy as RebalanceExecutionBlocker] ??
+                'Cannot run from this monitor.'}
+            </p>
+          )}
           {recommendation.gate.allowed ? (
-            <p className="text-muted-foreground">Would run now.</p>
+            recommendation.execution.available && (
+              <p className="text-muted-foreground">Would run now.</p>
+            )
           ) : (
             <>
               <p className="text-muted-foreground">Waits for:</p>

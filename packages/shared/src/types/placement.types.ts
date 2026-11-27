@@ -169,6 +169,7 @@ export interface PlacementRecommendation {
   sourceShardId: string;
   targetShardIds: string[];
   gate: PlacementGateResult;
+  execution: { available: boolean; blockedBy?: string };
 }
 
 export type PlacementBlockerKind =

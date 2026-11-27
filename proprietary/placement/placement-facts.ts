@@ -66,12 +66,14 @@ interface EpochSeen {
   changedAt: number | null;
 }
 
+export type PlacementEpochRead = Pick<PlacementNodeRead, 'id' | 'shardId' | 'configEpoch'>;
+
 export class PlacementEpochs {
   private readonly seen = new Map<string, Map<string, EpochSeen>>();
 
   observe(
     seedId: string,
-    nodes: readonly PlacementNodeRead[],
+    nodes: readonly PlacementEpochRead[],
     now: number,
     movedShardIds: readonly string[] = [],
   ): Map<string, boolean | null> {
@@ -103,6 +105,10 @@ export class PlacementEpochs {
 
   seeds(): string[] {
     return [...this.seen.keys()];
+  }
+
+  has(seedId: string): boolean {
+    return this.seen.has(seedId);
   }
 
   forget(seedId: string): void {
@@ -177,6 +183,29 @@ async function attempt<T>(
   }
 }
 
+export interface PlacementClusterRead {
+  shardIds: readonly string[];
+  openEvents: PlacementGateSignal[] | null;
+  incidents: PlacementGateIncident[] | null;
+  nodeFacts: PlacementNodeFacts | null;
+  unreadable: string[];
+}
+
+export async function readPlacementCluster(
+  port: PlacementFactsPort,
+  seedId: string,
+  shardIds: readonly string[],
+): Promise<PlacementClusterRead> {
+  const unreadable: string[] = [];
+  const wanted = [...new Set(shardIds)];
+  const [openEvents, incidents, nodeFacts] = await Promise.all([
+    attempt(() => port.placementOpenEvents(seedId), 'the open events', unreadable),
+    attempt(() => port.placementIncidents(seedId), 'the open incidents', unreadable),
+    attempt(() => port.readPlacementNodeFacts(seedId, wanted), 'the cluster nodes', unreadable),
+  ]);
+  return { shardIds: wanted, openEvents, incidents, nodeFacts, unreadable };
+}
+
 export async function readPlacementGateFacts(
   port: PlacementFactsPort,
   epochs: PlacementEpochs,
@@ -184,16 +213,26 @@ export async function readPlacementGateFacts(
   context: PlacementFactsContext,
   now: number,
 ): Promise<PlacementGateFacts> {
-  const { movedShardIds = [], ...gateContext } = context;
-  const unreadable: string[] = [];
-  const shardIds = [context.sourceShardId, ...context.targetShardIds];
-  const [openEvents, incidents, nodeFacts] = await Promise.all([
-    attempt(() => port.placementOpenEvents(seedId), 'the open events', unreadable),
-    attempt(() => port.placementIncidents(seedId), 'the open incidents', unreadable),
-    attempt(() => port.readPlacementNodeFacts(seedId, shardIds), 'the cluster nodes', unreadable),
+  const read = await readPlacementCluster(port, seedId, [
+    context.sourceShardId,
+    ...context.targetShardIds,
   ]);
+  return placementGateFactsOf(read, epochs, seedId, context, now);
+}
+
+export function placementGateFactsOf(
+  read: PlacementClusterRead,
+  epochs: PlacementEpochs,
+  seedId: string,
+  context: PlacementFactsContext,
+  now: number,
+): PlacementGateFacts {
+  const { movedShardIds = [], ...gateContext } = context;
+  const { openEvents, incidents, nodeFacts, unreadable } = read;
   const reads = nodeFacts?.nodes ?? [];
-  const changed = epochs.observe(seedId, reads, now, movedShardIds);
+  const changed = nodeFacts
+    ? epochs.observe(seedId, reads, now, movedShardIds)
+    : new Map<string, boolean | null>();
   const nodes: PlacementGateNode[] = reads.map((node) => ({
     id: node.id,
     address: node.address,
@@ -216,6 +255,6 @@ export async function readPlacementGateFacts(
     persistence: nodeFacts?.persistence ?? {},
     replication: nodeFacts?.replication ?? {},
     pingP50Ms: nodeFacts?.pingP50Ms ?? {},
-    unreadable,
+    unreadable: [...unreadable],
   };
 }
