@@ -922,6 +922,18 @@ describe('PlacementService', () => {
       expect(anomaly.runRebalance).toHaveBeenCalledWith('seed', 'a', moves, actor);
     });
 
+    it('runs no plan once another instance stored Observe, though the cache still says Recommend', async () => {
+      const { service, storage, anomaly } = await setup();
+      await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+      expect((await service.getStatus('seed')).mode).toBe('recommend');
+      await storage.savePlacementMode({ connectionId: 'seed', mode: 'observe', updatedAt: 2 });
+      await expect(service.runRebalance('seed', 'a', moves, actor)).resolves.toEqual({
+        status: 'blocked',
+        blockedBy: 'observe_mode',
+      });
+      expect(anomaly.runRebalance).not.toHaveBeenCalled();
+    });
+
     describe('the gate', () => {
       const failover = { metricType: 'failover_churn', nodeId: 'b', openedAt: Date.now() };
 
