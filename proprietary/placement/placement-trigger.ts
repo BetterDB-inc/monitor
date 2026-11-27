@@ -1,6 +1,10 @@
 import type { PlacementSettings, PlacementTriggerRead } from '@betterdb/shared';
 import type { ShardLoad, ShardLoadSample } from '@app/cluster/shard-load';
-import { hotShardRatio } from '../anomaly-detection/hot-shard-detector';
+import {
+  HOT_SHARD_MIN_PRIMARIES,
+  hotShardRatio,
+  hotShardShare,
+} from '../anomaly-detection/hot-shard-detector';
 import { median } from '../latency-regression/regression-detector';
 
 export const TRIGGER_MIN_HISTORY_SHARE = 0.8;
@@ -48,14 +52,19 @@ function sameSettings(a: TriggerSettings, b: TriggerSettings): boolean {
 
 function isOver(
   shard: ShardLoad,
+  owning: readonly ShardLoad[],
   sustainMedian: number,
   sustainTotal: number,
   settings: TriggerSettings,
 ): boolean {
+  if (owning.length < HOT_SHARD_MIN_PRIMARIES) return false;
   if (hotShardRatio(shard.sustainCpuUsecPerSecond, sustainMedian) >= settings.triggerRatio)
     return true;
-  const share = sustainTotal > 0 ? shard.sustainCpuUsecPerSecond / sustainTotal : 0;
-  return settings.maxCpuShare !== null && share >= settings.maxCpuShare;
+  if (settings.maxCpuShare === null) return false;
+  return (
+    hotShardShare(shard.sustainCpuUsecPerSecond, sustainTotal, owning.length) >=
+    settings.maxCpuShare
+  );
 }
 
 function addSpan(buckets: Bucket[], from: number, to: number, over: boolean): void {
@@ -119,10 +128,6 @@ export class PlacementTriggers {
     this.tracks.set(seedId, { settings: { ...settings }, shards: new Map() });
   }
 
-  configured(seedId: string): boolean {
-    return this.tracks.has(seedId);
-  }
-
   observe(seedId: string, sample: ShardLoadSample, staleMs: number): void {
     const track = this.tracks.get(seedId);
     if (!track) return;
@@ -131,7 +136,8 @@ export class PlacementTriggers {
     const sustainMedian =
       owning.length > 0 ? median(owning.map((shard) => shard.sustainCpuUsecPerSecond)) : 0;
     const sustainTotal = owning.reduce((sum, shard) => sum + shard.sustainCpuUsecPerSecond, 0);
-    const windowStart = sample.timestamp - settings.sustainMinutes * 60_000;
+    const sustainMs = settings.sustainMinutes * 60_000;
+    const windowStart = sample.timestamp - sustainMs;
     const present = new Set<string>();
     for (const shard of owning) {
       present.add(shard.nodeId);
@@ -144,7 +150,7 @@ export class PlacementTriggers {
       }
       const weight = Math.min(sample.timestamp - shardTrack.lastAt, staleMs);
       if (!sample.settling && weight > 0) {
-        const over = isOver(shard, sustainMedian, sustainTotal, settings);
+        const over = isOver(shard, owning, sustainMedian, sustainTotal, settings);
         addSpan(shardTrack.buckets, sample.timestamp - weight, sample.timestamp, over);
       }
       shardTrack.lastAt = sample.timestamp;
@@ -153,8 +159,10 @@ export class PlacementTriggers {
       shardTrack.firedAt = read.state === 'over' ? (shardTrack.firedAt ?? sample.timestamp) : null;
       shardTrack.read = { ...read, firedAt: shardTrack.firedAt };
     }
-    for (const shardId of [...shards.keys()]) {
-      if (!present.has(shardId)) shards.delete(shardId);
+    for (const [shardId, shardTrack] of [...shards]) {
+      if (!present.has(shardId) && sample.timestamp - shardTrack.lastAt > sustainMs) {
+        shards.delete(shardId);
+      }
     }
   }
 
