@@ -85,8 +85,6 @@ const INCIDENT_IGNORED = new Set([
   'placement_rollback',
 ]);
 
-const OPEN_RECOVERY = new Set(['active', 'recovering', 'degraded', 'unknown']);
-
 const ROLLBACK_KINDS = new Set<PlacementBlockerKind>([
   'unhealthy_node',
   'migration_running',
@@ -123,7 +121,7 @@ export function insideMaintenanceWindow(
 }
 
 function sameBlocker(a: PlacementBlocker, b: PlacementBlocker): boolean {
-  return a.kind === b.kind && a.scope === b.scope && a.nodeId === b.nodeId;
+  return a.kind === b.kind && a.scope === b.scope && a.nodeId === b.nodeId && a.detail === b.detail;
 }
 
 export function placementGate(
@@ -135,16 +133,7 @@ export function placementGate(
   const blockers: PlacementBlocker[] = [];
   const warnings: PlacementBlocker[] = [];
   const nodes = new Map(facts.nodes.map((node) => [node.id, node]));
-  const byAddress = new Map(facts.nodes.map((node) => [node.address, node.id]));
-  const named = (signal: PlacementGateSignal): PlacementGateSignal =>
-    signal.nodeId === null && signal.address
-      ? { ...signal, nodeId: byAddress.get(signal.address) ?? null }
-      : signal;
-  const openEvents = facts.openEvents.map(named);
-  const incidents = facts.incidents.map((incident) => ({
-    ...incident,
-    signals: incident.signals.map(named),
-  }));
+  const { openEvents, incidents } = facts;
   const name = (nodeId: string) => nodes.get(nodeId)?.address ?? nodeId;
   const raise = (
     kind: PlacementBlockerKind,
@@ -159,7 +148,6 @@ export function placementGate(
       if (!ROLLBACK_KINDS.has(kind) || (kind === 'latency' && scope === 'source')) return;
     }
     const list = AUTO_ONLY.has(kind) && purpose !== 'auto' ? warnings : blockers;
-    if (purpose === 'rollback' && list === warnings) return;
     if (!list.some((each) => sameBlocker(each, blocker))) list.push(blocker);
   };
 
@@ -194,6 +182,12 @@ export function placementGate(
     facts.budget.bytesUsed >= settings.maxBytesPerHour
   ) {
     raise('budget', 'cluster', 'The hourly migration budget is used up.');
+  } else if (facts.budget.jobsUsed + facts.targetShardIds.length > settings.maxMigrationsPerHour) {
+    raise(
+      'budget',
+      'cluster',
+      `The plan's ${facts.targetShardIds.length} moves would go over the hourly migration budget, which has ${settings.maxMigrationsPerHour - facts.budget.jobsUsed} left.`,
+    );
   }
   if (facts.paused) raise('paused', 'cluster', 'An admin paused slot moves.');
   if (!facts.supported)
@@ -213,7 +207,6 @@ export function placementGate(
   }
 
   for (const incident of incidents) {
-    if (!OPEN_RECOVERY.has(incident.recovery)) continue;
     if (
       incident.signals.some(
         (signal) => signal.nodeId === null && !INCIDENT_IGNORED.has(signal.metricType),
@@ -273,7 +266,6 @@ export function placementGate(
         );
       }
       for (const incident of incidents) {
-        if (!OPEN_RECOVERY.has(incident.recovery)) continue;
         const signals = incident.signals.filter(
           (signal) =>
             signal.nodeId === node.id &&

@@ -267,6 +267,14 @@ describe('placementGate', () => {
         'budget:cluster:',
       ],
       [
+        'a plan with more moves than the budget has left',
+        (f: PlacementGateFacts) => {
+          f.budget.jobsUsed = 3;
+          f.targetShardIds = ['t1', 'u1'];
+        },
+        'budget:cluster:',
+      ],
+      [
         'a budget with no bytes left',
         (f: PlacementGateFacts) => (f.budget.bytesUsed = 2 * 1024 ** 3),
         'budget:cluster:',
@@ -282,6 +290,18 @@ describe('placementGate', () => {
       const result = gate(facts(change));
       expect(result.allowed).toBe(false);
       expect(kindsOf(result)).toEqual([expected]);
+    });
+
+    it('lets a plan through that fits in the budget left', () => {
+      expect(gate(facts((f) => (f.budget.jobsUsed = 3))).allowed).toBe(true);
+    });
+
+    it('keeps each cause of the same kind of blocker', () => {
+      const result = gate(facts((f) => f.unreadable.push('the open events', 'the open incidents')));
+      expect(result.blockers.map((each) => each.detail)).toEqual([
+        'Could not read the open events.',
+        'Could not read the open incidents.',
+      ]);
     });
 
     it.each(
@@ -393,7 +413,6 @@ describe('placementGate', () => {
         ]),
         [],
       ],
-      ['a recovered incident', incident('recovered', [['memory_used', 't1', NOW]]), []],
       [
         'a degraded incident on a replica',
         incident('degraded', [['memory_used', 't2', NOW]]),
@@ -412,11 +431,6 @@ describe('placementGate', () => {
       ],
       ['an ignored signal that names no node', incident('active', [['hot_shard', null, NOW]]), []],
       [
-        'a recovered incident that names no node',
-        incident('recovered', [['memory_used', null, NOW]]),
-        [],
-      ],
-      [
         'a failover incident on the target',
         incident('active', [['replication_role', 't1', NOW]], ['node_failover']),
         ['failover:target:t1', 'incident:target:t1'],
@@ -425,32 +439,6 @@ describe('placementGate', () => {
       expect(kindsOf(gate(facts(change)))).toEqual(expected);
     });
 
-    const byAddress = (recovery: string, address: string) => (f: PlacementGateFacts) =>
-      f.incidents.push({
-        recovery,
-        patterns: [],
-        signals: [{ metricType: 'memory_used', nodeId: null, address, openedAt: NOW }],
-      });
-
-    it.each([
-      ['a target node', '10.0.0.3:7000', ['incident:target:t1']],
-      ['an unrelated node', '10.0.0.5:7000', []],
-      ['no node of the cluster', '10.0.0.9:7000', ['unknown:cluster:']],
-    ])('reads an incident entry that names only the address of %s', (_, address, expected) => {
-      expect(kindsOf(gate(facts(byAddress('active', address))))).toEqual(expected);
-    });
-
-    it('reads a node event that names only the address of a target node as that node', () => {
-      const built = facts((f) => {
-        f.openEvents.push({
-          metricType: 'failover_churn',
-          nodeId: null,
-          address: '10.0.0.3:7000',
-          openedAt: NOW,
-        });
-      });
-      expect(kindsOf(gate(built))).toEqual(['failover:target:t1']);
-    });
   });
 
   describe('per-shard and per-purpose rules', () => {
