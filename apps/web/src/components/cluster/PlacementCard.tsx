@@ -234,49 +234,57 @@ function BlockerList({
   );
 }
 
-function Recommendations({ status }: { status: PlacementStatus }) {
+function Recommendations({ status, stale }: { status: PlacementStatus; stale: boolean }) {
   if (status.recommendations.length === 0) return null;
   const address = (shardId: string) =>
     status.balance?.shards.find((shard) => shard.shardId === shardId)?.address ?? shardId;
   return (
-    <ul aria-label="Suggested slot moves" className="space-y-2">
-      {status.recommendations.map((recommendation) => {
-        const { execution, gate } = recommendation;
-        const waitsFor = execution.available
-          ? gate.blockers
-          : gate.blockers.filter((blocker) => blocker.kind !== execution.blockedBy);
-        return (
-          <li key={recommendation.sourceShardId} className="space-y-1">
-            <p>
-              {`Move slots from ${address(recommendation.sourceShardId)} to ${recommendation.targetShardIds.map(address).join(', ')}.`}
-            </p>
-            {!execution.available && (
-              <p className="text-muted-foreground">
-                {REBALANCE_BLOCKED[execution.blockedBy as RebalanceExecutionBlocker] ??
-                  'Cannot run from this monitor.'}
+    <>
+      {stale && (
+        <p className="text-muted-foreground">
+          The placement status could not be read again, so these checks may be out of date.
+        </p>
+      )}
+      <ul aria-label="Suggested slot moves" className="space-y-2">
+        {status.recommendations.map((recommendation) => {
+          const { execution, gate } = recommendation;
+          const waitsFor = execution.available
+            ? gate.blockers
+            : gate.blockers.filter((blocker) => blocker.kind !== execution.blockedBy);
+          return (
+            <li key={recommendation.sourceShardId} className="space-y-1">
+              <p>
+                {`Move slots from ${address(recommendation.sourceShardId)} to ${recommendation.targetShardIds.map(address).join(', ')}.`}
               </p>
-            )}
-            {gate.allowed
-              ? execution.available && <p className="text-muted-foreground">Would run now.</p>
-              : waitsFor.length > 0 && (
-                  <>
-                    <p className="text-muted-foreground">Waits for:</p>
-                    <BlockerList
-                      label="Placement blockers"
-                      items={waitsFor}
-                      className="text-muted-foreground"
-                    />
-                  </>
-                )}
-            <BlockerList
-              label="Placement warnings"
-              items={gate.warnings}
-              className="text-yellow-600 dark:text-yellow-500"
-            />
-          </li>
-        );
-      })}
-    </ul>
+              {!execution.available && (
+                <p className="text-muted-foreground">
+                  {REBALANCE_BLOCKED[execution.blockedBy as RebalanceExecutionBlocker] ??
+                    'Cannot run from this monitor.'}
+                </p>
+              )}
+              {gate.allowed
+                ? execution.available &&
+                  !stale && <p className="text-muted-foreground">Would run now.</p>
+                : waitsFor.length > 0 && (
+                    <>
+                      <p className="text-muted-foreground">Waits for:</p>
+                      <BlockerList
+                        label="Placement blockers"
+                        items={waitsFor}
+                        className="text-muted-foreground"
+                      />
+                    </>
+                  )}
+              <BlockerList
+                label="Placement warnings"
+                items={gate.warnings}
+                className="text-yellow-600 dark:text-yellow-500"
+              />
+            </li>
+          );
+        })}
+      </ul>
+    </>
   );
 }
 
@@ -320,7 +328,7 @@ function ClusterPlacementCard({ connectionId }: { connectionId: string | undefin
               <EffectiveMode status={status} />
               <Support status={status} />
               <BalanceBars balance={status.balance} settings={status.settings} />
-              <Recommendations status={status} />
+              <Recommendations status={status} stale={!!error} />
               <Button size="sm" variant="outline" onClick={() => setPolicyOpen(true)}>
                 {canMutate ? 'Edit policy' : 'View policy'}
               </Button>

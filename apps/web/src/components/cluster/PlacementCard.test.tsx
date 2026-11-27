@@ -588,6 +588,36 @@ describe('PlacementCard', () => {
     ).toBeInTheDocument();
   });
 
+  it('says no move would run now while a refresh fails', async () => {
+    const client = await show(
+      status({
+        recommendations: [
+          {
+            sourceShardId: 'a1',
+            targetShardIds: ['b2'],
+            gate: { allowed: true, blockers: [], warnings: [] },
+            execution: { available: true },
+          },
+        ],
+      }),
+    );
+    expect(await card()).toHaveTextContent('Would run now.');
+
+    get.mockRejectedValue(new ApiError('boom', 500));
+    await act(async () => {
+      await client.invalidateQueries();
+    });
+
+    await screen.findByText('Suggestions in recommend mode, not runnable', undefined, {
+      timeout: 3000,
+    });
+    const region = await card();
+    expect(region).not.toHaveTextContent('Would run now.');
+    expect(region).toHaveTextContent(
+      'The placement status could not be read again, so these checks may be out of date.',
+    );
+  });
+
   it('renders nothing without the license or a connection', async () => {
     license.licensed = false;
     await show(status());
