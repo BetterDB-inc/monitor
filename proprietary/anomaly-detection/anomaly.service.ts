@@ -1017,6 +1017,7 @@ export class AnomalyService
   private rebalancePolicyWarned = new Map<string, string>();
   private rebalanceRuns = new Map<string, Map<string, RebalanceRun>>();
   private replacedRebalanceRuns = new Map<string, RebalanceRun[]>();
+  private placementIncidentSince = new Map<string, number>();
   private clusterNodesObserver:
     | ((connectionId: string, nodes: readonly ClusterNode[], at: number) => void)
     | null = null;
@@ -1742,6 +1743,7 @@ export class AnomalyService
     this.rebalancePolicyWarned.delete(connectionId);
     this.rebalanceRuns.delete(connectionId);
     this.replacedRebalanceRuns.delete(connectionId);
+    this.placementIncidentSince.delete(connectionId);
     this.rebalanceFollowedAt.delete(connectionId);
     this.slotMigrationReadOnPoll.delete(connectionId);
     this.hotKeyNoteLogged.delete(connectionId);
@@ -7589,21 +7591,29 @@ export class AnomalyService
   }
 
   async placementIncidents(connectionId: string): Promise<PlacementGateIncident[]> {
-    const hourAgo = Date.now() - 60 * 60_000;
-    const [oldestOpen] = await this.storage.getAnomalyEvents({
-      scope: this.scopeFilter(connectionId),
-      resolved: false,
-      order: 'asc',
-      limit: 1,
-    });
+    const now = Date.now();
+    const hourAgo = now - 60 * 60_000;
+    const from = Math.max(
+      now - MAX_INCIDENT_LOOKBACK_MS,
+      Math.min(hourAgo, this.placementIncidentSince.get(connectionId) ?? hourAgo),
+    );
     const incidents = await this.readIncidentTimelines(
       connectionId,
-      Math.min(hourAgo, oldestOpen?.timestamp ?? hourAgo),
+      from,
       undefined,
       Number.MAX_SAFE_INTEGER,
       true,
     );
     const open = incidents.filter((incident) => incident.recovery.status !== 'recovered');
+    const lasting = open.filter((incident) => incident.recovery.openSignals.length > 0);
+    if (lasting.length > 0) {
+      this.placementIncidentSince.set(
+        connectionId,
+        Math.min(...lasting.map((incident) => incident.startedAt)),
+      );
+    } else {
+      this.placementIncidentSince.delete(connectionId);
+    }
     return open.map((incident) => ({
       recovery: incident.recovery.status,
       patterns: [
@@ -12179,18 +12189,7 @@ export class AnomalyService
       after = page[page.length - 1];
     }
     if (strict) {
-      const [hidden] = await this.storage.getAnomalyEvents({
-        startTime,
-        endTime: events[events.length - 1].timestamp,
-        scope,
-        resolved: false,
-        limit: 1,
-      });
-      if (hidden) {
-        throw new Error(
-          `the incident history stopped at ${events.length} events, before an open event`,
-        );
-      }
+      throw new Error(`the incident history stopped at ${events.length} events`);
     }
     this.logger.warn(
       `Incident history for ${scope?.id ?? 'all connections'} stopped at ${events.length} events`,

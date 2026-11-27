@@ -5127,7 +5127,7 @@ describe('AnomalyService', () => {
             await expect(service.placementIncidents('conn-a')).rejects.toThrow('db down');
           });
 
-          it('fails the incident read when the history scan stops before an open event', async () => {
+          it('fails the incident read when the incident history scan stops early', async () => {
             let n = 0;
             storage.getAnomalyEvents.mockImplementation(async ({ limit }) =>
               Array.from({ length: limit }, () => ({
@@ -5135,7 +5135,6 @@ describe('AnomalyService', () => {
                 connectionId: 'conn-a',
                 metricType: 'memory_used',
                 timestamp: clock - 60_000,
-                resolved: false,
               })),
             );
             await expect(service.placementIncidents('conn-a')).rejects.toThrow(
@@ -5143,24 +5142,35 @@ describe('AnomalyService', () => {
             );
           });
 
-          it('reads a busy cluster with no open event past the history scan limit', async () => {
-            let n = 0;
-            storage.getAnomalyEvents.mockImplementation(async ({ limit, resolved }) =>
-              resolved === false
-                ? []
-                : Array.from({ length: limit }, () => ({
-                    id: `e${n++}`,
-                    connectionId: 'conn-a',
-                    metricType: 'memory_used',
-                    timestamp: clock - 20 * 60_000 - n,
-                    resolved: true,
-                    resolvedAt: clock - 10 * 60_000,
-                  })),
+          it('reads a busy cluster whose month of spikes passes the history scan limit', async () => {
+            const hour = 60 * 60_000;
+            const history = Array.from({ length: 60_000 }, (_, n) => ({
+              id: `e${n}`,
+              connectionId: 'conn-a',
+              metricType: 'memory_used',
+              timestamp: clock - 10 * 60_000 - n * 50_000,
+              resolved: false,
+              baseline: 1,
+              stdDev: 1,
+              threshold: 3,
+            }));
+            storage.getAnomalyEvents.mockImplementation(
+              async ({ startTime = 0, endTime = Infinity, limit, after, order }) =>
+                (order === 'asc' ? [...history].reverse() : history)
+                  .filter(
+                    (event) =>
+                      event.timestamp >= startTime &&
+                      event.timestamp <= endTime &&
+                      (!after || event.timestamp < after.timestamp),
+                  )
+                  .slice(0, limit),
             );
-            await expect(service.placementIncidents('conn-a')).resolves.toEqual([]);
-            const reads = storage.getAnomalyEvents.mock.calls.map(([query]) => query);
-            expect(reads[0]).toMatchObject({ resolved: false, order: 'asc', limit: 1 });
-            expect(reads.at(-1)).toMatchObject({ resolved: false, limit: 1 });
+            const read = jest.spyOn(service as any, 'readIncidentTimelines');
+
+            await expect(service.placementIncidents('conn-a')).resolves.toBeDefined();
+            await expect(service.placementIncidents('conn-a')).resolves.toBeDefined();
+
+            expect(read.mock.calls.map(([, from]) => from)).toEqual([clock - hour, clock - hour]);
           });
 
           it('names the node of each incident signal, by address or by the connection it came from', async () => {
@@ -5174,7 +5184,8 @@ describe('AnomalyService', () => {
             });
             jest.spyOn(service as any, 'readIncidentTimelines').mockResolvedValue([
               {
-                recovery: { status: 'active' },
+                recovery: { status: 'active', openSignals: [] },
+                startedAt: 7,
                 lastEventAt: 7,
                 matchedPatterns: ['node_failover'],
                 sequenceMatches: [],
@@ -5187,7 +5198,8 @@ describe('AnomalyService', () => {
                 ],
               },
               {
-                recovery: { status: 'recovered' },
+                recovery: { status: 'recovered', openSignals: [] },
+                startedAt: 7,
                 lastEventAt: 7,
                 matchedPatterns: [],
                 sequenceMatches: [],
@@ -5214,48 +5226,39 @@ describe('AnomalyService', () => {
             ]);
           });
 
-          it('reads incidents back to the oldest open event, with no cap', async () => {
+          it('reads incidents back to the oldest one with open signals, up to a month', async () => {
+            const hour = 60 * 60_000;
             const read = jest.spyOn(service as any, 'readIncidentTimelines');
-            const openedAt = clock - 30 * 60 * 60_000;
-            const timeline = (status: string) => ({
-              recovery: { status },
-              lastEventAt: clock - 60_000,
+            const timeline = (status: string, startedAt: number, openSignals: string[]) => ({
+              recovery: { status, openSignals },
+              startedAt,
+              lastEventAt: startedAt,
               matchedPatterns: [],
               sequenceMatches: [],
               entries: [],
             });
-            storage.getAnomalyEvents.mockResolvedValueOnce([
-              { id: 'old', connectionId: 'conn-a', timestamp: openedAt, resolved: false },
-            ]);
-            read.mockResolvedValueOnce([
-              ...Array.from({ length: 60 }, () => timeline('recovered')),
-              timeline('degraded'),
-            ]);
-            expect(await service.placementIncidents('conn-a')).toHaveLength(1);
-            expect(storage.getAnomalyEvents).toHaveBeenLastCalledWith({
-              scope: expect.objectContaining({ connectionIds: expect.any(Array) }),
-              resolved: false,
-              order: 'asc',
-              limit: 1,
-            });
-            expect(read).toHaveBeenLastCalledWith(
-              'conn-a',
-              openedAt,
-              undefined,
-              Number.MAX_SAFE_INTEGER,
-              true,
-            );
+            const from = () => read.mock.calls.at(-1)?.[1];
 
-            storage.getAnomalyEvents.mockResolvedValueOnce([]);
-            read.mockResolvedValueOnce([]);
+            read.mockResolvedValueOnce([
+              ...Array.from({ length: 60 }, () => timeline('recovered', clock - 60_000, [])),
+              timeline('degraded', clock - 30 * hour, ['memory_used']),
+              timeline('unknown', clock - 50 * hour, []),
+            ]);
+            expect(await service.placementIncidents('conn-a')).toHaveLength(2);
+            expect(from()).toBe(clock - hour);
+
+            read.mockResolvedValueOnce([timeline('unknown', clock - 50 * hour, [])]);
             await service.placementIncidents('conn-a');
-            expect(read).toHaveBeenLastCalledWith(
-              'conn-a',
-              clock - 60 * 60_000,
-              undefined,
-              Number.MAX_SAFE_INTEGER,
-              true,
-            );
+            expect(from()).toBe(clock - 30 * hour);
+
+            read.mockResolvedValueOnce([
+              timeline('degraded', clock - 40 * 24 * hour, ['memory_used']),
+            ]);
+            await service.placementIncidents('conn-a');
+            expect(from()).toBe(clock - hour);
+
+            await service.placementIncidents('conn-a');
+            expect(from()).toBe(clock - 30 * 24 * hour);
           });
 
           it('counts an earlier run on the same shard in the hourly budget', async () => {
