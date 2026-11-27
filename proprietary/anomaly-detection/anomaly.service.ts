@@ -1026,7 +1026,7 @@ export class AnomalyService
   private replacedRebalanceRuns = new Map<string, RebalanceRun[]>();
   private placementIncidentReads = new Map<
     string,
-    { since: number | null; historyFrom: number | null }
+    { since: number | null; historyFrom: number | null; scope: string[] }
   >();
   private clusterNodesObserver:
     | ((connectionId: string, nodes: readonly ClusterNode[], at: number) => void)
@@ -7559,7 +7559,7 @@ export class AnomalyService
     const signals: PlacementGateSignal[] = [];
     for (const source of this.scopeConnectionIds(connectionId)) {
       const observed = this.observedNodeOf(source);
-      const open: StoredAnomalyEvent[] = [];
+      const stored: StoredAnomalyEvent[] = [];
       let after: AnomalyEventCursor | undefined;
       for (;;) {
         const page = await this.storage.getAnomalyEvents({
@@ -7568,10 +7568,19 @@ export class AnomalyService
           limit: OPEN_EVENT_PAGE_SIZE,
           after,
         });
-        open.push(...page.filter((event) => wanted.has(event.metricType)));
+        stored.push(...page.filter((event) => wanted.has(event.metricType)));
         if (page.length < OPEN_EVENT_PAGE_SIZE) break;
         after = page[page.length - 1];
       }
+      const saved = new Set(stored.map((event) => event.id));
+      const unsaved = this.recentAnomalies.filter(
+        (event) =>
+          !event.resolved &&
+          event.connectionId === source &&
+          wanted.has(event.metricType) &&
+          !saved.has(event.id),
+      );
+      const open = [...stored, ...unsaved];
       const recoveredAt = Math.max(
         Number.NEGATIVE_INFINITY,
         ...open
@@ -7604,7 +7613,10 @@ export class AnomalyService
     const now = Date.now();
     const hourAgo = now - 60 * 60_000;
     const monthAgo = now - MAX_INCIDENT_LOOKBACK_MS;
-    const earlier = this.placementIncidentReads.get(connectionId);
+    const scope = this.scopeConnectionIds(connectionId);
+    const remembered = this.placementIncidentReads.get(connectionId);
+    const earlier =
+      remembered && scope.every((id) => remembered.scope.includes(id)) ? remembered : undefined;
     const scan: IncidentScanCut = { cutAt: null };
     const incidents = await this.readIncidentTimelines(
       connectionId,
@@ -7619,6 +7631,7 @@ export class AnomalyService
     this.placementIncidentReads.set(connectionId, {
       since: lasting.length > 0 ? Math.min(...lasting.map((incident) => incident.startedAt)) : null,
       historyFrom,
+      scope,
     });
     return { incidents: open.map((incident) => this.placementIncidentOf(incident)), historyFrom };
   }

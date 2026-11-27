@@ -287,8 +287,15 @@ const REFUSED: Record<RebalanceRecheckFailure | 'plan_changed' | 'no_plan', stri
     'The placement policy now excludes a shard or a slot of this suggestion. A new suggestion follows.',
 };
 
-function refusal(err: unknown): string {
-  if (!(err instanceof ApiError)) return err instanceof Error ? err.message : String(err);
+interface Refusal {
+  message: string;
+  waitedFor?: string;
+}
+
+function refusal(err: unknown): Refusal {
+  if (!(err instanceof ApiError)) {
+    return { message: err instanceof Error ? err.message : String(err) };
+  }
   const payload = (err.payload ?? {}) as {
     reason?: string;
     blockedBy?: string;
@@ -298,14 +305,16 @@ function refusal(err: unknown): string {
   const reason = payload.reason as keyof typeof REFUSED | undefined;
   const blockedBy = payload.blockedBy as RebalanceExecutionBlocker | undefined;
   if (blockedBy === 'gate' && payload.blockers?.length) {
-    return `Waits for: ${payload.blockers.map((blocker) => blocker.detail).join(' ')}`;
+    const waitedFor = payload.blockers.map((blocker) => blocker.detail).join(' ');
+    return { message: `Waits for: ${waitedFor}`, waitedFor };
   }
-  return (
-    (reason && REFUSED[reason]) ||
-    (blockedBy && REBALANCE_BLOCKED[blockedBy]) ||
-    payload.message ||
-    err.message
-  );
+  return {
+    message:
+      (reason && REFUSED[reason]) ||
+      (blockedBy && REBALANCE_BLOCKED[blockedBy]) ||
+      payload.message ||
+      err.message,
+  };
 }
 
 function GateWarnings({ gate }: { gate: PlacementGateResult | undefined }) {
@@ -390,7 +399,7 @@ function RunDialog({
 }) {
   const queryClient = useQueryClient();
   const [sending, setSending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [refused, setRefused] = useState<Refusal | null>(null);
   const source = shown.projection.find((row) => row.role === 'source');
   const changed = current !== undefined && movesKey(current) !== movesKey(shown);
   const blockedBy = current?.execution?.available === false ? current.execution.blockedBy : undefined;
@@ -401,6 +410,11 @@ function RunDialog({
       : blockedBy === 'gate' && current?.gate?.blockers.length
         ? `Waits for: ${current.gate.blockers.map((blocker) => blocker.detail).join(' ')}`
         : blockedBy && REBALANCE_BLOCKED[blockedBy];
+  const allowedNow = !changed && current?.execution?.available === true;
+  const error =
+    refused?.waitedFor && allowedNow
+      ? `The last start waited for: ${refused.waitedFor} The safety checks allow it now.`
+      : refused?.message;
   const refresh = () =>
     Promise.all([
       queryClient.invalidateQueries({ queryKey: ['open-hot-shards', connectionId] }),
@@ -408,7 +422,7 @@ function RunDialog({
     ]);
   const run = async () => {
     setSending(true);
-    setError(null);
+    setRefused(null);
     let started = false;
     try {
       await metricsApi.runRebalance(
@@ -417,7 +431,7 @@ function RunDialog({
       );
       started = true;
     } catch (err) {
-      setError(refusal(err));
+      setRefused(refusal(err));
     } finally {
       setSending(false);
       await refresh();
@@ -447,7 +461,7 @@ function RunDialog({
               ))}
             </ul>
           )}
-          <GateWarnings gate={current?.gate ?? shown.gate} />
+          <GateWarnings gate={changed ? shown.gate : (current?.gate ?? shown.gate)} />
           <p className="text-muted-foreground">
             Cancel stops every slot migration on the hot shard, not only these. Slots already moved
             stay on their target.

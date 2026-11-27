@@ -312,6 +312,19 @@ describe('PlacementEpochs', () => {
     expect(epochs.observe('seed', nodes(3), NOW + MINUTE, ['b']).get('a')).toBe(true);
   });
 
+  it('reads a config epoch raised by a node that changed shards as a change, also in a shard we moved', () => {
+    const epochs = new PlacementEpochs();
+    epochs.observe('seed', [read('b', 'b2', false, 1)], NOW - 10 * MINUTE);
+    expect(epochs.observe('seed', [read('b', 'b', false, 2)], NOW, ['b']).get('b')).toBe(true);
+  });
+
+  it('reads a config epoch raised in a shard we moved as no change once the node was seen in it', () => {
+    const epochs = new PlacementEpochs();
+    epochs.observe('seed', [read('b', 'b2', false, 1)], NOW - 10 * MINUTE);
+    epochs.observe('seed', [read('b', 'b', false, 1)], NOW - MINUTE);
+    expect(epochs.observe('seed', [read('b', 'b', false, 2)], NOW, ['b']).get('b')).toBe(false);
+  });
+
   it('ignores a lower config epoch, and forgets nodes unseen for 5 minutes', () => {
     const epochs = new PlacementEpochs();
     epochs.observe('seed', nodes(3), NOW - 10 * MINUTE);

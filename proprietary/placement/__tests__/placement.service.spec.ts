@@ -183,6 +183,16 @@ async function setup(options: Setup = {}) {
   };
 }
 
+const withMember: Record<string, Partial<DatabaseConnectionConfig>> = {
+  seed: { id: 'seed', host: '10.0.0.1', port: 7001 },
+  member: {
+    id: 'member',
+    host: '10.0.0.2',
+    port: 7002,
+    membership: { seedId: 'seed', nodeId: 'n2', origin: 'auto', source: 'cluster' },
+  },
+};
+
 async function settled(): Promise<void> {
   await new Promise((done) => setImmediate(done));
 }
@@ -957,6 +967,23 @@ describe('PlacementService', () => {
         expect(anomaly.runRebalance).toHaveBeenCalledWith('seed', 'a', moves, actor);
       });
 
+      it('gates a run started through a member on the events and the budget of its seed', async () => {
+        const { service, storage, anomaly } = await setup({ configs: withMember });
+        await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+        anomaly.placementOpenEvents.mockImplementation(async (...args: unknown[]) =>
+          args[0] === 'seed' ? [failover] : [],
+        );
+        await expect(service.runRebalance('member', 'a', moves, actor)).resolves.toEqual({
+          status: 'blocked',
+          blockedBy: 'gate',
+          blockers: [expect.objectContaining({ kind: 'failover', scope: 'target', nodeId: 'b' })],
+        });
+        expect(anomaly.readPlacementNodeFacts).toHaveBeenCalledWith('seed', ['a', 'b']);
+        expect(anomaly.placementJobsSince).toHaveBeenCalledWith('seed', expect.any(Number));
+        expect(anomaly.placementMovedShardsSince).toHaveBeenCalledWith('seed', expect.any(Number));
+        expect(anomaly.runRebalance).not.toHaveBeenCalled();
+      });
+
       it('counts the slot jobs of the last hour against the budget', async () => {
         const { service, storage, anomaly } = await setup();
         await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
@@ -1113,6 +1140,25 @@ describe('PlacementService', () => {
 
         anomaly.readPlacementNodeFacts.mockResolvedValue(withUncollectedReplica(2));
         const later = await service.gateFor('seed', subject, 'approve', { now });
+        expect(later.blockers).toEqual([]);
+      });
+
+      it('dates a config epoch raise read through a member by the poll of its seed', async () => {
+        const { service, anomaly } = await setup({ configs: withMember });
+        const now = Date.now();
+        const subject = { sourceShardId: 'a', targetShardIds: ['b'], moveCount: 1 };
+        anomaly.readPlacementNodeFacts.mockResolvedValue(withUncollectedReplica(1));
+        await service.gateFor('member', subject, 'approve', { now: now - 30 * 60_000 });
+        const observe = anomaly.setClusterNodesObserver.mock.calls[0][0] as (
+          connectionId: string,
+          nodes: ClusterNode[],
+          at: number,
+        ) => void;
+        observe('seed', polledNodes(1), now - 25 * 60_000);
+        observe('seed', polledNodes(2), now - 19 * 60_000);
+
+        anomaly.readPlacementNodeFacts.mockResolvedValue(withUncollectedReplica(2));
+        const later = await service.gateFor('member', subject, 'approve', { now });
         expect(later.blockers).toEqual([]);
       });
 
@@ -1450,6 +1496,53 @@ describe('PlacementService', () => {
           ],
         },
       });
+    });
+
+    it.each([
+      ['finishes', healthyNodes],
+      [
+        'fails',
+        () =>
+          ({
+            get nodes(): never {
+              throw new Error('torn read');
+            },
+          }) as unknown as PlacementNodeFacts,
+      ],
+    ])(
+      'keeps the gate of the newer plan when the read of the plan before it %s later',
+      async (_, late) => {
+        const { service, storage, anomaly } = await setup();
+        await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+        const to = (targetShardId: string) =>
+          shard({
+            kind: 'plan',
+            sourceShardId: 'a',
+            moves: [{ targetShardId, ranges: [[0, 3]] }],
+            execution: { available: true },
+          } as unknown as RebalancePlan);
+        let finish: (facts: PlacementNodeFacts) => void = () => {};
+        anomaly.readPlacementNodeFacts.mockReturnValueOnce(
+          new Promise<PlacementNodeFacts>((resolve) => {
+            finish = resolve;
+          }),
+        );
+        const older = service.withPlacementBlocker('seed', [to('b')]);
+        await settled();
+        await service.withPlacementBlocker('seed', [to('c')]);
+        finish(late());
+        await older;
+
+        await service.withPlacementBlocker('seed', [to('c')]);
+        expect(anomaly.readPlacementNodeFacts).toHaveBeenCalledTimes(2);
+      },
+    );
+
+    it('reads the gate of a plan listed through a member from its seed', async () => {
+      const { service, storage, anomaly } = await setup({ configs: withMember });
+      await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+      await service.withPlacementBlocker('member', [shard(plan({ available: true }))]);
+      expect(anomaly.readPlacementNodeFacts).toHaveBeenCalledWith('seed', ['a']);
     });
 
     it('leaves a plan that is not runnable for another reason without a gate', async () => {

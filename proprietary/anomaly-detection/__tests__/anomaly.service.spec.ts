@@ -5088,6 +5088,37 @@ describe('AnomalyService', () => {
             expect(typeReads).toBe(500);
           });
 
+          it('counts an open event that only memory holds while its save waits for a retry', async () => {
+            const event = (
+              id: string,
+              connectionId: string,
+              metricType: string,
+              extra: object,
+            ) => ({
+              id,
+              connectionId,
+              metricType,
+              timestamp: 5,
+              resolved: false,
+              ...extra,
+            });
+            storage.getAnomalyEvents.mockResolvedValue([
+              event('saved', 'conn-a', 'command_p99', { node: { nodeId: 'c0000000' } }),
+            ]);
+            (service as any).recentAnomalies = [
+              event('saved', 'conn-a', 'command_p99', { node: { nodeId: 'a0000000' } }),
+              event('unsaved', 'conn-a', 'topology_divergence', { timestamp: 6 }),
+              event('closed', 'conn-a', 'failover_churn', { resolved: true }),
+              event('elsewhere', 'conn-z', 'failover_churn', {}),
+              event('unrelated', 'conn-a', 'memory_used', {}),
+            ];
+
+            await expect(service.placementOpenEvents('conn-a')).resolves.toEqual([
+              { metricType: 'command_p99', nodeId: 'c0000000', openedAt: 5 },
+              { metricType: 'topology_divergence', nodeId: null, openedAt: 6 },
+            ]);
+          });
+
           it('names the replica of a divergence event by its address when no node was stamped', async () => {
             storage.getAnomalyEvents.mockResolvedValue([
               {
@@ -5298,6 +5329,26 @@ describe('AnomalyService', () => {
 
             await service.placementIncidents('conn-a');
             expect(from()).toBe(clock - 30 * 24 * hour);
+          });
+
+          it('reads incidents back a month again once the cluster scope gains a connection', async () => {
+            const hour = 60 * 60_000;
+            const scope = jest
+              .spyOn(service as any, 'scopeConnectionIds')
+              .mockReturnValue(['conn-a']);
+            const read = jest.spyOn(service as any, 'readIncidentTimelines');
+            const from = async () => {
+              await service.placementIncidents('conn-a');
+              return read.mock.calls.at(-1)?.[1];
+            };
+
+            expect(await from()).toBe(clock - 30 * 24 * hour);
+            expect(await from()).toBe(clock - hour);
+            scope.mockReturnValue(['conn-a', 'conn-peer']);
+            expect(await from()).toBe(clock - 30 * 24 * hour);
+            expect(await from()).toBe(clock - hour);
+            scope.mockReturnValue(['conn-a']);
+            expect(await from()).toBe(clock - hour);
           });
 
           it('counts an earlier run on the same shard in the hourly budget', async () => {
