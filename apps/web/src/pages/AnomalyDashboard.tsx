@@ -337,7 +337,10 @@ export function AnomalyDashboard() {
       <RaftHealthBanner events={raftHealthEvents ?? undefined} />
       <ReplicaSlotStateBanner events={replicaSlotStateEvents ?? undefined} />
       <HotShardCaptureNotice connectionId={currentConnection?.id} />
-      <RebalanceRuns connectionId={currentConnection?.id} />
+      <RebalanceRuns
+        connectionId={currentConnection?.id}
+        showHistory={currentConnection?.capabilities?.clusterEnabled === true}
+      />
       <RebalanceSuggestion
         connectionId={currentConnection?.id}
         mode={placement ? placement.effectiveMode : placementError ? undefined : 'observe'}

@@ -75,6 +75,8 @@ import {
   ScheduledCaptureQueryOptions,
   ScheduledCapturePatch,
   LogSource,
+  StoredRebalanceRun,
+  RebalanceRunQueryOptions,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   AgentToken,
@@ -118,6 +120,7 @@ import {
   isSameLogEntry,
   matchesLogSource,
 } from './repositories/slowlog.memory.repository';
+import { RebalanceRunMemoryRepository } from './repositories/rebalance-run.memory.repository';
 import { InvitationMemoryRepository } from './repositories/invitation.memory.repository';
 import type { InvitationRepository } from '../../common/interfaces/invitation-repository.interface';
 import { ActivityMemoryRepository } from './repositories/activity.memory.repository';
@@ -185,6 +188,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   private readonly MAX_DELIVERIES_PER_WEBHOOK = 1000;
   private readonly webhookRepo = new WebhookMemoryRepository(this.MAX_DELIVERIES_PER_WEBHOOK);
   private readonly slowlogRepo = new SlowLogMemoryRepository();
+  private readonly rebalanceRunRepo = new RebalanceRunMemoryRepository();
   private readonly invitationRepo = new InvitationMemoryRepository();
   private readonly activityRepo = new ActivityMemoryRepository();
   private idCounter = 1;
@@ -1885,6 +1889,25 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       this.replicationDivergenceWindows.map((w) => this.replicationDivergenceWindowKey(w.connectionId, w)),
     );
     return before - this.replicationDivergenceWindows.length;
+  }
+
+  // Slot Rebalance Run Methods
+  async saveRebalanceRun(run: StoredRebalanceRun): Promise<void> {
+    return this.rebalanceRunRepo.saveRebalanceRun(run);
+  }
+
+  async getRebalanceRuns(options: RebalanceRunQueryOptions): Promise<StoredRebalanceRun[]> {
+    return this.rebalanceRunRepo.getRebalanceRuns(options);
+  }
+
+  async getLatestRebalanceRunPerShard(
+    connectionId: string,
+    since: number,
+  ): Promise<StoredRebalanceRun[]> {
+    return this.rebalanceRunRepo.getLatestRebalanceRunPerShard(connectionId, since);
+  }
+  async pruneOldRebalanceRuns(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+    return this.rebalanceRunRepo.pruneOldRebalanceRuns(cutoffTimestamp, connectionId);
   }
 
   // AI Cache/Memory Sample Methods

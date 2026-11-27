@@ -3,15 +3,21 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { RebalanceRun } from '../../types/anomaly';
 
-const { getRebalanceRuns, cancelRebalance, canMutate } = vi.hoisted(() => ({
-  getRebalanceRuns: vi.fn(),
-  cancelRebalance: vi.fn(),
-  canMutate: vi.fn(() => true),
-}));
+const { getRebalanceRuns, getRebalanceRunHistory, cancelRebalance, canMutate } = vi.hoisted(
+  () => ({
+    getRebalanceRuns: vi.fn(),
+    getRebalanceRunHistory: vi.fn(),
+    cancelRebalance: vi.fn(),
+    canMutate: vi.fn(() => true),
+  }),
+);
 
 vi.mock('../../api/metrics', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../api/metrics')>();
-  return { ...actual, metricsApi: { getRebalanceRuns, cancelRebalance } };
+  return {
+    ...actual,
+    metricsApi: { getRebalanceRuns, getRebalanceRunHistory, cancelRebalance },
+  };
 });
 vi.mock('../../hooks/useCanMutate', () => ({ useCanMutate: canMutate }));
 
@@ -46,12 +52,15 @@ function run(overrides: Partial<RebalanceRun> = {}): RebalanceRun {
   };
 }
 
-async function show(runs: RebalanceRun[]): Promise<QueryClient> {
+async function show(
+  runs: RebalanceRun[],
+  { showHistory = false } = {},
+): Promise<QueryClient> {
   getRebalanceRuns.mockResolvedValue(runs);
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <RebalanceRuns connectionId="conn-1" />
+      <RebalanceRuns connectionId="conn-1" showHistory={showHistory} />
     </QueryClientProvider>,
   );
   await act(async () => {
@@ -186,5 +195,105 @@ describe('RebalanceRuns', () => {
     await show([run()]);
 
     expect(within(await panel()).queryByRole('button', { name: 'Cancel' })).toBeNull();
+  });
+
+  describe('history', () => {
+    const toggle = () => screen.findByRole('button', { name: /slot rebalance history/i });
+
+    it('is not offered unless asked for', async () => {
+      await show([run()]);
+      await panel();
+
+      expect(screen.queryByRole('button', { name: /slot rebalance history/i })).toBeNull();
+    });
+
+    it('is closed at first and reads nothing', async () => {
+      await show([], { showHistory: true });
+
+      expect(await toggle()).toHaveAttribute('aria-expanded', 'false');
+      expect(getRebalanceRunHistory).not.toHaveBeenCalled();
+    });
+
+    it('lists the stored runs with their outcome once opened', async () => {
+      getRebalanceRunHistory.mockResolvedValue([
+        run({
+          state: 'succeeded',
+          endedAt: 5_000,
+          outcome: { projectedRatio: 1.19, actualRatio: 1.31, measuredAt: 70_000 },
+        }),
+      ]);
+      await show([], { showHistory: true });
+
+      fireEvent.click(await toggle());
+
+      const entry = await screen.findByRole('listitem');
+      expect(getRebalanceRunHistory).toHaveBeenCalledTimes(1);
+      expect(entry).toHaveTextContent('Shard 3f2a9c1e at 10.0.0.1:6379');
+      expect(entry).toHaveTextContent('Done');
+      expect(entry).toHaveTextContent('To 10.0.0.3:6379.');
+      expect(entry).toHaveTextContent('Started by admin@example.com');
+      expect(entry).toHaveTextContent('Projected 1.19x the median for the hot shard; measured 1.31x.');
+      expect(within(entry).queryByRole('button')).toBeNull();
+    });
+
+    it('gives no ratio for a run that did not succeed, as the live card does', async () => {
+      getRebalanceRunHistory.mockResolvedValue([run({ state: 'failed', endedAt: 5_000 })]);
+      await show([], { showHistory: true });
+      fireEvent.click(await toggle());
+      const entry = await screen.findByRole('listitem');
+      expect(entry).not.toHaveTextContent('not measured');
+      expect(entry).not.toHaveTextContent('Projected');
+    });
+    it('says so when no run was stored', async () => {
+      getRebalanceRunHistory.mockResolvedValue([]);
+      await show([], { showHistory: true });
+
+      fireEvent.click(await toggle());
+
+      expect(
+        await screen.findByText('No slot rebalance was started in the last 7 days.'),
+      ).toBeInTheDocument();
+    });
+
+    it('keeps the stored runs and warns when a refresh of the history fails', async () => {
+      getRebalanceRunHistory.mockResolvedValue([run({ state: 'succeeded', endedAt: 5_000 })]);
+      const client = await show([], { showHistory: true });
+      fireEvent.click(await toggle());
+      await screen.findByRole('listitem');
+
+      getRebalanceRunHistory.mockRejectedValue(new Error('Network error'));
+      await act(async () => {
+        await client.invalidateQueries({ queryKey: ['slot-rebalance-history'] });
+      });
+
+      expect(await screen.findByRole('alert', {}, { timeout: 5_000 })).toHaveTextContent(
+        'Could not refresh the slot rebalance history. The last list read is shown.',
+      );
+      expect(screen.getByRole('listitem')).toHaveTextContent('Done');
+    });
+    it('is offered when the live runs cannot be read', async () => {
+      getRebalanceRuns.mockRejectedValue(new Error('Network error'));
+      getRebalanceRunHistory.mockResolvedValue([]);
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      render(
+        <QueryClientProvider client={client}>
+          <RebalanceRuns connectionId="conn-1" showHistory />
+        </QueryClientProvider>,
+      );
+      fireEvent.click(await toggle());
+      expect(
+        await screen.findByText('No slot rebalance was started in the last 7 days.'),
+      ).toBeInTheDocument();
+    });
+    it('says so when the history cannot be read', async () => {
+      getRebalanceRunHistory.mockRejectedValue(new Error('Network error'));
+      await show([], { showHistory: true });
+
+      fireEvent.click(await toggle());
+
+      expect(await screen.findByRole('alert', {}, { timeout: 5_000 })).toHaveTextContent(
+        'Could not read the slot rebalance history.',
+      );
+    });
   });
 });

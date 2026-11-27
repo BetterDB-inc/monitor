@@ -472,6 +472,28 @@ export interface ReplicationDivergenceWindowQueryOptions {
   limit?: number;
 }
 
+export interface StoredRebalanceRun {
+  /** `${connectionId}:${sourceShardId}:${startedAt}` */
+  id: string;
+  connectionId: string;
+  sourceShardId: string;
+  state: 'running' | 'succeeded' | 'failed' | 'cancelled' | 'unknown';
+  startedAt: number;
+  endedAt: number | null;
+  updatedAt: number;
+  /** JSON of the proprietary rebalance run; opaque to storage. */
+  payload: string;
+}
+
+export interface RebalanceRunQueryOptions {
+  connectionId: string;
+  /** Runs started at or after this time. */
+  since?: number;
+  states?: StoredRebalanceRun['state'][];
+  /** Default 50, at most 500. */
+  limit?: number;
+}
+
 // Memory Snapshot Types
 export interface StoredMemorySnapshot {
   id: string; // UUID
@@ -911,6 +933,22 @@ export interface StoragePort {
     options: ReplicationDivergenceWindowQueryOptions,
   ): Promise<StoredReplicationDivergenceWindow[]>;
   pruneOldReplicationDivergenceWindows(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+
+  /** Upserts by id. A write older (`updatedAt`) than the stored row is ignored. */
+  saveRebalanceRun(run: StoredRebalanceRun): Promise<void>;
+  /** Newest `startedAt` first. */
+  getRebalanceRuns(options: RebalanceRunQueryOptions): Promise<StoredRebalanceRun[]>;
+  /**
+   * The newest run (by `startedAt`) of each source shard of the connection that started at or
+   * after `since`, newest first. One row per shard, with no limit across shards.
+   */
+  getLatestRebalanceRunPerShard(connectionId: string, since: number): Promise<StoredRebalanceRun[]>;
+  /**
+   * Deletes runs that ended before the cutoff, and runs that never ended and started more than
+   * REBALANCE_UNENDED_PRUNE_MARGIN_MS before it: a run whose last save never landed. Adoption looks
+   * back 30 days at most, so such a row is never picked up again.
+   */
+  pruneOldRebalanceRuns(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   // AI Cache/Memory Sample Methods (AI Cache & Memory observability) - connectionId required for writes
   saveAiCacheSamples(

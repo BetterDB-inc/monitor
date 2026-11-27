@@ -17,7 +17,7 @@ import {
   NotFoundException,
   Req,
 } from '@nestjs/common';
-import { ApiHeader, ApiOperation } from '@nestjs/swagger';
+import { ApiHeader, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { AnomalyService } from './anomaly.service';
 import { PlacementService } from '../placement/placement.service';
 import { IncidentTimeline } from './incident-timeline';
@@ -35,6 +35,7 @@ import { ServedHotShardDetail } from './hot-shard-detector';
 import { TopologyDivergenceReport } from './topology-divergence-report';
 import { TopologyDisagreementReport, TopologyFullCheckView } from './topology-full-check';
 import { type RebalanceRunView, parseConfirmedMoves } from './slot-rebalance-run';
+import { REBALANCE_HISTORY_DEFAULT_MS } from './rebalance-run-store';
 import type { RequestWithActor } from '../../apps/api/src/auth/guards/actor.guard';
 import { LicenseGuard, RequiresFeature, Feature } from '@proprietary/licenses';
 import { ConnectionId, CONNECTION_ID_HEADER } from '../../apps/api/src/common/decorators';
@@ -227,13 +228,32 @@ export class AnomalyController {
   @Get('slot-rebalance')
   @UseGuards(LicenseGuard)
   @RequiresFeature(Feature.ANOMALY_DETECTION)
-  @ApiOperation({ summary: 'Slot rebalances started from this monitor in the last hour' })
+  @ApiOperation({
+    summary:
+      'Slot rebalances started from this monitor: the ones running or ended in the last hour, or the stored history',
+    description:
+      'With history=true the stored runs are listed, newest first: those started since `since` (default: ' +
+      '7 days ago), at most `limit` (default 50, at most 500).',
+  })
   @ApiHeader({ name: CONNECTION_ID_HEADER, required: true, description: 'Connection ID of the cluster' })
+  @ApiQuery({ name: 'history', required: false, type: Boolean })
+  @ApiQuery({ name: 'since', required: false, type: Number, description: 'Start time in ms, with history=true' })
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Only with history=true' })
   async getRebalanceRuns(
     @ConnectionId({ required: true }) connectionId: string,
     @Req() request: RequestWithActor,
+    @Query('history') history?: string,
+    @Query('since') since?: string,
+    @Query('limit') limit?: string,
   ): Promise<RebalanceRunView[]> {
-    const runs = await this.anomalyService.followRebalanceRuns(connectionId);
+    const runs =
+      history === 'true'
+        ? await this.anomalyService.getRebalanceRunHistory(
+            connectionId,
+            parseOptionalInt(since, 'since') ?? Date.now() - REBALANCE_HISTORY_DEFAULT_MS,
+            parseLimit(limit, 50),
+          )
+        : await this.anomalyService.followRebalanceRuns(connectionId);
     if (request.actor?.role === 'admin') return runs;
     return runs.map((run) => ({ ...run, startedBy: { ...run.startedBy, email: null } }));
   }
