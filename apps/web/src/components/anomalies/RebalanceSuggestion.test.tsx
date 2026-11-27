@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { PlacementMode } from '@betterdb/shared';
 import type {
@@ -458,6 +458,42 @@ describe('RebalanceSuggestion', () => {
       const region = await panel();
       expect(within(region).queryByRole('button', { name: 'Run this plan' })).toBeNull();
       expect(region).toHaveTextContent('BetterDB does not run it.');
+    });
+
+    it('shows a read-only member the safety checks without a run button', async () => {
+      canMutate.mockReturnValue(false);
+      await show([
+        hotShard(
+          plan({
+            execution: { available: false, blockedBy: 'gate' },
+            gate: { allowed: false, blockers: [fork], warnings: [coverage] },
+          }),
+        ),
+      ]);
+
+      const blocked = await panel();
+      expect(within(blocked).getByRole('list', { name: 'Placement blockers' })).toHaveTextContent(
+        fork.detail,
+      );
+      expect(within(blocked).getByRole('list', { name: 'Placement warnings' })).toHaveTextContent(
+        coverage.detail,
+      );
+      cleanup();
+
+      await show([
+        hotShard(
+          plan({
+            execution: { available: true },
+            gate: { allowed: true, blockers: [], warnings: [coverage] },
+          }),
+        ),
+      ]);
+
+      const runnable = await panel();
+      expect(within(runnable).getByRole('list', { name: 'Placement warnings' })).toHaveTextContent(
+        coverage.detail,
+      );
+      expect(within(runnable).queryByRole('button', { name: 'Run this plan' })).toBeNull();
     });
 
     it('says how to turn running on for a Valkey 9 plan', async () => {

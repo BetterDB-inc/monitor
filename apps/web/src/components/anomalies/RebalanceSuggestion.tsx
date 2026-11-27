@@ -342,7 +342,7 @@ function WaitsFor({ gate }: { gate: PlacementGateResult }) {
 function RunPlan({ plan, onRun }: { plan: RebalancePlan; onRun: (plan: RebalancePlan) => void }) {
   const canMutate = useCanMutate();
   const execution = plan.execution;
-  if (!execution || !canMutate) return null;
+  if (!execution) return null;
   if (!execution.available) {
     if (!execution.blockedBy || plan.support !== 'valkey_atomic') return null;
     if (execution.blockedBy === 'gate' && plan.gate?.blockers.length) {
@@ -353,15 +353,19 @@ function RunPlan({ plan, onRun }: { plan: RebalancePlan; onRun: (plan: Rebalance
         </div>
       );
     }
+    if (!canMutate) return null;
     return <p className="text-muted-foreground">{REBALANCE_BLOCKED[execution.blockedBy]}</p>;
   }
+  if (!canMutate && !plan.gate) return null;
   return (
     <div className="space-y-2">
       {plan.gate?.allowed && <p className="text-muted-foreground">Would run now.</p>}
       <GateWarnings gate={plan.gate} />
-      <Button size="sm" onClick={() => onRun(plan)}>
-        Run this plan
-      </Button>
+      {canMutate && (
+        <Button size="sm" onClick={() => onRun(plan)}>
+          Run this plan
+        </Button>
+      )}
     </div>
   );
 }
