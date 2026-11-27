@@ -1001,7 +1001,15 @@ server.tool(
   async ({ instanceId }) =>
     withTelemetry('get_slot_migrations', async () => {
       const id = resolveInstanceId(instanceId);
-      const data = await apiFetch(`/mcp/instance/${id}/cluster/slot-migrations`);
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/cluster/slot-migrations`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return { content: [{ type: 'text' as const, text: `Instance '${id}' not found.` }] };
+        }
+        throw err;
+      }
       return {
         content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
       };
