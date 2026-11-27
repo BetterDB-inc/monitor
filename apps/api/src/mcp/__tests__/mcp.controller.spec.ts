@@ -101,4 +101,64 @@ describe('McpController', () => {
     expect(errorSpy).toHaveBeenCalledWith('Failed to get info for conn-42', expect.any(String));
     errorSpy.mockRestore();
   });
+
+  describe('slot migrations', () => {
+    const clusterMetrics = { checkSlotMigrations: jest.fn() };
+    const getInfoParsed = jest.fn();
+    let c: McpController;
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+      getInfoParsed.mockResolvedValue({ cluster: { cluster_enabled: '1' } });
+      registry.get.mockReturnValue({ getInfoParsed });
+      c = new McpController(
+        registry as any,
+        metricsService as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        clusterMetrics as any,
+        {} as any,
+      );
+    });
+
+    it('returns the check as it is, with complete', async () => {
+      const check = { migrations: [], complete: false };
+      clusterMetrics.checkSlotMigrations.mockResolvedValue(check);
+
+      await expect(c.getSlotMigrations('conn-1')).resolves.toBe(check);
+      expect(clusterMetrics.checkSlotMigrations).toHaveBeenCalledWith('conn-1');
+      expect(getInfoParsed).toHaveBeenCalledWith(['cluster']);
+    });
+
+    it('says an instance outside cluster mode is not a cluster without checking it', async () => {
+      getInfoParsed.mockResolvedValue({ cluster: { cluster_enabled: '0' } });
+
+      await expect(c.getSlotMigrations('conn-1')).resolves.toEqual({
+        error: 'not_cluster',
+        message: 'This instance is not running in cluster mode.',
+      });
+      expect(clusterMetrics.checkSlotMigrations).not.toHaveBeenCalled();
+    });
+
+    it('returns 404 for an unregistered instance', async () => {
+      registry.get.mockImplementationOnce(() => {
+        throw new NotFoundException("Connection 'missing' not found.");
+      });
+
+      await expect(c.getSlotMigrations('missing')).rejects.toBeInstanceOf(NotFoundException);
+      expect(clusterMetrics.checkSlotMigrations).not.toHaveBeenCalled();
+    });
+
+    it('maps a failed read to a 500', async () => {
+      getInfoParsed.mockRejectedValueOnce(new Error('socket closed'));
+      const errorSpy = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+
+      await expect(c.getSlotMigrations('conn-1')).rejects.toMatchObject({
+        status: HttpStatus.INTERNAL_SERVER_ERROR,
+        message: 'Failed to get slot migrations',
+      });
+      errorSpy.mockRestore();
+    });
+  });
 });

@@ -48,6 +48,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one line per shard. `fullCheck` carries the last check that set out to
   ask every node, when one was run from the Cluster page; the tool reads
   it and cannot start one.
+- `get_topology_divergence`: the last round of cluster view sampling in
+  detail, with the two sides of each disagreement and the nodes only part of
+  the cluster knows about. Node lists are capped at 25 and other lists at 50
+  entries, with the full counts.
+- `get_slot_migrations`: the slot migrations in progress on a cluster, asked
+  of every primary. `complete` is false when some of them could not be read.
+- `get_rebalance_runs`: the slot rebalances started from the monitor that
+  are running or ended in the last hour, with the state of each move and the
+  projected and measured load. Read-only; the email of the person who
+  started a run is not shared.
 
 ### Changed
 

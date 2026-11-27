@@ -361,6 +361,28 @@ export class McpController {
     }
   }
 
+  @Get('instance/:id/cluster/slot-migrations')
+  async getSlotMigrations(@Param('id', ValidateInstanceIdPipe) id: string) {
+    try {
+      // The migration check reports a failed discovery as an incomplete read instead of throwing,
+      // so a standalone instance has to be told apart before it.
+      const info = await this.registry.get(id).getInfoParsed(['cluster']);
+      // Only an explicit '0' means standalone; a missing section falls through to the
+      // check, which then reports complete: false rather than a false "not a cluster".
+      if (info.cluster?.cluster_enabled === '0') {
+        return { error: 'not_cluster', message: 'This instance is not running in cluster mode.' };
+      }
+      return await this.clusterMetricsService.checkSlotMigrations(id);
+    } catch (error) {
+      throw mapMcpError(
+        this.logger,
+        error,
+        'Failed to get slot migrations',
+        `Failed to get slot migrations for ${id}`,
+      );
+    }
+  }
+
   @Get('instance/:id/latency/history/:eventName')
   async getLatencyHistory(
     @Param('id', ValidateInstanceIdPipe) id: string,

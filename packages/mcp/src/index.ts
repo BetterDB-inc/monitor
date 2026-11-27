@@ -845,6 +845,60 @@ server.tool(
 );
 
 server.tool(
+  'get_topology_divergence',
+  'Get the last round of cluster view sampling in detail. `observers` are the nodes asked in the round and `unanswered` those of them that gave no view; a round asks only a sample of the nodes, and a node that was not asked is not in the report at all. `divergences` has each open disagreement between the views, with the two `sides` of nodes (the smaller side first) and its `disagreements`: `kind` is `slot_owner`, `failure_flags`, `membership` or `config_epoch`, `subject` the nodes it is about, `slots` the slot ranges when it is about slots, `positions` each `value` seen with the `observers` that hold it, and how many `rounds` and `since` when (ms). `partialMembership` lists nodes that only part of the cluster knows about: `node`, who knows it (`knownBy`), who does not (`notKnownBy`, each with a `status`), `ownViewMissing`, its own `disagreements`, and when there is one the `command` an operator can run on the `runOn` nodes. Disagreements explained by such a finding are listed under it and not in `divergences`, so read both lists. `confirmed` and `eventId` tell whether an anomaly event is open; an unconfirmed entry is still being counted. `seen: false` marks a finding whose event is open but that the last round no longer found. Node lists are capped at 25 and other lists at 50 entries; `totals` has the full counts of `observers`, `unanswered`, `divergences` and `partialMembership`, and a list that was cut inside an entry has its full length in a `<name>Count` field beside it. `status` is `not_sampled` before the first round or on a cluster that is not sampled, and `insufficient_views` when fewer than two nodes answered. `ok` means only that the views that answered were compared, not that the whole cluster agrees. Read-only. Use with get_topology_disagreements (the per-shard summary) when a cluster looks split or a topology_divergence or partial_membership anomaly is open.',
+  {
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ instanceId }) =>
+    withTelemetry('get_topology_divergence', async () => {
+      const id = resolveInstanceId(instanceId);
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/anomalies/topology-divergence`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return unavailableOrNotFoundResult(id, 'Anomaly detection');
+        }
+        throw err;
+      }
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
+);
+
+server.tool(
+  'get_rebalance_runs',
+  'Get the slot rebalances started from this monitor on an instance, newest first: the ones still running and the ones that ended in the last hour, at most one per hot shard (the latest). Each run has the hot shard it moves slots off (`sourceShardId`, `sourceAddr`), its `state` (running, succeeded, failed, cancelled, unknown), `startedAt` and `endedAt` (ms), who started it (`startedBy.userId`; the email is not shared here and is always null) and its `jobs`, each with the target shard, slot `ranges` and `state` (starting, running, succeeded, failed, cancelled, unknown), plus `jobName`, `phase` and `message` when known. `projectedRatio` is the load the hot shard was expected to have after the move, as a multiple of the cluster median; once measured, `outcome.actualRatio` is the load it really had, to compare with `outcome.projectedRatio`. `outcomeUnavailable` is true when it could not be measured. The states are the ones the monitor last read while polling: this tool reads nothing from the cluster. Runs are kept in memory under the instance they were started on, so an empty list does not prove that no slots were moved: a restart of the monitor clears it, and moves started elsewhere are not listed (use get_slot_migrations for what is moving now). Read-only: this tool cannot start or cancel a rebalance. Use after a hot_shard anomaly to see whether someone already acted on it and whether it worked.',
+  {
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ instanceId }) =>
+    withTelemetry('get_rebalance_runs', async () => {
+      const id = resolveInstanceId(instanceId);
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/anomalies/slot-rebalance`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return unavailableOrNotFoundResult(id, 'Anomaly detection');
+        }
+        throw err;
+      }
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
+);
+
+server.tool(
   'get_client_activity',
   'Get time-bucketed client activity from persisted snapshots. Shows connection counts, command distribution, and buffer usage over time. Use startTime/endTime to focus on a specific incident window.',
   {
@@ -934,6 +988,28 @@ server.tool(
       const id = resolveInstanceId(instanceId);
       const qs = buildQuery({ limit });
       const data = await apiFetch(`/mcp/instance/${id}/cluster/slowlog${qs}`);
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
+);
+
+server.tool(
+  'get_slot_migrations',
+  'Get the slot migrations in progress on a cluster right now, asked of every primary. Returns `{ complete, migrations }`: one entry per slot for a legacy MIGRATING / IMPORTING move, or one per atomic migration job (Valkey 9+ and Redis 8.4+), each with `slot` (the first slot of a job, -1 when unknown), the source and target node ids and addresses, and `state` (`migrating` or `importing`). A job also has `jobName`, `slotRange` and `phase`; Valkey adds `lastUpdateAt` (ms) and `remainingReplBytes`, Redis adds `retries` and `lastError`. `complete` is false when some primaries could not be read or are flagged as failed, or the cluster could not be discovered: an empty `migrations` list then does NOT prove that nothing is moving. On Redis 8.4+, atomic tasks are seen only when the monitoring user may run CLUSTER MIGRATION. Finished and failed Valkey jobs are not listed; a Valkey job that failed, or a migration that is stuck, is raised as a slot_migration_stuck anomaly (see get_anomalies). Returns an error message if this instance is not running in cluster mode. Read-only. Use when a hot shard, a latency rise or error replies might be caused by slots being moved, or to check that a rebalance has finished moving.',
+  { instanceId: z.string().optional().describe('Optional instance ID override') },
+  async ({ instanceId }) =>
+    withTelemetry('get_slot_migrations', async () => {
+      const id = resolveInstanceId(instanceId);
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/cluster/slot-migrations`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return { content: [{ type: 'text' as const, text: `Instance '${id}' not found.` }] };
+        }
+        throw err;
+      }
       return {
         content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
       };

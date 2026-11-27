@@ -13,9 +13,11 @@ import { ConnectionRegistry } from '@app/connections/connection-registry.service
 import { ValidateInstanceIdPipe, mapMcpError, safeLimit, safeParseInt } from '@app/mcp/mcp-helpers';
 import { AnomalyService } from './anomaly.service';
 import { PlacementService } from '../placement/placement.service';
-import { withDisputedShardsOnly } from './topology-disagreements';
+import { DISAGREEMENT_LIST_LIMIT, withDisputedShardsOnly } from './topology-disagreements';
+import { capDivergenceReport } from './topology-divergence-report';
 import { MetricType } from './types';
 
+const DIVERGENCE_ENTRY_LIMIT = 50;
 const DEFAULT_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 const DIVERGENCE_SERIES_LOOKBACK_MS = 60 * 60 * 1000;
 const METRIC_TYPE_VALUES = new Set<string>(Object.values(MetricType));
@@ -94,6 +96,33 @@ export class McpAnomalyController {
       return await this.placement.withPlacementBlocker(id, shards);
     } catch (error) {
       throw mapMcpError(this.logger, error, 'Failed to get hot shards');
+    }
+  }
+
+  @Get('instance/:id/anomalies/slot-rebalance')
+  getRebalanceRuns(@Param('id', ValidateInstanceIdPipe) id: string) {
+    try {
+      this.registry.get(id);
+      // An agent token is not an admin session, so the email is never shared here.
+      return this.anomalyService
+        .getRebalanceRunsSnapshot(id)
+        .map((run) => ({ ...run, startedBy: { ...run.startedBy, email: null } }));
+    } catch (error) {
+      throw mapMcpError(this.logger, error, 'Failed to get slot rebalance runs');
+    }
+  }
+
+  @Get('instance/:id/anomalies/topology-divergence')
+  getTopologyDivergence(@Param('id', ValidateInstanceIdPipe) id: string) {
+    try {
+      this.registry.get(id);
+      return capDivergenceReport(
+        this.anomalyService.getTopologyDivergence(id),
+        DISAGREEMENT_LIST_LIMIT,
+        DIVERGENCE_ENTRY_LIMIT,
+      );
+    } catch (error) {
+      throw mapMcpError(this.logger, error, 'Failed to get topology divergence');
     }
   }
 
