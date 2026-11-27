@@ -1,5 +1,6 @@
 import {
   DEFAULT_PLACEMENT_SETTINGS,
+  PLACEMENT_RESOLVE_RATIO_CAP,
   defaultPlacementSettings,
   excludedPrimaryIds,
   excludedShardNodeIds,
@@ -7,6 +8,7 @@ import {
   validatePlacementSettings,
   type PlacementSettings,
 } from '@betterdb/shared';
+import { HOT_SHARD_RELEASE_FACTOR } from '../../anomaly-detection/hot-shard-detector';
 
 function withChange(change: Partial<PlacementSettings>): unknown {
   return { ...DEFAULT_PLACEMENT_SETTINGS, ...change };
@@ -50,6 +52,24 @@ describe('placement policy settings', () => {
   it('refuses a resolve ratio at or over the trigger ratio', () => {
     expect(errorsOf(withChange({ resolveRatio: 2, triggerRatio: 2 }))).toEqual([
       expect.stringContaining('resolveRatio'),
+    ]);
+  });
+
+  it('caps the resolve ratio at the ratio where the detector closes a hot shard', () => {
+    expect(PLACEMENT_RESOLVE_RATIO_CAP).toBe(HOT_SHARD_RELEASE_FACTOR);
+  });
+
+  it('refuses a resolve ratio at or over 1.5 even under a higher trigger ratio', () => {
+    expect(errorsOf(withChange({ triggerRatio: 5, resolveRatio: 3 }))).toEqual([
+      'resolveRatio: must be below 1.5, the ratio at which a hot shard event closes',
+    ]);
+    expect(errorsOf(withChange({ triggerRatio: 5, resolveRatio: 1.5 }))).toHaveLength(1);
+    expect(errorsOf(withChange({ triggerRatio: 5, resolveRatio: 1.45 }))).toEqual([]);
+  });
+
+  it('names the trigger ratio when it is the lower bound', () => {
+    expect(errorsOf(withChange({ triggerRatio: 1.2, resolveRatio: 1.3 }))).toEqual([
+      'resolveRatio: must be below triggerRatio',
     ]);
   });
 
@@ -189,6 +209,15 @@ describe('placement policy settings', () => {
       expect(read.settings).toEqual(stored);
       expect(read.invalid?.problems).toEqual([expect.stringContaining('resolveRatio')]);
       expect(read.invalid?.exclusionsReadable).toBe(true);
+    });
+
+    it('reads a stored resolve ratio over the cap as the default and reports it', () => {
+      const read = readStoredPlacementSettings({ ...stored, triggerRatio: 5, resolveRatio: 3 });
+      expect(read.settings).toEqual(stored);
+      expect(read.invalid).toEqual({
+        problems: ['resolveRatio: must be below 1.5, the ratio at which a hot shard event closes'],
+        exclusionsReadable: true,
+      });
     });
 
     it('says the exclusions cannot be read when one of them does not validate', () => {

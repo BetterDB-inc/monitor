@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { DEFAULT_PLACEMENT_SETTINGS, type PlacementSettings } from '@betterdb/shared';
+import {
+  DEFAULT_PLACEMENT_SETTINGS,
+  type PlacementPolicySaved,
+  type PlacementSettings,
+} from '@betterdb/shared';
 
 const { canMutate } = vi.hoisted(() => ({ canMutate: vi.fn(() => true) }));
 vi.mock('../../hooks/useCanMutate', () => ({ useCanMutate: canMutate }));
@@ -30,6 +34,13 @@ function open(save = vi.fn(), onOpenChange = vi.fn()) {
   );
   return { save, onOpenChange };
 }
+
+const saved = (policyVersion: number, exclusionsExpandProblem: string | null = null) =>
+  ({
+    policyVersion,
+    exclusionsExpanded: exclusionsExpandProblem === null,
+    exclusionsExpandProblem,
+  }) as unknown as PlacementPolicySaved;
 
 const field = (name: string) => screen.getByLabelText(name) as HTMLInputElement;
 
@@ -61,7 +72,7 @@ describe('PlacementPolicyDrawer', () => {
   });
 
   it('saves the edited policy at the version it was opened with and closes', async () => {
-    const { save, onOpenChange } = open(vi.fn().mockResolvedValue(undefined));
+    const { save, onOpenChange } = open(vi.fn().mockResolvedValue(saved(5)));
     fireEvent.change(field('Trigger ratio'), { target: { value: '2.5' } });
     fireEvent.change(field('Excluded slots'), { target: { value: '7-8' } });
     fireEvent.click(screen.getByRole('switch', { name: 'Roll back worse moves' }));
@@ -74,6 +85,24 @@ describe('PlacementPolicyDrawer', () => {
       ),
     );
     await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+  });
+
+  it('stays open and says the shard nodes were not added when the cluster did not answer', async () => {
+    const save = vi
+      .fn()
+      .mockResolvedValueOnce(saved(5, 'CLUSTER NODES did not answer within 2 s'))
+      .mockResolvedValueOnce(saved(6));
+    const { onOpenChange } = open(save);
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      "Saved, but the shard's other nodes were not added: CLUSTER NODES did not answer within 2 s.",
+    );
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+    expect(save).toHaveBeenLastCalledWith(stored, 5);
   });
 
   it('shows the errors the server gives and stays open', async () => {

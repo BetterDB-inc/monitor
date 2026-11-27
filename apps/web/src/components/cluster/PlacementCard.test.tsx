@@ -217,9 +217,11 @@ describe('PlacementCard', () => {
   });
 
   it('saves the policy from the drawer at the version it read', async () => {
-    setPolicy.mockResolvedValue(
-      status({ settings: { ...DEFAULT_PLACEMENT_SETTINGS, triggerRatio: 3 }, policyVersion: 4 }),
-    );
+    setPolicy.mockResolvedValue({
+      ...status({ settings: { ...DEFAULT_PLACEMENT_SETTINGS, triggerRatio: 3 }, policyVersion: 4 }),
+      exclusionsExpanded: true,
+      exclusionsExpandProblem: null,
+    });
     const client = await show(status());
 
     fireEvent.click(within(await card()).getByRole('button', { name: 'Edit policy' }));

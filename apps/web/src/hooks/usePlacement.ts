@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Feature,
   type PlacementMode,
+  type PlacementPolicySaved,
   type PlacementSettings,
   type PlacementStatus,
 } from '@betterdb/shared';
@@ -39,7 +40,7 @@ export function usePlacement(connectionId: string | undefined, enabled = true) {
   });
 
   const { mutateAsync: savePolicyAt, reset: resetPolicy } = useMutation<
-    PlacementStatus,
+    PlacementPolicySaved,
     Error,
     { settings: PlacementSettings; version: number }
   >({
@@ -47,7 +48,7 @@ export function usePlacement(connectionId: string | undefined, enabled = true) {
       placementApi.setPolicy(connectionId as string, settings, version),
     onSuccess: async (status) => {
       await queryClient.cancelQueries({ queryKey: placementQueryKey(connectionId) });
-      queryClient.setQueryData(placementQueryKey(connectionId), status);
+      queryClient.setQueryData<PlacementStatus>(placementQueryKey(connectionId), status);
       await queryClient.invalidateQueries({ queryKey: ['open-hot-shards', connectionId] });
     },
   });

@@ -7,3 +7,7 @@ export function clusterNodeState(flags: readonly string[]): ClusterNodeState {
   if (flags.some((flag) => SUSPECT_FLAGS.includes(flag))) return 'suspect';
   return 'healthy';
 }
+
+export function primaryIdOf(node: { id: string; master: string }): string {
+  return node.master && node.master !== '-' ? node.master : node.id;
+}

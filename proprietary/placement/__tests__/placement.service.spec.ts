@@ -151,7 +151,7 @@ describe('PlacementService', () => {
   it('reads the sustained trigger of each shard from the samples it was handed', async () => {
     const { service, feed } = await setup();
     const now = Date.now();
-    await service.settingsOf('seed', { fresh: true });
+    await service.settingsOf('seed');
     feed('seed', now - 30 * 60_000, now);
 
     const shards = (await service.getStatus('seed')).balance?.shards;
@@ -168,7 +168,7 @@ describe('PlacementService', () => {
   it('shows a shard as warming up while its load history is short', async () => {
     const { service, feed } = await setup();
     const now = Date.now();
-    await service.settingsOf('seed', { fresh: true });
+    await service.settingsOf('seed');
     feed('seed', now - 60_000, now);
 
     const row = (await service.getStatus('seed')).balance?.shards[0];
@@ -221,7 +221,7 @@ describe('PlacementService', () => {
   it('reads a trigger whose samples stopped longer ago than the staleness bound as short', async () => {
     const { service, feed } = await setup();
     const start = Date.now() - 40 * 60_000;
-    await service.settingsOf('seed', { fresh: true });
+    await service.settingsOf('seed');
     feed('seed', start, start + 30 * 60_000);
 
     expect(service.triggerOf('seed', 'a', start + 30 * 60_000 + 90_000)?.state).toBe('over');
@@ -236,7 +236,7 @@ describe('PlacementService', () => {
     const { service, listeners, feed } = await setup();
     const start = Date.now() - 30 * 60_000;
     const end = start + 30 * 60_000;
-    await service.settingsOf('seed', { fresh: true });
+    await service.settingsOf('seed');
     feed('seed', start, end);
     expect(service.triggerOf('seed', 'a', end)?.state).toBe('over');
 
@@ -247,7 +247,7 @@ describe('PlacementService', () => {
     });
 
     feed('seed', start, end);
-    await service.setSettings('seed', { ...DEFAULT_PLACEMENT_SETTINGS, resolveRatio: 1.5 }, 0);
+    await service.setSettings('seed', { ...DEFAULT_PLACEMENT_SETTINGS, resolveRatio: 1.4 }, 0);
     expect(service.triggerOf('seed', 'a', end)?.state).toBe('over');
     await service.setSettings('seed', { ...DEFAULT_PLACEMENT_SETTINGS, triggerRatio: 2.5 }, 1);
     expect(service.triggerOf('seed', 'a', end)).toMatchObject({
@@ -278,7 +278,7 @@ describe('PlacementService', () => {
     jest
       .spyOn(storage, 'getPlacementPolicy')
       .mockImplementationOnce(() => new Promise((done) => (finish = done)));
-    const slow = service.settingsOf('seed', { fresh: true });
+    const slow = service.settingsOf('seed');
     await service.setSettings('seed', { ...DEFAULT_PLACEMENT_SETTINGS, sustainMinutes: 45 }, 0);
     finish(before);
     await slow;
@@ -370,6 +370,7 @@ describe('PlacementService', () => {
         0,
       );
       expect(status.settings.excludedShardIds).toEqual(['c', 'gone', 'c-replica']);
+      expect(status).toMatchObject({ exclusionsExpanded: true, exclusionsExpandProblem: null });
       expect((await storage.getPlacementPolicy('seed'))?.settings.excludedShardIds).toEqual([
         'c',
         'gone',
@@ -385,8 +386,53 @@ describe('PlacementService', () => {
           throw new Error('connection lost');
         },
       } as never);
-      await service.setSettings('seed', tighter, 0);
-      expect((await storage.getPlacementPolicy('seed'))?.settings.excludedShardIds).toEqual(['c']);
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      try {
+        const status = await service.setSettings('seed', tighter, 0);
+        expect((await storage.getPlacementPolicy('seed'))?.settings.excludedShardIds).toEqual([
+          'c',
+        ]);
+        expect(status).toMatchObject({
+          policyVersion: 1,
+          exclusionsExpanded: false,
+          exclusionsExpandProblem: 'connection lost',
+        });
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('were not added (connection lost)'));
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('saves the excluded shards as typed and says so when CLUSTER NODES takes over 2 s', async () => {
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      try {
+        const { service, storage, registry } = await setup();
+        registry.get.mockReturnValue({
+          getCapabilities: () => ({ clusterEnabled: true, hasClusterSlotStats: true }),
+          getClusterNodes: () => new Promise(() => undefined),
+        } as never);
+        const saving = service.setSettings('seed', tighter, 0);
+        await jest.advanceTimersByTimeAsync(2_000);
+        expect(await saving).toMatchObject({
+          exclusionsExpanded: false,
+          exclusionsExpandProblem: 'CLUSTER NODES did not answer within 2 s',
+        });
+        expect((await storage.getPlacementPolicy('seed'))?.settings.excludedShardIds).toEqual([
+          'c',
+        ]);
+        expect(warn).toHaveBeenCalledTimes(1);
+      } finally {
+        warn.mockRestore();
+        jest.useRealTimers();
+      }
+    });
+
+    it('says nothing was left out when no shard is excluded', async () => {
+      const { service } = await setup();
+      expect(
+        await service.setSettings('seed', { ...tighter, excludedShardIds: [] }, 0),
+      ).toMatchObject({ exclusionsExpanded: true, exclusionsExpandProblem: null });
     });
 
     it('stores the mode a connection runs in when its first policy is saved', async () => {
@@ -460,14 +506,14 @@ describe('PlacementService', () => {
 
       await service.setSettings(
         'seed',
-        { ...tighter, nodeCpuLimitUsecPerSecond: 600_000, resolveRatio: 1.5 },
+        { ...tighter, nodeCpuLimitUsecPerSecond: 600_000, resolveRatio: 1.4 },
         0,
       );
 
       expect(await resolve('seed')).toEqual({
         ...DEFAULT_REBALANCE_POLICY,
         nodeCpuLimitUsecPerSecond: 600_000,
-        resolveRatio: 1.5,
+        resolveRatio: 1.4,
         excludedShardIds: ['c'],
         excludedSlots: [7],
       });
@@ -534,14 +580,14 @@ describe('PlacementService', () => {
       jest
         .spyOn(storage, 'getPlacementPolicy')
         .mockImplementationOnce(() => new Promise((done) => (finish = done)));
-      const slow = service.settingsOf('seed', { fresh: true });
+      const slow = service.getStatus('seed');
       await service.setSettings('seed', tighter, 0);
       finish(before);
-      expect((await slow).version).toBe(0);
+      expect((await slow).policyVersion).toBe(0);
       expect((await resolve('seed')).excludedSlots).toEqual([7]);
     });
 
-    it('reads the settings with their version, and fresh past the half-minute cache', async () => {
+    it('reads the settings with their version from the half-minute cache', async () => {
       const { service, storage } = await setup();
       expect(await service.settingsOf('seed')).toEqual({
         settings: DEFAULT_PLACEMENT_SETTINGS,
@@ -554,12 +600,12 @@ describe('PlacementService', () => {
       );
 
       expect((await service.settingsOf('seed')).version).toBe(0);
-      expect(await service.settingsOf('seed', { fresh: true })).toEqual({
+      expect((await service.getStatus('seed')).policyVersion).toBe(1);
+      expect(await service.settingsOf('seed')).toEqual({
         settings: tighter,
         version: 1,
         invalid: null,
       });
-      expect((await service.settingsOf('seed')).version).toBe(1);
     });
 
     it('maps the settings the planner uses over the planner defaults', () => {
