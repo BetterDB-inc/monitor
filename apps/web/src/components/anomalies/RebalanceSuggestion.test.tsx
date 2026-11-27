@@ -435,12 +435,93 @@ describe('RebalanceSuggestion', () => {
       await show([hotShard(runnable())]);
       fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
       const dialog = await screen.findByRole('dialog');
+      getHotShards.mockResolvedValue([
+        hotShard(
+          plan({
+            execution: { available: false, blockedBy: 'gate' },
+            gate: { allowed: false, blockers: [fork], warnings: [] },
+          }),
+        ),
+      ]);
 
       fireEvent.click(within(dialog).getByRole('button', { name: 'Start the migration' }));
 
       expect(await within(dialog).findByRole('alert')).toHaveTextContent(
         `Waits for: ${fork.detail}`,
       );
+    });
+
+    it('calls a gate refusal the last start once a fresh verdict allows the plan', async () => {
+      runRebalance.mockRejectedValue(
+        new ApiError('Forbidden', 403, { blockedBy: 'gate', blockers: [fork] }),
+      );
+      await show([hotShard(runnable())]);
+      fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Start the migration' }));
+
+      const alert = await within(dialog).findByRole('alert');
+      expect(alert).toHaveTextContent(
+        `The last start waited for: ${fork.detail} The safety checks allow it now.`,
+      );
+      expect(alert).not.toHaveTextContent(/^Waits for/);
+      expect(within(dialog).getByRole('button', { name: 'Start the migration' })).toBeEnabled();
+    });
+
+    it('shows the latest gate warnings while the moves still match', async () => {
+      const client = await show([hotShard(runnable())]);
+      fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+      expect(within(dialog).queryByRole('list', { name: 'Placement warnings' })).toBeNull();
+
+      getHotShards.mockResolvedValue([
+        hotShard(
+          plan({
+            execution: { available: true },
+            gate: { allowed: true, blockers: [], warnings: [coverage] },
+          }),
+        ),
+      ]);
+      await act(async () => {
+        await client.invalidateQueries();
+      });
+
+      expect(
+        await within(dialog).findByRole('list', { name: 'Placement warnings' }),
+      ).toHaveTextContent(coverage.detail);
+    });
+
+    it('keeps the gate warnings of the plan the dialog shows once the plan is replaced', async () => {
+      const elsewhere = { ...coverage, detail: 'The monitor does not connect to 10.0.0.9:6379.' };
+      const client = await show([
+        hotShard(
+          plan({
+            execution: { available: true },
+            gate: { allowed: true, blockers: [], warnings: [coverage] },
+          }),
+        ),
+      ]);
+      fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+
+      getHotShards.mockResolvedValue([
+        hotShard(
+          plan({
+            execution: { available: true },
+            moves: [{ ...plan().moves[0], ranges: [[5000, 6000]] }],
+            gate: { allowed: true, blockers: [], warnings: [elsewhere] },
+          }),
+        ),
+      ]);
+      await act(async () => {
+        await client.invalidateQueries();
+      });
+
+      await within(dialog).findByRole('button', { name: 'Review the new plan' });
+      const warnings = within(dialog).getByRole('list', { name: 'Placement warnings' });
+      expect(warnings).toHaveTextContent(coverage.detail);
+      expect(warnings).not.toHaveTextContent(elsewhere.detail);
     });
 
     it('says a running migration holds the plan back', async () => {
