@@ -534,6 +534,30 @@ describe('PlacementCard', () => {
     expect(outdated).not.toHaveTextContent('Would run now.');
   });
 
+  it('names a running slot migration once when the run and the gate both wait for it', async () => {
+    const migrating = {
+      kind: 'migration_running' as const,
+      scope: 'cluster' as const,
+      detail: 'A slot migration is running.',
+    };
+    await show(
+      status({
+        recommendations: [
+          {
+            sourceShardId: 'a1',
+            targetShardIds: ['b2'],
+            gate: { allowed: false, blockers: [migrating], warnings: [] },
+            execution: { available: false, blockedBy: 'migration_running' },
+          },
+        ],
+      }),
+    );
+
+    const moves = within(await card()).getByRole('list', { name: 'Suggested slot moves' });
+    expect(moves.textContent?.match(/A slot migration is running/g)).toHaveLength(1);
+    expect(moves).not.toHaveTextContent('Waits for:');
+  });
+
   it('says when no load has been sampled yet', async () => {
     await show(status({ balance: null }));
 

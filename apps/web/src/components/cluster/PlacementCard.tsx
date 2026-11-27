@@ -240,38 +240,42 @@ function Recommendations({ status }: { status: PlacementStatus }) {
     status.balance?.shards.find((shard) => shard.shardId === shardId)?.address ?? shardId;
   return (
     <ul aria-label="Suggested slot moves" className="space-y-2">
-      {status.recommendations.map((recommendation) => (
-        <li key={recommendation.sourceShardId} className="space-y-1">
-          <p>
-            {`Move slots from ${address(recommendation.sourceShardId)} to ${recommendation.targetShardIds.map(address).join(', ')}.`}
-          </p>
-          {!recommendation.execution.available && (
-            <p className="text-muted-foreground">
-              {REBALANCE_BLOCKED[recommendation.execution.blockedBy as RebalanceExecutionBlocker] ??
-                'Cannot run from this monitor.'}
+      {status.recommendations.map((recommendation) => {
+        const { execution, gate } = recommendation;
+        const waitsFor = execution.available
+          ? gate.blockers
+          : gate.blockers.filter((blocker) => blocker.kind !== execution.blockedBy);
+        return (
+          <li key={recommendation.sourceShardId} className="space-y-1">
+            <p>
+              {`Move slots from ${address(recommendation.sourceShardId)} to ${recommendation.targetShardIds.map(address).join(', ')}.`}
             </p>
-          )}
-          {recommendation.gate.allowed ? (
-            recommendation.execution.available && (
-              <p className="text-muted-foreground">Would run now.</p>
-            )
-          ) : (
-            <>
-              <p className="text-muted-foreground">Waits for:</p>
-              <BlockerList
-                label="Placement blockers"
-                items={recommendation.gate.blockers}
-                className="text-muted-foreground"
-              />
-            </>
-          )}
-          <BlockerList
-            label="Placement warnings"
-            items={recommendation.gate.warnings}
-            className="text-yellow-600 dark:text-yellow-500"
-          />
-        </li>
-      ))}
+            {!execution.available && (
+              <p className="text-muted-foreground">
+                {REBALANCE_BLOCKED[execution.blockedBy as RebalanceExecutionBlocker] ??
+                  'Cannot run from this monitor.'}
+              </p>
+            )}
+            {gate.allowed
+              ? execution.available && <p className="text-muted-foreground">Would run now.</p>
+              : waitsFor.length > 0 && (
+                  <>
+                    <p className="text-muted-foreground">Waits for:</p>
+                    <BlockerList
+                      label="Placement blockers"
+                      items={waitsFor}
+                      className="text-muted-foreground"
+                    />
+                  </>
+                )}
+            <BlockerList
+              label="Placement warnings"
+              items={gate.warnings}
+              className="text-yellow-600 dark:text-yellow-500"
+            />
+          </li>
+        );
+      })}
     </ul>
   );
 }
