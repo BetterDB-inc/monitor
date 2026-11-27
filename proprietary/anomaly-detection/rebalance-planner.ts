@@ -1,4 +1,4 @@
-import type { ClusterNodeState } from '@betterdb/shared';
+import type { ClusterNodeState, PlacementGateResult } from '@betterdb/shared';
 import type { SlotLoadRate } from '@app/cluster/shard-load';
 import { median } from '../latency-regression/regression-detector';
 import { hotShardRatio } from './hot-shard-detector';
@@ -131,7 +131,8 @@ export type RebalanceExecutionBlocker =
   | 'migration_running'
   | 'plan_outdated'
   | 'server_refused'
-  | 'observe_mode';
+  | 'observe_mode'
+  | 'gate';
 
 export interface RebalanceExecution {
   available: boolean;
@@ -153,6 +154,7 @@ export interface RebalancePlan {
   support?: RebalanceSupport;
   commands?: RebalanceCommand[];
   execution?: RebalanceExecution;
+  gate?: PlacementGateResult;
 }
 
 export interface RebalanceNoPlan {

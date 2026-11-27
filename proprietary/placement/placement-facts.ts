@@ -1,0 +1,209 @@
+import {
+  PLACEMENT_EPOCH_WINDOW_MS,
+  type PlacementGateFacts,
+  type PlacementGateIncident,
+  type PlacementGateNode,
+  type PlacementGateSignal,
+} from './placement-gate';
+
+export const PLACEMENT_GATE_EVENT_TYPES: readonly string[] = [
+  'cluster_state',
+  'topology_divergence',
+  'slot_migration_stuck',
+  'orphaned_slot_keys',
+  'ghost_membership',
+  'failover_churn',
+  'replication_role',
+  'lagging_promotion',
+  'persistence_child',
+  'fork_memory_risk',
+  'command_p99',
+  'replication_divergence',
+];
+
+export interface PlacementNodeRead {
+  id: string;
+  address: string;
+  role: 'master' | 'replica';
+  state: PlacementGateNode['state'];
+  shardId: string;
+  collected: boolean;
+  configEpoch: number;
+}
+
+export interface PlacementNodeFacts {
+  nodes: PlacementNodeRead[];
+  clusterStateOk: boolean | null;
+  migrations: PlacementGateFacts['migrations'];
+  persistence: PlacementGateFacts['persistence'];
+  replication: PlacementGateFacts['replication'];
+  pingP50Ms: PlacementGateFacts['pingP50Ms'];
+}
+
+export interface PlacementFactsPort {
+  placementOpenEvents(connectionId: string): Promise<PlacementGateSignal[]>;
+  placementIncidents(connectionId: string): Promise<PlacementGateIncident[]>;
+  readPlacementNodeFacts(connectionId: string, shardIds: string[]): Promise<PlacementNodeFacts>;
+}
+
+export type PlacementFactsContext = Pick<
+  PlacementGateFacts,
+  | 'budget'
+  | 'paused'
+  | 'supported'
+  | 'sourceShardId'
+  | 'targetShardIds'
+  | 'sourceTriggerFiredAt'
+  | 'quarantinedShardIds'
+  | 'cooldownLeftSlots'
+>;
+
+interface EpochSeen {
+  epoch: number;
+  since: number;
+  changedAt: number | null;
+}
+
+export class PlacementEpochs {
+  private readonly seen = new Map<string, Map<string, EpochSeen>>();
+
+  observe(
+    seedId: string,
+    nodes: readonly PlacementNodeRead[],
+    now: number,
+  ): Map<string, boolean | null> {
+    const known = this.seen.get(seedId) ?? new Map<string, EpochSeen>();
+    const next = new Map<string, EpochSeen>();
+    const changed = new Map<string, boolean | null>();
+    for (const node of nodes) {
+      const before = known.get(node.id);
+      const entry: EpochSeen = !before
+        ? { epoch: node.configEpoch, since: now, changedAt: null }
+        : node.configEpoch > before.epoch
+          ? { epoch: node.configEpoch, since: before.since, changedAt: now }
+          : before;
+      next.set(node.id, entry);
+      if (entry.changedAt !== null && now - entry.changedAt < PLACEMENT_EPOCH_WINDOW_MS) {
+        changed.set(node.id, true);
+      } else {
+        changed.set(node.id, now - entry.since >= PLACEMENT_EPOCH_WINDOW_MS ? false : null);
+      }
+    }
+    this.seen.set(seedId, next);
+    return changed;
+  }
+
+  seeds(): string[] {
+    return [...this.seen.keys()];
+  }
+
+  forget(seedId: string): void {
+    this.seen.delete(seedId);
+  }
+}
+
+export const PLACEMENT_PINGS = 10;
+export const PLACEMENT_REPLICA_LAG_S = 1;
+
+export async function pingP50(client: { ping(): Promise<unknown> }): Promise<number> {
+  const times: number[] = [];
+  for (let count = 0; count < PLACEMENT_PINGS; count++) {
+    const started = performance.now();
+    await client.ping();
+    times.push(performance.now() - started);
+  }
+  times.sort((a, b) => a - b);
+  const middle = times.length / 2;
+  return (times[Math.floor(middle - 0.5)] + times[Math.ceil(middle - 0.5)]) / 2;
+}
+
+export function forkOf(
+  persistence: Record<string, string> | undefined,
+): { forkRunning: boolean } | null {
+  if (!persistence || persistence.rdb_bgsave_in_progress === undefined) return null;
+  return {
+    forkRunning:
+      persistence.rdb_bgsave_in_progress === '1' || persistence.aof_rewrite_in_progress === '1',
+  };
+}
+
+export function replicasInSyncOf(
+  replication: Record<string, string> | undefined,
+): { replicasInSync: boolean } | null {
+  const count = Number(replication?.connected_slaves);
+  if (!replication || !Number.isInteger(count)) return null;
+  const replicas = Object.entries(replication)
+    .filter(([key]) => /^slave\d+$/.test(key))
+    .map(([, value]) => Object.fromEntries(value.split(',').map((pair) => pair.split('='))));
+  const inSync = replicas.every(
+    (replica) => replica.state === 'online' && Number(replica.lag) <= PLACEMENT_REPLICA_LAG_S,
+  );
+  return { replicasInSync: replicas.length === count && inSync };
+}
+
+function withNodeIds(
+  signals: readonly PlacementGateSignal[],
+  nodes: readonly PlacementNodeRead[],
+): PlacementGateSignal[] {
+  const byAddress = new Map(nodes.map((node) => [node.address, node.id]));
+  return signals.map((signal) =>
+    signal.nodeId === null && signal.address
+      ? { ...signal, nodeId: byAddress.get(signal.address) ?? null }
+      : signal,
+  );
+}
+
+async function attempt<T>(
+  read: () => Promise<T>,
+  name: string,
+  unreadable: string[],
+): Promise<T | null> {
+  try {
+    return await read();
+  } catch {
+    unreadable.push(name);
+    return null;
+  }
+}
+
+export async function readPlacementGateFacts(
+  port: PlacementFactsPort,
+  epochs: PlacementEpochs,
+  seedId: string,
+  context: PlacementFactsContext,
+  now: number,
+): Promise<PlacementGateFacts> {
+  const unreadable: string[] = [];
+  const shardIds = [context.sourceShardId, ...context.targetShardIds];
+  const [openEvents, incidents, nodeFacts] = await Promise.all([
+    attempt(() => port.placementOpenEvents(seedId), 'the open events', unreadable),
+    attempt(() => port.placementIncidents(seedId), 'the open incidents', unreadable),
+    attempt(() => port.readPlacementNodeFacts(seedId, shardIds), 'the cluster nodes', unreadable),
+  ]);
+  const reads = nodeFacts?.nodes ?? [];
+  const changed = epochs.observe(seedId, reads, now);
+  const nodes: PlacementGateNode[] = reads.map((node) => ({
+    id: node.id,
+    address: node.address,
+    role: node.role,
+    state: node.state,
+    shardId: node.shardId,
+    collected: node.collected,
+    epochChanged: changed.get(node.id) ?? null,
+  }));
+  return {
+    ...context,
+    nodes,
+    clusterStateOk: nodeFacts ? nodeFacts.clusterStateOk : null,
+    migrations: nodeFacts ? nodeFacts.migrations : 'unknown',
+    openEvents: withNodeIds(openEvents ?? [], reads),
+    incidents: (incidents ?? []).map((incident) => ({
+      ...incident,
+      signals: withNodeIds(incident.signals, reads),
+    })),
+    persistence: nodeFacts?.persistence ?? {},
+    replication: nodeFacts?.replication ?? {},
+    pingP50Ms: nodeFacts?.pingP50Ms ?? {},
+    unreadable,
+  };
+}

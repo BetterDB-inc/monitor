@@ -14,6 +14,14 @@ import {
   runB8Case,
 } from '../src/scenarios';
 import { runPeaks } from '../src/sustain';
+import {
+  GATE_FIRED_AT,
+  GATE_PLACES,
+  NODE_BLOCKER_CASES,
+  type GateWorld,
+  judgeGate,
+  quietWorld,
+} from '../src/gate';
 import { simulate } from '../src/simulate';
 
 const everyScenario = runAll();
@@ -156,3 +164,40 @@ test('a poll gap in a short peak does not fire the trigger, and heavy bursts do'
   assert.deepEqual(runPeaks({ ...spike, days: 1 }).firesByDay, [0]);
   assert.deepEqual(runPeaks({ ...bursts, days: 1 }).firesByDay, [1]);
 });
+
+test('a blocker on a node outside the plan never holds it back, and on the plan it does', async () => {
+  const [failover] = NODE_BLOCKER_CASES;
+  const outside = await judgeGate(
+    worldWith((world) => failover.raise(world, GATE_PLACES['unrelated primary'])),
+  );
+  assert.equal(outside.allowed, true);
+  const onTarget = await judgeGate(
+    worldWith((world) => failover.raise(world, GATE_PLACES['target replica'])),
+  );
+  assert.deepEqual(
+    onTarget.blockers.map((each) => [each.kind, each.scope, each.nodeId]),
+    [['failover', 'target', 't2']],
+  );
+});
+
+test('the hot shard command_p99 holds the move back only when it opened before the trigger fired', async () => {
+  const p99 = (openedAt: number) =>
+    judgeGate(
+      worldWith((world) =>
+        world.events.push({ metricType: 'command_p99', nodeId: 's1', openedAt }),
+      ),
+    );
+  assert.equal((await p99(GATE_FIRED_AT)).allowed, true);
+  assert.equal((await p99(GATE_FIRED_AT - 1)).allowed, false);
+});
+
+test('every B4 scenario is in the run', async () => {
+  const variants = (await everyScenario).filter((scenario) => scenario.id === 'B4').length;
+  assert.equal(variants, NODE_BLOCKER_CASES.length + 4);
+});
+
+function worldWith(change: (world: GateWorld) => void): GateWorld {
+  const world = quietWorld();
+  change(world);
+  return world;
+}

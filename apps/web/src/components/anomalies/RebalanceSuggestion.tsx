@@ -1,7 +1,12 @@
 import { useState } from 'react';
 import { Check, Copy } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
-import { displayKeyName, type PlacementMode } from '@betterdb/shared';
+import {
+  displayKeyName,
+  type PlacementBlocker,
+  type PlacementGateResult,
+  type PlacementMode,
+} from '@betterdb/shared';
 import { ApiError } from '../../api/client';
 import { metricsApi } from '../../api/metrics';
 import { useCanMutate } from '../../hooks/useCanMutate';
@@ -280,14 +285,49 @@ const REFUSED: Record<RebalanceRecheckFailure | 'plan_changed' | 'no_plan', stri
 
 function refusal(err: unknown): string {
   if (!(err instanceof ApiError)) return err instanceof Error ? err.message : String(err);
-  const payload = (err.payload ?? {}) as { reason?: string; blockedBy?: string; message?: string };
+  const payload = (err.payload ?? {}) as {
+    reason?: string;
+    blockedBy?: string;
+    message?: string;
+    blockers?: PlacementBlocker[];
+  };
   const reason = payload.reason as keyof typeof REFUSED | undefined;
   const blockedBy = payload.blockedBy as RebalanceExecutionBlocker | undefined;
+  if (blockedBy === 'gate' && payload.blockers?.length) {
+    return `Waits for: ${payload.blockers.map((blocker) => blocker.detail).join(' ')}`;
+  }
   return (
     (reason && REFUSED[reason]) ||
     (blockedBy && REBALANCE_BLOCKED[blockedBy]) ||
     payload.message ||
     err.message
+  );
+}
+
+function GateWarnings({ gate }: { gate: PlacementGateResult | undefined }) {
+  if (!gate || gate.warnings.length === 0) return null;
+  return (
+    <ul
+      aria-label="Placement warnings"
+      className="list-disc pl-5 text-yellow-600 dark:text-yellow-500"
+    >
+      {gate.warnings.map((warning) => (
+        <li key={`${warning.kind} ${warning.scope} ${warning.nodeId ?? ''}`}>{warning.detail}</li>
+      ))}
+    </ul>
+  );
+}
+
+function WaitsFor({ gate }: { gate: PlacementGateResult }) {
+  return (
+    <div className="space-y-1">
+      <p className="text-muted-foreground">Waits for:</p>
+      <ul aria-label="Placement blockers" className="list-disc pl-5 text-muted-foreground">
+        {gate.blockers.map((blocker) => (
+          <li key={`${blocker.kind} ${blocker.scope} ${blocker.nodeId ?? ''}`}>{blocker.detail}</li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
@@ -297,12 +337,24 @@ function RunPlan({ plan, onRun }: { plan: RebalancePlan; onRun: (plan: Rebalance
   if (!execution || !canMutate) return null;
   if (!execution.available) {
     if (!execution.blockedBy || plan.support !== 'valkey_atomic') return null;
+    if (execution.blockedBy === 'gate' && plan.gate?.blockers.length) {
+      return (
+        <div className="space-y-2">
+          <WaitsFor gate={plan.gate} />
+          <GateWarnings gate={plan.gate} />
+        </div>
+      );
+    }
     return <p className="text-muted-foreground">{REBALANCE_BLOCKED[execution.blockedBy]}</p>;
   }
   return (
-    <Button size="sm" onClick={() => onRun(plan)}>
-      Run this plan
-    </Button>
+    <div className="space-y-2">
+      {plan.gate?.allowed && <p className="text-muted-foreground">Would run now.</p>}
+      <GateWarnings gate={plan.gate} />
+      <Button size="sm" onClick={() => onRun(plan)}>
+        Run this plan
+      </Button>
+    </div>
   );
 }
 
@@ -334,7 +386,9 @@ function RunDialog({
     ? REFUSED.no_plan
     : changed
       ? REFUSED.plan_changed
-      : blockedBy && REBALANCE_BLOCKED[blockedBy];
+      : blockedBy === 'gate' && current?.gate?.blockers.length
+        ? `Waits for: ${current.gate.blockers.map((blocker) => blocker.detail).join(' ')}`
+        : blockedBy && REBALANCE_BLOCKED[blockedBy];
   const refresh = () =>
     Promise.all([
       queryClient.invalidateQueries({ queryKey: ['open-hot-shards', connectionId] }),

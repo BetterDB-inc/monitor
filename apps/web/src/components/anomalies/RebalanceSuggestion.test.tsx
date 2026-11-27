@@ -372,6 +372,71 @@ describe('RebalanceSuggestion', () => {
       expect(within(dialog).getByRole('button', { name: 'Start the migration' })).toBeEnabled();
     });
 
+    const fork = {
+      kind: 'fork' as const,
+      scope: 'source' as const,
+      nodeId: SOURCE,
+      detail: '10.0.0.1:6379 is saving to disk in a fork.',
+    };
+    const coverage = {
+      kind: 'coverage' as const,
+      scope: 'target' as const,
+      nodeId: TARGET,
+      detail: 'The monitor does not connect to 10.0.0.4:6379.',
+    };
+
+    it('says the plan would run now and lists the warnings of the gate', async () => {
+      await show([
+        hotShard(
+          plan({
+            execution: { available: true },
+            gate: { allowed: true, blockers: [], warnings: [coverage] },
+          }),
+        ),
+      ]);
+
+      const region = await panel();
+      expect(region).toHaveTextContent('Would run now.');
+      expect(within(region).getByRole('list', { name: 'Placement warnings' })).toHaveTextContent(
+        coverage.detail,
+      );
+      expect(within(region).getByRole('button', { name: 'Run this plan' })).toBeEnabled();
+    });
+
+    it('lists what the plan waits for while the gate blocks it', async () => {
+      await show([
+        hotShard(
+          plan({
+            execution: { available: false, blockedBy: 'gate' },
+            gate: { allowed: false, blockers: [fork], warnings: [] },
+          }),
+        ),
+      ]);
+
+      const region = await panel();
+      expect(within(region).queryByRole('button', { name: 'Run this plan' })).toBeNull();
+      expect(region).toHaveTextContent('Waits for:');
+      expect(within(region).getByRole('list', { name: 'Placement blockers' })).toHaveTextContent(
+        fork.detail,
+      );
+      expect(region).not.toHaveTextContent('Would run now.');
+    });
+
+    it('names the blockers when the server refuses the start on the gate', async () => {
+      runRebalance.mockRejectedValue(
+        new ApiError('Forbidden', 403, { blockedBy: 'gate', blockers: [fork] }),
+      );
+      await show([hotShard(runnable())]);
+      fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Start the migration' }));
+
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+        `Waits for: ${fork.detail}`,
+      );
+    });
+
     it('says a running migration holds the plan back', async () => {
       await show([hotShard(plan({ execution: { available: false, blockedBy: 'migration_running' } }))]);
 

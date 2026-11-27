@@ -4883,6 +4883,66 @@ describe('AnomalyService', () => {
             expect(execution()).toEqual({ available: true });
           });
 
+          it('reads the placement facts of the shards it is asked about', async () => {
+            const section = (bgsave: number) =>
+              `# Persistence\r\nrdb_bgsave_in_progress:${bgsave}\r\naof_rewrite_in_progress:0\r\n` +
+              `# Replication\r\nrole:master\r\nconnected_slaves:0\r\n`;
+            const { clients, discovery } = dialMemory({
+              a0000000: section(1),
+              b0000000: section(0),
+              c0000000: section(0),
+            });
+            for (const client of Object.values(clients)) {
+              (client as unknown as { ping: jest.Mock }).ping = jest.fn(async () => 'PONG');
+            }
+            (clients.b0000000 as unknown as { ping: jest.Mock }).ping = jest.fn(async () => {
+              throw new Error('ECONNRESET');
+            });
+            (discovery as any).discoverNodesIsolated = jest.fn(async () =>
+              IDS.map((id, i) => ({
+                id,
+                address: ADDRS[i],
+                role: 'master',
+                state: 'healthy',
+                flags: ['master'],
+                slots: [],
+                configEpoch: i + 1,
+              })),
+            );
+            (service as any).clusterMetrics = {
+              readSlotMigrations: jest.fn(async () => ({
+                jobViews: [],
+                finishedJobs: [],
+                failed: [],
+                complete: true,
+                migrations: [],
+              })),
+            };
+            (service as any).connectionRegistry.get.mockReturnValue({
+              getClusterInfo: jest.fn(async () => ({ cluster_state: 'fail' })),
+            });
+
+            const facts = await service.readPlacementNodeFacts('conn-a', ['a0000000', 'b0000000']);
+
+            expect(facts.nodes.map((node) => [node.id, node.shardId, node.configEpoch])).toEqual([
+              ['a0000000', 'a0000000', 1],
+              ['b0000000', 'b0000000', 2],
+              ['c0000000', 'c0000000', 3],
+            ]);
+            expect(facts).toMatchObject({
+              clusterStateOk: false,
+              migrations: 'none',
+              persistence: { a0000000: { forkRunning: true }, b0000000: { forkRunning: false } },
+              replication: {
+                a0000000: { replicasInSync: true },
+                b0000000: { replicasInSync: true },
+              },
+              pingP50Ms: { a0000000: expect.any(Number), b0000000: null },
+            });
+            expect(Object.keys(facts.pingP50Ms).sort()).toEqual(['a0000000', 'b0000000']);
+            expect(clients.c0000000.info).not.toHaveBeenCalled();
+          });
+
           it('offers no run when the plan has no Valkey 9 command', async () => {
             enable();
             spreadLoad();

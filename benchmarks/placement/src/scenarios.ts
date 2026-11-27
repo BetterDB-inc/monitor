@@ -13,6 +13,17 @@ import {
   describeHashTags,
   judgePlacementSupport,
 } from './product';
+import {
+  GATE_FIRED_AT,
+  GATE_NOW,
+  GATE_PLACES,
+  type GateWorld,
+  type NodeBlockerCase,
+  NODE_BLOCKER_CASES,
+  describeBlockers,
+  judgeGate,
+  quietWorld,
+} from './gate';
 import { simulate } from './simulate';
 import { type PeakCase, runPeaks } from './sustain';
 
@@ -453,12 +464,308 @@ export function runB3Case(entry: B3Case): ScenarioResult {
   return result('B3', entry.variant, checks);
 }
 
+const blocks = (
+  blockers: { kind: string; scope: string; nodeId?: string }[],
+  kind: string,
+  scope: string,
+  nodeId?: string,
+) =>
+  blockers.some(
+    (each) =>
+      each.kind === kind &&
+      each.scope === scope &&
+      (nodeId === undefined || each.nodeId === nodeId),
+  );
+
+const worldWith = (change: (world: GateWorld) => void): GateWorld => {
+  const world = quietWorld();
+  change(world);
+  return world;
+};
+
+export async function runB4NodeCase(entry: NodeBlockerCase): Promise<ScenarioResult> {
+  const checks: Check[] = [];
+  for (const place of entry.places) {
+    const nodeId = GATE_PLACES[place];
+    const gate = await judgeGate(worldWith((world) => entry.raise(world, nodeId)));
+    const detail = `blockers ${describeBlockers(gate.blockers)}`;
+    if (place === 'unrelated primary') {
+      checks.push(check('a node outside the plan does not block', gate.allowed, detail));
+    } else {
+      const scope = place.startsWith('source') ? 'source' : 'target';
+      checks.push(
+        check(
+          `blocks as ${entry.kind} on the ${place}`,
+          blocks(gate.blockers, entry.kind, scope, nodeId),
+          detail,
+        ),
+      );
+    }
+  }
+  const cleared = await judgeGate(quietWorld());
+  checks.push(
+    check(
+      'the plan runs once it clears',
+      cleared.allowed,
+      `blockers ${describeBlockers(cleared.blockers)}`,
+    ),
+  );
+  return result('B4', entry.variant, checks);
+}
+
+async function gateChecks(
+  cases: [
+    string,
+    (world: GateWorld) => void,
+    (gate: Awaited<ReturnType<typeof judgeGate>>) => boolean,
+    ('approve' | 'auto')?,
+  ][],
+): Promise<Check[]> {
+  const checks: Check[] = [];
+  for (const [name, change, expect, purpose] of cases) {
+    const gate = await judgeGate(worldWith(change), purpose);
+    checks.push(
+      check(
+        name,
+        expect(gate),
+        `blockers ${describeBlockers(gate.blockers)}; warnings ${describeBlockers(gate.warnings)}`,
+      ),
+    );
+  }
+  return checks;
+}
+
+export async function runB4ClusterWide(): Promise<ScenarioResult> {
+  return result(
+    'B4',
+    'cluster-wide blockers',
+    await gateChecks([
+      [
+        'a failed node outside the plan blocks',
+        (world) => world.failed.add('u2'),
+        (gate) => blocks(gate.blockers, 'unhealthy_node', 'cluster', 'u2'),
+      ],
+      [
+        'a running slot migration blocks',
+        (world) => (world.migrations = 'running'),
+        (gate) => blocks(gate.blockers, 'migration_running', 'cluster'),
+      ],
+      [
+        'a cluster state that is not ok blocks',
+        (world) => (world.clusterStateOk = false),
+        (gate) => blocks(gate.blockers, 'cluster_state', 'cluster'),
+      ],
+      [
+        'an open topology_divergence event blocks',
+        (world) =>
+          world.events.push({
+            metricType: 'topology_divergence',
+            nodeId: 'u1',
+            openedAt: GATE_NOW,
+          }),
+        (gate) => blocks(gate.blockers, 'topology_divergence', 'cluster'),
+      ],
+      [
+        'a failover event that names no node blocks',
+        (world) =>
+          world.events.push({ metricType: 'failover_churn', nodeId: null, openedAt: GATE_NOW }),
+        (gate) => blocks(gate.blockers, 'failover', 'cluster'),
+      ],
+      [
+        '4 slot jobs in the last hour use the budget up',
+        (world) => (world.jobsUsed = 4),
+        (gate) => blocks(gate.blockers, 'budget', 'cluster'),
+      ],
+      [
+        '3 slot jobs in the last hour leave room',
+        (world) => (world.jobsUsed = 3),
+        (gate) => gate.allowed,
+      ],
+    ]),
+  );
+}
+
+export async function runB4Unknown(): Promise<ScenarioResult> {
+  const unknown =
+    (scope: string, nodeId?: string) => (gate: Awaited<ReturnType<typeof judgeGate>>) =>
+      !gate.allowed && blocks(gate.blockers, 'unknown', scope, nodeId);
+  return result(
+    'B4',
+    'reads that fail',
+    await gateChecks([
+      [
+        'the open events cannot be read',
+        (world) => world.unreadable.add('placementOpenEvents'),
+        unknown('cluster'),
+      ],
+      [
+        'the incidents cannot be read',
+        (world) => world.unreadable.add('placementIncidents'),
+        unknown('cluster'),
+      ],
+      [
+        'the cluster nodes cannot be read',
+        (world) => world.unreadable.add('readPlacementNodeFacts'),
+        unknown('cluster'),
+      ],
+      [
+        'CLUSTER INFO does not answer',
+        (world) => (world.clusterStateOk = null),
+        unknown('cluster'),
+      ],
+      [
+        'the slot migration read does not answer',
+        (world) => (world.migrations = 'unknown'),
+        unknown('cluster'),
+      ],
+      [
+        'PING on the target replica times out',
+        (world) => world.pings.set('t2', null),
+        unknown('target', 't2'),
+      ],
+      [
+        'PING on an unrelated node is not read',
+        (world) => world.pings.set('u1', null),
+        (gate) => gate.allowed,
+      ],
+    ]),
+  );
+}
+
+export async function runB4NotCollected(): Promise<ScenarioResult> {
+  const off = (world: GateWorld) => world.uncollected.add('t2');
+  return result(
+    'B4',
+    'a target replica the monitor does not connect to',
+    await gateChecks([
+      [
+        'its quiet state runs with a coverage warning',
+        off,
+        (gate) => gate.allowed && blocks(gate.warnings, 'coverage', 'target', 't1'),
+      ],
+      [
+        'Auto waits for coverage',
+        off,
+        (gate) => blocks(gate.blockers, 'coverage', 'target', 't1'),
+        'auto',
+      ],
+      [
+        'an event stored for it is not trusted',
+        (world) => {
+          off(world);
+          world.events.push({ metricType: 'failover_churn', nodeId: 't2', openedAt: GATE_NOW });
+        },
+        (gate) => gate.allowed,
+      ],
+      [
+        'a raised config epoch blocks as failover',
+        (world) => {
+          off(world);
+          world.epochs.set('t2', 2);
+        },
+        (gate) => blocks(gate.blockers, 'failover', 'target', 't2'),
+      ],
+      [
+        'a replica out of sync in INFO replication of its primary blocks',
+        (world) => {
+          off(world);
+          world.outOfSync.add('t2');
+        },
+        (gate) => blocks(gate.blockers, 'replication_divergence', 'target', 't1'),
+      ],
+      [
+        'a fork on it still blocks',
+        (world) => {
+          off(world);
+          world.forks.add('t2');
+        },
+        (gate) => blocks(gate.blockers, 'fork', 'target', 't2'),
+      ],
+    ]),
+  );
+}
+
+export async function runB4SourceSymptom(): Promise<ScenarioResult> {
+  const before = GATE_FIRED_AT - 5 * 60_000;
+  const after = GATE_FIRED_AT + 5 * 60_000;
+  const p99 = (nodeId: string, openedAt: number) => (world: GateWorld) =>
+    world.events.push({ metricType: 'command_p99', nodeId, openedAt });
+  const inIncident = (nodeId: string, metricType: string, openedAt: number) => (world: GateWorld) =>
+    world.incidents.push({
+      recovery: 'active',
+      patterns: [],
+      signals: [{ metricType, nodeId, openedAt }],
+    });
+  return result(
+    'B4',
+    "the hot shard's own symptoms",
+    await gateChecks([
+      [
+        'command_p99 on the hot shard after the trigger fired does not block',
+        p99('s1', after),
+        (gate) => gate.allowed,
+      ],
+      [
+        'command_p99 on the hot shard before the trigger fired blocks',
+        p99('s1', before),
+        (gate) => blocks(gate.blockers, 'latency', 'source', 's1'),
+      ],
+      [
+        'command_p99 on the hot shard blocks while the trigger has not fired',
+        (world) => {
+          p99('s1', after)(world);
+          world.firedAt = null;
+        },
+        (gate) => blocks(gate.blockers, 'latency', 'source', 's1'),
+      ],
+      [
+        'command_p99 on the target after the trigger fired blocks',
+        p99('t1', after),
+        (gate) => blocks(gate.blockers, 'latency', 'target', 't1'),
+      ],
+      [
+        'an incident of load_saturation on the hot shard after the trigger does not block',
+        inIncident('s1', 'load_saturation', after),
+        (gate) => gate.allowed,
+      ],
+      [
+        'an incident of cpu_utilization on the hot shard before the trigger blocks',
+        inIncident('s1', 'cpu_utilization', before),
+        (gate) => blocks(gate.blockers, 'incident', 'source', 's1'),
+      ],
+      [
+        'an incident of load_saturation on the target blocks',
+        inIncident('t1', 'load_saturation', after),
+        (gate) => blocks(gate.blockers, 'incident', 'target', 't1'),
+      ],
+      [
+        'an incident entry of the hot shard itself does not block',
+        inIncident('s1', 'hot_shard', before),
+        (gate) => gate.allowed,
+      ],
+    ]),
+  );
+}
+
+export async function runB4(): Promise<ScenarioResult[]> {
+  const results: ScenarioResult[] = [];
+  for (const entry of NODE_BLOCKER_CASES) results.push(await runB4NodeCase(entry));
+  results.push(
+    await runB4ClusterWide(),
+    await runB4Unknown(),
+    await runB4NotCollected(),
+    await runB4SourceSymptom(),
+  );
+  return results;
+}
+
 export async function runAll(): Promise<ScenarioResult[]> {
   return [
     runB2(),
     await runB2HashTag(false),
     await runB2HashTag(true),
     ...B3_CASES.map(runB3Case),
+    ...(await runB4()),
     ...B8_CASES.map(runB8Case),
   ];
 }

@@ -1,4 +1,4 @@
-import { clusterNodeState, type ClusterNodeState } from '@betterdb/shared';
+import { clusterNodeState, type ClusterNodeState, type PlacementBlocker } from '@betterdb/shared';
 import type { ClusterNode } from '@app/common/types/metrics.types';
 import type { ShardLoadSample } from '@app/cluster/shard-load';
 import { median } from '../latency-regression/regression-detector';
@@ -130,7 +130,7 @@ export const isCancelPending = (run: RebalanceRun, now: number) =>
 
 export type RebalanceRunResult =
   | { status: 'started'; run: RebalanceRunView }
-  | { status: 'blocked'; blockedBy: RebalanceExecutionBlocker }
+  | { status: 'blocked'; blockedBy: RebalanceExecutionBlocker; blockers?: PlacementBlocker[] }
   | {
       status: 'changed';
       reason: 'no_plan' | 'plan_changed' | RebalanceRecheckFailure;

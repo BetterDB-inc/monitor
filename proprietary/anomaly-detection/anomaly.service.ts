@@ -150,6 +150,14 @@ import {
   type PlacementPrimaryRead,
 } from '../placement/placement-support';
 import { readPlacementPrimaryFacts } from '../placement/placement-primaries';
+import type { PlacementGateIncident, PlacementGateSignal } from '../placement/placement-gate';
+import {
+  PLACEMENT_GATE_EVENT_TYPES,
+  forkOf,
+  pingP50,
+  replicasInSyncOf,
+  type PlacementNodeFacts,
+} from '../placement/placement-facts';
 import {
   type ConfirmedMove,
   type RebalanceCancelResult,
@@ -7441,6 +7449,154 @@ export class AnomalyService
           (client) => client.call('COMMAND', 'INFO', 'CLUSTER|MIGRATESLOTS'),
         ),
     });
+  }
+
+  placementPlanOf(connectionId: string, shardId: string): RebalancePlan | null {
+    const verdict = this.hotShardRebalance
+      .get(connectionId)
+      ?.get(hotShardSignature(shardId))?.verdict;
+    return verdict?.kind === 'plan' ? verdict : null;
+  }
+
+  placementJobsSince(connectionId: string, since: number): number {
+    const runs = this.rebalanceRuns.get(connectionId)?.values() ?? [];
+    return [...runs].reduce(
+      (total, run) => total + (run.startedAt >= since ? run.jobs.length : 0),
+      0,
+    );
+  }
+
+  async placementOpenEvents(connectionId: string): Promise<PlacementGateSignal[]> {
+    const wanted = new Set(PLACEMENT_GATE_EVENT_TYPES);
+    const sources = [
+      connectionId,
+      ...this.connectionRegistry.listMembers(connectionId).map((member) => member.id),
+    ];
+    const signals: PlacementGateSignal[] = [];
+    for (const source of new Set(sources)) {
+      const observed =
+        this.connectionRegistry.getObservedNodeId(source) ??
+        this.connectionRegistry.getConfig(source)?.membership?.nodeId ??
+        null;
+      for (let offset = 0; ; offset += OPEN_EVENT_PAGE_SIZE) {
+        const open = await this.storage.getAnomalyEvents({
+          connectionId: source,
+          resolved: false,
+          limit: OPEN_EVENT_PAGE_SIZE,
+          offset,
+        });
+        for (const event of open) {
+          if (!wanted.has(event.metricType)) continue;
+          signals.push({
+            metricType: event.metricType,
+            nodeId: event.node?.nodeId ?? (event.nodeAddr ? null : observed),
+            ...(event.nodeAddr ? { address: event.nodeAddr } : {}),
+            openedAt: event.timestamp,
+          });
+        }
+        if (open.length < OPEN_EVENT_PAGE_SIZE) break;
+      }
+    }
+    return signals;
+  }
+
+  async placementIncidents(connectionId: string): Promise<PlacementGateIncident[]> {
+    const now = Date.now();
+    const incidents = await this.readIncidentTimelines(
+      connectionId,
+      now - 24 * 60 * 60_000,
+      undefined,
+      50,
+    );
+    return incidents
+      .filter((incident) => incident.recovery.status !== 'recovered')
+      .map((incident) => ({
+        recovery: incident.recovery.status,
+        patterns: [
+          ...incident.matchedPatterns,
+          ...incident.sequenceMatches.map((match) => match.pattern),
+        ],
+        signals: incident.entries
+          .filter((entry) => entry.recoveryState !== 'recovered')
+          .map((entry) => ({
+            metricType: entry.metricType,
+            nodeId: entry.node?.nodeId ?? null,
+            ...(entry.nodeAddr ? { address: entry.nodeAddr } : {}),
+            openedAt: entry.timestamp,
+          })),
+      }));
+  }
+
+  async readPlacementNodeFacts(
+    connectionId: string,
+    shardIds: string[],
+  ): Promise<PlacementNodeFacts> {
+    const discovery = this.clusterDiscovery;
+    if (!discovery || !this.dialsDataNodes(connectionId)) {
+      throw new Error('the monitor does not connect to the cluster nodes directly');
+    }
+    const timeout = AnomalyService.FANOUT_COMMAND_TIMEOUT_MS;
+    const [discovered, report, clusterInfo] = await Promise.all([
+      discovery.discoverNodesIsolated(connectionId, timeout),
+      this.clusterMetrics?.readSlotMigrations(connectionId).catch(() => null) ??
+        Promise.resolve(null),
+      withTimeout(
+        this.connectionRegistry.get(connectionId).getClusterInfo(),
+        timeout,
+        'CLUSTER INFO timed out',
+      ).catch(() => null),
+    ]);
+    const nodes = discovered.map((node) => {
+      const observer = this.connectionRegistry.findIdObservingNode(node.id);
+      return {
+        id: node.id,
+        address: node.address,
+        role: node.role,
+        state: node.state,
+        shardId: node.role === 'master' ? node.id : (node.masterId ?? node.id),
+        collected: observer !== null && !this.connectionRegistry.isOutsideCluster(observer),
+        configEpoch: node.configEpoch,
+      };
+    });
+    const wanted = new Set(shardIds);
+    const read = nodes.filter((node) => wanted.has(node.shardId));
+    const persistence: PlacementNodeFacts['persistence'] = {};
+    const replication: PlacementNodeFacts['replication'] = {};
+    const pingP50Ms: PlacementNodeFacts['pingP50Ms'] = {};
+    await Promise.all(
+      read.map(async (node) => {
+        const [info, ping] = await Promise.all([
+          this.readShard(connectionId, node.id, 'reading INFO on the node timed out', (client) =>
+            client.info('persistence', 'replication'),
+          )
+            .then(
+              (raw) => InfoParser.parse(raw) as Record<string, Record<string, string> | undefined>,
+            )
+            .catch(() => null),
+          this.readShard(connectionId, node.id, 'PING on the node timed out', (client) =>
+            pingP50(client),
+          ).catch(() => null),
+        ]);
+        pingP50Ms[node.id] = ping;
+        persistence[node.id] = info ? forkOf(info.persistence) : null;
+        if (node.role === 'master')
+          replication[node.id] = info ? replicasInSyncOf(info.replication) : null;
+      }),
+    );
+    const running =
+      this.rebalanceStarting.has(connectionId) ||
+      [...(this.rebalanceRuns.get(connectionId)?.values() ?? [])].some(
+        (run) => run.state === 'running',
+      );
+    const migration = report ? this.slotMigrationStateOf(connectionId, report) : 'unknown';
+    return {
+      nodes,
+      clusterStateOk: clusterInfo ? clusterInfo.cluster_state === 'ok' : null,
+      migrations: running ? 'running' : migration,
+      persistence,
+      replication,
+      pingP50Ms,
+    };
   }
 
   private async readShardInfo(

@@ -161,3 +161,44 @@ export interface PlacementStatus {
   policyVersion: number;
   policyInvalid: PlacementPolicyInvalid | null;
 }
+
+export type PlacementBlockerKind =
+  | 'unhealthy_node'
+  | 'migration_running'
+  | 'cluster_state'
+  | 'topology_divergence'
+  | 'slot_migration_stuck'
+  | 'orphaned_slot_keys'
+  | 'ghost_membership'
+  | 'budget'
+  | 'paused'
+  | 'unsupported'
+  | 'failover'
+  | 'fork'
+  | 'replication_divergence'
+  | 'latency'
+  | 'incident'
+  | 'excluded'
+  | 'cooldown'
+  | 'no_return'
+  | 'quarantined'
+  | 'outside_window'
+  | 'coverage'
+  | 'unknown';
+
+export type PlacementBlockerScope = 'cluster' | 'source' | 'target';
+
+export interface PlacementBlocker {
+  kind: PlacementBlockerKind;
+  scope: PlacementBlockerScope;
+  nodeId?: string;
+  detail: string;
+}
+
+export interface PlacementGateResult {
+  allowed: boolean;
+  blockers: PlacementBlocker[];
+  warnings: PlacementBlocker[];
+}
+
+export type PlacementGatePurpose = 'approve' | 'auto' | 'rollback';

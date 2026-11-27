@@ -19,8 +19,31 @@ import { DEFAULT_REBALANCE_POLICY } from '../../anomaly-detection/rebalance-plan
 import type { PlacementPrimaryRead } from '../placement-support';
 import type { ServedHotShardDetail } from '../../anomaly-detection/hot-shard-detector';
 import type { RebalanceNoPlan, RebalancePlan } from '../../anomaly-detection/rebalance-planner';
+import type { PlacementNodeFacts } from '../placement-facts';
+import type { PlacementGateSignal } from '../placement-gate';
 
 const valkey9 = { dbType: 'valkey' as const, version: '9.0.0' };
+
+function healthyNodes(): PlacementNodeFacts {
+  const ids = ['a', 'b', 'c'];
+  const each = <T>(value: T) => Object.fromEntries(ids.map((id) => [id, value]));
+  return {
+    nodes: ids.map((id) => ({
+      id,
+      address: `${id}:7000`,
+      role: 'master' as const,
+      state: 'healthy' as const,
+      shardId: id,
+      collected: true,
+      configEpoch: 1,
+    })),
+    clusterStateOk: true,
+    migrations: 'none',
+    persistence: each({ forkRunning: false }),
+    replication: each({ replicasInSync: true }),
+    pingP50Ms: each(1),
+  };
+}
 
 function primaries(): PlacementPrimaryRead[] {
   return [
@@ -76,6 +99,11 @@ async function setup(options: Setup = {}) {
     readPlacementPrimaries: jest.fn(async () => (options.primaries === undefined ? primaries() : options.primaries)),
     runRebalance: jest.fn(),
     setRebalancePolicyResolver: jest.fn(),
+    placementPlanOf: jest.fn((): RebalancePlan | null => null),
+    placementJobsSince: jest.fn(() => 0),
+    placementOpenEvents: jest.fn(async (): Promise<PlacementGateSignal[]> => []),
+    placementIncidents: jest.fn(async () => []),
+    readPlacementNodeFacts: jest.fn(async () => healthyNodes()),
   };
   const env = { BETTERDB_SLOT_MIGRATION: 'true', STORAGE_TYPE: 'sqlite', ...options.env };
   const config = { get: jest.fn((key: string) => env[key as keyof typeof env]) };
@@ -712,6 +740,42 @@ describe('PlacementService', () => {
       expect(anomaly.runRebalance).toHaveBeenCalledWith('seed', 'a', moves, actor);
     });
 
+    describe('the gate', () => {
+      const cached = { kind: 'plan', sourceShardId: 'a', moves } as unknown as RebalancePlan;
+      const failover = { metricType: 'failover_churn', nodeId: 'b', openedAt: Date.now() };
+
+      it('blocks the run while an event is open on a target node, and runs it once it closes', async () => {
+        const { service, storage, anomaly } = await setup();
+        await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+        anomaly.placementPlanOf.mockReturnValue(cached);
+        anomaly.placementOpenEvents.mockResolvedValue([failover]);
+        await expect(service.runRebalance('seed', 'a', moves, actor)).resolves.toEqual({
+          status: 'blocked',
+          blockedBy: 'gate',
+          blockers: [expect.objectContaining({ kind: 'failover', scope: 'target', nodeId: 'b' })],
+        });
+        expect(anomaly.placementPlanOf).toHaveBeenCalledWith('seed', 'a');
+        expect(anomaly.runRebalance).not.toHaveBeenCalled();
+
+        anomaly.placementOpenEvents.mockResolvedValue([]);
+        anomaly.runRebalance.mockResolvedValue({ status: 'started', run: {} });
+        await expect(service.runRebalance('seed', 'a', moves, actor)).resolves.toMatchObject({
+          status: 'started',
+        });
+        expect(anomaly.runRebalance).toHaveBeenCalledWith('seed', 'a', moves, actor);
+      });
+
+      it('counts the slot jobs of the last hour against the budget', async () => {
+        const { service, storage, anomaly } = await setup();
+        await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+        anomaly.placementPlanOf.mockReturnValue(cached);
+        anomaly.placementJobsSince.mockReturnValue(4);
+        const result = await service.runRebalance('seed', 'a', moves, actor);
+        expect(result).toMatchObject({ status: 'blocked', blockedBy: 'gate' });
+        expect(anomaly.placementJobsSince).toHaveBeenCalledWith('seed', expect.any(Number));
+      });
+    });
+
     it('records a NOPERM reply of the server as acl', async () => {
       const { service, storage, anomaly } = await setup();
       await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
@@ -939,11 +1003,43 @@ describe('PlacementService', () => {
       expect(anomaly.readPlacementPrimaries).not.toHaveBeenCalled();
     });
 
-    it('leaves plans alone in Recommend', async () => {
+    it('keeps a runnable plan runnable in Recommend and attaches the gate', async () => {
       const { service, storage } = await setup();
       await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+      const [marked] = await service.withPlacementBlocker('seed', [
+        shard(plan({ available: true })),
+      ]);
+      expect(marked.rebalance).toMatchObject({
+        execution: { available: true },
+        gate: { allowed: true, blockers: [], warnings: [] },
+      });
+    });
+
+    it('marks a plan the gate blocks as not runnable, and reuses the gate for 10 seconds', async () => {
+      const { service, storage, anomaly } = await setup();
+      await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+      anomaly.placementOpenEvents.mockResolvedValue([
+        { metricType: 'persistence_child', nodeId: 'a', openedAt: Date.now() },
+      ]);
       const shards = [shard(plan({ available: true }))];
+      const [marked] = await service.withPlacementBlocker('seed', shards);
+      expect(marked.rebalance).toMatchObject({
+        execution: { available: false, blockedBy: 'gate' },
+        gate: {
+          allowed: false,
+          blockers: [expect.objectContaining({ kind: 'fork', scope: 'source' })],
+        },
+      });
+      await service.withPlacementBlocker('seed', shards);
+      expect(anomaly.readPlacementNodeFacts).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves a plan that is not runnable for another reason without a gate', async () => {
+      const { service, storage, anomaly } = await setup();
+      await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+      const shards = [shard(plan({ available: false, blockedBy: 'flag_off' }))];
       expect(await service.withPlacementBlocker('seed', shards)).toEqual(shards);
+      expect(anomaly.readPlacementNodeFacts).not.toHaveBeenCalled();
     });
 
     it('keeps the plan, not runnable, when the client of the seed is gone', async () => {

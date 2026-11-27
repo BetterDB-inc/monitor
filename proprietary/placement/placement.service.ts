@@ -15,6 +15,8 @@ import {
   PLACEMENT_SETTABLE_MODES,
   excludedShardNodeIds,
   validatePlacementSettings,
+  type PlacementGatePurpose,
+  type PlacementGateResult,
   type PlacementMode,
   type PlacementPolicy,
   type PlacementPolicyInvalid,
@@ -38,6 +40,7 @@ import type { ServedHotShardDetail } from '../anomaly-detection/hot-shard-detect
 import {
   DEFAULT_REBALANCE_POLICY,
   type RebalanceExecution,
+  type RebalancePlan,
   type RebalancePolicy,
 } from '../anomaly-detection/rebalance-planner';
 import type {
@@ -54,10 +57,14 @@ import {
 } from './placement-support';
 import { placementBalance } from './placement-balance';
 import { PlacementTriggers } from './placement-trigger';
+import { placementGate } from './placement-gate';
+import { PlacementEpochs, readPlacementGateFacts } from './placement-facts';
 
 const SUPPORT_CACHE_MS = 30_000;
 const POLICY_CACHE_MS = 30_000;
 const SHARD_NODES_TIMEOUT_MS = 2_000;
+const GATE_CACHE_MS = 10_000;
+const BUDGET_WINDOW_MS = 60 * 60_000;
 
 export class PlacementModeError extends Error {
   constructor(
@@ -121,6 +128,11 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
   private readonly aclDenied = new Map<string, string | null>();
   private readonly triggers = new PlacementTriggers();
   private readonly policyRefreshes = new Map<string, Promise<unknown>>();
+  private readonly epochs = new PlacementEpochs();
+  private readonly gateCache = new Map<
+    string,
+    { at: number; key: string; gate: PlacementGateResult }
+  >();
   private stopListening: (() => void) | null = null;
 
   constructor(
@@ -329,6 +341,11 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
     if (!(await this.allowsRun(connectionId))) {
       return { status: 'blocked', blockedBy: 'observe_mode' };
     }
+    const plan = this.anomaly.placementPlanOf(connectionId, shardId);
+    if (plan) {
+      const gate = await this.gateFor(connectionId, plan, 'approve');
+      if (!gate.allowed) return { status: 'blocked', blockedBy: 'gate', blockers: gate.blockers };
+    }
     const result = await this.anomaly.runRebalance(connectionId, shardId, confirmed, startedBy);
     if (result.status === 'refused' && result.serverReply && isAclRefusal(result.message)) {
       const seedId = this.seedOf(connectionId);
@@ -350,13 +367,71 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
         namesAPlan(shard.rebalance) ? { ...shard, rebalance: undefined } : shard,
       );
     }
-    if (mode !== null) return shards;
+    if (mode !== null) {
+      return Promise.all(
+        shards.map(async (shard) => {
+          const plan = shard.rebalance;
+          if (plan?.kind !== 'plan' || plan.execution?.available !== true) return shard;
+          const gate = await this.cachedGate(connectionId, plan);
+          const execution: RebalanceExecution = gate.allowed
+            ? plan.execution
+            : { available: false, blockedBy: 'gate' };
+          return { ...shard, rebalance: { ...plan, execution, gate } };
+        }),
+      );
+    }
     const execution: RebalanceExecution = { available: false };
     return shards.map((shard) =>
       shard.rebalance?.kind === 'plan' && shard.rebalance.execution?.available === true
         ? { ...shard, rebalance: { ...shard.rebalance, execution } }
         : shard,
     );
+  }
+
+  async gateFor(
+    connectionId: string,
+    plan: RebalancePlan,
+    purpose: PlacementGatePurpose,
+    now = Date.now(),
+  ): Promise<PlacementGateResult> {
+    const seedId = this.seedOf(connectionId);
+    const [{ settings }, support] = await Promise.all([
+      this.settingsOf(seedId),
+      this.readOnlySupport(seedId),
+    ]);
+    const facts = await readPlacementGateFacts(
+      this.anomaly,
+      this.epochs,
+      connectionId,
+      {
+        budget: {
+          jobsUsed: this.anomaly.placementJobsSince(connectionId, now - BUDGET_WINDOW_MS),
+          bytesUsed: 0,
+        },
+        paused: false,
+        supported: support.modes[purpose === 'auto' ? 'auto' : 'recommend'].available,
+        sourceShardId: plan.sourceShardId,
+        targetShardIds: [...new Set(plan.moves.map((move) => move.targetShardId))],
+        sourceTriggerFiredAt: this.triggerOf(seedId, plan.sourceShardId, now)?.firedAt ?? null,
+        quarantinedShardIds: [],
+        cooldownLeftSlots: null,
+      },
+      now,
+    );
+    return placementGate(facts, settings, now, purpose);
+  }
+
+  private async cachedGate(
+    connectionId: string,
+    plan: RebalancePlan,
+  ): Promise<PlacementGateResult> {
+    const key = gateKeyOf(plan);
+    const cacheKey = `${connectionId}\u0000${plan.sourceShardId}`;
+    const cached = this.gateCache.get(cacheKey);
+    if (cached && cached.key === key && Date.now() - cached.at < GATE_CACHE_MS) return cached.gate;
+    const gate = await this.gateFor(connectionId, plan, 'approve');
+    this.gateCache.set(cacheKey, { at: Date.now(), key, gate });
+    return gate;
   }
 
   private seedOf(connectionId: string): string {
@@ -444,6 +519,12 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
     for (const seedId of this.triggers.seeds()) {
       if (!this.registry.getConfig(seedId)) this.triggers.forget(seedId);
     }
+    for (const connectionId of this.epochs.seeds()) {
+      if (!this.registry.getConfig(connectionId)) this.epochs.forget(connectionId);
+    }
+    for (const cacheKey of this.gateCache.keys()) {
+      if (!this.registry.getConfig(cacheKey.split('\u0000')[0])) this.gateCache.delete(cacheKey);
+    }
   }
 
   private noteTopology(seedId: string, primaries: PlacementPrimaryRead[] | null): boolean {
@@ -510,6 +591,10 @@ function namesAPlan(rebalance: ServedHotShardDetail['rebalance']): boolean {
     (rebalance.reason === 'covered_by_other_plan' ||
       rebalance.reason === 'conflicts_with_other_plan')
   );
+}
+
+function gateKeyOf(plan: RebalancePlan): string {
+  return JSON.stringify(plan.moves.map((move) => [move.targetShardId, move.ranges]));
 }
 
 function effectiveModeOf(mode: PlacementMode, support: PlacementSupport): PlacementMode {
