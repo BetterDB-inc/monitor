@@ -148,3 +148,8 @@ export interface PlacementStatus {
   policyVersion: number;
   policyInvalid: PlacementPolicyInvalid | null;
 }
+
+export interface PlacementPolicySaved extends PlacementStatus {
+  exclusionsExpanded: boolean;
+  exclusionsExpandProblem: string | null;
+}

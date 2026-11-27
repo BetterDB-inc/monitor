@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react';
-import type { PlacementSettings } from '@betterdb/shared';
+import type { PlacementPolicySaved, PlacementSettings } from '@betterdb/shared';
 import { ApiError } from '../../api/client';
 import { useCanMutate } from '../../hooks/useCanMutate';
 import { Button } from '../ui/button';
@@ -157,14 +157,15 @@ function PolicyForm({
 }: {
   settings: PlacementSettings;
   version: number;
-  onSave: (settings: PlacementSettings, version: number) => Promise<unknown>;
+  onSave: (settings: PlacementSettings, version: number) => Promise<PlacementPolicySaved>;
   onClose: () => void;
 }) {
   const canMutate = useCanMutate();
   const [form, setForm] = useState<PlacementPolicyForm>(() => formOf(settings));
-  const [openedAt] = useState(version);
+  const [openedAt, setOpenedAt] = useState(version);
   const [saving, setSaving] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
+  const [notExpanded, setNotExpanded] = useState<string | null>(null);
   const readOnly = !canMutate || saving;
 
   const invalid = (field: string) => {
@@ -201,9 +202,15 @@ function PolicyForm({
     }
     setSaving(true);
     setErrors([]);
+    setNotExpanded(null);
     try {
-      await onSave(result.settings, openedAt);
-      onClose();
+      const saved = await onSave(result.settings, openedAt);
+      if (saved.exclusionsExpanded) {
+        onClose();
+        return;
+      }
+      setOpenedAt(saved.policyVersion);
+      setNotExpanded(saved.exclusionsExpandProblem ?? 'the cluster did not answer');
     } catch (err) {
       setErrors(errorsOf(err));
     } finally {
@@ -303,6 +310,11 @@ function PolicyForm({
             onCheckedChange={(checked) => update({ autoRollback: checked })}
           />
         </div>
+        {notExpanded && (
+          <p role="status" className="text-sm text-amber-600 dark:text-amber-400">
+            {`Saved, but the shard's other nodes were not added: ${notExpanded}. A failover can move an excluded shard out of the list. Save again once the cluster answers.`}
+          </p>
+        )}
         {errors.length > 0 && (
           <ul role="alert" className="list-disc pl-5 text-sm text-destructive">
             {errors.map((error, index) => (
@@ -342,7 +354,7 @@ export function PlacementPolicyDrawer({
   onOpenChange: (open: boolean) => void;
   settings: PlacementSettings;
   version: number;
-  onSave: (settings: PlacementSettings, version: number) => Promise<unknown>;
+  onSave: (settings: PlacementSettings, version: number) => Promise<PlacementPolicySaved>;
 }) {
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
