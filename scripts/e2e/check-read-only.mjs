@@ -26,7 +26,8 @@ for (const pattern of ['requirepass', 'masterauth', '*']) {
   const values = await res.json();
   for (const name of ['requirepass', 'masterauth', 'primaryauth']) {
     const value = values[name];
-    if (value !== undefined && value !== '' && value !== '<redacted>') {
+    // Redacted values carry a fingerprint (<redacted:1a2b3c4d>) so changes still show.
+    if (value !== undefined && value !== '' && !/^<redacted(:[0-9a-f]{8})?>$/.test(value)) {
       throw new Error(`CONFIG GET ${pattern} leaked ${name} on read-only connection ${connectionId}`);
     }
   }
@@ -43,7 +44,7 @@ if (acl.status === 404) {
   const rules = await acl.json();
   const text = JSON.stringify(rules);
   if (/#[0-9a-f]{64}/i.test(text)) throw new Error(`ACL LIST leaked a password hash on read-only connection ${connectionId}`);
-  if (!/#<redacted>|nopass/.test(text)) throw new Error(`ACL LIST returned no rules to check: ${text.slice(0, 200)}`);
+  if (!/#<redacted(:[0-9a-f]{8})?>|nopass/.test(text)) throw new Error(`ACL LIST returned no rules to check: ${text.slice(0, 200)}`);
   console.log(`ACL LIST: hashes redacted (${Array.isArray(rules) ? rules.length : '?'} rules)`);
 }
 

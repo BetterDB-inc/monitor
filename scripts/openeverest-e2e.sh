@@ -250,7 +250,7 @@ log "Checking ACL LIST through the CLI redacts password hashes"
 acl_list="$(node scripts/e2e/cli-command.mjs "http://localhost:$MONITOR_PORT" "$first_id" ACL LIST)"
 printf '%s\n' "$acl_list" | cut -c1-300
 printf '%s' "$acl_list" | grep -qE '#[0-9a-f]{64}' && die "ACL LIST leaked a password hash through the CLI"
-printf '%s' "$acl_list" | grep -q '#<redacted>' || die "ACL LIST through the CLI shows no redacted hash: $acl_list"
+printf '%s' "$acl_list" | grep -qE '#<redacted:[0-9a-f]{8}>' || die "ACL LIST through the CLI shows no fingerprinted hash: $acl_list"
 
 log "Checking the settings cannot be changed through the plugin API"
 code="$(plugin settings-put | head -n1)"
