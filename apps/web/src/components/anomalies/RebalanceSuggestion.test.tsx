@@ -401,6 +401,12 @@ describe('RebalanceSuggestion', () => {
         coverage.detail,
       );
       expect(within(region).getByRole('button', { name: 'Run this plan' })).toBeEnabled();
+
+      fireEvent.click(within(region).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+      expect(within(dialog).getByRole('list', { name: 'Placement warnings' })).toHaveTextContent(
+        coverage.detail,
+      );
     });
 
     it('lists what the plan waits for while the gate blocks it', async () => {

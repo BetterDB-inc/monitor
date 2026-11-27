@@ -316,7 +316,9 @@ function GateWarnings({ gate }: { gate: PlacementGateResult | undefined }) {
       className="list-disc pl-5 text-yellow-600 dark:text-yellow-500"
     >
       {gate.warnings.map((warning) => (
-        <li key={`${warning.kind} ${warning.scope} ${warning.nodeId ?? ''}`}>{warning.detail}</li>
+        <li key={`${warning.kind} ${warning.scope} ${warning.nodeId ?? ''} ${warning.detail}`}>
+          {warning.detail}
+        </li>
       ))}
     </ul>
   );
@@ -328,7 +330,9 @@ function WaitsFor({ gate }: { gate: PlacementGateResult }) {
       <p className="text-muted-foreground">Waits for:</p>
       <ul aria-label="Placement blockers" className="list-disc pl-5 text-muted-foreground">
         {gate.blockers.map((blocker) => (
-          <li key={`${blocker.kind} ${blocker.scope} ${blocker.nodeId ?? ''}`}>{blocker.detail}</li>
+          <li key={`${blocker.kind} ${blocker.scope} ${blocker.nodeId ?? ''} ${blocker.detail}`}>
+            {blocker.detail}
+          </li>
         ))}
       </ul>
     </div>
@@ -439,6 +443,7 @@ function RunDialog({
               ))}
             </ul>
           )}
+          <GateWarnings gate={current?.gate ?? shown.gate} />
           <p className="text-muted-foreground">
             Cancel stops every slot migration on the hot shard, not only these. Slots already moved
             stay on their target.
