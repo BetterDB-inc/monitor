@@ -103,7 +103,10 @@ function Support({ status }: { status: PlacementStatus }) {
 const BAR_HEADROOM = 1.25;
 
 function clockTime(at: number): string {
-  return new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const date = new Date(at);
+  const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (date.toDateString() === new Date().toDateString()) return time;
+  return `${date.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${time}`;
 }
 
 function SustainLine({ shard }: { shard: PlacementBalance['shards'][number] }) {
