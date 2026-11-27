@@ -153,6 +153,7 @@ import {
 } from '../placement/placement-support';
 import { readPlacementPrimaryFacts } from '../placement/placement-primaries';
 import type { PlacementGateIncident, PlacementGateSignal } from '../placement/placement-gate';
+import type { PlacementIncidentsRead } from '../placement/placement-facts';
 import {
   PLACEMENT_GATE_EVENT_TYPES,
   forkOf,
@@ -821,6 +822,12 @@ const NEXT_FIRING_BUDGET_EXHAUSTED = 'lookup budget exhausted';
 const NEXT_FIRING_MIN_REMAINING_MS = 250;
 const NEXT_FIRING_MAX_OUTSTANDING = 5;
 const MAX_INCIDENT_LOOKBACK_MS = INCIDENT_LOOKBACK_MS;
+
+interface IncidentScanCut {
+  cutAt: number | null;
+}
+
+type IncidentReadMode = boolean | IncidentScanCut;
 const MAX_INCIDENT_EVENTS_PER_CONNECTION = 200;
 const RETRY_AMP_ATTRIBUTION_TIMEOUT_MS = 5_000;
 const CORRELATION_ID_CHUNK_SIZE = 500;
@@ -1017,7 +1024,10 @@ export class AnomalyService
   private rebalancePolicyWarned = new Map<string, string>();
   private rebalanceRuns = new Map<string, Map<string, RebalanceRun>>();
   private replacedRebalanceRuns = new Map<string, RebalanceRun[]>();
-  private placementIncidentSince = new Map<string, number>();
+  private placementIncidentReads = new Map<
+    string,
+    { since: number | null; historyFrom: number | null }
+  >();
   private clusterNodesObserver:
     | ((connectionId: string, nodes: readonly ClusterNode[], at: number) => void)
     | null = null;
@@ -1743,7 +1753,7 @@ export class AnomalyService
     this.rebalancePolicyWarned.delete(connectionId);
     this.rebalanceRuns.delete(connectionId);
     this.replacedRebalanceRuns.delete(connectionId);
-    this.placementIncidentSince.delete(connectionId);
+    this.placementIncidentReads.delete(connectionId);
     this.rebalanceFollowedAt.delete(connectionId);
     this.slotMigrationReadOnPoll.delete(connectionId);
     this.hotKeyNoteLogged.delete(connectionId);
@@ -7590,31 +7600,31 @@ export class AnomalyService
     return signals;
   }
 
-  async placementIncidents(connectionId: string): Promise<PlacementGateIncident[]> {
+  async placementIncidents(connectionId: string): Promise<PlacementIncidentsRead> {
     const now = Date.now();
     const hourAgo = now - 60 * 60_000;
-    const from = Math.max(
-      now - MAX_INCIDENT_LOOKBACK_MS,
-      Math.min(hourAgo, this.placementIncidentSince.get(connectionId) ?? hourAgo),
-    );
+    const monthAgo = now - MAX_INCIDENT_LOOKBACK_MS;
+    const earlier = this.placementIncidentReads.get(connectionId);
+    const scan: IncidentScanCut = { cutAt: null };
     const incidents = await this.readIncidentTimelines(
       connectionId,
-      from,
+      earlier ? Math.max(monthAgo, Math.min(hourAgo, earlier.since ?? hourAgo)) : monthAgo,
       undefined,
       Number.MAX_SAFE_INTEGER,
-      true,
+      earlier ? true : scan,
     );
     const open = incidents.filter((incident) => incident.recovery.status !== 'recovered');
     const lasting = open.filter((incident) => incident.recovery.openSignals.length > 0);
-    if (lasting.length > 0) {
-      this.placementIncidentSince.set(
-        connectionId,
-        Math.min(...lasting.map((incident) => incident.startedAt)),
-      );
-    } else {
-      this.placementIncidentSince.delete(connectionId);
-    }
-    return open.map((incident) => ({
+    const historyFrom = earlier ? earlier.historyFrom : scan.cutAt;
+    this.placementIncidentReads.set(connectionId, {
+      since: lasting.length > 0 ? Math.min(...lasting.map((incident) => incident.startedAt)) : null,
+      historyFrom,
+    });
+    return { incidents: open.map((incident) => this.placementIncidentOf(incident)), historyFrom };
+  }
+
+  private placementIncidentOf(incident: IncidentTimeline): PlacementGateIncident {
+    return {
       recovery: incident.recovery.status,
       patterns: [
         ...incident.matchedPatterns,
@@ -7630,7 +7640,7 @@ export class AnomalyService
           ...(entry.nodeAddr ? { address: entry.nodeAddr } : {}),
           openedAt: entry.timestamp,
         })),
-    }));
+    };
   }
 
   async readPlacementNodeFacts(
@@ -11764,7 +11774,7 @@ export class AnomalyService
     startTime: number | undefined,
     endTime: number | undefined,
     limit: number,
-    strict = false,
+    strict: IncidentReadMode = false,
   ): Promise<IncidentTimeline[]> {
     const now = Date.now();
     const { maxSpanMs } = DEFAULT_INCIDENT_TIMELINE_OPTIONS;
@@ -11831,7 +11841,7 @@ export class AnomalyService
     connectionId: string | undefined,
     rangeStart: number,
     rangeEnd: number | undefined,
-    strict = false,
+    strict: IncidentReadMode = false,
   ): Promise<IncidentWindow> {
     const now = Date.now();
     const reach = 2 * DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs;
@@ -11885,7 +11895,7 @@ export class AnomalyService
     events: AnomalyEvent[],
     startTime: number,
     endTime: number | undefined,
-    strict = false,
+    strict: IncidentReadMode = false,
   ): Promise<StoredIncidentBoundary[]> {
     if (!connectionId) return [];
     const scope = this.correlationScopeOf(connectionId);
@@ -12094,7 +12104,7 @@ export class AnomalyService
     connectionId: string | undefined,
     startTime: number,
     endTime: number | undefined,
-    strict = false,
+    strict: IncidentReadMode = false,
   ): Promise<StoredIncidentBoundary[]> {
     return this.readBoundariesOf(
       connectionId ? [this.correlationScopeOf(connectionId)] : undefined,
@@ -12108,7 +12118,7 @@ export class AnomalyService
     scopeIds: string[] | undefined,
     startTime: number,
     endTime: number | undefined,
-    strict = false,
+    strict: IncidentReadMode = false,
   ): Promise<StoredIncidentBoundary[]> {
     try {
       return await this.storage.getIncidentBoundaries({ scopeIds, startTime, endTime });
@@ -12123,7 +12133,7 @@ export class AnomalyService
     connectionId: string | undefined,
     loadFrom: number,
     endTime: number | undefined,
-    strict = false,
+    strict: IncidentReadMode = false,
   ): Promise<AnomalyEvent[]> {
     const scope = connectionId ? this.scopeFilter(connectionId) : undefined;
     const stored = await this.storedAnomaliesInRange(scope, loadFrom, endTime, strict);
@@ -12172,7 +12182,7 @@ export class AnomalyService
     scope: AnomalyScopeFilter | undefined,
     startTime: number,
     endTime: number | undefined,
-    strict = false,
+    strict: IncidentReadMode = false,
   ): Promise<AnomalyEvent[]> {
     const events: AnomalyEvent[] = [];
     let after: AnomalyEventCursor | undefined;
@@ -12188,8 +12198,14 @@ export class AnomalyService
       if (page.length < INCIDENT_HISTORY_PAGE_SIZE) return events;
       after = page[page.length - 1];
     }
-    if (strict) {
+    if (strict === true) {
       throw new Error(`the incident history stopped at ${events.length} events`);
+    }
+    if (strict) {
+      strict.cutAt = Math.max(
+        strict.cutAt ?? Number.NEGATIVE_INFINITY,
+        events[events.length - 1].timestamp,
+      );
     }
     this.logger.warn(
       `Incident history for ${scope?.id ?? 'all connections'} stopped at ${events.length} events`,

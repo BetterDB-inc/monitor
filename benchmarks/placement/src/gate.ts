@@ -96,7 +96,7 @@ function portOf(world: GateWorld): PlacementFactsPort {
     },
     placementIncidents: async () => {
       fail('placementIncidents');
-      return world.incidents;
+      return { incidents: world.incidents, historyFrom: null };
     },
     readPlacementNodeFacts: async (_seedId, shardIds) => {
       fail('readPlacementNodeFacts');

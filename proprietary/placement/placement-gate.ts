@@ -40,6 +40,7 @@ export interface PlacementGateFacts {
   migrations: 'none' | 'running' | 'unknown';
   openEvents: PlacementGateSignal[];
   incidents: PlacementGateIncident[];
+  incidentHistoryFrom: number | null;
   persistence: Record<string, { forkRunning: boolean } | null>;
   replication: Record<string, { replicasInSync: boolean } | null>;
   pingP50Ms: Record<string, number | null>;
@@ -100,6 +101,8 @@ const ROLLBACK_KINDS = new Set<PlacementBlockerKind>([
 
 const AUTO_ONLY = new Set<PlacementBlockerKind>(['coverage', 'outside_window', 'quarantined']);
 
+const WARNING_ONLY = new Set<PlacementBlockerKind>(['incident_history']);
+
 const DAY_MS = 24 * 60 * 60_000;
 
 export function insideMaintenanceWindow(
@@ -149,7 +152,8 @@ export function placementGate(
     if (purpose === 'rollback') {
       if (!ROLLBACK_KINDS.has(kind) || (kind === 'latency' && scope === 'source')) return;
     }
-    const list = AUTO_ONLY.has(kind) && purpose !== 'auto' ? warnings : blockers;
+    const list =
+      WARNING_ONLY.has(kind) || (AUTO_ONLY.has(kind) && purpose !== 'auto') ? warnings : blockers;
     if (!list.some((each) => sameBlocker(each, blocker))) list.push(blocker);
   };
 
@@ -206,6 +210,14 @@ export function placementGate(
     if (kind && event.nodeId === null) {
       raise(kind, 'cluster', `An open ${event.metricType} event on a node it does not name.`);
     }
+  }
+
+  if (facts.incidentHistoryFrom !== null) {
+    raise(
+      'incident_history',
+      'cluster',
+      `The incident history is longer than one read, so open incidents were checked back to ${new Date(facts.incidentHistoryFrom).toISOString()} only.`,
+    );
   }
 
   for (const incident of incidents) {

@@ -54,6 +54,7 @@ function facts(change: (facts: PlacementGateFacts) => void = () => {}): Placemen
     migrations: 'none',
     openEvents: [],
     incidents: [],
+    incidentHistoryFrom: null,
     persistence: each({ forkRunning: false }),
     replication: {
       s1: { replicasInSync: true },
@@ -487,6 +488,22 @@ describe('placementGate', () => {
       const approve = gate(built, 'approve', policy);
       expect(approve.allowed).toBe(true);
       expect(approve.warnings.map((each) => each.kind)).toEqual([kind]);
+    });
+
+    it('warns, and never blocks, when the incident history was read only back to a cut-off', () => {
+      const built = facts((f) => (f.incidentHistoryFrom = Date.parse('2026-11-01T00:00:00.000Z')));
+      for (const purpose of ['approve', 'auto'] as const) {
+        const result = gate(built, purpose);
+        expect(result.allowed).toBe(true);
+        expect(result.blockers).toEqual([]);
+        expect(result.warnings).toEqual([
+          expect.objectContaining({
+            kind: 'incident_history',
+            scope: 'cluster',
+            detail: expect.stringContaining('2026-11-01T00:00:00.000Z'),
+          }),
+        ]);
+      }
     });
 
     it('names the nodes the monitor does not connect to', () => {

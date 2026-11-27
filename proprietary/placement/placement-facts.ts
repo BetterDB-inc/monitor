@@ -40,9 +40,14 @@ export interface PlacementNodeFacts {
   pingP50Ms: PlacementGateFacts['pingP50Ms'];
 }
 
+export interface PlacementIncidentsRead {
+  incidents: PlacementGateIncident[];
+  historyFrom: number | null;
+}
+
 export interface PlacementFactsPort {
   placementOpenEvents(connectionId: string): Promise<PlacementGateSignal[]>;
-  placementIncidents(connectionId: string): Promise<PlacementGateIncident[]>;
+  placementIncidents(connectionId: string): Promise<PlacementIncidentsRead>;
   readPlacementNodeFacts(connectionId: string, shardIds: string[]): Promise<PlacementNodeFacts>;
 }
 
@@ -199,7 +204,7 @@ async function attempt<T>(
 export interface PlacementClusterRead {
   shardIds: readonly string[];
   openEvents: PlacementGateSignal[] | null;
-  incidents: PlacementGateIncident[] | null;
+  incidents: PlacementIncidentsRead | null;
   nodeFacts: PlacementNodeFacts | null;
   unreadable: string[];
 }
@@ -261,10 +266,11 @@ export function placementGateFactsOf(
     clusterStateOk: nodeFacts ? nodeFacts.clusterStateOk : null,
     migrations: nodeFacts ? nodeFacts.migrations : 'unknown',
     openEvents: withNodeIds(openEvents ?? [], reads),
-    incidents: (incidents ?? []).map((incident) => ({
+    incidents: (incidents?.incidents ?? []).map((incident) => ({
       ...incident,
       signals: withNodeIds(incident.signals, reads),
     })),
+    incidentHistoryFrom: incidents?.historyFrom ?? null,
     persistence: nodeFacts?.persistence ?? {},
     replication: nodeFacts?.replication ?? {},
     pingP50Ms: nodeFacts?.pingP50Ms ?? {},
