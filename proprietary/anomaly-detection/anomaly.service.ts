@@ -2585,7 +2585,15 @@ export class AnomalyService
         }
         if (nodes || !readsTopology) await this.detectSlotMigrations(ctx, timestamp);
         await this.followRebalanceRunsOnPoll(ctx.connectionId, timestamp, nodes);
-        if (nodes) this.clusterNodesObserver?.(ctx.connectionId, nodes, timestamp);
+        if (nodes) {
+          try {
+            this.clusterNodesObserver?.(ctx.connectionId, nodes, timestamp);
+          } catch (error) {
+            this.logger.warn(
+              `Cluster nodes observer failed for ${ctx.connectionName}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
         if (nodes) {
           // A slot-owning primary with no synced replica (#714). Runs in both
           // topology modes, and is not held back during a rolling update: that

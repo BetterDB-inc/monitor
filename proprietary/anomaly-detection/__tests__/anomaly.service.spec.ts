@@ -5165,6 +5165,18 @@ describe('AnomalyService', () => {
             );
           });
 
+          it('runs the rest of the poll when the cluster nodes observer throws', async () => {
+            service.setClusterNodesObserver(() => {
+              throw new Error('observer broke');
+            });
+            const warn = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => {});
+            const hotShards = jest.spyOn(service as any, 'detectHotShards');
+            spreadLoad();
+            await step(HOT, 1);
+            expect(warn).toHaveBeenCalledWith(expect.stringContaining('observer broke'));
+            expect(hotShards).toHaveBeenCalled();
+          });
+
           it('offers no run when the plan has no Valkey 9 command', async () => {
             enable();
             spreadLoad();
