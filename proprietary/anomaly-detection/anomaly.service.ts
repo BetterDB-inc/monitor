@@ -12175,6 +12175,15 @@ export class AnomalyService
     return (await this.advanceRebalanceRuns(connectionId)).runs.map(runView);
   }
 
+  /** The runs as the poll loop last followed them: reads nothing from the cluster and changes no run. */
+  getRebalanceRunsSnapshot(connectionId: string): RebalanceRunView[] {
+    const now = Date.now();
+    return [...(this.rebalanceRuns.get(connectionId)?.values() ?? [])]
+      .filter((run) => isRunKept(run, now))
+      .sort((a, b) => b.startedAt - a.startedAt)
+      .map(runView);
+  }
+
   private async followRebalanceRunsOnPoll(
     connectionId: string,
     timestamp: number,

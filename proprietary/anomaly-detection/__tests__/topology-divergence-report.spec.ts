@@ -4,6 +4,7 @@ import {
   DIVERGENCE_SEVERITY_BY_KIND,
   buildDivergenceDetail,
   buildPartialMembershipDetail,
+  capDivergenceReport,
   closingPartialMembershipDetail,
   disagreementsByFinding,
   divergenceMessage,
@@ -11,6 +12,8 @@ import {
   outranksSeverity,
   raisedDivergenceGroup,
   toDivergenceNode,
+  type DivergenceDetailDisagreement,
+  type TopologyDivergenceReport,
 } from '../topology-divergence-report';
 import type { PartialMembership } from '../partial-membership';
 import { AnomalySeverity } from '../types';
@@ -508,5 +511,107 @@ describe('disagreementsByFinding', () => {
     );
 
     expect(keysOf(listed)).toEqual({ 'partial_membership:n0': ['membership:n0'] });
+  });
+});
+
+describe('capDivergenceReport', () => {
+  const named = (count: number) => Array.from({ length: count }, (_, i) => toDivergenceNode(`n${i}`, NODES));
+
+  const disagreement = (nodeCount: number, entryCount: number): DivergenceDetailDisagreement => ({
+    kind: 'slot_owner',
+    subject: named(nodeCount),
+    slots: Array.from({ length: entryCount }, (_, i) => [i, i]),
+    positions: Array.from({ length: entryCount }, (_, i) => ({ value: `v${i}`, observers: named(nodeCount) })),
+    rounds: 3,
+    since: 85000,
+    eventId: null,
+    eventType: null,
+  });
+
+  const reportOf = (nodeCount: number, entryCount: number): TopologyDivergenceReport => {
+    const disagreements = () => Array.from({ length: entryCount }, () => disagreement(nodeCount, entryCount));
+    const gaps = () => named(nodeCount).map((node) => ({ ...node, status: 'missing' as const }));
+    return {
+      status: 'ok',
+      sampledAt: 100000,
+      observers: named(nodeCount),
+      unanswered: named(nodeCount),
+      divergences: Array.from({ length: entryCount }, () => ({
+        eventId: null,
+        confirmed: false,
+        since: 85000,
+        sides: [{ nodes: named(nodeCount) }, { nodes: named(1) }],
+        disagreements: disagreements(),
+      })),
+      partialMembership: Array.from({ length: entryCount }, () => ({
+        eventId: null,
+        confirmed: false,
+        seen: true,
+        since: 85000,
+        node: named(1)[0],
+        knownBy: named(nodeCount),
+        notKnownBy: gaps(),
+        ownViewMissing: gaps(),
+        command: 'CLUSTER MEET 10.1.0.0 6379',
+        runOn: named(nodeCount),
+        disagreements: disagreements(),
+      })),
+    };
+  };
+
+  it('leaves a report under the caps as it is and adds the totals', () => {
+    const report = reportOf(2, 3);
+
+    expect(capDivergenceReport(report, 2, 3)).toEqual({
+      ...report,
+      totals: { observers: 2, unanswered: 2, divergences: 3, partialMembership: 3 },
+    });
+  });
+
+  it('cuts every list and keeps the full length beside it', () => {
+    const capped = capDivergenceReport(reportOf(5, 4), 2, 3);
+
+    expect(capped.totals).toEqual({ observers: 5, unanswered: 5, divergences: 4, partialMembership: 4 });
+    expect(capped.observers).toHaveLength(2);
+    expect(capped.unanswered).toHaveLength(2);
+    expect(capped.divergences).toHaveLength(3);
+    expect(capped.partialMembership).toHaveLength(3);
+
+    const [divergence] = capped.divergences;
+    expect(divergence.sides[0].nodes).toHaveLength(2);
+    expect(divergence.sides[0].nodesCount).toBe(5);
+    expect(divergence.sides[1]).toEqual({ nodes: named(1) });
+    expect(divergence.disagreements).toHaveLength(3);
+    expect(divergence.disagreementsCount).toBe(4);
+
+    const [finding] = capped.partialMembership;
+    for (const list of ['knownBy', 'notKnownBy', 'ownViewMissing', 'runOn'] as const) {
+      expect(finding[list]).toHaveLength(2);
+      expect(finding[`${list}Count`]).toBe(5);
+    }
+    expect(finding.disagreements).toHaveLength(3);
+    expect(finding.disagreementsCount).toBe(4);
+
+    for (const entry of [divergence.disagreements[0], finding.disagreements[0]]) {
+      expect(entry.subject).toHaveLength(2);
+      expect(entry.subjectCount).toBe(5);
+      expect(entry.slots).toHaveLength(3);
+      expect(entry.slotsCount).toBe(4);
+      expect(entry.positions).toHaveLength(3);
+      expect(entry.positionsCount).toBe(4);
+      expect(entry.positions[0].observers).toHaveLength(2);
+      expect(entry.positions[0].observersCount).toBe(5);
+    }
+  });
+
+  it('adds no slots to a disagreement that has none and does not change the report it was given', () => {
+    const report = reportOf(5, 1);
+    delete report.divergences[0].disagreements[0].slots;
+    const before = structuredClone(report);
+
+    const capped = capDivergenceReport(report, 2, 3);
+
+    expect(capped.divergences[0].disagreements[0]).not.toHaveProperty('slots');
+    expect(report).toEqual(before);
   });
 });

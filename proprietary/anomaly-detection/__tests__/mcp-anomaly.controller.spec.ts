@@ -16,6 +16,8 @@ describe('McpAnomalyController', () => {
     getHotShards: jest.fn(),
     getTopologyDisagreements: jest.fn(),
     getReplicationDivergenceHistory: jest.fn(),
+    getRebalanceRunsSnapshot: jest.fn(),
+    getTopologyDivergence: jest.fn(),
   };
   const registry = { get: jest.fn() };
   const placement = { withPlacementBlocker: jest.fn() };
@@ -239,6 +241,104 @@ describe('McpAnomalyController', () => {
   it('topology disagreements is served under the instance anomalies path', () => {
     expect(Reflect.getMetadata('path', McpAnomalyController.prototype.getTopologyDisagreements)).toBe(
       'instance/:id/anomalies/topology-disagreements',
+    );
+  });
+
+  it('rebalance runs keep the user id, drop the email and keep the order', () => {
+    const run = (sourceShardId: string, startedAt: number) => ({
+      sourceShardId,
+      startedAt,
+      state: 'running',
+      startedBy: { userId: 'u1', email: 'admin@example.com' },
+      jobs: [],
+    });
+    const runs = [run('b', 2000), run('a', 1000)];
+    svc.getRebalanceRunsSnapshot.mockReturnValue(runs);
+
+    expect(controller.getRebalanceRuns('inst1')).toEqual(
+      runs.map((entry) => ({ ...entry, startedBy: { userId: 'u1', email: null } })),
+    );
+    expect(svc.getRebalanceRunsSnapshot).toHaveBeenCalledWith('inst1');
+    expect(runs[0].startedBy.email).toBe('admin@example.com');
+  });
+
+  it('rebalance runs return 404 for an unregistered instance', () => {
+    registry.get.mockImplementationOnce(() => {
+      throw new NotFoundException('nope');
+    });
+
+    let caught: unknown;
+    try {
+      controller.getRebalanceRuns('ghost');
+    } catch (error) {
+      caught = error;
+    }
+
+    expect((caught as HttpException).getStatus()).toBe(404);
+    expect(svc.getRebalanceRunsSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('topology divergence caps the node and entry lists and reports the totals', () => {
+    const nodes = Array.from({ length: 30 }, (_, i) => ({ nodeId: `n${i}`, address: '', role: 'primary' }));
+    const divergence = { eventId: null, confirmed: false, since: 1, sides: [{ nodes }], disagreements: [] };
+    svc.getTopologyDivergence.mockReturnValue({
+      status: 'ok',
+      sampledAt: 1000,
+      observers: nodes,
+      unanswered: [],
+      divergences: Array.from({ length: 60 }, () => divergence),
+      partialMembership: [],
+    });
+
+    const report = controller.getTopologyDivergence('inst1');
+
+    expect(report.observers).toHaveLength(25);
+    expect(report.divergences).toHaveLength(50);
+    expect(report.divergences[0].sides[0].nodes).toHaveLength(25);
+    expect(report.divergences[0].sides[0].nodesCount).toBe(30);
+    expect(report.totals).toEqual({ observers: 30, unanswered: 0, divergences: 60, partialMembership: 0 });
+    expect(svc.getTopologyDivergence).toHaveBeenCalledWith('inst1');
+  });
+
+  it('topology divergence passes not_sampled through', () => {
+    const empty = {
+      status: 'not_sampled',
+      sampledAt: null,
+      observers: [],
+      unanswered: [],
+      divergences: [],
+      partialMembership: [],
+    };
+    svc.getTopologyDivergence.mockReturnValue(empty);
+
+    expect(controller.getTopologyDivergence('inst1')).toEqual({
+      ...empty,
+      totals: { observers: 0, unanswered: 0, divergences: 0, partialMembership: 0 },
+    });
+  });
+
+  it('topology divergence returns 404 for an unregistered instance', () => {
+    registry.get.mockImplementationOnce(() => {
+      throw new NotFoundException('nope');
+    });
+
+    let caught: unknown;
+    try {
+      controller.getTopologyDivergence('ghost');
+    } catch (error) {
+      caught = error;
+    }
+
+    expect((caught as HttpException).getStatus()).toBe(404);
+    expect(svc.getTopologyDivergence).not.toHaveBeenCalled();
+  });
+
+  it('serves rebalance runs and topology divergence under the instance anomalies path', () => {
+    expect(Reflect.getMetadata('path', McpAnomalyController.prototype.getRebalanceRuns)).toBe(
+      'instance/:id/anomalies/slot-rebalance',
+    );
+    expect(Reflect.getMetadata('path', McpAnomalyController.prototype.getTopologyDivergence)).toBe(
+      'instance/:id/anomalies/topology-divergence',
     );
   });
 });

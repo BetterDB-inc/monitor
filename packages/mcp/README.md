@@ -176,12 +176,15 @@ Clients that load skills from a plugin (Connect Apps and other skill-aware clien
 | `get_hot_shards` | Open hot shards on a cluster with their top slots, hot keys and a suggested slot rebalance, or the reason none is suggested, and the hash tags or crowded slots behind it *(Pro)* |
 | `get_placement_status` | Slot placement mode of a cluster, the reasons it can't take slot moves, and each shard's load against the median *(Pro)* |
 | `get_topology_disagreements` | Where the nodes of a cluster disagree about slot owners, config epochs, failure flags or membership, with the number of views on each side and one line per shard, plus the last check that set out to ask every node when one was run from the Cluster page *(Pro)* |
+| `get_topology_divergence` | The last round of cluster view sampling in detail: the sides of each disagreement and the nodes only part of the cluster knows about *(Pro)* |
+| `get_rebalance_runs` | Slot rebalances started from the monitor that are running or ended in the last hour, with each move's state and the projected and measured load. Read-only *(Pro)* |
 | `get_client_activity` | Time-bucketed client activity from persisted snapshots |
 | `get_acl_audit` | ACL audit log entries |
 | `get_cluster_nodes` | Cluster node discovery — roles, state (`healthy`, `suspect` or `failed`), slot ranges, whether the monitor collects each node, plus availability zone and shard id on Valkey 9.1+ (older versions: the zone from the connection's zone map) |
 | `get_cluster_node_stats` | Per-node performance stats across the cluster |
 | `get_cluster_slowlog` | Aggregated slowlog across all cluster nodes |
 | `get_slot_stats` | Per-slot key counts and CPU usage (Valkey 8+) |
+| `get_slot_migrations` | Slot migrations in progress, asked of every primary, and whether every primary could be read |
 
 ### Analytics Tools
 

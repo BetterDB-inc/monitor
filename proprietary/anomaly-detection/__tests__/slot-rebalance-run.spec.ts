@@ -13,9 +13,11 @@ import {
   startRun,
   withOutcome,
   REBALANCE_OUTCOME_WAIT_MS,
+  type RebalanceRun,
   type RunNode,
   type RunReport,
 } from '../slot-rebalance-run';
+import { AnomalyService } from '../anomaly.service';
 
 const plan = (overrides: Partial<RebalancePlan> = {}): RebalancePlan => ({
   kind: 'plan',
@@ -983,5 +985,54 @@ describe('slot rebalance run', () => {
       expect(lost.jobs[0].state).toBe('unknown');
       expect(lost.state).toBe('unknown');
     });
+  });
+});
+
+describe('getRebalanceRunsSnapshot', () => {
+  const HOUR_MS = 60 * 60 * 1000;
+  const actor = { userId: 'u1', email: 'admin@example.com' };
+
+  const serviceWith = (runs: RebalanceRun[]) => {
+    const readSlotMigrations = jest.fn();
+    const discoverNodesIsolated = jest.fn();
+    const kept = new Map(runs.map((run) => [run.sourceShardId, run]));
+    const service: AnomalyService = Object.assign(Object.create(AnomalyService.prototype), {
+      rebalanceRuns: new Map([['conn-1', kept]]),
+      clusterMetrics: { readSlotMigrations },
+      clusterDiscovery: { discoverNodesIsolated },
+    });
+    return { service, kept, readSlotMigrations, discoverNodesIsolated };
+  };
+
+  const runFrom = (sourceShardId: string, startedAt: number, patch: Partial<RebalanceRun> = {}): RebalanceRun => ({
+    ...startRun(plan({ sourceShardId }), actor, startedAt, []),
+    ...patch,
+  });
+
+  it('returns the runs newest first without reading the cluster or changing a run', () => {
+    const now = Date.now();
+    const older = runFrom('a', now - 20_000);
+    const newer = runFrom('b', now - 10_000);
+    const { service, kept, readSlotMigrations, discoverNodesIsolated } = serviceWith([older, newer]);
+    const before = structuredClone([...kept]);
+
+    expect(service.getRebalanceRunsSnapshot('conn-1')).toEqual([runView(newer), runView(older)]);
+    expect(readSlotMigrations).not.toHaveBeenCalled();
+    expect(discoverNodesIsolated).not.toHaveBeenCalled();
+    expect([...kept]).toEqual(before);
+  });
+
+  it('leaves out a run that ended over an hour ago without dropping it', () => {
+    const now = Date.now();
+    const expired = runFrom('a', now - 2 * HOUR_MS, { state: 'succeeded', endedAt: now - HOUR_MS - 1000 });
+    const recent = runFrom('b', now - 2 * HOUR_MS, { state: 'failed', endedAt: now - 1000 });
+    const { service, kept } = serviceWith([expired, recent]);
+
+    expect(service.getRebalanceRunsSnapshot('conn-1').map((run) => run.sourceShardId)).toEqual(['b']);
+    expect(kept.size).toBe(2);
+  });
+
+  it('is empty for a connection with no run', () => {
+    expect(serviceWith([]).service.getRebalanceRunsSnapshot('conn-2')).toEqual([]);
   });
 });

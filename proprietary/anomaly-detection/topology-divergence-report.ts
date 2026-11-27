@@ -73,6 +73,42 @@ export interface TopologyDivergenceReport {
   partialMembership: PartialMembershipDetail[];
 }
 
+type Capped<T, K extends keyof T> = T & { [P in K as `${P & string}Count`]?: number };
+
+export type CappedDivergencePosition = Capped<DivergenceDetailPosition, 'observers'>;
+
+export type CappedDivergenceDisagreement = Capped<
+  Omit<DivergenceDetailDisagreement, 'positions'> & { positions: CappedDivergencePosition[] },
+  'subject' | 'slots' | 'positions'
+>;
+
+export type CappedPartialMembershipDetail = Capped<
+  Omit<PartialMembershipDetail, 'disagreements'> & { disagreements: CappedDivergenceDisagreement[] },
+  'knownBy' | 'notKnownBy' | 'ownViewMissing' | 'runOn' | 'disagreements'
+>;
+
+export type CappedTopologyDivergenceDetail = Capped<
+  Omit<TopologyDivergenceDetail, 'sides' | 'disagreements'> & {
+    sides: Array<Capped<{ nodes: DivergenceNode[] }, 'nodes'>>;
+    disagreements: CappedDivergenceDisagreement[];
+  },
+  'disagreements'
+>;
+
+export interface CappedTopologyDivergenceReport extends Omit<
+  TopologyDivergenceReport,
+  'divergences' | 'partialMembership'
+> {
+  divergences: CappedTopologyDivergenceDetail[];
+  partialMembership: CappedPartialMembershipDetail[];
+  totals: {
+    observers: number;
+    unanswered: number;
+    divergences: number;
+    partialMembership: number;
+  };
+}
+
 export const DIVERGENCE_SEVERITY_BY_KIND: Record<DivergenceKind, AnomalySeverity> = {
   slot_owner: AnomalySeverity.CRITICAL,
   failure_flags: AnomalySeverity.WARNING,
@@ -297,5 +333,66 @@ export function closingPartialMembershipDetail(
     command: null,
     runOn: [],
     disagreements: [],
+  };
+}
+
+function capList<K extends string, T>(
+  key: K,
+  list: T[],
+  max: number,
+): Record<K, T[]> & { [P in `${K}Count`]?: number } {
+  const capped = list.length > max ? { [key]: list.slice(0, max), [`${key}Count`]: list.length } : { [key]: list };
+  return capped as Record<K, T[]> & { [P in `${K}Count`]?: number };
+}
+
+/**
+ * Cuts every list of the report to a size a client can take in. Node lists are cut to `maxNodes`, lists of
+ * findings, positions and slot ranges to `maxEntries`. A list that was cut keeps its full length in a
+ * `<name>Count` field beside it.
+ */
+export function capDivergenceReport(
+  report: TopologyDivergenceReport,
+  maxNodes: number,
+  maxEntries: number,
+): CappedTopologyDivergenceReport {
+  const capDisagreement = (disagreement: DivergenceDetailDisagreement): CappedDivergenceDisagreement => ({
+    ...disagreement,
+    ...capList('subject', disagreement.subject, maxNodes),
+    ...(disagreement.slots ? capList('slots', disagreement.slots, maxEntries) : {}),
+    ...capList(
+      'positions',
+      disagreement.positions.map((position) => ({
+        ...position,
+        ...capList('observers', position.observers, maxNodes),
+      })),
+      maxEntries,
+    ),
+  });
+  const capDisagreements = (list: DivergenceDetailDisagreement[]) =>
+    capList('disagreements', list.map(capDisagreement), maxEntries);
+
+  return {
+    ...report,
+    observers: report.observers.slice(0, maxNodes),
+    unanswered: report.unanswered.slice(0, maxNodes),
+    divergences: report.divergences.slice(0, maxEntries).map((divergence) => ({
+      ...divergence,
+      sides: divergence.sides.map((side) => capList('nodes', side.nodes, maxNodes)),
+      ...capDisagreements(divergence.disagreements),
+    })),
+    partialMembership: report.partialMembership.slice(0, maxEntries).map((finding) => ({
+      ...finding,
+      ...capList('knownBy', finding.knownBy, maxNodes),
+      ...capList('notKnownBy', finding.notKnownBy, maxNodes),
+      ...capList('ownViewMissing', finding.ownViewMissing, maxNodes),
+      ...capList('runOn', finding.runOn, maxNodes),
+      ...capDisagreements(finding.disagreements),
+    })),
+    totals: {
+      observers: report.observers.length,
+      unanswered: report.unanswered.length,
+      divergences: report.divergences.length,
+      partialMembership: report.partialMembership.length,
+    },
   };
 }
