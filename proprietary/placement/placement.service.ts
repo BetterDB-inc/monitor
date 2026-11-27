@@ -102,6 +102,7 @@ export { PlacementPolicyUnreadableError };
 export interface PlacementGateSubject {
   sourceShardId: string;
   targetShardIds: readonly string[];
+  moveCount: number;
 }
 
 export interface PlacementGateOptions {
@@ -402,7 +403,7 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
     }
     const gate = await this.gateFor(
       connectionId,
-      { sourceShardId: shardId, targetShardIds: targetsOf(confirmed) },
+      { sourceShardId: shardId, targetShardIds: targetsOf(confirmed), moveCount: confirmed.length },
       'approve',
     );
     if (!gate.allowed) return { status: 'blocked', blockedBy: 'gate', blockers: gate.blockers };
@@ -491,6 +492,7 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
         supported: support.modes[purpose === 'auto' ? 'auto' : 'recommend'].available,
         sourceShardId: subject.sourceShardId,
         targetShardIds: [...subject.targetShardIds],
+        moveCount: subject.moveCount,
         sourceTriggerFiredAt:
           options.sourceTriggerFiredAt !== undefined
             ? options.sourceTriggerFiredAt
@@ -543,7 +545,11 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
   ): Promise<PlacementGateResult> {
     const key = gateKeyOf(plan);
     const cacheKey = `${connectionId}\u0000${plan.sourceShardId}`;
-    const subject = { sourceShardId: plan.sourceShardId, targetShardIds: targetsOf(plan.moves) };
+    const subject = {
+      sourceShardId: plan.sourceShardId,
+      targetShardIds: targetsOf(plan.moves),
+      moveCount: plan.moves.length,
+    };
     const read = cluster
       .then((shared) => this.judgeGate(connectionId, subject, 'approve', shared))
       .then((gate) => {

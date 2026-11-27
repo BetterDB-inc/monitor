@@ -48,6 +48,7 @@ export interface PlacementGateFacts {
   supported: boolean;
   sourceShardId: string;
   targetShardIds: string[];
+  moveCount: number;
   sourceTriggerFiredAt: number | null;
   quarantinedShardIds: string[];
   cooldownLeftSlots: number | null;
@@ -182,11 +183,11 @@ export function placementGate(
     facts.budget.bytesUsed >= settings.maxBytesPerHour
   ) {
     raise('budget', 'cluster', 'The hourly migration budget is used up.');
-  } else if (facts.budget.jobsUsed + facts.targetShardIds.length > settings.maxMigrationsPerHour) {
+  } else if (facts.budget.jobsUsed + facts.moveCount > settings.maxMigrationsPerHour) {
     raise(
       'budget',
       'cluster',
-      `The plan's ${facts.targetShardIds.length} moves would go over the hourly migration budget, which has ${settings.maxMigrationsPerHour - facts.budget.jobsUsed} left.`,
+      `The plan's ${facts.moveCount} moves would go over the hourly migration budget, which has ${settings.maxMigrationsPerHour - facts.budget.jobsUsed} left.`,
     );
   }
   if (facts.paused) raise('paused', 'cluster', 'An admin paused slot moves.');

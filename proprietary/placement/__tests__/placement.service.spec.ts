@@ -922,6 +922,23 @@ describe('PlacementService', () => {
         expect(anomaly.placementJobsSince).toHaveBeenCalledWith('seed', expect.any(Number));
       });
 
+      it('counts every move against the budget, even two to one target', async () => {
+        const { service, storage, anomaly } = await setup();
+        await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+        anomaly.placementJobsSince.mockReturnValue(3);
+        anomaly.runRebalance.mockResolvedValue({ status: 'started', run: {} });
+        const one = [{ targetShardId: 'b', ranges: [[0, 10]] as [number, number][] }];
+        const two = [...one, { targetShardId: 'b', ranges: [[20, 30]] as [number, number][] }];
+        await expect(service.runRebalance('seed', 'a', one, actor)).resolves.toMatchObject({
+          status: 'started',
+        });
+        await expect(service.runRebalance('seed', 'a', two, actor)).resolves.toEqual({
+          status: 'blocked',
+          blockedBy: 'gate',
+          blockers: [expect.objectContaining({ kind: 'budget', scope: 'cluster' })],
+        });
+      });
+
       it('gates the moves it was asked to run, not the plan it holds', async () => {
         const { service, storage, anomaly } = await setup();
         await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
@@ -965,7 +982,7 @@ describe('PlacementService', () => {
         anomaly.placementOpenEvents.mockResolvedValue([
           { metricType: 'command_p99', nodeId: 'a', openedAt: now - 1_000 },
         ]);
-        const subject = { sourceShardId: 'a', targetShardIds: ['b'] };
+        const subject = { sourceShardId: 'a', targetShardIds: ['b'], moveCount: 1 };
         const live = await service.gateFor('seed', subject, 'approve', { now });
         expect(live.blockers).toEqual([
           expect.objectContaining({ kind: 'latency', scope: 'source', nodeId: 'a' }),
@@ -980,7 +997,7 @@ describe('PlacementService', () => {
       it('dates a config epoch raise by the poll that saw it', async () => {
         const { service, anomaly } = await setup();
         const now = Date.now();
-        const subject = { sourceShardId: 'a', targetShardIds: ['b'] };
+        const subject = { sourceShardId: 'a', targetShardIds: ['b'], moveCount: 1 };
         anomaly.readPlacementNodeFacts.mockResolvedValue(withUncollectedReplica(1));
         await service.gateFor('seed', subject, 'approve', { now: now - 30 * 60_000 });
         const observe = anomaly.setClusterNodesObserver.mock.calls[0][0] as (
@@ -1008,7 +1025,7 @@ describe('PlacementService', () => {
         anomaly.readPlacementNodeFacts.mockResolvedValue(withUncollectedReplica(1));
         const first = await service.gateFor(
           'seed',
-          { sourceShardId: 'a', targetShardIds: ['b'] },
+          { sourceShardId: 'a', targetShardIds: ['b'], moveCount: 1 },
           'approve',
           { now },
         );
@@ -1020,7 +1037,7 @@ describe('PlacementService', () => {
       it('reads a config epoch our own slot move raised as no failover', async () => {
         const { service, anomaly } = await setup();
         const now = Date.now();
-        const subject = { sourceShardId: 'a', targetShardIds: ['b'] };
+        const subject = { sourceShardId: 'a', targetShardIds: ['b'], moveCount: 1 };
         anomaly.readPlacementNodeFacts.mockResolvedValue(withUncollectedReplica(1));
         await service.gateFor('seed', subject, 'approve', { now: now - 10 * 60_000 });
 

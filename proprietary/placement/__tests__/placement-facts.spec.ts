@@ -45,6 +45,7 @@ const context: PlacementFactsContext = {
   supported: true,
   sourceShardId: 's1',
   targetShardIds: ['t1'],
+  moveCount: 1,
   sourceTriggerFiredAt: null,
   quarantinedShardIds: [],
   cooldownLeftSlots: null,

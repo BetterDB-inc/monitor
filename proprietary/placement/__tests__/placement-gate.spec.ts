@@ -66,6 +66,7 @@ function facts(change: (facts: PlacementGateFacts) => void = () => {}): Placemen
     supported: true,
     sourceShardId: 's1',
     targetShardIds: ['t1'],
+    moveCount: 1,
     sourceTriggerFiredAt: FIRED_AT,
     quarantinedShardIds: [],
     cooldownLeftSlots: null,
@@ -271,6 +272,15 @@ describe('placementGate', () => {
         (f: PlacementGateFacts) => {
           f.budget.jobsUsed = 3;
           f.targetShardIds = ['t1', 'u1'];
+          f.moveCount = 2;
+        },
+        'budget:cluster:',
+      ],
+      [
+        'two moves to one target with one job left',
+        (f: PlacementGateFacts) => {
+          f.budget.jobsUsed = 3;
+          f.moveCount = 2;
         },
         'budget:cluster:',
       ],

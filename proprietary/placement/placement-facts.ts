@@ -55,6 +55,7 @@ type PlacementGateContext = Pick<
   | 'supported'
   | 'sourceShardId'
   | 'targetShardIds'
+  | 'moveCount'
   | 'sourceTriggerFiredAt'
   | 'quarantinedShardIds'
   | 'cooldownLeftSlots'
