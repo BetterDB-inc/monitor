@@ -7556,7 +7556,7 @@ export class AnomalyService
           limit: OPEN_EVENT_PAGE_SIZE,
           after,
         });
-        open.push(...page);
+        open.push(...page.filter((event) => wanted.has(event.metricType)));
         if (page.length < OPEN_EVENT_PAGE_SIZE) break;
         after = page[page.length - 1];
       }
@@ -7567,7 +7567,6 @@ export class AnomalyService
           .map((event) => event.timestamp),
       );
       for (const event of open) {
-        if (!wanted.has(event.metricType)) continue;
         if (
           event.metricType === MetricType.CLUSTER_STATE &&
           (event.value === 1 || event.timestamp <= recoveredAt)

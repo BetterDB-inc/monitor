@@ -5050,6 +5050,44 @@ describe('AnomalyService', () => {
             expect(calls[2]).toMatchObject({ connectionId: 'conn-peer', after: undefined });
           });
 
+          it('keeps only the placement events of each open event page', async () => {
+            let typeReads = 0;
+            const unrelated = (n: number) => ({
+              id: `u${n}`,
+              connectionId: 'conn-a',
+              timestamp: 1_000 - n,
+              get metricType() {
+                typeReads += 1;
+                return 'memory_used';
+              },
+            });
+            storage.getAnomalyEvents.mockImplementation(async ({ after }) =>
+              after
+                ? [
+                    {
+                      id: 'p',
+                      connectionId: 'conn-a',
+                      metricType: 'persistence_child',
+                      timestamp: 10,
+                      nodeAddr: '10.0.0.2:6379',
+                    },
+                  ]
+                : Array.from({ length: 500 }, (_, n) => unrelated(n)),
+            );
+
+            const signals = await service.placementOpenEvents('conn-a');
+
+            expect(signals).toEqual([
+              {
+                metricType: 'persistence_child',
+                nodeId: null,
+                address: '10.0.0.2:6379',
+                openedAt: 10,
+              },
+            ]);
+            expect(typeReads).toBe(500);
+          });
+
           it('names the replica of a divergence event by its address when no node was stamped', async () => {
             storage.getAnomalyEvents.mockResolvedValue([
               {
