@@ -6,6 +6,7 @@ import {
   type PlacementPolicyInvalid,
   type PlacementSettings,
 } from '../types/placement.types';
+import { primaryIdOf } from './cluster-node-state';
 
 const CLUSTER_SLOTS = 16384;
 const MINUTES_PER_DAY = 24 * 60;
@@ -148,8 +149,7 @@ export function excludedPrimaryIds(
   const excluded = new Set(excludedNodeIds);
   for (const node of nodes) {
     if (!excludedNodeIds.includes(node.id)) continue;
-    const primary = node.master && node.master !== '-' ? node.master : node.id;
-    excluded.add(primary);
+    excluded.add(primaryIdOf(node));
   }
   return [...excluded];
 }
@@ -158,14 +158,12 @@ export function excludedShardNodeIds(
   excludedNodeIds: readonly string[],
   nodes: ReadonlyArray<{ id: string; master: string }>,
 ): string[] {
-  const primaryOf = (node: { id: string; master: string }) =>
-    node.master && node.master !== '-' ? node.master : node.id;
   const excluded = new Set(excludedNodeIds);
   for (const id of excludedNodeIds) {
     const node = nodes.find((each) => each.id === id);
     if (!node) continue;
-    const primary = primaryOf(node);
-    for (const each of nodes) if (primaryOf(each) === primary) excluded.add(each.id);
+    const primary = primaryIdOf(node);
+    for (const each of nodes) if (primaryIdOf(each) === primary) excluded.add(each.id);
   }
   return [...excluded];
 }
