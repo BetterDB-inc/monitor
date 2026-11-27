@@ -7451,11 +7451,29 @@ export class AnomalyService
     });
   }
 
-  placementPlanOf(connectionId: string, shardId: string): RebalancePlan | null {
-    const verdict = this.hotShardRebalance
-      .get(connectionId)
-      ?.get(hotShardSignature(shardId))?.verdict;
-    return verdict?.kind === 'plan' ? verdict : null;
+  placementPlans(connectionId: string): RebalancePlan[] {
+    return [...(this.hotShardRebalance.get(connectionId)?.values() ?? [])].flatMap((kept) =>
+      kept.verdict.kind === 'plan' ? [kept.verdict] : [],
+    );
+  }
+
+  placementMovedShardsSince(connectionId: string, since: number): string[] {
+    const runs = [...(this.rebalanceRuns.get(connectionId)?.values() ?? [])];
+    return [
+      ...new Set(
+        runs
+          .filter((run) => (run.endedAt ?? Infinity) >= since)
+          .flatMap((run) => [run.sourceShardId, ...run.jobs.map((job) => job.targetShardId)]),
+      ),
+    ];
+  }
+
+  private observedNodeOf(connectionId: string): string | null {
+    return (
+      this.connectionRegistry.getObservedNodeId(connectionId) ??
+      this.connectionRegistry.getConfig(connectionId)?.membership?.nodeId ??
+      null
+    );
   }
 
   placementJobsSince(connectionId: string, since: number): number {
@@ -7474,10 +7492,7 @@ export class AnomalyService
     ];
     const signals: PlacementGateSignal[] = [];
     for (const source of new Set(sources)) {
-      const observed =
-        this.connectionRegistry.getObservedNodeId(source) ??
-        this.connectionRegistry.getConfig(source)?.membership?.nodeId ??
-        null;
+      const observed = this.observedNodeOf(source);
       for (let offset = 0; ; offset += OPEN_EVENT_PAGE_SIZE) {
         const open = await this.storage.getAnomalyEvents({
           connectionId: source,
@@ -7520,7 +7535,9 @@ export class AnomalyService
           .filter((entry) => entry.recoveryState !== 'recovered')
           .map((entry) => ({
             metricType: entry.metricType,
-            nodeId: entry.node?.nodeId ?? null,
+            nodeId:
+              entry.node?.nodeId ??
+              (entry.nodeAddr ? null : this.observedNodeOf(entry.connectionId)),
             ...(entry.nodeAddr ? { address: entry.nodeAddr } : {}),
             openedAt: entry.timestamp,
           })),
@@ -7579,8 +7596,12 @@ export class AnomalyService
         ]);
         pingP50Ms[node.id] = ping;
         persistence[node.id] = info ? forkOf(info.persistence) : null;
-        if (node.role === 'master')
-          replication[node.id] = info ? replicasInSyncOf(info.replication) : null;
+        if (node.role === 'master') {
+          const listed = nodes.filter(
+            (each) => each.role === 'replica' && each.shardId === node.id,
+          ).length;
+          replication[node.id] = info ? replicasInSyncOf(info.replication, listed) : null;
+        }
       }),
     );
     const running =

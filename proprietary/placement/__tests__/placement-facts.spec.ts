@@ -193,18 +193,21 @@ describe('reads of one node', () => {
     `ip=10.0.0.9,port=7000,state=${state},offset=100,lag=${lag}`;
 
   it.each([
-    [{ role: 'master', connected_slaves: '0' }, { replicasInSync: true }],
+    [{ role: 'master', connected_slaves: '0' }, 0, { replicasInSync: true }],
+    [{ role: 'master', connected_slaves: '0' }, 1, { replicasInSync: false }],
     [
       { connected_slaves: '2', slave0: replica('online', 0), slave1: replica('online', 1) },
+      2,
       { replicasInSync: true },
     ],
-    [{ connected_slaves: '1', slave0: replica('online', 3) }, { replicasInSync: false }],
-    [{ connected_slaves: '1', slave0: replica('wait_bgsave', 0) }, { replicasInSync: false }],
-    [{ connected_slaves: '2', slave0: replica('online', 0) }, { replicasInSync: false }],
-    [{ role: 'master' }, null],
-    [undefined, null],
-  ])('reads INFO replication %j as %j', (section, expected) => {
-    expect(replicasInSyncOf(section)).toEqual(expected);
+    [{ connected_slaves: '1', slave0: replica('online', 0) }, 2, { replicasInSync: false }],
+    [{ connected_slaves: '1', slave0: replica('online', 3) }, 1, { replicasInSync: false }],
+    [{ connected_slaves: '1', slave0: replica('wait_bgsave', 0) }, 1, { replicasInSync: false }],
+    [{ connected_slaves: '2', slave0: replica('online', 0) }, 2, { replicasInSync: false }],
+    [{ role: 'master' }, 0, null],
+    [undefined, 0, null],
+  ])('reads INFO replication %j with %d listed replicas as %j', (section, listed, expected) => {
+    expect(replicasInSyncOf(section, listed)).toEqual(expected);
   });
 });
 
@@ -224,6 +227,13 @@ describe('PlacementEpochs', () => {
     expect(epochs.observe('seed', nodes(2), NOW).get('a')).toBe(true);
     expect(epochs.observe('seed', nodes(2), NOW + 4 * MINUTE).get('a')).toBe(true);
     expect(epochs.observe('seed', nodes(2), NOW + 5 * MINUTE).get('a')).toBe(false);
+  });
+
+  it('reads a config epoch raised in a shard a slot move of ours touched as no change', () => {
+    const epochs = new PlacementEpochs();
+    epochs.observe('seed', nodes(1), NOW - 10 * MINUTE);
+    expect(epochs.observe('seed', nodes(2), NOW, ['a']).get('a')).toBe(false);
+    expect(epochs.observe('seed', nodes(3), NOW + MINUTE, ['b']).get('a')).toBe(true);
   });
 
   it('ignores a lower config epoch, and forgets nodes that left', () => {

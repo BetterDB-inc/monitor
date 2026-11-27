@@ -57,7 +57,7 @@ import {
 } from './placement-support';
 import { placementBalance } from './placement-balance';
 import { PlacementTriggers } from './placement-trigger';
-import { placementGate } from './placement-gate';
+import { PLACEMENT_EPOCH_WINDOW_MS, placementGate } from './placement-gate';
 import { PlacementEpochs, readPlacementGateFacts } from './placement-facts';
 
 const SUPPORT_CACHE_MS = 30_000;
@@ -91,6 +91,16 @@ export class PlacementPolicyUnreadableError extends Error {
   constructor(readonly problems: string[]) {
     super(`The exclusions of the stored placement policy cannot be read: ${problems.join('; ')}`);
   }
+}
+
+export interface PlacementGateSubject {
+  sourceShardId: string;
+  targetShardIds: readonly string[];
+}
+
+export interface PlacementGateOptions {
+  now?: number;
+  sourceTriggerFiredAt?: number | null;
 }
 
 export interface PlacementSettingsRead {
@@ -132,6 +142,10 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
   private readonly gateCache = new Map<
     string,
     { at: number; key: string; gate: PlacementGateResult }
+  >();
+  private readonly gateReads = new Map<
+    string,
+    { key: string; read: Promise<PlacementGateResult> }
   >();
   private stopListening: (() => void) | null = null;
 
@@ -341,11 +355,12 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
     if (!(await this.allowsRun(connectionId))) {
       return { status: 'blocked', blockedBy: 'observe_mode' };
     }
-    const plan = this.anomaly.placementPlanOf(connectionId, shardId);
-    if (plan) {
-      const gate = await this.gateFor(connectionId, plan, 'approve');
-      if (!gate.allowed) return { status: 'blocked', blockedBy: 'gate', blockers: gate.blockers };
-    }
+    const gate = await this.gateFor(
+      connectionId,
+      { sourceShardId: shardId, targetShardIds: targetsOf(confirmed) },
+      'approve',
+    );
+    if (!gate.allowed) return { status: 'blocked', blockedBy: 'gate', blockers: gate.blockers };
     const result = await this.anomaly.runRebalance(connectionId, shardId, confirmed, startedBy);
     if (result.status === 'refused' && result.serverReply && isAclRefusal(result.message)) {
       const seedId = this.seedOf(connectionId);
@@ -390,12 +405,12 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
 
   async gateFor(
     connectionId: string,
-    plan: RebalancePlan,
+    subject: PlacementGateSubject,
     purpose: PlacementGatePurpose,
-    now = Date.now(),
+    { now = Date.now(), ...options }: PlacementGateOptions = {},
   ): Promise<PlacementGateResult> {
     const seedId = this.seedOf(connectionId);
-    const [{ settings }, support] = await Promise.all([
+    const [{ settings, invalid }, support] = await Promise.all([
       this.settingsOf(seedId),
       this.readOnlySupport(seedId),
     ]);
@@ -410,15 +425,23 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
         },
         paused: false,
         supported: support.modes[purpose === 'auto' ? 'auto' : 'recommend'].available,
-        sourceShardId: plan.sourceShardId,
-        targetShardIds: [...new Set(plan.moves.map((move) => move.targetShardId))],
-        sourceTriggerFiredAt: this.triggerOf(seedId, plan.sourceShardId, now)?.firedAt ?? null,
+        sourceShardId: subject.sourceShardId,
+        targetShardIds: [...subject.targetShardIds],
+        sourceTriggerFiredAt:
+          options.sourceTriggerFiredAt !== undefined
+            ? options.sourceTriggerFiredAt
+            : (this.triggerOf(seedId, subject.sourceShardId, now)?.firedAt ?? null),
         quarantinedShardIds: [],
         cooldownLeftSlots: null,
+        movedShardIds: this.anomaly.placementMovedShardsSince(
+          connectionId,
+          now - PLACEMENT_EPOCH_WINDOW_MS,
+        ),
       },
       now,
     );
-    return placementGate(facts, settings, now, purpose);
+    const unreadable = invalid ? [...facts.unreadable, 'the placement policy'] : facts.unreadable;
+    return placementGate({ ...facts, unreadable }, settings, now, purpose);
   }
 
   private async cachedGate(
@@ -429,9 +452,32 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
     const cacheKey = `${connectionId}\u0000${plan.sourceShardId}`;
     const cached = this.gateCache.get(cacheKey);
     if (cached && cached.key === key && Date.now() - cached.at < GATE_CACHE_MS) return cached.gate;
-    const gate = await this.gateFor(connectionId, plan, 'approve');
-    this.gateCache.set(cacheKey, { at: Date.now(), key, gate });
-    return gate;
+    const reading = this.gateReads.get(cacheKey);
+    if (reading && reading.key === key) return reading.read;
+    const read = this.gateFor(
+      connectionId,
+      { sourceShardId: plan.sourceShardId, targetShardIds: targetsOf(plan.moves) },
+      'approve',
+    )
+      .then((gate) => {
+        this.gateCache.set(cacheKey, { at: Date.now(), key, gate });
+        return gate;
+      })
+      .catch((): PlacementGateResult => {
+        this.gateCache.delete(cacheKey);
+        return {
+          allowed: false,
+          blockers: [
+            { kind: 'unknown', scope: 'cluster', detail: 'Could not run the safety checks.' },
+          ],
+          warnings: [],
+        };
+      })
+      .finally(() => {
+        if (this.gateReads.get(cacheKey)?.read === read) this.gateReads.delete(cacheKey);
+      });
+    this.gateReads.set(cacheKey, { key, read });
+    return read;
   }
 
   private seedOf(connectionId: string): string {
@@ -522,8 +568,10 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
     for (const connectionId of this.epochs.seeds()) {
       if (!this.registry.getConfig(connectionId)) this.epochs.forget(connectionId);
     }
-    for (const cacheKey of this.gateCache.keys()) {
-      if (!this.registry.getConfig(cacheKey.split('\u0000')[0])) this.gateCache.delete(cacheKey);
+    for (const cache of [this.gateCache, this.gateReads]) {
+      for (const cacheKey of cache.keys()) {
+        if (!this.registry.getConfig(cacheKey.split('\u0000')[0])) cache.delete(cacheKey);
+      }
     }
   }
 
@@ -591,6 +639,10 @@ function namesAPlan(rebalance: ServedHotShardDetail['rebalance']): boolean {
     (rebalance.reason === 'covered_by_other_plan' ||
       rebalance.reason === 'conflicts_with_other_plan')
   );
+}
+
+function targetsOf(moves: readonly { targetShardId: string }[]): string[] {
+  return [...new Set(moves.map((move) => move.targetShardId))];
 }
 
 function gateKeyOf(plan: RebalancePlan): string {

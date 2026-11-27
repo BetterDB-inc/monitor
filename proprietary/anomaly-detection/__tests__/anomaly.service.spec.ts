@@ -4943,6 +4943,88 @@ describe('AnomalyService', () => {
             expect(clients.c0000000.info).not.toHaveBeenCalled();
           });
 
+          it('names the node of each open event, by address or by the connection it came from', async () => {
+            const registry = (service as any).connectionRegistry;
+            registry.listMembers.mockReturnValue([{ id: 'conn-b' }]);
+            registry.noteObservedNodeId('conn-b', 'b0000000');
+            const event = (metricType: string, extra: object) => ({
+              metricType,
+              timestamp: 5,
+              ...extra,
+            });
+            storage.getAnomalyEvents.mockImplementation(async ({ connectionId }) =>
+              connectionId === 'conn-a'
+                ? [
+                    event('persistence_child', { nodeAddr: '10.0.0.2:6379' }),
+                    event('command_p99', { node: { nodeId: 'c0000000' } }),
+                    event('failover_churn', {}),
+                    event('memory_used', {}),
+                  ]
+                : [event('fork_memory_risk', {})],
+            );
+
+            await expect(service.placementOpenEvents('conn-a')).resolves.toEqual([
+              {
+                metricType: 'persistence_child',
+                nodeId: null,
+                address: '10.0.0.2:6379',
+                openedAt: 5,
+              },
+              { metricType: 'command_p99', nodeId: 'c0000000', openedAt: 5 },
+              { metricType: 'failover_churn', nodeId: null, openedAt: 5 },
+              { metricType: 'fork_memory_risk', nodeId: 'b0000000', openedAt: 5 },
+            ]);
+          });
+
+          it('names the node of each incident signal, by address or by the connection it came from', async () => {
+            (service as any).connectionRegistry.noteObservedNodeId('conn-b', 'b0000000');
+            const entry = (connectionId: string, extra: object) => ({
+              connectionId,
+              metricType: 'memory_used',
+              timestamp: 7,
+              recoveryState: 'active',
+              ...extra,
+            });
+            jest.spyOn(service as any, 'readIncidentTimelines').mockResolvedValue([
+              {
+                recovery: { status: 'active' },
+                matchedPatterns: ['node_failover'],
+                sequenceMatches: [],
+                entries: [
+                  entry('conn-a', { nodeAddr: '10.0.0.2:6379' }),
+                  entry('conn-a', { node: { nodeId: 'c0000000' } }),
+                  entry('conn-b', {}),
+                  entry('conn-a', {}),
+                  entry('conn-a', { recoveryState: 'recovered' }),
+                ],
+              },
+              {
+                recovery: { status: 'recovered' },
+                matchedPatterns: [],
+                sequenceMatches: [],
+                entries: [entry('conn-a', {})],
+              },
+            ]);
+
+            await expect(service.placementIncidents('conn-a')).resolves.toEqual([
+              {
+                recovery: 'active',
+                patterns: ['node_failover'],
+                signals: [
+                  {
+                    metricType: 'memory_used',
+                    nodeId: null,
+                    address: '10.0.0.2:6379',
+                    openedAt: 7,
+                  },
+                  { metricType: 'memory_used', nodeId: 'c0000000', openedAt: 7 },
+                  { metricType: 'memory_used', nodeId: 'b0000000', openedAt: 7 },
+                  { metricType: 'memory_used', nodeId: null, openedAt: 7 },
+                ],
+              },
+            ]);
+          });
+
           it('offers no run when the plan has no Valkey 9 command', async () => {
             enable();
             spreadLoad();

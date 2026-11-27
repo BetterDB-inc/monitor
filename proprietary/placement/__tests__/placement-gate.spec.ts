@@ -405,7 +405,17 @@ describe('placementGate', () => {
         ['incident:source:s2'],
       ],
       ['an incident on an unrelated node', incident('active', [['memory_used', 'u1', NOW]]), []],
-      ['an incident that names no node', incident('active', [['memory_used', null, NOW]]), []],
+      [
+        'an incident that names no node',
+        incident('active', [['memory_used', null, NOW]]),
+        ['unknown:cluster:'],
+      ],
+      ['an ignored signal that names no node', incident('active', [['hot_shard', null, NOW]]), []],
+      [
+        'a recovered incident that names no node',
+        incident('recovered', [['memory_used', null, NOW]]),
+        [],
+      ],
       [
         'a failover incident on the target',
         incident('active', [['replication_role', 't1', NOW]], ['node_failover']),
@@ -468,6 +478,18 @@ describe('placementGate', () => {
       expect(gate(leaving, 'rollback')).toEqual({ allowed: true, blockers: [], warnings: [] });
       const returning = facts((f) => (f.pingP50Ms.t1 = 500));
       expect(kindsOf(gate(returning, 'rollback'))).toEqual(['latency:target:t1']);
+    });
+
+    it('holds a rollback back on what it cannot read', () => {
+      const built = facts((f) => {
+        f.nodes = [];
+        f.migrations = 'unknown';
+        f.clusterStateOk = null;
+        f.unreadable = ['the open events', 'the cluster nodes'];
+      });
+      const result = gate(built, 'rollback');
+      expect(result.allowed).toBe(false);
+      expect(result.blockers.map((each) => each.kind)).toContain('unknown');
     });
 
     it('keeps only the safety blockers for a rollback', () => {

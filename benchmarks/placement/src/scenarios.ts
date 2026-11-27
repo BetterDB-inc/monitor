@@ -518,7 +518,7 @@ async function gateChecks(
     string,
     (world: GateWorld) => void,
     (gate: Awaited<ReturnType<typeof judgeGate>>) => boolean,
-    ('approve' | 'auto')?,
+    ('approve' | 'auto' | 'rollback')?,
   ][],
 ): Promise<Check[]> {
   const checks: Check[] = [];
@@ -627,6 +627,22 @@ export async function runB4Unknown(): Promise<ScenarioResult> {
         'PING on an unrelated node is not read',
         (world) => world.pings.set('u1', null),
         (gate) => gate.allowed,
+      ],
+      [
+        'an open incident with an entry that names no node',
+        (world) =>
+          world.incidents.push({
+            recovery: 'active',
+            patterns: [],
+            signals: [{ metricType: 'memory_used', nodeId: null, openedAt: GATE_NOW }],
+          }),
+        unknown('cluster'),
+      ],
+      [
+        'a rollback is held back when the cluster nodes cannot be read',
+        (world) => world.unreadable.add('readPlacementNodeFacts'),
+        unknown('cluster'),
+        'rollback',
       ],
     ]),
   );

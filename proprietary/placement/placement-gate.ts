@@ -95,6 +95,7 @@ const ROLLBACK_KINDS = new Set<PlacementBlockerKind>([
   'failover',
   'fork',
   'latency',
+  'unknown',
 ]);
 
 const AUTO_ONLY = new Set<PlacementBlockerKind>(['coverage', 'outside_window', 'quarantined']);
@@ -198,6 +199,17 @@ export function placementGate(
     const kind = NODE_EVENTS[event.metricType] ?? REPLICA_EVENTS[event.metricType];
     if (kind && event.nodeId === null) {
       raise(kind, 'cluster', `An open ${event.metricType} event on a node it does not name.`);
+    }
+  }
+
+  for (const incident of facts.incidents) {
+    if (!OPEN_RECOVERY.has(incident.recovery)) continue;
+    if (
+      incident.signals.some(
+        (signal) => signal.nodeId === null && !INCIDENT_IGNORED.has(signal.metricType),
+      )
+    ) {
+      raise('unknown', 'cluster', 'An open incident involves a node it does not name.');
     }
   }
 

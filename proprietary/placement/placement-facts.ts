@@ -46,7 +46,9 @@ export interface PlacementFactsPort {
   readPlacementNodeFacts(connectionId: string, shardIds: string[]): Promise<PlacementNodeFacts>;
 }
 
-export type PlacementFactsContext = Pick<
+export type PlacementFactsContext = PlacementGateContext & { movedShardIds?: readonly string[] };
+
+type PlacementGateContext = Pick<
   PlacementGateFacts,
   | 'budget'
   | 'paused'
@@ -71,16 +73,22 @@ export class PlacementEpochs {
     seedId: string,
     nodes: readonly PlacementNodeRead[],
     now: number,
+    movedShardIds: readonly string[] = [],
   ): Map<string, boolean | null> {
     const known = this.seen.get(seedId) ?? new Map<string, EpochSeen>();
     const next = new Map<string, EpochSeen>();
     const changed = new Map<string, boolean | null>();
     for (const node of nodes) {
       const before = known.get(node.id);
+      const moved = movedShardIds.includes(node.shardId);
       const entry: EpochSeen = !before
         ? { epoch: node.configEpoch, since: now, changedAt: null }
         : node.configEpoch > before.epoch
-          ? { epoch: node.configEpoch, since: before.since, changedAt: now }
+          ? {
+              epoch: node.configEpoch,
+              since: before.since,
+              changedAt: moved ? before.changedAt : now,
+            }
           : before;
       next.set(node.id, entry);
       if (entry.changedAt !== null && now - entry.changedAt < PLACEMENT_EPOCH_WINDOW_MS) {
@@ -129,6 +137,7 @@ export function forkOf(
 
 export function replicasInSyncOf(
   replication: Record<string, string> | undefined,
+  listedReplicas: number,
 ): { replicasInSync: boolean } | null {
   const count = Number(replication?.connected_slaves);
   if (!replication || !Number.isInteger(count)) return null;
@@ -138,7 +147,9 @@ export function replicasInSyncOf(
   const inSync = replicas.every(
     (replica) => replica.state === 'online' && Number(replica.lag) <= PLACEMENT_REPLICA_LAG_S,
   );
-  return { replicasInSync: replicas.length === count && inSync };
+  return {
+    replicasInSync: count === listedReplicas && replicas.length === listedReplicas && inSync,
+  };
 }
 
 function withNodeIds(
@@ -173,6 +184,7 @@ export async function readPlacementGateFacts(
   context: PlacementFactsContext,
   now: number,
 ): Promise<PlacementGateFacts> {
+  const { movedShardIds = [], ...gateContext } = context;
   const unreadable: string[] = [];
   const shardIds = [context.sourceShardId, ...context.targetShardIds];
   const [openEvents, incidents, nodeFacts] = await Promise.all([
@@ -181,7 +193,7 @@ export async function readPlacementGateFacts(
     attempt(() => port.readPlacementNodeFacts(seedId, shardIds), 'the cluster nodes', unreadable),
   ]);
   const reads = nodeFacts?.nodes ?? [];
-  const changed = epochs.observe(seedId, reads, now);
+  const changed = epochs.observe(seedId, reads, now, movedShardIds);
   const nodes: PlacementGateNode[] = reads.map((node) => ({
     id: node.id,
     address: node.address,
@@ -192,7 +204,7 @@ export async function readPlacementGateFacts(
     epochChanged: changed.get(node.id) ?? null,
   }));
   return {
-    ...context,
+    ...gateContext,
     nodes,
     clusterStateOk: nodeFacts ? nodeFacts.clusterStateOk : null,
     migrations: nodeFacts ? nodeFacts.migrations : 'unknown',
