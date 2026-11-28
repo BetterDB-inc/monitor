@@ -278,6 +278,42 @@ describe.each([
     expect(await start('a2')).toBeNull();
   });
 
+  const waitOnAbort = async (id: string, clusterNodes: string[]) => {
+    await approved(id, clusterNodes);
+    await start(id);
+    await storage.transitionPlacementAction(id, ['running'], {
+      state: 'aborted_pending',
+      endedAt: 1,
+    });
+  };
+
+  it('keeps the locks of an action waiting on an abort until it is aborted', async () => {
+    await waitOnAbort('a1', ['n1']);
+    await approved('a2', ['n1']);
+
+    expect(await storage.freeOrphanedPlacementLocks()).toBe(0);
+    expect(await start('a2')).toBeNull();
+
+    await storage.transitionPlacementAction('a1', ['aborted_pending'], {
+      state: 'aborted',
+      endedAt: 9,
+    });
+    expect(await start('a2')).toMatchObject({ state: 'running' });
+  });
+
+  it('lists an action waiting on an abort as open', async () => {
+    await waitOnAbort('a1', ['n1']);
+
+    expect((await storage.listOpenPlacementActions()).map((each) => each.id)).toEqual(['a1']);
+  });
+
+  it('never prunes an action waiting on an abort', async () => {
+    await waitOnAbort('a1', ['n1']);
+
+    expect(await storage.prunePlacementActions(Number.MAX_SAFE_INTEGER)).toBe(0);
+    expect(await stateOf('a1')).toBe('aborted_pending');
+  });
+
   it('frees the locks of ended and missing actions only', async () => {
     await approved('open', ['n1']);
     await start('open');

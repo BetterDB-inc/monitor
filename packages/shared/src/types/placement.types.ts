@@ -246,6 +246,7 @@ export const PLACEMENT_OPEN_STATES: readonly PlacementActionState[] = [
   'running',
   'verifying',
   'rolling_back',
+  'aborted_pending',
 ];
 
 export const PLACEMENT_TERMINAL_STATES: readonly PlacementActionState[] = [
@@ -255,7 +256,6 @@ export const PLACEMENT_TERMINAL_STATES: readonly PlacementActionState[] = [
   'rejected',
   'expired',
   'aborted',
-  'aborted_pending',
   'failed',
   'rolled_back',
   'rollback_blocked',
