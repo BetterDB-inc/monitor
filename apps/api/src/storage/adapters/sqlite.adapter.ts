@@ -35,6 +35,7 @@ import {
   placementFromRow,
   placementStepReadOf,
   placementPageLimit,
+  placementPatchEnding,
   PlacementLockTaken,
 } from './placement-action-rows';
 import type {
@@ -5027,10 +5028,11 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const db = this.db;
     if (!db) throw new Error('Database not initialized');
     if (from.length === 0) return null;
-    const set = placementColumns<PlacementAction>(PLACEMENT_ACTION_COLUMNS, patch, [
-      'id',
-      'connectionId',
-    ]);
+    const set = placementColumns<PlacementAction>(
+      PLACEMENT_ACTION_COLUMNS,
+      placementPatchEnding(patch, Date.now()),
+      ['id', 'connectionId'],
+    );
     try {
       return db.transaction(() => {
         const row = db

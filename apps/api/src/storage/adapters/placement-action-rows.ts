@@ -1,4 +1,10 @@
-import type { PlacementAction, PlacementStep, PlacementStepRead } from '@betterdb/shared';
+import {
+  PLACEMENT_TERMINAL_STATES,
+  type PlacementAction,
+  type PlacementActionPatch,
+  type PlacementStep,
+  type PlacementStepRead,
+} from '@betterdb/shared';
 
 type ColumnKind = 'text' | 'nullableText' | 'json' | 'number' | 'nullableNumber';
 
@@ -105,6 +111,15 @@ export function placementStepReadOf(row: Record<string, unknown>): PlacementStep
     ...placementFromRow(PLACEMENT_STEP_COLUMNS, row),
     sourceShardId: String(row.action_source_shard_id),
   };
+}
+
+export function placementPatchEnding(
+  patch: PlacementActionPatch,
+  now: number,
+): PlacementActionPatch {
+  return PLACEMENT_TERMINAL_STATES.includes(patch.state) && patch.endedAt == null
+    ? { ...patch, endedAt: now }
+    : patch;
 }
 
 export function placementPageLimit(limit: number | undefined): number {

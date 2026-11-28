@@ -98,7 +98,12 @@ import type {
   UpdateProposalStatusInput,
   AppendProposalAuditInput,
 } from '@betterdb/shared';
-import { parsePlacementCursor, placementCursor, placementPageLimit } from './placement-action-rows';
+import {
+  parsePlacementCursor,
+  placementCursor,
+  placementPageLimit,
+  placementPatchEnding,
+} from './placement-action-rows';
 import {
   defaultPlacementSettings,
   PLACEMENT_TERMINAL_STATES,
@@ -1590,7 +1595,12 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   ): Promise<PlacementAction | null> {
     const current = this.placementActions.get(id);
     if (!current || !from.includes(current.state)) return null;
-    const next = { ...current, ...definedOf(patch), id, connectionId: current.connectionId };
+    const next = {
+      ...current,
+      ...definedOf(placementPatchEnding(patch, Date.now())),
+      id,
+      connectionId: current.connectionId,
+    };
     if (next.state === 'running') {
       const nodeIds = [...new Set(next.clusterNodes)];
       if (nodeIds.some((nodeId) => (this.placementLocks.get(nodeId)?.actionId ?? id) !== id)) {

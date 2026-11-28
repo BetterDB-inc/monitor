@@ -35,6 +35,7 @@ import {
   placementFromRow,
   placementStepReadOf,
   placementPageLimit,
+  placementPatchEnding,
   PlacementLockTaken,
 } from './placement-action-rows';
 import type {
@@ -4993,10 +4994,11 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     patch: PlacementActionPatch,
   ): Promise<PlacementAction | null> {
     if (from.length === 0) return null;
-    const set = placementColumns<PlacementAction>(PLACEMENT_ACTION_COLUMNS, patch, [
-      'id',
-      'connectionId',
-    ]);
+    const set = placementColumns<PlacementAction>(
+      PLACEMENT_ACTION_COLUMNS,
+      placementPatchEnding(patch, Date.now()),
+      ['id', 'connectionId'],
+    );
     try {
       return await this.inPlacementTransaction(async (client) => {
         const assignments = set.columns.map((column, index) => `${column} = $${index + 1}`);

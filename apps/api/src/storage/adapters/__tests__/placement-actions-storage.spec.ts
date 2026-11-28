@@ -550,6 +550,31 @@ describe.each([
     expect((await storage.getPlacementAction('a1'))?.action.message).toBe('kept');
   });
 
+  it('stamps the end of an action that moves into a terminal state without one', async () => {
+    await storage.createPlacementAction(action('a1'), []);
+    const before = Date.now();
+
+    const ended = await storage.transitionPlacementAction('a1', ['proposed'], {
+      state: 'rejected',
+    });
+
+    expect(ended?.endedAt).toBeGreaterThanOrEqual(before);
+    expect(ended?.endedAt).toBeLessThanOrEqual(Date.now());
+    expect((await storage.getPlacementAction('a1'))?.action.endedAt).toBe(ended?.endedAt);
+    expect(await storage.prunePlacementActions(Date.now() + 1)).toBe(1);
+  });
+
+  it('keeps the end a terminal move gives, and stamps none on an open move', async () => {
+    await storage.createPlacementAction(action('a1'), []);
+
+    expect(
+      await storage.transitionPlacementAction('a1', ['proposed'], { state: 'approved' }),
+    ).toMatchObject({ endedAt: null });
+    expect(
+      await storage.transitionPlacementAction('a1', ['approved'], { state: 'expired', endedAt: 7 }),
+    ).toMatchObject({ endedAt: 7 });
+  });
+
   it('prunes ended actions with their steps, keeping open and recent ones', async () => {
     await storage.createPlacementAction(action('old', { state: 'succeeded', endedAt: 100 }), [
       step('old', 0, { state: 'done', sendingAt: 50, endedAt: 90 }),
