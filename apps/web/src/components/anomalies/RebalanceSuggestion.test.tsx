@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import type { PlacementMode } from '@betterdb/shared';
+import type { PlacementBlocker, PlacementMode } from '@betterdb/shared';
 import type {
   HotShardDetail,
   RebalanceNoPlanReason,
@@ -451,22 +451,65 @@ describe('RebalanceSuggestion', () => {
       );
     });
 
-    it('calls a gate refusal the last start once a fresh verdict allows the plan', async () => {
+    const blockedBy = (...blockers: PlacementBlocker[]) =>
+      hotShard(
+        plan({
+          execution: { available: false, blockedBy: 'gate' },
+          gate: { allowed: false, blockers, warnings: [] },
+        }),
+      );
+
+    it('calls a gate refusal the last start once a later verdict allows the plan', async () => {
+      runRebalance.mockRejectedValue(
+        new ApiError('Forbidden', 403, { blockedBy: 'gate', blockers: [fork] }),
+      );
+      const client = await show([hotShard(runnable())]);
+      fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+      getHotShards.mockResolvedValue([blockedBy(fork)]);
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Start the migration' }));
+
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+        `Waits for: ${fork.detail}`,
+      );
+      expect(within(dialog).getByRole('button', { name: 'Start the migration' })).toBeDisabled();
+
+      getHotShards.mockResolvedValue([hotShard(runnable())]);
+      await act(async () => {
+        await client.invalidateQueries();
+      });
+
+      await waitFor(() =>
+        expect(within(dialog).getByRole('alert')).toHaveTextContent(
+          `The last start waited for: ${fork.detail} The safety checks allow it now.`,
+        ),
+      );
+      expect(within(dialog).getByRole('alert')).not.toHaveTextContent(/^Waits for/);
+      expect(within(dialog).getByRole('button', { name: 'Start the migration' })).toBeEnabled();
+    });
+
+    it('calls a gate refusal the last start once a later verdict waits for something else', async () => {
+      const failover = {
+        kind: 'failover' as const,
+        scope: 'target' as const,
+        nodeId: TARGET,
+        detail: '10.0.0.4:6379 is failing over.',
+      };
       runRebalance.mockRejectedValue(
         new ApiError('Forbidden', 403, { blockedBy: 'gate', blockers: [fork] }),
       );
       await show([hotShard(runnable())]);
       fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
       const dialog = await screen.findByRole('dialog');
+      getHotShards.mockResolvedValue([blockedBy(failover)]);
 
       fireEvent.click(within(dialog).getByRole('button', { name: 'Start the migration' }));
 
       const alert = await within(dialog).findByRole('alert');
-      expect(alert).toHaveTextContent(
-        `The last start waited for: ${fork.detail} The safety checks allow it now.`,
-      );
-      expect(alert).not.toHaveTextContent(/^Waits for/);
-      expect(within(dialog).getByRole('button', { name: 'Start the migration' })).toBeEnabled();
+      expect(alert.textContent).toBe(`The last start waited for: ${fork.detail}`);
+      expect(within(dialog).getAllByText(/^Waits for:/)).toHaveLength(1);
+      expect(within(dialog).getByText(`Waits for: ${failover.detail}`)).toBeInTheDocument();
     });
 
     it('shows the latest gate warnings while the moves still match', async () => {

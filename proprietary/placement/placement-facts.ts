@@ -109,7 +109,11 @@ export class PlacementEpochs {
               changedAt: ours ? before.changedAt : now,
               seenAt: Math.max(now, before.seenAt),
             }
-          : { ...before, shardId: node.shardId, seenAt: Math.max(now, before.seenAt) };
+          : {
+              ...before,
+              shardId: now >= before.seenAt ? node.shardId : before.shardId,
+              seenAt: Math.max(now, before.seenAt),
+            };
       next.set(node.id, entry);
       if (entry.changedAt !== null && now - entry.changedAt < PLACEMENT_EPOCH_WINDOW_MS) {
         changed.set(node.id, true);

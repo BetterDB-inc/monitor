@@ -5111,11 +5111,28 @@ describe('AnomalyService', () => {
               event('closed', 'conn-a', 'failover_churn', { resolved: true }),
               event('elsewhere', 'conn-z', 'failover_churn', {}),
               event('unrelated', 'conn-a', 'memory_used', {}),
+              event('pruned', 'conn-a', 'failover_churn', { persisted: true }),
             ];
+            const outbox = (service as any).persistenceOutbox;
+            outbox.enqueueSave(
+              event('unsaved', 'conn-a', 'topology_divergence', { timestamp: 6 }),
+              undefined,
+              0,
+            );
+            outbox.enqueueSave(
+              event('evicted', 'conn-a', 'failover_churn', { timestamp: 7 }),
+              undefined,
+              0,
+            );
+            outbox.enqueueRewrite(
+              event('rewritten', 'conn-a', 'failover_churn', { persisted: true }),
+              0,
+            );
 
             await expect(service.placementOpenEvents('conn-a')).resolves.toEqual([
               { metricType: 'command_p99', nodeId: 'c0000000', openedAt: 5 },
               { metricType: 'topology_divergence', nodeId: null, openedAt: 6 },
+              { metricType: 'failover_churn', nodeId: null, openedAt: 7 },
             ]);
           });
 
@@ -5203,6 +5220,39 @@ describe('AnomalyService', () => {
             ]);
           });
 
+          it.each([
+            ['leaves out', 2 * 60 * 60_000, 0],
+            ['counts', 10 * 60_000, 1],
+          ])(
+            '%s an incident without open signals on every read when its last event is %d ms old',
+            async (_, age, count) => {
+              const history = [
+                {
+                  id: 'spike',
+                  connectionId: 'conn-a',
+                  metricType: 'memory_used',
+                  timestamp: clock - age,
+                  resolved: false,
+                  baseline: 1,
+                  stdDev: 1,
+                  threshold: 3,
+                },
+              ];
+              storage.getAnomalyEvents.mockImplementation(
+                async ({ startTime = 0, endTime = Infinity }) =>
+                  history.filter(
+                    (event) => event.timestamp >= startTime && event.timestamp <= endTime,
+                  ),
+              );
+
+              const first = await service.placementIncidents('conn-a');
+              const second = await service.placementIncidents('conn-a');
+
+              expect(first.incidents).toHaveLength(count);
+              expect(second.incidents).toHaveLength(count);
+            },
+          );
+
           it('reads a busy cluster whose month of spikes passes the history scan limit', async () => {
             const hour = 60 * 60_000;
             const history = Array.from({ length: 60_000 }, (_, n) => ({
@@ -5253,7 +5303,7 @@ describe('AnomalyService', () => {
               {
                 recovery: { status: 'active', openSignals: [] },
                 startedAt: 7,
-                lastEventAt: 7,
+                lastEventAt: clock,
                 matchedPatterns: ['node_failover'],
                 sequenceMatches: [],
                 entries: [
@@ -5314,7 +5364,7 @@ describe('AnomalyService', () => {
               timeline('degraded', clock - 30 * hour, ['memory_used']),
               timeline('unknown', clock - 50 * hour, []),
             ]);
-            expect((await service.placementIncidents('conn-a')).incidents).toHaveLength(2);
+            expect((await service.placementIncidents('conn-a')).incidents).toHaveLength(1);
             expect(from()).toBe(clock - 30 * 24 * hour);
 
             read.mockResolvedValueOnce([timeline('unknown', clock - 50 * hour, [])]);

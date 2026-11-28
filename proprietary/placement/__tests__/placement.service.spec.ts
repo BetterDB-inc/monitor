@@ -967,6 +967,91 @@ describe('PlacementService', () => {
         expect(anomaly.runRebalance).toHaveBeenCalledWith('seed', 'a', moves, actor);
       });
 
+      const listing = (sourceShardId: string, targetShardId: string) => [
+        {
+          eventId: 'evt',
+          shardId: sourceShardId,
+          nodeAddr: `${sourceShardId}:7000`,
+          rebalance: {
+            kind: 'plan',
+            sourceShardId,
+            moves: [{ targetShardId, ranges: [[0, 10]] }],
+            execution: { available: true },
+          },
+        } as unknown as ServedHotShardDetail,
+      ];
+
+      it.each([
+        ['the same connection', 'seed'],
+        ['a member', 'member'],
+      ])(
+        'drops the listed gate of a plan once a run of it was refused, also when listed through %s',
+        async (_, listedThrough) => {
+          const { service, storage, anomaly } = await setup({ configs: withMember });
+          await storage.savePlacementMode({
+            connectionId: 'seed',
+            mode: 'recommend',
+            updatedAt: 1,
+          });
+          const listed = listing('a', 'b');
+          const [before] = await service.withPlacementBlocker(listedThrough, listed);
+          expect(before.rebalance).toMatchObject({ execution: { available: true } });
+
+          anomaly.placementOpenEvents.mockResolvedValue([failover]);
+          await expect(service.runRebalance('seed', 'a', moves, actor)).resolves.toMatchObject({
+            status: 'blocked',
+            blockedBy: 'gate',
+          });
+
+          const [after] = await service.withPlacementBlocker(listedThrough, listed);
+          expect(after.rebalance).toMatchObject({
+            execution: { available: false, blockedBy: 'gate' },
+            gate: {
+              allowed: false,
+              blockers: [expect.objectContaining({ kind: 'failover', nodeId: 'b' })],
+            },
+          });
+        },
+      );
+
+      it('keeps the listed gates of another shard and of another cluster when a run is refused', async () => {
+        const { service, storage, anomaly } = await setup({
+          configs: { ...withMember, other: { id: 'other', host: '10.0.0.9', port: 7009 } },
+        });
+        await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+        await storage.savePlacementMode({ connectionId: 'other', mode: 'recommend', updatedAt: 1 });
+        await service.withPlacementBlocker('seed', listing('c', 'd'));
+        await service.withPlacementBlocker('other', listing('a', 'b'));
+        anomaly.placementOpenEvents.mockResolvedValue([failover]);
+        await service.runRebalance('seed', 'a', moves, actor);
+        const reads = anomaly.readPlacementNodeFacts.mock.calls.length;
+        await service.withPlacementBlocker('seed', listing('c', 'd'));
+        await service.withPlacementBlocker('other', listing('a', 'b'));
+        expect(anomaly.readPlacementNodeFacts).toHaveBeenCalledTimes(reads);
+      });
+
+      it('keeps a list read that started before a refused run out of the cache', async () => {
+        const { service, storage, anomaly } = await setup();
+        await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+        let finish: (facts: PlacementNodeFacts) => void = () => {};
+        anomaly.readPlacementNodeFacts.mockReturnValueOnce(
+          new Promise<PlacementNodeFacts>((resolve) => {
+            finish = resolve;
+          }),
+        );
+        const early = service.withPlacementBlocker('seed', listing('a', 'b'));
+        await settled();
+        anomaly.placementOpenEvents.mockResolvedValue([failover]);
+        await service.runRebalance('seed', 'a', moves, actor);
+        finish(healthyNodes());
+        await early;
+
+        const [after] = await service.withPlacementBlocker('seed', listing('a', 'b'));
+        expect(after.rebalance).toMatchObject({
+          execution: { available: false, blockedBy: 'gate' },
+        });
+      });
+
       it('gates a run started through a member on the events and the budget of its seed', async () => {
         const { service, storage, anomaly } = await setup({ configs: withMember });
         await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });

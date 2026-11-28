@@ -412,8 +412,8 @@ function RunDialog({
         : blockedBy && REBALANCE_BLOCKED[blockedBy];
   const allowedNow = !changed && current?.execution?.available === true;
   const error =
-    refused?.waitedFor && allowedNow
-      ? `The last start waited for: ${refused.waitedFor} The safety checks allow it now.`
+    refused?.waitedFor && (allowedNow || current?.gate) && refused.message !== notice
+      ? `The last start waited for: ${refused.waitedFor}${allowedNow ? ' The safety checks allow it now.' : ''}`
       : refused?.message;
   const refresh = () =>
     Promise.all([

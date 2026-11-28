@@ -7573,8 +7573,15 @@ export class AnomalyService
         after = page[page.length - 1];
       }
       const saved = new Set(stored.map((event) => event.id));
-      const unsaved = this.recentAnomalies.filter(
+      const held = new Map(
+        [...this.recentAnomalies, ...this.persistenceOutbox.unsavedAnomalies()].map((event) => [
+          event.id,
+          event,
+        ]),
+      );
+      const unsaved = [...held.values()].filter(
         (event) =>
+          !event.persisted &&
           !event.resolved &&
           event.connectionId === source &&
           wanted.has(event.metricType) &&
@@ -7625,7 +7632,11 @@ export class AnomalyService
       Number.MAX_SAFE_INTEGER,
       earlier ? true : scan,
     );
-    const open = incidents.filter((incident) => incident.recovery.status !== 'recovered');
+    const open = incidents.filter(
+      (incident) =>
+        incident.recovery.status !== 'recovered' &&
+        (incident.recovery.openSignals.length > 0 || incident.lastEventAt >= hourAgo),
+    );
     const lasting = open.filter((incident) => incident.recovery.openSignals.length > 0);
     const historyFrom = earlier ? earlier.historyFrom : scan.cutAt;
     this.placementIncidentReads.set(connectionId, {
