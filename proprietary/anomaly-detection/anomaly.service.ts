@@ -7573,8 +7573,15 @@ export class AnomalyService
         after = page[page.length - 1];
       }
       const saved = new Set(stored.map((event) => event.id));
-      const unsaved = this.recentAnomalies.filter(
+      const held = new Map(
+        [...this.recentAnomalies, ...this.persistenceOutbox.unsavedAnomalies()].map((event) => [
+          event.id,
+          event,
+        ]),
+      );
+      const unsaved = [...held.values()].filter(
         (event) =>
+          !event.persisted &&
           !event.resolved &&
           event.connectionId === source &&
           wanted.has(event.metricType) &&

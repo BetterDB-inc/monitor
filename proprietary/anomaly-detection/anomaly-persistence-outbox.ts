@@ -105,6 +105,12 @@ export class PersistenceOutbox {
     return entry?.kind === 'save' ? entry.anomaly : undefined;
   }
 
+  unsavedAnomalies(): AnomalyEvent[] {
+    return [...this.pending.values()].flatMap((entry) =>
+      entry.kind === 'save' ? [entry.anomaly] : [],
+    );
+  }
+
   resolvedAt(id: string): number | undefined {
     const entry = this.pending.get(id);
     return entry?.kind === 'resolve' ? entry.resolvedAt : undefined;

@@ -5111,11 +5111,28 @@ describe('AnomalyService', () => {
               event('closed', 'conn-a', 'failover_churn', { resolved: true }),
               event('elsewhere', 'conn-z', 'failover_churn', {}),
               event('unrelated', 'conn-a', 'memory_used', {}),
+              event('pruned', 'conn-a', 'failover_churn', { persisted: true }),
             ];
+            const outbox = (service as any).persistenceOutbox;
+            outbox.enqueueSave(
+              event('unsaved', 'conn-a', 'topology_divergence', { timestamp: 6 }),
+              undefined,
+              0,
+            );
+            outbox.enqueueSave(
+              event('evicted', 'conn-a', 'failover_churn', { timestamp: 7 }),
+              undefined,
+              0,
+            );
+            outbox.enqueueRewrite(
+              event('rewritten', 'conn-a', 'failover_churn', { persisted: true }),
+              0,
+            );
 
             await expect(service.placementOpenEvents('conn-a')).resolves.toEqual([
               { metricType: 'command_p99', nodeId: 'c0000000', openedAt: 5 },
               { metricType: 'topology_divergence', nodeId: null, openedAt: 6 },
+              { metricType: 'failover_churn', nodeId: null, openedAt: 7 },
             ]);
           });
 
