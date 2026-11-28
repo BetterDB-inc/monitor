@@ -418,7 +418,10 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
       'approve',
       { freshPolicy: true },
     ).catch(unreadableGate);
-    if (!gate.allowed) return { status: 'blocked', blockedBy: 'gate', blockers: gate.blockers };
+    if (!gate.allowed) {
+      this.forgetGates(connectionId, shardId);
+      return { status: 'blocked', blockedBy: 'gate', blockers: gate.blockers };
+    }
     const result = await this.anomaly.runRebalance(connectionId, shardId, confirmed, startedBy);
     if (result.status === 'refused' && result.serverReply && isAclRefusal(result.message)) {
       const seedId = this.seedOf(connectionId);
@@ -578,6 +581,18 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
       });
     this.gateReads.set(cacheKey, { key, read });
     return read;
+  }
+
+  private forgetGates(connectionId: string, shardId: string): void {
+    const cluster = this.clusterOf(connectionId);
+    for (const cache of [this.gateCache, this.gateReads]) {
+      for (const cacheKey of cache.keys()) {
+        const [listedThrough, sourceShardId] = cacheKey.split('\u0000');
+        if (sourceShardId === shardId && this.clusterOf(listedThrough) === cluster) {
+          cache.delete(cacheKey);
+        }
+      }
+    }
   }
 
   private gateKeyFor(connectionId: string, plan: RebalancePlan): string {
