@@ -5352,29 +5352,72 @@ describe('AnomalyService', () => {
             );
           });
 
-          it('blocks on an unresolved event older than a cut on the first read', async () => {
+          const probed = (recovery: number | null | undefined) =>
+            jest.spyOn(service as any, 'incidentHistoryProbe').mockReturnValue(recovery);
+
+          it.each([
+            ['blocks on', 'an open', 3, null, true],
+            ['passes', 'a recovered', 3, 1, false],
+            ['passes', 'an unknown', 3, undefined, false],
+            ['blocks on', 'an unknown', 0.5, undefined, true],
+            ['passes', 'an open', 31 * 24, null, false],
+          ])(
+            '%s %s unresolved event %s hours old past a cut on the first read',
+            async (_, __, hours, recovery, blocks) => {
+              const hour = 60 * 60_000;
+              const probe = probed(recovery);
+              const read = jest.spyOn(service as any, 'readIncidentTimelines');
+              const openedAt = clock - hours * hour;
+              storage.getAnomalyEvents.mockResolvedValue([
+                unresolved('before', openedAt),
+                unresolved('after', clock - hour / 8),
+              ]);
+              read.mockImplementationOnce(cutTimelines(clock - (hours * hour) / 2));
+
+              const first = await service.placementIncidents('conn-a');
+
+              expect(first.incidents).toEqual(
+                blocks
+                  ? [
+                      {
+                        recovery: 'unknown',
+                        patterns: [],
+                        signals: [{ metricType: 'memory_used', nodeId: 'c0000000', openedAt }],
+                      },
+                    ]
+                  : [],
+              );
+              if (hours === 3) {
+                expect(probe).toHaveBeenCalledWith(
+                  expect.objectContaining({
+                    connectionId: 'conn-a',
+                    metricType: 'memory_used',
+                    since: openedAt,
+                    until: null,
+                    now: clock,
+                  }),
+                );
+              }
+            },
+          );
+
+          it('keeps blocking on an open event past a cut once a later read is not cut, reading on from the hour', async () => {
             const hour = 60 * 60_000;
+            probed(null);
             const read = jest.spyOn(service as any, 'readIncidentTimelines');
-            storage.getAnomalyEvents.mockResolvedValue([
-              unresolved('before', clock - 3 * hour),
-              unresolved('after', clock - hour),
-            ]);
+            storage.getAnomalyEvents.mockResolvedValue([unresolved('before', clock - 3 * hour)]);
             read.mockImplementationOnce(cutTimelines(clock - 2 * hour));
+            read.mockResolvedValueOnce([]);
 
             const first = await service.placementIncidents('conn-a');
+            const second = await service.placementIncidents('conn-a');
 
-            expect(first).toEqual({
-              historyFrom: clock - 2 * hour,
-              incidents: [
-                {
-                  recovery: 'unknown',
-                  patterns: [],
-                  signals: [
-                    { metricType: 'memory_used', nodeId: 'c0000000', openedAt: clock - 3 * hour },
-                  ],
-                },
-              ],
-            });
+            expect(first.incidents).toHaveLength(1);
+            expect(second.incidents).toEqual(first.incidents);
+            expect(read.mock.calls.map(([, from]) => from)).toEqual([
+              clock - 30 * 24 * hour,
+              clock - hour,
+            ]);
           });
 
           it('reads the unresolved events once for the open events and a cut incident read', async () => {
@@ -5527,7 +5570,7 @@ describe('AnomalyService', () => {
             },
           );
 
-          it('blocks a busy cluster on the open spikes its month of history cuts off', async () => {
+          it('lets a busy cluster pass on the old spikes its month of history cuts off, reading on from the hour', async () => {
             const hour = 60 * 60_000;
             const history = Array.from({ length: 60_000 }, (_, n) => ({
               id: `e${n}`,
@@ -5560,12 +5603,14 @@ describe('AnomalyService', () => {
             expect(second.historyFrom).toBe(cutAt);
             const openedAt = (read: { incidents: { signals: { openedAt: number }[] }[] }) =>
               read.incidents.flatMap((incident) => incident.signals.map((each) => each.openedAt));
-            expect(openedAt(first)).toContain(history[59_999].timestamp);
-            expect(openedAt(second)).toContain(history[59_999].timestamp);
-            expect(read.mock.calls.map(([, from]) => from)).toEqual([
-              clock - 30 * 24 * hour,
-              clock - 30 * 24 * hour,
-            ]);
+            for (const each of [first, second]) {
+              expect(openedAt(each)).not.toContain(history[50_000].timestamp);
+              expect(openedAt(each)).not.toContain(history[59_999].timestamp);
+            }
+            const [monthFrom, laterFrom] = read.mock.calls.map(([, from]) => from as number);
+            expect(monthFrom).toBe(clock - 30 * 24 * hour);
+            expect(laterFrom).toBeGreaterThan(clock - 2 * hour);
+            expect(laterFrom).toBeLessThanOrEqual(clock - hour);
           });
 
           it('names the node of each incident signal, by address or by the connection it came from', async () => {

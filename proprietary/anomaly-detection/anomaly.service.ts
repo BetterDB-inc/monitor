@@ -7731,17 +7731,23 @@ export class AnomalyService
           (incident.recovery.openSignals.length > 0 || incident.lastEventAt >= hourAgo),
       )
       .map((incident) => this.countedPlacementIncident(incident));
-    const hidden =
+    const readFrom = scan.cutAt ?? (from > monthAgo ? from : null);
+    const events = readFrom !== null ? await unresolved : [];
+    const rescued =
       scan.cutAt !== null
-        ? this.placementIncidentsCutOff(
+        ? this.placementIncidentsRescued(
             earlier?.counted ?? [],
             scan.cutAt,
             visible,
-            await unresolved,
+            events,
             hourAgo,
           )
         : [];
-    const counted = [...visible, ...hidden];
+    const counted = [...visible, ...rescued];
+    const loose =
+      readFrom !== null
+        ? this.placementLooseIncidents(events, readFrom, counted, { now, hourAgo, monthAgo })
+        : [];
     const kept =
       earlier?.historyGap &&
       earlier.historyGap.to >= monthAgo &&
@@ -7762,7 +7768,7 @@ export class AnomalyService
         : (kept ?? raised);
     return {
       incidents: {
-        incidents: counted.map((each) => each.incident),
+        incidents: [...counted.map((each) => each.incident), ...loose],
         historyFrom: historyGap?.to ?? null,
       },
       memory: {
@@ -7787,7 +7793,7 @@ export class AnomalyService
     };
   }
 
-  private placementIncidentsCutOff(
+  private placementIncidentsRescued(
     earlier: readonly CountedPlacementIncident[],
     cutAt: number,
     visible: readonly CountedPlacementIncident[],
@@ -7796,27 +7802,47 @@ export class AnomalyService
   ): CountedPlacementIncident[] {
     const seen = new Set(visible.flatMap((each) => each.anomalyIds));
     const open = new Set(unresolved.flat().map((event) => event.id));
-    const rescued = earlier.filter(
+    return earlier.filter(
       (each) =>
         each.startedAt < cutAt &&
         (each.openIds.length > 0
           ? each.openIds.some((id) => !seen.has(id) && open.has(id))
           : !each.anomalyIds.some((id) => seen.has(id)) && each.lastEventAt >= hourAgo),
     );
-    const counted = new Set([...seen, ...rescued.flatMap((each) => each.anomalyIds)]);
-    const loose = unresolved
+  }
+
+  private placementLooseIncidents(
+    unresolved: readonly PlacementUnresolvedEvent[][],
+    readFrom: number,
+    counted: readonly CountedPlacementIncident[],
+    at: { now: number; hourAgo: number; monthAgo: number },
+  ): PlacementGateIncident[] {
+    const seen = new Set(counted.flatMap((each) => each.anomalyIds));
+    return unresolved
       .flatMap((events) => withoutRecoveredClusterState(events))
-      .filter((event) => event.timestamp < cutAt && !counted.has(event.id));
-    return [
-      ...rescued,
-      ...loose.map((event) => ({
-        startedAt: event.timestamp,
-        lastEventAt: event.timestamp,
-        anomalyIds: [event.id],
-        openIds: [event.id],
-        incident: { recovery: 'unknown', patterns: [], signals: [this.placementSignalOf(event)] },
-      })),
-    ];
+      .filter(
+        (event) =>
+          event.timestamp >= at.monthAgo &&
+          event.timestamp < readFrom &&
+          !seen.has(event.id) &&
+          (event.timestamp >= at.hourAgo ||
+            this.incidentHistoryProbe({
+              connectionId: event.connectionId,
+              metricType: event.metricType as MetricType,
+              since: event.timestamp,
+              until: null,
+              baseline: event.baseline,
+              stdDev: event.stdDev,
+              threshold: event.threshold,
+              now: at.now,
+              kind: event.kind,
+            }) === null),
+      )
+      .map((event) => ({
+        recovery: 'unknown',
+        patterns: [],
+        signals: [this.placementSignalOf(event)],
+      }));
   }
 
   private placementIncidentOf(incident: IncidentTimeline): PlacementGateIncident {
