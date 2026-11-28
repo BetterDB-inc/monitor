@@ -1591,6 +1591,18 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     const current = this.placementActions.get(id);
     if (!current || !from.includes(current.state)) return null;
     const next = { ...current, ...definedOf(patch), id, connectionId: current.connectionId };
+    if (next.state === 'running') {
+      const nodeIds = [...new Set(next.clusterNodes)];
+      if (nodeIds.some((nodeId) => (this.placementLocks.get(nodeId)?.actionId ?? id) !== id)) {
+        return null;
+      }
+      const acquiredAt = next.startedAt ?? Date.now();
+      for (const nodeId of nodeIds) {
+        if (!this.placementLocks.has(nodeId)) {
+          this.placementLocks.set(nodeId, { actionId: id, acquiredAt });
+        }
+      }
+    }
     this.placementActions.set(id, next);
     if (PLACEMENT_TERMINAL_STATES.includes(next.state)) {
       for (const [nodeId, lock] of this.placementLocks) {
@@ -1614,17 +1626,6 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     const next = { ...current, ...definedOf(patch), actionId, index };
     steps[position] = next;
     return structuredClone(next);
-  }
-
-  async acquirePlacementLock(
-    actionId: string,
-    nodeIds: readonly string[],
-    now: number,
-  ): Promise<boolean> {
-    if (nodeIds.some((nodeId) => this.placementLocks.has(nodeId))) return false;
-    for (const nodeId of new Set(nodeIds))
-      this.placementLocks.set(nodeId, { actionId, acquiredAt: now });
-    return true;
   }
 
   async freeOrphanedPlacementLocks(): Promise<number> {

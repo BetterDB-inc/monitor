@@ -47,6 +47,34 @@ function statementsOf(storage: StoragePort): () => string[] {
   return () => [];
 }
 
+async function plantLock(storage: StoragePort, nodeId: string, actionId: string): Promise<void> {
+  if (storage instanceof SqliteAdapter) {
+    const db = (
+      storage as unknown as {
+        db: { prepare: (sql: string) => { run: (...args: unknown[]) => unknown } };
+      }
+    ).db;
+    db.prepare(
+      'INSERT INTO placement_locks (node_id, action_id, acquired_at) VALUES (?, ?, 1)',
+    ).run(nodeId, actionId);
+    return;
+  }
+  if (storage instanceof PostgresAdapter) {
+    const pool = (
+      storage as unknown as { pool: { query: (sql: string, args: unknown[]) => Promise<unknown> } }
+    ).pool;
+    await pool.query(
+      'INSERT INTO placement_locks (node_id, action_id, acquired_at) VALUES ($1, $2, 1)',
+      [nodeId, actionId],
+    );
+    return;
+  }
+  (storage as unknown as { placementLocks: Map<string, unknown> }).placementLocks.set(nodeId, {
+    actionId,
+    acquiredAt: 1,
+  });
+}
+
 function action(id: string, overrides: Partial<PlacementAction> = {}): PlacementAction {
   return {
     id,
@@ -175,51 +203,94 @@ describe.each([
     ).toBeNull();
   });
 
-  it('refuses a lock on a node another action holds, taking none of the rows', async () => {
-    expect(await storage.acquirePlacementLock('a1', ['n1', 'n2'], 1)).toBe(true);
-    expect(await storage.acquirePlacementLock('a2', ['n3', 'n2'], 2)).toBe(false);
-    expect(await storage.acquirePlacementLock('a3', ['n3'], 3)).toBe(true);
+  const approved = (id: string, clusterNodes: string[]) =>
+    storage.createPlacementAction(action(id, { state: 'approved', clusterNodes }), []);
+  const start = (id: string) =>
+    storage.transitionPlacementAction(id, ['approved'], { state: 'running', startedAt: 5 });
+  const stateOf = async (id: string) => (await storage.getPlacementAction(id))?.action.state;
+
+  it('locks the nodes of an action as it starts, refusing nodes another action holds and writing none', async () => {
+    await approved('a1', ['n1', 'n3']);
+    await approved('a2', ['n3', 'n2']);
+    await approved('a3', ['n2']);
+
+    expect(await start('a1')).toMatchObject({ state: 'running', startedAt: 5 });
+    expect(await start('a2')).toBeNull();
+    expect(await stateOf('a2')).toBe('approved');
+    expect(await start('a3')).toMatchObject({ state: 'running' });
   });
 
-  it('lets one of two actions locking the same nodes in opposite order win', async () => {
-    const results = await Promise.all([
-      storage.acquirePlacementLock('a1', ['n1', 'n2', 'n3'], 1),
-      storage.acquirePlacementLock('a2', ['n3', 'n2', 'n1'], 1),
-    ]);
-    expect(results.sort()).toEqual([false, true]);
+  it('locks nothing for an action that is not approved', async () => {
+    await storage.createPlacementAction(
+      action('a1', { state: 'rejected', clusterNodes: ['n1'] }),
+      [],
+    );
+    await approved('a2', ['n1']);
+
+    expect(await start('a1')).toBeNull();
+    expect(await start('a2')).toMatchObject({ state: 'running' });
+  });
+
+  it('starts exactly one of two actions racing for the same nodes in opposite order', async () => {
+    await approved('a1', ['n1', 'n2', 'n3']);
+    await approved('a2', ['n3', 'n2', 'n1']);
+
+    const results = await Promise.all([start('a1'), start('a2')]);
+
+    expect(results.filter((each) => each !== null)).toHaveLength(1);
+    expect([await stateOf('a1'), await stateOf('a2')].sort()).toEqual(['approved', 'running']);
+  });
+
+  it('keeps the lock of a running action that is moved to running again', async () => {
+    await approved('a1', ['n1']);
+    await approved('a2', ['n1']);
+    await start('a1');
+
+    expect(
+      await storage.transitionPlacementAction('a1', ['running'], {
+        state: 'running',
+        message: 'x',
+      }),
+    ).toMatchObject({ state: 'running', message: 'x' });
+    expect(await start('a2')).toBeNull();
   });
 
   it('frees the lock when the action ends, and keeps it while the action is open', async () => {
-    await storage.createPlacementAction(action('a1', { state: 'approved' }), []);
-    expect(await storage.acquirePlacementLock('a1', ['n1', 'n2'], 1)).toBe(true);
+    await approved('a1', ['n1', 'n2']);
+    await approved('a2', ['n1']);
+    await start('a1');
 
-    await storage.transitionPlacementAction('a1', ['approved'], { state: 'running' });
-    expect(await storage.acquirePlacementLock('a2', ['n1'], 2)).toBe(false);
+    await storage.transitionPlacementAction('a1', ['running'], { state: 'verifying' });
+    expect(await start('a2')).toBeNull();
 
-    await storage.transitionPlacementAction('a1', ['running'], { state: 'aborted', endedAt: 9 });
-    expect(await storage.acquirePlacementLock('a2', ['n1', 'n2'], 3)).toBe(true);
+    await storage.transitionPlacementAction('a1', ['verifying'], { state: 'aborted', endedAt: 9 });
+    expect(await start('a2')).toMatchObject({ state: 'running' });
   });
 
   it('keeps the lock when a transition is refused', async () => {
-    await storage.createPlacementAction(action('a1', { state: 'running' }), []);
-    await storage.acquirePlacementLock('a1', ['n1'], 1);
+    await approved('a1', ['n1']);
+    await approved('a2', ['n1']);
+    await start('a1');
 
     expect(
       await storage.transitionPlacementAction('a1', ['approved'], { state: 'failed' }),
     ).toBeNull();
-    expect(await storage.acquirePlacementLock('a2', ['n1'], 2)).toBe(false);
+    expect(await start('a2')).toBeNull();
   });
 
   it('frees the locks of ended and missing actions only', async () => {
-    await storage.createPlacementAction(action('open', { state: 'running' }), []);
+    await approved('open', ['n1']);
+    await start('open');
     await storage.createPlacementAction(action('ended', { state: 'failed', endedAt: 5 }), []);
-    await storage.acquirePlacementLock('open', ['n1'], 1);
-    await storage.acquirePlacementLock('ended', ['n2'], 1);
-    await storage.acquirePlacementLock('gone', ['n3', 'n4'], 1);
+    await plantLock(storage, 'n2', 'ended');
+    await plantLock(storage, 'n3', 'gone');
+    await plantLock(storage, 'n4', 'gone');
 
     expect(await storage.freeOrphanedPlacementLocks()).toBe(3);
-    expect(await storage.acquirePlacementLock('next', ['n2', 'n3', 'n4'], 2)).toBe(true);
-    expect(await storage.acquirePlacementLock('next', ['n1'], 2)).toBe(false);
+    await approved('next', ['n2', 'n3', 'n4']);
+    await approved('blocked', ['n1']);
+    expect(await start('next')).toMatchObject({ state: 'running' });
+    expect(await start('blocked')).toBeNull();
   });
 
   it('updates a step from a state it is in, or without a check', async () => {

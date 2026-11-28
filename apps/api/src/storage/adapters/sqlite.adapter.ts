@@ -35,6 +35,7 @@ import {
   placementFromRow,
   placementStepReadOf,
   placementPageLimit,
+  PlacementLockTaken,
 } from './placement-action-rows';
 import type {
   StoredScalingReadinessScore,
@@ -675,8 +676,6 @@ function populatedDbsCte(where: string): string {
 }
 
 const TERMINAL_PLACEHOLDERS = PLACEMENT_TERMINAL_STATES.map(() => '?').join(', ');
-
-class PlacementLockTaken extends Error {}
 
 function insertPlacementRow(
   db: Database.Database,
@@ -5032,20 +5031,38 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       'id',
       'connectionId',
     ]);
-    return db.transaction(() => {
-      const row = db
-        .prepare(
-          `UPDATE placement_actions SET ${set.columns.map((column) => `${column} = ?`).join(', ')}
-           WHERE id = ? AND state IN (${from.map(() => '?').join(', ')})
-           RETURNING *`,
-        )
-        .get(...set.params, id, ...from) as Record<string, unknown> | undefined;
-      if (!row) return null;
-      if (PLACEMENT_TERMINAL_STATES.includes(patch.state)) {
-        db.prepare('DELETE FROM placement_locks WHERE action_id = ?').run(id);
-      }
-      return placementFromRow(PLACEMENT_ACTION_COLUMNS, row);
-    })();
+    try {
+      return db.transaction(() => {
+        const row = db
+          .prepare(
+            `UPDATE placement_actions SET ${set.columns.map((column) => `${column} = ?`).join(', ')}
+             WHERE id = ? AND state IN (${from.map(() => '?').join(', ')})
+             RETURNING *`,
+          )
+          .get(...set.params, id, ...from) as Record<string, unknown> | undefined;
+        if (!row) return null;
+        const action = placementFromRow<PlacementAction>(PLACEMENT_ACTION_COLUMNS, row);
+        if (action.state === 'running') {
+          const acquiredAt = action.startedAt ?? Date.now();
+          for (const nodeId of [...new Set(action.clusterNodes)].sort()) {
+            db.prepare(
+              'INSERT INTO placement_locks (node_id, action_id, acquired_at) VALUES (?, ?, ?) ON CONFLICT(node_id) DO NOTHING',
+            ).run(nodeId, id, acquiredAt);
+            const holder = db
+              .prepare('SELECT action_id FROM placement_locks WHERE node_id = ?')
+              .get(nodeId) as { action_id: string };
+            if (holder.action_id !== id) throw new PlacementLockTaken();
+          }
+        }
+        if (PLACEMENT_TERMINAL_STATES.includes(action.state)) {
+          db.prepare('DELETE FROM placement_locks WHERE action_id = ?').run(id);
+        }
+        return action;
+      })();
+    } catch (error) {
+      if (error instanceof PlacementLockTaken) return null;
+      throw error;
+    }
   }
 
   async updatePlacementStep(
@@ -5073,31 +5090,6 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       )
       .get(...set.params, actionId, index, ...(from ?? [])) as Record<string, unknown> | undefined;
     return row ? placementFromRow(PLACEMENT_STEP_COLUMNS, row) : null;
-  }
-
-  async acquirePlacementLock(
-    actionId: string,
-    nodeIds: readonly string[],
-    now: number,
-  ): Promise<boolean> {
-    const db = this.db;
-    if (!db) throw new Error('Database not initialized');
-    try {
-      db.transaction(() => {
-        for (const nodeId of new Set(nodeIds)) {
-          const result = db
-            .prepare(
-              'INSERT OR IGNORE INTO placement_locks (node_id, action_id, acquired_at) VALUES (?, ?, ?)',
-            )
-            .run(nodeId, actionId, now);
-          if (result.changes === 0) throw new PlacementLockTaken();
-        }
-      })();
-      return true;
-    } catch (error) {
-      if (error instanceof PlacementLockTaken) return false;
-      throw error;
-    }
   }
 
   async freeOrphanedPlacementLocks(): Promise<number> {

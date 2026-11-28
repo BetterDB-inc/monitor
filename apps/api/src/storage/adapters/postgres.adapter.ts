@@ -35,6 +35,7 @@ import {
   placementFromRow,
   placementStepReadOf,
   placementPageLimit,
+  PlacementLockTaken,
 } from './placement-action-rows';
 import type {
   StoredScalingReadinessScore,
@@ -4996,20 +4997,38 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       'id',
       'connectionId',
     ]);
-    return this.inPlacementTransaction(async (client) => {
-      const assignments = set.columns.map((column, index) => `${column} = $${index + 1}`);
-      const result = await client.query(
-        `UPDATE placement_actions SET ${assignments.join(', ')}
-         WHERE id = $${set.params.length + 1} AND state = ANY($${set.params.length + 2}::text[])
-         RETURNING *`,
-        [...set.params, id, from],
-      );
-      if (result.rowCount === 0) return null;
-      if (PLACEMENT_TERMINAL_STATES.includes(patch.state)) {
-        await client.query('DELETE FROM placement_locks WHERE action_id = $1', [id]);
+    try {
+      return await this.inPlacementTransaction(async (client) => {
+        const assignments = set.columns.map((column, index) => `${column} = $${index + 1}`);
+        const result = await client.query(
+          `UPDATE placement_actions SET ${assignments.join(', ')}
+           WHERE id = $${set.params.length + 1} AND state = ANY($${set.params.length + 2}::text[])
+           RETURNING *`,
+          [...set.params, id, from],
+        );
+        if (result.rowCount === 0) return null;
+        const action = placementFromRow<PlacementAction>(PLACEMENT_ACTION_COLUMNS, result.rows[0]);
+        if (action.state === 'running') {
+          const locked = await client.query(
+            `INSERT INTO placement_locks (node_id, action_id, acquired_at)
+             SELECT node_id, $2, $3 FROM UNNEST($1::text[]) AS node_id ORDER BY node_id
+             ON CONFLICT (node_id) DO UPDATE SET node_id = EXCLUDED.node_id
+             RETURNING action_id`,
+            [[...new Set(action.clusterNodes)].sort(), id, action.startedAt ?? Date.now()],
+          );
+          if (locked.rows.some((row) => row.action_id !== id)) throw new PlacementLockTaken();
+        }
+        if (PLACEMENT_TERMINAL_STATES.includes(action.state)) {
+          await client.query('DELETE FROM placement_locks WHERE action_id = $1', [id]);
+        }
+        return action;
+      });
+    } catch (error) {
+      if (error instanceof PlacementLockTaken || (error as { code?: string }).code === '40P01') {
+        return null;
       }
-      return placementFromRow(PLACEMENT_ACTION_COLUMNS, result.rows[0]);
-    });
+      throw error;
+    }
   }
 
   async updatePlacementStep(
@@ -5040,28 +5059,6 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       args,
     );
     return result.rowCount === 0 ? null : placementFromRow(PLACEMENT_STEP_COLUMNS, result.rows[0]);
-  }
-
-  async acquirePlacementLock(
-    actionId: string,
-    nodeIds: readonly string[],
-    now: number,
-  ): Promise<boolean> {
-    if (!this.pool) throw new Error('Database not initialized');
-    const unique = [...new Set(nodeIds)].sort();
-    if (unique.length === 0) return true;
-    try {
-      await this.pool.query(
-        `INSERT INTO placement_locks (node_id, action_id, acquired_at)
-         SELECT node_id, $2, $3 FROM UNNEST($1::text[]) AS node_id ORDER BY node_id`,
-        [unique, actionId, now],
-      );
-      return true;
-    } catch (error) {
-      const code = (error as { code?: string }).code;
-      if (code === '23505' || code === '40P01') return false;
-      throw error;
-    }
   }
 
   async freeOrphanedPlacementLocks(): Promise<number> {

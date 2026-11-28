@@ -895,7 +895,6 @@ export interface StoragePort {
     from: readonly PlacementStepState[] | null,
     patch: PlacementStepPatch,
   ): Promise<PlacementStep | null>;
-  acquirePlacementLock(actionId: string, nodeIds: readonly string[], now: number): Promise<boolean>;
   freeOrphanedPlacementLocks(): Promise<number>;
   placementStepsSince(connectionId: string, since: number): Promise<PlacementStepRead[]>;
   prunePlacementActions(before: number): Promise<number>;

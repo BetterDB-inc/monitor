@@ -134,3 +134,5 @@ export function parsePlacementCursor(cursor: string): { createdAt: number; id: s
   }
   throw new Error('Invalid placement action cursor');
 }
+
+export class PlacementLockTaken extends Error {}
