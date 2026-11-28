@@ -69,6 +69,12 @@ betterdb:
   # Name of an existing Secret with keys `url` and `token` instead of the two
   # values above. The backend only reads it (get/list/watch).
   existingSecret: ""
+  # The chart generates a random key (kept across upgrades and uninstall) that
+  # tags redacted secrets so changes still show. With helm template or a GitOps
+  # tool, which cannot look the old key up, name your own Secret here instead,
+  # holding at least 32 random bytes under `key`, e.g.
+  #   kubectl create secret generic betterdb-fingerprint --from-literal=key="$(openssl rand -base64 32)"
+  existingFingerprintSecret: ""
   # PEM bundle to trust for the BetterDB WebSocket (added to the public
   # roots), for a self-hosted Monitor behind a private CA. Rendered into its
   # own Secret, mounted, and passed as BETTERDB_CA_FILE; independent of

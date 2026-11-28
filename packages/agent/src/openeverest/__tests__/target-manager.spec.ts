@@ -49,7 +49,8 @@ class FakeKube {
   namespace = 'everest-system';
   objects = new Map<string, Obj[]>();
   configMap: Obj | null = null;
-  fingerprint: Obj | null = null;
+  // Rendered by the chart; the manager only reads it.
+  fingerprint: Obj | null = { metadata: { name: 'fingerprint' }, data: { key: Buffer.alloc(32, 5).toString('base64') } };
   kubeSystem: { uid?: string; failWith?: number | 'network'; failTimes?: number } = { uid: 'cluster-uid' };
   watchers = new Map<string, Array<(e: { type: string; object: Obj }) => void>>();
   patches: Array<{ path: string; body: unknown }> = [];
@@ -88,10 +89,6 @@ class FakeKube {
     if (path.endsWith('/configmaps')) {
       this.configMap = { ...body, metadata: { ...body.metadata, resourceVersion: '1' } };
       return this.configMap;
-    }
-    if (path === SECRETS && body.metadata.name === 'fingerprint') {
-      this.fingerprint = body;
-      return body;
     }
     const items = this.objects.get(this.collection(path)) ?? [];
     items.push(body);
@@ -175,7 +172,7 @@ beforeEach(() => {
 });
 
 describe('TargetManager opt-ins', () => {
-  it('hands every target the key from its own Secret, created once and kept across restarts', async () => {
+  it('hands every target the key from the fingerprint Secret, the same across restarts', async () => {
     const kube = new FakeKube();
     kube.objects.set(INSTANCES, [instance('db', 'orders'), instance('db', 'sessions')]);
     kube.configMap = { metadata: { name: 'targets', resourceVersion: '1' }, data: { main__db__orders: '{}', main__db__sessions: '{}' } };
@@ -188,10 +185,8 @@ describe('TargetManager opt-ins', () => {
     await flush();
 
     const keys = mockTargets.map((t) => t.options.fingerprintKey?.toString('hex'));
-    expect(kube.fingerprint?.metadata.name).toBe('fingerprint');
     expect(keys).toHaveLength(4);
-    expect(new Set(keys).size).toBe(1);
-    expect(keys[0]).toHaveLength(64);
+    expect(new Set(keys)).toEqual(new Set([Buffer.alloc(32, 5).toString('hex')]));
     await restarted.stop();
   });
 
@@ -366,5 +361,16 @@ describe('TargetManager settings', () => {
 
     expect(manager.settings()).toMatchObject({ url: 'wss://from-secret/agent/ws', tokenSet: true, source: 'secret' });
     await manager.stop();
+  });
+});
+
+describe('TargetManager fingerprint key', () => {
+  it('fails the start without the key Secret, so the start is retried rather than tags going untagged', async () => {
+    const kube = new FakeKube();
+    kube.fingerprint = null;
+    const { manager } = build(kube);
+
+    await expect(manager.start()).rejects.toThrow(/does not exist/);
+    expect(mockTargets).toHaveLength(0);
   });
 });

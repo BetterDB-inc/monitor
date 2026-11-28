@@ -53,6 +53,7 @@ and every write on these connections. No pod is restarted and no database CR is 
 | `betterdb.ca` | `""` | PEM bundle to trust, on top of the public roots, for a self-hosted Monitor behind a private CA (own Secret, mounted, `BETTERDB_CA_FILE`). |
 | `betterdb.existingCaSecret.name` / `.key` | `""` / `ca.crt` | Existing Secret holding that bundle instead of `betterdb.ca`. |
 | `betterdb.caFile` | `""` | Path to a CA bundle already mounted via `extraVolumes`; ignored when `betterdb.ca` is set. |
+| `betterdb.existingFingerprintSecret` | `""` | Secret with `key` (32+ random bytes, base64) to tag redacted secrets with, instead of the chart-generated one. Needed with `helm template`/GitOps. |
 | `watchNamespaces` | `[]` | Namespaces whose Instances and Secrets the plugin may read. Empty: cluster-wide. |
 | `openeverest.apiUrl` | `""` | OpenEverest API for the authorization check; empty uses the in-cluster default. |
 | `openeverest.clusterName` | `main` | OpenEverest's name for this Kubernetes cluster. |
@@ -63,10 +64,19 @@ and every write on these connections. No pod is restarted and no database CR is 
 | `replicaCount` | `1` | Keep at 1: a second pod would open duplicate connections. |
 
 `helm.sh/resource-policy` is not set on the settings Secret or the targets ConfigMap: values set
-inline are re-applied on every upgrade, and the ConfigMap and the `<release>-fingerprint` Secret
-the backend creates are not managed by the chart at all (they survive `helm upgrade` and are
-removed after `helm uninstall` only by hand). Deleting the fingerprint Secret makes the plugin
-generate a new key on its next start, which changes every redacted-secret tag once.
+inline are re-applied on every upgrade, and the ConfigMap the backend creates is not managed by the
+chart at all (it survives `helm upgrade` and is removed by `helm uninstall` only by hand).
+
+The `<release>-fingerprint` Secret holds the random key that tags redacted secrets. The chart
+generates it on install, keeps it on upgrade (through `lookup`), and keeps it on `helm uninstall`
+(`helm.sh/resource-policy: keep`), because a new key changes every tag at once. `helm template` and
+GitOps tools such as Argo CD cannot run `lookup` and would render a new key each time, so with them
+set `betterdb.existingFingerprintSecret` to a Secret you create:
+
+```bash
+kubectl -n everest-system create secret generic betterdb-fingerprint \
+  --from-literal=key="$(openssl rand -base64 32)"
+```
 
 ## Checks
 

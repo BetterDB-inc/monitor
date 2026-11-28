@@ -255,6 +255,10 @@ acl_tags="$(printf '%s' "$acl_list" | grep -oE '<redacted:[0-9a-f]{8}>' | sort -
 fp_key_len="$(kubectl -n "$OE_NAMESPACE" get secret betterdb-openeverest-fingerprint -o jsonpath='{.data.key}' | base64 -d | wc -c)"
 [ "$fp_key_len" -eq 32 ] || die "the fingerprint Secret holds a $fp_key_len-byte key, expected 32"
 echo "fingerprint key: 32 random bytes in betterdb-openeverest-fingerprint; tags: $acl_tags"
+plugin_sa="system:serviceaccount:$OE_NAMESPACE:betterdb-openeverest"
+[ "$(kubectl -n "$OE_NAMESPACE" auth can-i create secrets --as="$plugin_sa")" = "no" ] \
+  || die "the plugin ServiceAccount may create Secrets (it could mint ServiceAccount tokens)"
+echo "the plugin ServiceAccount cannot create Secrets"
 
 log "Checking the settings cannot be changed through the plugin API"
 code="$(plugin settings-put | head -n1)"
@@ -322,6 +326,14 @@ selector="$(kubectl -n "$OE_NAMESPACE" get networkpolicy betterdb-openeverest -o
 matched="$(kubectl -n "$OE_NAMESPACE" get pods -l "$selector" --field-selector=status.phase=Running --no-headers | wc -l)"
 echo "selector $selector matches $matched running pod(s)"
 [ "$matched" -ge 1 ] || die "the NetworkPolicy selector matches no everest-server pod"
+
+log "Upgrading the chart and checking the fingerprint key is kept"
+fp_before="$(kubectl -n "$OE_NAMESPACE" get secret betterdb-openeverest-fingerprint -o jsonpath='{.data.key}')"
+helm upgrade betterdb-openeverest charts/betterdb-openeverest --namespace "$OE_NAMESPACE" --reuse-values \
+  --wait --timeout "$TIMEOUT" >/dev/null
+fp_after="$(kubectl -n "$OE_NAMESPACE" get secret betterdb-openeverest-fingerprint -o jsonpath='{.data.key}')"
+[ -n "$fp_before" ] && [ "$fp_before" = "$fp_after" ] || die "helm upgrade replaced the fingerprint key"
+echo "helm upgrade kept the fingerprint key"
 
 log "Restarting the plugin pod and checking the opt-in survives, then disabling"
 kubectl -n "$OE_NAMESPACE" rollout restart deploy/betterdb-openeverest >/dev/null
