@@ -1495,6 +1495,14 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return policy ? structuredClone(policy) : null;
   }
 
+  async listPlacementPolicies(): Promise<PlacementPolicy[]> {
+    return structuredClone(
+      [...this.placementPolicies.values()].sort((a, b) =>
+        a.connectionId < b.connectionId ? -1 : a.connectionId > b.connectionId ? 1 : 0,
+      ),
+    );
+  }
+
   async savePlacementMode(write: PlacementModeWrite): Promise<PlacementPolicy> {
     const current = this.placementPolicies.get(write.connectionId);
     const policy: PlacementPolicy = {

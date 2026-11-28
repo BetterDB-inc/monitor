@@ -870,6 +870,7 @@ export interface StoragePort {
   saveScalingReadinessSettings(settings: ScalingReadinessSettings): Promise<ScalingReadinessSettings>;
 
   getPlacementPolicy(connectionId: string): Promise<PlacementPolicy | null>;
+  listPlacementPolicies(): Promise<PlacementPolicy[]>;
   savePlacementMode(write: PlacementModeWrite): Promise<PlacementPolicy>;
   savePlacementSettings(
     write: PlacementSettingsWrite,

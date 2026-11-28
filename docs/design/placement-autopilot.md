@@ -323,7 +323,7 @@ Four new tables and one changed table, each in the memory, sqlite and postgres a
 | `bytes_estimated` / `keys_moved` / `slots_moved` | integer | Budgets |
 | `sending_at`, `started_at`, `ended_at` | integer | `sending_at` indexed for the hourly budget |
 
-Retention: `PLACEMENT_ACTION_RETENTION_DAYS`, default 90, pruned with the activity job. Today's in-memory `RebalanceRun` becomes a view over the rows, surviving a restart. The cooldown and no-return rules (2.4) read the `done` steps of the last `max(slotCooldownDays, noReturnDays)`.
+Retention: `PLACEMENT_ACTION_RETENTION_DAYS`, default 90, pruned with the activity job. Today's in-memory `RebalanceRun` becomes a view over the rows, surviving a restart. The cooldown and no-return rules (2.4) read the `done` steps of the last `max(slotCooldownDays, noReturnDays)`, so pruning never goes past the longest of those windows in any stored policy or the defaults.
 
 ### 3.3 `placement_locks` (phase 3)
 

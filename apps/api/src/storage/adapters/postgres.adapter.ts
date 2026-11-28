@@ -4848,6 +4848,14 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return row ? this.placementPolicyFromRow(row) : null;
   }
 
+  async listPlacementPolicies(): Promise<PlacementPolicy[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      'SELECT connection_id, mode, policy, version, updated_at FROM placement_policies ORDER BY connection_id',
+    );
+    return result.rows.map((row) => this.placementPolicyFromRow(row));
+  }
+
   private placementPolicyFromRow(row: Record<string, any>): PlacementPolicy {
     const { settings, invalid } = readStoredPlacementSettings(row.policy);
     return {

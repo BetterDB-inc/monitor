@@ -91,6 +91,20 @@ describe.each([
     expect(await storage.getPlacementPolicy('conn-a')).toBeNull();
   });
 
+  it('lists every stored policy by connection', async () => {
+    expect(await storage.listPlacementPolicies()).toEqual([]);
+    await storage.savePlacementMode({ connectionId: 'conn-b', mode: 'observe', updatedAt: 1_500 });
+    await storage.savePlacementSettings(
+      { connectionId: 'conn-a', settings: tighter, updatedAt: 3_000, modeIfNew: 'recommend' },
+      0,
+    );
+
+    expect(await storage.listPlacementPolicies()).toEqual([
+      stored('conn-a', 'recommend', 3_000, tighter, 1),
+      stored('conn-b', 'observe', 1_500),
+    ]);
+  });
+
   it('saves and replaces the mode per connection', async () => {
     await storage.savePlacementMode({
       connectionId: 'conn-a',

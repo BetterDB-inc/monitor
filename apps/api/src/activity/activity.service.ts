@@ -1,6 +1,6 @@
 import { BadRequestException, Inject, Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'crypto';
-import type { Actor, ActorVia } from '@betterdb/shared';
+import { DEFAULT_PLACEMENT_SETTINGS, type Actor, type ActorVia } from '@betterdb/shared';
 import type {
   ActivityCursor,
   ActivityRecord,
@@ -121,8 +121,13 @@ export class ActivityService {
   }
 
   async prunePlacementActions(now: number = Date.now()): Promise<number> {
-    return this.storage.prunePlacementActions(
-      now - this.config.placementActionRetentionDays * DAY_MS,
+    const policies = await this.storage.listPlacementPolicies();
+    const days = Math.max(
+      this.config.placementActionRetentionDays,
+      ...[DEFAULT_PLACEMENT_SETTINGS, ...policies.map((policy) => policy.settings)].flatMap(
+        (settings) => [settings.slotCooldownDays, settings.noReturnDays],
+      ),
     );
+    return this.storage.prunePlacementActions(now - days * DAY_MS);
   }
 }

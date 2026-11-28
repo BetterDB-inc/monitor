@@ -4863,6 +4863,16 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return this.readPlacementPolicy(connectionId);
   }
 
+  async listPlacementPolicies(): Promise<PlacementPolicy[]> {
+    if (!this.db) throw new Error('Database not initialized');
+    const rows = this.db
+      .prepare(
+        'SELECT connection_id, mode, policy, version, updated_at FROM placement_policies ORDER BY connection_id',
+      )
+      .all() as PlacementPolicyRow[];
+    return rows.map((row) => this.placementPolicyOfRow(row));
+  }
+
   private readPlacementPolicy(connectionId: string): PlacementPolicy | null {
     if (!this.db) throw new Error('Database not initialized');
     const row = this.db
