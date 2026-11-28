@@ -1001,7 +1001,7 @@ Each cluster also has a placement policy, stored with its mode on the seed conne
 | `sustainMinutes` | 30 | How long the sustained load of a shard must stay over the trigger before the trigger fires. The trigger does not move slots yet. |
 | `slotCooldownDays` | 7 | How long a slot that moved stays put, except for a rollback. |
 | `noReturnDays` | 7 | How long a slot stays away from a shard it left, except for a rollback. |
-| `maxMigrationsPerHour` | 4 | Moves per hour; a move takes slots from one source to one target. |
+| `maxMigrationsPerHour` | 4 | Moves per hour; a move takes slots from one source to one target. A suggested plan has no more targets than the budget has left, and at least one. |
 | `maxBytesPerHour` | 2 GiB | Bytes moved per hour. Moved bytes are not counted yet, so the safety checks block only a value of 0. |
 | `maintenanceWindows` | none (any time) | Days, a start time (UTC) and a duration in minutes. |
 | `abortLatencyMs` | 50 | A node of the hot shard or a target whose `PING` median of 10 is over `max(50, abortLatencyMs)` ms holds the plan back. |

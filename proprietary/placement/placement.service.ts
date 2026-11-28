@@ -108,7 +108,7 @@ export interface PlacementGateSubject {
 export interface PlacementGateOptions {
   now?: number;
   sourceTriggerFiredAt?: number | null;
-  freshPolicy?: boolean;
+  policy?: PlacementSettingsRead;
 }
 
 export interface PlacementSettingsRead {
@@ -117,13 +117,17 @@ export interface PlacementSettingsRead {
   invalid: PlacementPolicyInvalid | null;
 }
 
-export function rebalancePolicyOf(settings: PlacementSettings): RebalancePolicy {
+export function rebalancePolicyOf(settings: PlacementSettings, jobsUsed = 0): RebalancePolicy {
   return {
     ...DEFAULT_REBALANCE_POLICY,
     nodeCpuLimitUsecPerSecond: settings.nodeCpuLimitUsecPerSecond,
     resolveRatio: settings.resolveRatio,
     excludedShardIds: settings.excludedShardIds,
     excludedSlots: settings.excludedSlots,
+    maxTargets: Math.max(
+      1,
+      Math.min(DEFAULT_REBALANCE_POLICY.maxTargets, settings.maxMigrationsPerHour - jobsUsed),
+    ),
   };
 }
 
@@ -138,6 +142,7 @@ function settingsReadOf(policy: PlacementPolicy | null): PlacementSettingsRead {
 @Injectable()
 export class PlacementService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PlacementService.name);
+  private readonly warnRead = (message: string): void => this.logger.warn(message);
   private readonly invalidWarned = new Map<string, string>();
   private readonly policyCache = new Map<string, { at: number; policy: PlacementPolicy | null }>();
   private readonly policyGeneration = new Map<string, number>();
@@ -329,7 +334,10 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
     const { settings, invalid } = await this.settingsOf(seedId);
     if (invalid && !invalid.exclusionsReadable)
       throw new PlacementPolicyUnreadableError(invalid.problems);
-    return rebalancePolicyOf(settings);
+    return rebalancePolicyOf(
+      settings,
+      this.anomaly.placementJobsSince(seedId, Date.now() - BUDGET_WINDOW_MS),
+    );
   }
 
   private async readPolicy(seedId: string): Promise<PlacementPolicy | null> {
@@ -409,22 +417,23 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
     confirmed: readonly ConfirmedMove[],
     startedBy: RebalanceRunActor,
   ): Promise<RebalanceRunResult> {
-    if (!(await this.allowsRun(connectionId))) {
+    const seedId = this.seedOf(connectionId);
+    const policy = await this.readPolicy(seedId);
+    if ((await this.runningMode(seedId, policy)) === 'observe') {
       return { status: 'blocked', blockedBy: 'observe_mode' };
     }
     const gate = await this.gateFor(
       connectionId,
       { sourceShardId: shardId, targetShardIds: targetsOf(confirmed), moveCount: confirmed.length },
       'approve',
-      { freshPolicy: true },
-    ).catch(unreadableGate);
+      { policy: settingsReadOf(policy) },
+    ).catch((err: unknown) => this.unreadableGate(connectionId, err));
     if (!gate.allowed) {
       this.forgetGates(connectionId, shardId);
       return { status: 'blocked', blockedBy: 'gate', blockers: gate.blockers };
     }
     const result = await this.anomaly.runRebalance(connectionId, shardId, confirmed, startedBy);
     if (result.status === 'refused' && result.serverReply && isAclRefusal(result.message)) {
-      const seedId = this.seedOf(connectionId);
       this.aclDenied.set(seedId, null);
       this.supportCache.delete(seedId);
       this.supportReads.delete(seedId);
@@ -475,10 +484,12 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
     purpose: PlacementGatePurpose,
     options: PlacementGateOptions = {},
   ): Promise<PlacementGateResult> {
-    const read = await readPlacementCluster(this.anomaly, this.seedOf(connectionId), [
-      subject.sourceShardId,
-      ...subject.targetShardIds,
-    ]);
+    const read = await readPlacementCluster(
+      this.anomaly,
+      this.seedOf(connectionId),
+      [subject.sourceShardId, ...subject.targetShardIds],
+      this.warnRead,
+    );
     return this.judgeGate(connectionId, subject, purpose, read, options);
   }
 
@@ -487,11 +498,11 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
     subject: PlacementGateSubject,
     purpose: PlacementGatePurpose,
     read: PlacementClusterRead,
-    { now = Date.now(), freshPolicy = false, ...options }: PlacementGateOptions = {},
+    { now = Date.now(), policy, ...options }: PlacementGateOptions = {},
   ): Promise<PlacementGateResult> {
     const seedId = this.seedOf(connectionId);
     const [{ settings, invalid }, support] = await Promise.all([
-      freshPolicy ? this.readPolicy(seedId).then(settingsReadOf) : this.settingsOf(seedId),
+      policy ?? this.settingsOf(seedId),
       this.readOnlySupport(seedId),
     ]);
     const facts = placementGateFactsOf(
@@ -547,6 +558,7 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
       this.anomaly,
       this.clusterOf(connectionId),
       missing.flatMap((plan) => [plan.sourceShardId, ...targetsOf(plan.moves)]),
+      this.warnRead,
     );
     return Promise.all(
       plans.map((plan, index) => gates[index] ?? this.gateFromCluster(connectionId, plan, cluster)),
@@ -572,15 +584,22 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
         if (owns()) this.gateCache.set(cacheKey, { at: Date.now(), key, gate });
         return gate;
       })
-      .catch((): PlacementGateResult => {
+      .catch((err: unknown): PlacementGateResult => {
         if (owns()) this.gateCache.delete(cacheKey);
-        return unreadableGate();
+        return this.unreadableGate(connectionId, err);
       })
       .finally(() => {
         if (this.gateReads.get(cacheKey)?.read === read) this.gateReads.delete(cacheKey);
       });
     this.gateReads.set(cacheKey, { key, read });
     return read;
+  }
+
+  private unreadableGate(connectionId: string, err: unknown): PlacementGateResult {
+    this.logger.warn(
+      `Could not run the placement safety checks of ${connectionId}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return unreadableGate();
   }
 
   private forgetGates(connectionId: string, shardId: string): void {
@@ -623,8 +642,11 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async runningMode(seedId: string): Promise<PlacementMode> {
-    const mode = await this.storedMode(seedId);
+  private async runningMode(
+    seedId: string,
+    policy?: PlacementPolicy | null,
+  ): Promise<PlacementMode> {
+    const mode = policy === undefined ? await this.storedMode(seedId) : this.modeOf(policy, seedId);
     if (mode === 'observe') return 'observe';
     const support =
       mode === 'recommend' ? await this.readOnlySupport(seedId) : await this.support(seedId);

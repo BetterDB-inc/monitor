@@ -115,9 +115,18 @@ describe('readPlacementGateFacts', () => {
     ['placementIncidents', 'the open incidents'],
     ['readPlacementNodeFacts', 'the cluster nodes'],
   ] as const)('lists a failed %s read as unreadable, and the gate blocks', async (method, name) => {
+    const warn = jest.fn();
     const stub = port({ [method]: jest.fn(async () => Promise.reject(new Error('timed out'))) });
-    const facts = await readPlacementGateFacts(stub, warmed('seed', []), 'seed', context, NOW);
+    const facts = await readPlacementGateFacts(
+      stub,
+      warmed('seed', []),
+      'seed',
+      context,
+      NOW,
+      warn,
+    );
     expect(facts.unreadable).toEqual([name]);
+    expect(warn).toHaveBeenCalledWith(`Could not read ${name} of seed: timed out`);
     const result = placementGate(facts, defaultPlacementSettings(), NOW, 'approve');
     expect(result.allowed).toBe(false);
     expect(result.blockers[0]).toMatchObject({ kind: 'unknown', scope: 'cluster' });
