@@ -1,0 +1,37 @@
+{{- if .Values.networkPolicy.enabled -}}
+{{- /*
+The backend is a plain ClusterIP Service and the plugin proxy's JWT check runs
+in everest-server, not here, so only everest-server pods should be able to
+reach it. Ingress is limited to pods matching networkPolicy.serverPodSelector
+in the OpenEverest namespace (the release namespace unless overridden), plus
+any extra peers given. Egress is left open: the backend needs the Kubernetes
+API, every Valkey pod and BetterDB. Needs a CNI that enforces NetworkPolicy;
+kind's default CNI does not, so there it is a no-op.
+*/ -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "betterdb-openeverest.fullname" . }}
+  labels:
+    {{- include "betterdb-openeverest.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "betterdb-openeverest.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ default .Release.Namespace .Values.networkPolicy.openeverestNamespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.serverPodSelector | nindent 14 }}
+        {{- with .Values.networkPolicy.extraFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.port }}
+{{- end }}

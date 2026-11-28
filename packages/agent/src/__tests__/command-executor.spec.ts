@@ -149,3 +149,124 @@ describe('CommandExecutor COLLECT_KEY_ANALYTICS', () => {
     expect(result.keyDetails?.filter((k) => k.freqScore === 7)).toHaveLength(2);
   });
 });
+
+describe('CommandExecutor read-only', () => {
+  function executorWith(options: { unsafeMode?: boolean; readOnly?: boolean }) {
+    const call = jest.fn().mockResolvedValue('OK');
+    const client = { call, config: jest.fn().mockResolvedValue([]), info: jest.fn().mockResolvedValue('') } as unknown as Valkey;
+    return { executor: new CommandExecutor(client, options), call };
+  }
+
+  it.each([
+    ['SLOWLOG', ['RESET']],
+    ['COMMANDLOG', ['RESET', 'slow']],
+    ['LATENCY', ['RESET']],
+    ['ACL', ['LOG', 'RESET']],
+    ['CLIENT', ['KILL', 'ID', '7']],
+    ['CONFIG', ['SET', 'maxmemory', '0']],
+    ['FLUSHALL', []],
+  ])('refuses %s %j locally, before it reaches the server', async (cmd, args) => {
+    const { executor, call } = executorWith({ readOnly: true });
+
+    expect(executor.isAllowed(cmd, args)).toBe(false);
+    await expect(executor.execute(cmd, args)).rejects.toThrow('Command not allowed');
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it('keeps refusing mutations even with unsafe mode on', async () => {
+    const { executor, call } = executorWith({ readOnly: true, unsafeMode: true });
+
+    await expect(executor.execute('SET', ['k', 'v'])).rejects.toThrow('Command not allowed');
+    await expect(executor.execute('SLOWLOG', ['RESET'])).rejects.toThrow('Command not allowed');
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it('judges the arguments that reach the server, so a binary operand cannot swap in another sub-command', async () => {
+    const { executor, call } = executorWith({ readOnly: true });
+
+    // CLIENT LIST passes the check; substituting LIST with KILL would send
+    // CLIENT KILL ID 7. The sub-command slot is never substituted.
+    await executor.execute('CLIENT', ['LIST', 'ID', '7'], { LIST: Buffer.from('KILL') });
+    expect(call.mock.calls[0]).toEqual(['CLIENT', 'LIST', 'ID', '7']);
+
+    // A placeholder in a data slot is substituted.
+    await executor.execute('CLIENT', ['LIST', 'ID', 'placeholder'], { placeholder: Buffer.from('9') });
+    expect(call.mock.calls[1]).toEqual(['CLIENT', 'LIST', 'ID', Buffer.from('9')]);
+  });
+
+  it('judges binary operands by their bytes, so a binary RESET cannot clear the ACL log', async () => {
+    const { executor, call } = executorWith({ readOnly: true });
+
+    await expect(
+      executor.execute('ACL', ['LOG', 'placeholder'], { placeholder: Buffer.from('RESET') }),
+    ).rejects.toThrow('Command not allowed: ACL LOG <binary>');
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a binary operand', ['LOG', 'placeholder'], { placeholder: Buffer.from('RESET\0') }],
+    ['a plain argument', ['LOG', 'RESET\0'], undefined],
+    ['a lower-case argument with trailing bytes after the NUL', ['LOG', 'reset\0junk'], undefined],
+  ])('refuses ACL LOG RESET followed by a NUL as %s, as Valkey reads it as RESET', async (_how, args, binaryArgs) => {
+    const { executor, call } = executorWith({ readOnly: true });
+
+    await expect(executor.execute('ACL', args as string[], binaryArgs as Record<string, Buffer> | undefined)).rejects.toThrow('Command not allowed');
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it('only substitutes own placeholders, never inherited names like constructor', async () => {
+    const { executor, call } = executorWith({ readOnly: true });
+
+    await executor.execute('CLIENT', ['LIST', 'ID', 'constructor'], {});
+    expect(call.mock.calls[0]).toEqual(['CLIENT', 'LIST', 'ID', 'constructor']);
+  });
+
+  it('tags redacted secrets with the fingerprint it was given', async () => {
+    const call = jest.fn().mockResolvedValue([`user app on #${'c'.repeat(64)} ~* +@all`]);
+    const client = { call, config: jest.fn(), info: jest.fn() } as unknown as Valkey;
+    const executor = new CommandExecutor(client, { readOnly: true, fingerprint: () => '1a2b3c4d' });
+
+    expect(await executor.execute('ACL', ['LIST'])).toEqual(['user app on #<redacted:1a2b3c4d> ~* +@all']);
+  });
+
+  it('still runs reads', async () => {
+    const { executor, call } = executorWith({ readOnly: true });
+
+    await executor.execute('SLOWLOG', ['GET', '10']);
+    await executor.execute('CLUSTER', ['NODES']);
+
+    expect(call.mock.calls.map((c) => c.join(' '))).toEqual(['SLOWLOG GET 10', 'CLUSTER NODES']);
+  });
+
+  it('redacts credentials from CONFIG GET replies, including a glob that covers them', async () => {
+    const config = jest.fn().mockResolvedValue(['requirepass', 's3cret', 'maxmemory', '0', 'masterauth', 's3cret']);
+    const client = { call: jest.fn(), config, info: jest.fn() } as unknown as Valkey;
+
+    const readOnly = new CommandExecutor(client, { readOnly: true });
+    expect(await readOnly.execute('CONFIG', ['GET', '*'])).toEqual(['requirepass', '<redacted>', 'maxmemory', '0', 'masterauth', '<redacted>']);
+    expect(await readOnly.execute('CONFIG', ['GET', 'requirepass'])).toEqual(['requirepass', '<redacted>', 'maxmemory', '0', 'masterauth', '<redacted>']);
+    expect(config).toHaveBeenLastCalledWith('GET', 'requirepass');
+
+    const plain = new CommandExecutor(client, {});
+    expect(await plain.execute('CONFIG', ['GET', '*'])).toEqual(['requirepass', 's3cret', 'maxmemory', '0', 'masterauth', 's3cret']);
+  });
+
+  it('redacts password hashes from ACL LIST replies', async () => {
+    const hash = 'd'.repeat(64);
+    const call = jest.fn().mockResolvedValue([`user default on #${hash} ~* +@all`, 'user ro on nopass ~* +@read']);
+    const client = { call, config: jest.fn(), info: jest.fn() } as unknown as Valkey;
+
+    expect(await new CommandExecutor(client, { readOnly: true }).execute('ACL', ['LIST']))
+      .toEqual(['user default on #<redacted> ~* +@all', 'user ro on nopass ~* +@read']);
+    expect(await new CommandExecutor(client, {}).execute('ACL', ['LIST']))
+      .toEqual([`user default on #${hash} ~* +@all`, 'user ro on nopass ~* +@read']);
+  });
+
+  it('allows the RESET sub-commands when not read-only, as before', async () => {
+    const { executor, call } = executorWith({});
+
+    await executor.execute('SLOWLOG', ['RESET']);
+
+    expect(call).toHaveBeenCalledWith('SLOWLOG', 'RESET');
+  });
+});

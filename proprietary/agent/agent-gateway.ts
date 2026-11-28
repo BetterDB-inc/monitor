@@ -2,12 +2,86 @@ import { Injectable, Logger } from '@nestjs/common';
 import { WebSocketServer, WebSocket, RawData } from 'ws';
 import { IncomingMessage } from 'http';
 import { Socket } from 'net';
+import { createHash } from 'crypto';
 import { AgentTokensService } from './agent-tokens.service';
 import { AgentDatabaseAdapter } from './agent-database-adapter';
 import { ConnectionRegistry } from '../../apps/api/src/connections/connection-registry.service';
-import type { AgentHelloMessage, AgentConnectionInfo } from '@betterdb/shared';
+import type { AgentHelloMessage, AgentConnectionInfo, AgentIdentity, AgentWelcomeMessage } from '@betterdb/shared';
 
 const LIVENESS_CHECK_MS = 5000;
+
+/**
+ * Identified agents (one process relaying many nodes) may hold at most this
+ * many connections per token; beyond it the gateway turns new ones away rather
+ * than let one token fill the registry.
+ */
+export const MAX_CONNECTIONS_PER_TOKEN = 512;
+
+const IDENTITY_PLATFORMS: ReadonlySet<string> = new Set(['openeverest']);
+const IDENTITY_MAX_LENGTH = 253;
+// DNS-style names for the Kubernetes-side labels; the node key may be a
+// cluster node id, host:port or a pod name, the cluster id a UID.
+const DNS_NAME = /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/;
+const NODE_KEY = /^[A-Za-z0-9][A-Za-z0-9.:_[\]-]*$/;
+const OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+
+function validField(value: unknown, pattern: RegExp): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= IDENTITY_MAX_LENGTH && pattern.test(value);
+}
+
+/**
+ * Checks an identity from the wire: the platform comes from an allowlist,
+ * cluster, namespace, instance and node are required, every field is a
+ * bounded string of an expected shape, and nothing else is kept. Returns null
+ * for anything malformed, which the gateway rejects.
+ */
+export function validateIdentity(raw: unknown): AgentIdentity | null {
+  if (raw === null || typeof raw !== 'object') return null;
+  const value = raw as Record<string, unknown>;
+  if (typeof value.platform !== 'string' || !IDENTITY_PLATFORMS.has(value.platform)) return null;
+  if (!validField(value.cluster, DNS_NAME) || !validField(value.namespace, DNS_NAME) || !validField(value.instance, DNS_NAME)) return null;
+  if (!validField(value.node, NODE_KEY)) return null;
+  if (value.clusterId !== undefined && !validField(value.clusterId, OPAQUE_ID)) return null;
+  if (value.nodeName !== undefined && !validField(value.nodeName, OPAQUE_ID)) return null;
+  const identity: AgentIdentity = {
+    platform: value.platform as AgentIdentity['platform'],
+    cluster: value.cluster,
+    namespace: value.namespace,
+    instance: value.instance,
+    node: value.node,
+  };
+  if (value.clusterId !== undefined) identity.clusterId = value.clusterId;
+  if (value.nodeName !== undefined) identity.nodeName = value.nodeName;
+  return identity;
+}
+
+/**
+ * Connection id for an agent. A single-target agent is its token: one token,
+ * one database. A multi-target agent (OpenEverest) sends an identity with each
+ * node it relays, and the id is derived from that instead, so a node keeps its
+ * id (and its history) when the agent pod restarts or fails over.
+ *
+ * The hash is scoped by the token's name, not its id: ids survive rotating
+ * the token (create the new one under the same name), while a token created
+ * under another name cannot take over an existing node's id. Tokens carry no
+ * owner today, so the name is the stable handle an admin controls. The
+ * Kubernetes cluster id is preferred over the OpenEverest cluster name, which
+ * is only a label the user picked.
+ */
+export function agentConnectionId(tokenId: string, tokenName: string, identity?: AgentIdentity): string {
+  if (!identity) return `agent-${tokenId}`;
+  const cluster = identity.clusterId || identity.cluster;
+  const digest = createHash('sha256')
+    .update([tokenName, identity.platform, cluster, identity.namespace, identity.instance, identity.node].join('\0'))
+    .digest('hex');
+  return `agent-${identity.platform}-${digest.slice(0, 16)}`;
+}
+
+/** Display name for an identified agent connection: namespace/instance/node. */
+export function agentConnectionName(tokenName: string, identity?: AgentIdentity): string {
+  if (!identity) return tokenName;
+  return `${identity.namespace}/${identity.instance}/${identity.nodeName || identity.node}`;
+}
 
 type ConnectionIdClaim = 'free' | 'replaced' | 'taken' | 'closed';
 
@@ -22,6 +96,8 @@ function isPong(data: RawData): boolean {
 interface AgentConnection {
   id: string;
   tokenId: string;
+  /** Holds one of the token's connection slots until registration settles (see MAX_CONNECTIONS_PER_TOKEN). */
+  reserved: boolean;
   name: string;
   ws: WebSocket;
   adapter: AgentDatabaseAdapter;
@@ -37,6 +113,9 @@ export class AgentGateway {
   private wss: WebSocketServer;
   private agents = new Map<string, AgentConnection>();
   private claims = new Map<string, Promise<void>>();
+  // Slots taken by hellos whose registration has not settled yet, per token,
+  // so a burst of concurrent hellos cannot pass the cap together.
+  private reservations = new Map<string, number>();
 
   constructor(
     private readonly tokenService: AgentTokensService,
@@ -72,12 +151,15 @@ export class AgentGateway {
   }
 
   private onConnection(ws: WebSocket, tokenId: string, tokenName: string): void {
-    const connectionId = `agent-${tokenId}`;
+    // The id is provisional until agent_hello: an identified agent gets one
+    // derived from its labels (see agentConnectionId).
+    let connectionId = `agent-${tokenId}`;
     this.logger.log(`Agent connected: ${connectionId} (token: ${tokenName})`);
 
     const agent: AgentConnection = {
       id: connectionId,
       tokenId,
+      reserved: false,
       name: tokenName,
       ws,
       adapter: null as any, // Will be set after hello
@@ -99,7 +181,30 @@ export class AgentGateway {
 
         if (msg.type === 'agent_hello' && !agent.agentHello) {
           clearTimeout(helloTimeout);
-          agent.agentHello = msg as AgentHelloMessage;
+          const hello = msg as AgentHelloMessage;
+          if (hello.identity !== undefined) {
+            const identity = validateIdentity(hello.identity);
+            if (!identity) {
+              this.logger.warn(`Agent ${connectionId} sent a malformed identity, closing`);
+              ws.close(4004, 'Invalid identity');
+              return;
+            }
+            hello.identity = identity;
+            // A reconnecting node replaces its own entry, so that one does not
+            // count; the slot is reserved here, synchronously, and released
+            // when registration settles or the socket closes.
+            const id = agentConnectionId(tokenId, tokenName, identity);
+            if (this.connectionsForToken(tokenId, id) >= MAX_CONNECTIONS_PER_TOKEN) {
+              this.logger.warn(`Agent ${connectionId}: token ${tokenName} already has ${MAX_CONNECTIONS_PER_TOKEN} connections, turning this one away`);
+              ws.close(4005, 'Too many connections for this token');
+              return;
+            }
+            this.reserve(agent);
+          }
+          agent.agentHello = hello;
+          agent.id = agentConnectionId(tokenId, tokenName, hello.identity);
+          agent.name = agentConnectionName(tokenName, hello.identity);
+          connectionId = agent.id;
           this.queueRegistration(agent);
           return;
         }
@@ -125,12 +230,35 @@ export class AgentGateway {
 
     ws.on('close', () => {
       clearTimeout(helloTimeout);
+      this.release(agent);
       this.unregisterAgent(connectionId, ws);
     });
 
     ws.on('error', (err) => {
       this.logger.error(`Agent ${connectionId} WebSocket error: ${err.message}`);
     });
+  }
+
+  /** Registered connections plus unsettled reservations for a token, minus the id a newcomer will replace. */
+  private connectionsForToken(tokenId: string, replacingId?: string): number {
+    let count = this.reservations.get(tokenId) ?? 0;
+    for (const agent of this.agents.values()) {
+      if (agent.tokenId === tokenId && agent.id !== replacingId) count++;
+    }
+    return count;
+  }
+
+  private reserve(agent: AgentConnection): void {
+    agent.reserved = true;
+    this.reservations.set(agent.tokenId, (this.reservations.get(agent.tokenId) ?? 0) + 1);
+  }
+
+  private release(agent: AgentConnection): void {
+    if (!agent.reserved) return;
+    agent.reserved = false;
+    const left = (this.reservations.get(agent.tokenId) ?? 1) - 1;
+    if (left > 0) this.reservations.set(agent.tokenId, left);
+    else this.reservations.delete(agent.tokenId);
   }
 
   private queueRegistration(agent: AgentConnection): void {
@@ -144,13 +272,24 @@ export class AgentGateway {
   }
 
   private async registerAgent(agent: AgentConnection): Promise<void> {
+    try {
+      await this.doRegister(agent);
+    } finally {
+      // Registered (now counted in this.agents) or refused: the slot is no longer a reservation.
+      this.release(agent);
+    }
+  }
+
+  private async doRegister(agent: AgentConnection): Promise<void> {
     if (agent.ws.readyState !== WebSocket.OPEN) return;
 
     const hello = agent.agentHello!;
     this.logger.log(
       `Agent ${agent.id} hello: ${hello.valkey.type} ${hello.valkey.version} ` +
       `(cluster: ${hello.valkey.cluster}, auth: ${hello.authMode ?? 'password'}, ` +
-      `capabilities: ${hello.capabilities.join(', ')})`,
+      `capabilities: ${hello.capabilities.join(', ')}` +
+      (hello.identity ? `, identity: ${agent.name}` : '') +
+      (hello.readOnly ? ', read-only' : '') + ')',
     );
 
     const claim = await this.claimConnectionId(agent);
@@ -172,7 +311,7 @@ export class AgentGateway {
         agent.id,
         agent.name,
         agent.adapter,
-        { serverless: hello.valkey.serverless === true },
+        { serverless: hello.valkey.serverless === true, readOnly: hello.readOnly === true },
       );
       this.logger.log(`Agent ${agent.id} registered as connection`);
     } catch (err: any) {
@@ -183,6 +322,15 @@ export class AgentGateway {
     }
 
     this.agents.set(agent.id, agent);
+
+    // Tell the agent its hello was understood (identity, read-only); see AgentWelcomeMessage.
+    const welcome: AgentWelcomeMessage = {
+      type: 'welcome',
+      serverVersion: process.env.APP_VERSION || process.env.npm_package_version || 'unknown',
+      identity: hello.identity !== undefined,
+      readOnly: hello.readOnly === true,
+    };
+    agent.ws.send(JSON.stringify(welcome));
 
     // Start heartbeat
     agent.pingTimer = setInterval(() => {
@@ -277,6 +425,8 @@ export class AgentGateway {
           agentVersion: agent.agentHello.version,
           valkey: agent.agentHello.valkey,
           authMode: agent.agentHello.authMode,
+          identity: agent.agentHello.identity,
+          readOnly: agent.agentHello.readOnly,
         });
       }
     }

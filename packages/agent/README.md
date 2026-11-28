@@ -61,6 +61,15 @@ npx @betterdb/agent \
 | `VALKEY_DB` / `--valkey-db` | `0` | Database number |
 | `BETTERDB_UNSAFE_CLI` / `--unsafe-cli` | `false` | Allow all commands (not just the read-only allowlist). Do not enable on publicly accessible instances. |
 
+## OpenEverest mode
+
+`--mode openeverest` (or `BETTERDB_AGENT_MODE=openeverest`) runs the agent as the backend of the
+BetterDB plugin for [OpenEverest](https://openeverest.io): one process that serves the plugin's
+HTTP API and UI bundle, watches the Valkey instances a user enabled, and streams every node of
+each instance to BetterDB with the instance's connection credentials, read-only. It needs a
+Kubernetes ServiceAccount and is installed by the `betterdb-openeverest` Helm chart; see
+[docs/install/openeverest.md](../../docs/install/openeverest.md) rather than setting it up by hand.
+
 ## Managed Services
 
 Works with AWS ElastiCache, Google Memorystore, Azure Cache, Aiven, and others. Set `VALKEY_TLS=true` if the provider requires encryption. The agent must be deployed in the same VPC/network as your database.

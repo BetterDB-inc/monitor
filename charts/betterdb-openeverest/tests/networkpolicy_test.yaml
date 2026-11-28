@@ -1,0 +1,58 @@
+suite: networkpolicy
+templates:
+  - templates/networkpolicy.yaml
+tests:
+  - it: admits only everest-server pods in the release namespace on the backend port by default
+    release:
+      namespace: everest-system
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: NetworkPolicy
+      - equal:
+          path: spec.policyTypes
+          value: [Ingress]
+      - equal:
+          path: spec.podSelector.matchLabels
+          value:
+            app.kubernetes.io/name: betterdb-openeverest
+            app.kubernetes.io/instance: RELEASE-NAME
+      - equal:
+          path: spec.ingress[0].from
+          value:
+            - namespaceSelector:
+                matchLabels:
+                  kubernetes.io/metadata.name: everest-system
+              podSelector:
+                matchLabels:
+                  app.kubernetes.io/name: everest-server
+      - equal:
+          path: spec.ingress[0].ports
+          value:
+            - protocol: TCP
+              port: 8080
+
+  - it: targets another OpenEverest namespace and extra peers when given
+    release:
+      namespace: plugins
+    set:
+      networkPolicy.openeverestNamespace: everest-system
+      networkPolicy.extraFrom:
+        - podSelector:
+            matchLabels:
+              app: debug
+    asserts:
+      - equal:
+          path: spec.ingress[0].from[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
+          value: everest-system
+      - equal:
+          path: spec.ingress[0].from[1].podSelector.matchLabels.app
+          value: debug
+
+  - it: renders nothing when disabled
+    set:
+      networkPolicy.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0

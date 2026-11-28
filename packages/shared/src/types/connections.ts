@@ -215,6 +215,11 @@ export interface DatabaseConnectionConfig {
   credentialStatus?: CredentialStatus;
   /** Error message when credentials are invalid */
   credentialError?: string;
+  /**
+   * Set at runtime on agent connections whose agent asked for read-only: the
+   * server refuses state-changing commands on them (see checkAgentReadOnly).
+   */
+  readOnly?: boolean;
 }
 
 /**
@@ -432,6 +437,8 @@ export interface ConnectionStatus {
   updatedAt?: number;
   isConnected: boolean;
   connectionType?: 'direct' | 'agent' | 'external';
+  /** True on agent connections where state-changing actions are refused. */
+  readOnly?: boolean;
   dialsDataNodes?: boolean;
   autoRegisterNodes?: boolean;
   membership?: TopologyMembership;

@@ -242,6 +242,8 @@ jobs:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: read
+      # helm-publish.yml also pushes the chart to ghcr (helm-publish-oci.yml).
+      packages: write
     uses: ./.github/workflows/helm-publish.yml
     with:
       ref: ${{ github.ref }}

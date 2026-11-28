@@ -43,8 +43,11 @@ import {
   FIELD_NAME_RE,
 } from '../../apps/api/src/database/parsers/vector-index.parser';
 import type { AgentHelloMessage, KeyAnalyticsOptions, KeyAnalyticsResult } from '@betterdb/shared';
+import { checkAgentReadOnly, redactSensitiveReply, supportsClusterSlotStats } from '@betterdb/shared';
+import { AgentReadOnlyError } from '../../apps/api/src/common/errors/agent-read-only.error';
 
 const COMMAND_TIMEOUT_MS = 15000;
+
 
 interface PendingRequest {
   resolve: (value: unknown) => void;
@@ -56,23 +59,31 @@ export class AgentDatabaseAdapter implements DatabasePort {
   private capabilities: DatabaseCapabilities;
   private pendingRequests = new Map<string, PendingRequest>();
   private _connected = false;
+  // Set when the agent asked for read-only (OpenEverest hands it the admin
+  // user). Enforced here, on every command, so neither the UI nor the CLI can
+  // change state through this connection whatever the agent itself allows.
+  private readonly readOnly: boolean;
 
   constructor(
     private ws: WebSocket,
     private agentHello: AgentHelloMessage,
   ) {
+    // CLUSTER SLOT-STATS arrived in Valkey 8.0 and Redis 8.2; the agent's
+    // CLUSTER capability only says the server runs in cluster mode.
+    const slotStats = agentHello.capabilities.includes('CLUSTER') && supportsClusterSlotStats(agentHello.valkey.type, agentHello.valkey.version);
     this.capabilities = {
       dbType: agentHello.valkey.type,
       version: agentHello.valkey.version,
       hasCommandLog: agentHello.capabilities.includes('COMMANDLOG'),
-      hasSlotStats: agentHello.capabilities.includes('CLUSTER'),
-      hasClusterSlotStats: agentHello.capabilities.includes('CLUSTER'),
+      hasSlotStats: slotStats,
+      hasClusterSlotStats: slotStats,
       hasLatencyMonitor: agentHello.capabilities.includes('LATENCY'),
       hasAclLog: agentHello.capabilities.includes('ACL'),
       hasMemoryDoctor: agentHello.capabilities.includes('MEMORY'),
       hasConfig: agentHello.capabilities.includes('CONFIG'),
       hasVectorSearch: agentHello.capabilities.includes('FT'),
     };
+    this.readOnly = agentHello.readOnly === true;
 
     ws.on('message', (data) => {
       try {
@@ -108,9 +119,24 @@ export class AgentDatabaseAdapter implements DatabasePort {
     binaryArgs?: Record<string, string>,
     options?: { cli?: boolean },
   ): Promise<unknown> {
+    const reply = this.exchange(cmd, args, binaryArgs, options);
+    // The agent redacts too; this covers an older agent that does not.
+    return this.readOnly ? reply.then((value) => redactSensitiveReply(cmd, args, value)) : reply;
+  }
+
+  private exchange(
+    cmd: string,
+    args?: string[],
+    binaryArgs?: Record<string, string>,
+    options?: { cli?: boolean },
+  ): Promise<unknown> {
     return new Promise((resolve, reject) => {
       if (!this._connected || this.ws.readyState !== WebSocket.OPEN) {
         reject(new Error('Agent connection is closed'));
+        return;
+      }
+      if (this.readOnly && checkAgentReadOnly(cmd.toUpperCase(), args) !== null) {
+        reject(new AgentReadOnlyError());
         return;
       }
 
@@ -347,6 +373,7 @@ export class AgentDatabaseAdapter implements DatabasePort {
   }
 
   async killClient(_filters: ClientFilters): Promise<number> {
+    if (this.readOnly) throw new AgentReadOnlyError();
     throw new Error('killClient is not supported through agent connections');
   }
 

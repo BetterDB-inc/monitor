@@ -1,0 +1,151 @@
+# Default values for betterdb-openeverest.
+#
+# The chart installs the BetterDB plugin for OpenEverest: a Plugin CR (the
+# "BetterDB" tab on Valkey instances and a settings panel) and one Deployment
+# of the betterdb/agent image in `openeverest` mode, which is both the plugin
+# backend and the agent that streams every node of each enabled instance to
+# BetterDB. Install it next to OpenEverest, in everest-system.
+
+# One replica only. A second pod would open a second set of connections to the
+# same nodes under the same identities; BetterDB keeps the first and turns the
+# other away, so extra replicas add log noise, not availability.
+replicaCount: 1
+
+image:
+  repository: betterdb/agent
+  # Empty resolves to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# The Plugin CR OpenEverest reads. It is cluster-scoped and keyed by name, so
+# install the chart once per OpenEverest.
+plugin:
+  name: betterdb
+  displayName: "BetterDB"
+  description: "Valkey monitoring, slow commands, client and keyspace analytics in BetterDB Cloud or a self-hosted BetterDB. Read-only; no pod restarts."
+  vendor: "BetterDB"
+  enabled: true
+  # Host versions the plugin accepts (semver range). Empty leaves the check out,
+  # as plugin-user-management does; set it to pin the plugin to a host line.
+  compatibleHostVersions: ""
+  # The React major the bundle is built against (the host checks this).
+  compatibleUiContractVersions: "^18.0.0"
+  # Extension points the bundle registers; the host rejects any other type.
+  # `providers` scopes the tab to Valkey instances (spec.providerRef.name).
+  extensionPoints:
+    - type: clusterDetailTab
+      path: betterdb
+      label: BetterDB
+      providers: [valkey]
+    - type: settingsPanel
+      path: betterdb
+      label: BetterDB
+
+openeverest:
+  # OpenEverest API the backend calls for the authorization check. Empty uses
+  # the in-cluster default: the EVEREST_SERVICE_HOST/PORT environment of a pod
+  # in everest-system, then everest.everest-system.svc.cluster.local:8080
+  # (the alpha.1 chart's API Service is named `everest`).
+  apiUrl: ""
+  # OpenEverest's name for the Kubernetes cluster this chart is installed in.
+  # The plugin only reaches instances of this cluster, through its ServiceAccount.
+  clusterName: main
+
+# Where the agents stream to. Set them here or bring a Secret (existingSecret);
+# the plugin's settings panel shows them but cannot change them. Values set
+# here are re-applied on every `helm upgrade`; a change to the Secret is picked
+# up without a restart.
+betterdb:
+  # BetterDB Cloud: wss://<workspace>.app.betterdb.com/agent/ws
+  # Self-hosted:    wss://<monitor-host>/api/agent/ws  (or ws:// to an in-cluster
+  #                 betterdb-monitor Service, e.g. ws://betterdb-monitor.betterdb.svc:3001/api/agent/ws)
+  url: ""
+  # Agent token from BetterDB (Connections -> Via Agent).
+  token: ""
+  # Name of an existing Secret with keys `url` and `token` instead of the two
+  # values above. The backend only reads it (get/list/watch).
+  existingSecret: ""
+  # The chart generates a random key (kept across upgrades and uninstall) that
+  # tags redacted secrets so changes still show. With helm template or a GitOps
+  # tool, which cannot look the old key up, name your own Secret here instead,
+  # holding at least 32 random bytes under `key`, e.g.
+  #   kubectl create secret generic betterdb-fingerprint --from-literal=key="$(openssl rand -base64 32)"
+  existingFingerprintSecret: ""
+  # PEM bundle to trust for the BetterDB WebSocket (added to the public
+  # roots), for a self-hosted Monitor behind a private CA. Rendered into its
+  # own Secret, mounted, and passed as BETTERDB_CA_FILE; independent of
+  # existingSecret.
+  ca: ""
+  # Or an existing Secret holding the bundle (key defaults to ca.crt).
+  existingCaSecret:
+    name: ""
+    key: ca.crt
+  # Or a path inside the container to a bundle mounted through
+  # extraVolumes/extraVolumeMounts. Ignored when `ca` or existingCaSecret is set.
+  caFile: ""
+
+# Namespaces whose Instances and connection Secrets the plugin may read. Empty
+# grants cluster-wide get/list/watch on both (the plugin-user-management
+# model); a list narrows it to Roles in those namespaces.
+watchNamespaces: []
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+rbac:
+  create: true
+
+service:
+  port: 8080
+
+# Only everest-server should reach the backend: the plugin proxy's session
+# check runs there, not in the backend. The policy admits pods matching
+# serverPodSelector in the OpenEverest namespace (the release namespace unless
+# set). Needs a CNI that enforces NetworkPolicy; kind's default CNI does not.
+networkPolicy:
+  enabled: true
+  openeverestNamespace: ""
+  serverPodSelector:
+    app.kubernetes.io/name: everest-server
+  # Extra ingress peers (NetworkPolicyPeer list), e.g. a port-forward test pod.
+  extraFrom: []
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 96Mi
+  limits:
+    memory: 512Mi
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  runAsNonRoot: true
+  # The betterdb/agent image runs as the `agent` user (uid 100, gid 101).
+  # The uid has to be numeric here: with runAsNonRoot the kubelet refuses to
+  # start a container whose image names its user instead of numbering it.
+  runAsUser: 100
+  runAsGroup: 101
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+extraEnv: []
+extraVolumes: []
+extraVolumeMounts: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

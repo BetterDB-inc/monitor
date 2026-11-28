@@ -1,0 +1,67 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/openeverest/hub/main/schemas/formula-v1.json
+#
+# BetterDB plugin for OpenEverest: Valkey monitoring, slow commands and keyspace
+# analytics in BetterDB Cloud or a self-hosted BetterDB.
+#
+# Draft of the hub listing. Goes to openeverest/hub as
+# extensions/plugins/betterdb/{formula.yaml,README.md,icon.svg} once the chart is
+# published to oci://ghcr.io/betterdb/charts and tested on alpha.1. Not opened yet.
+
+apiVersion: hub.openeverest.io/v1
+kind: Extension
+
+metadata:
+  name: betterdb
+  type: plugin
+  displayName: "BetterDB"
+  description: |
+    Monitoring for Valkey instances in BetterDB Cloud or a self-hosted BetterDB: metrics history,
+    slow commands and COMMANDLOG, clients, ACL log, cluster topology and keyspace analytics.
+    Adds a BetterDB tab to Valkey instances; an in-cluster agent streams every node, read-only.
+  categories:
+    - monitoring
+  keywords:
+    - valkey
+    - redis
+    - monitoring
+    - observability
+  homepage: https://betterdb.com
+  sourceRepo: https://github.com/BetterDB-inc/monitor
+  license: Apache-2.0
+  maturity: alpha
+  access: public
+  maintainers:
+    - name: "BetterDB"
+      email: "hello@betterdb.com"
+      github: "BetterDB-inc"
+  icon: ./icon.svg
+
+spec:
+  plugin:
+    contributes:
+      ui: true
+      backend: true
+      cli: false
+    extensionPoints:
+      - clusterDetailTab
+      - settingsPanel
+
+  compatibility:
+    openeverest: ">=2.0.0-alpha.1"
+
+  artifacts:
+    chart:
+      defaultChannel: stable
+      channels:
+        stable:
+          ref: oci://ghcr.io/betterdb/charts/betterdb-openeverest
+          version: "0.1.0"
+
+  install:
+    helm:
+      releaseName: betterdb-openeverest
+      namespace: everest-system
+    prerequisites:
+      - name: BetterDB
+        description: "A BetterDB Cloud workspace, or a self-hosted BetterDB Monitor (Docker or the betterdb-monitor chart) reachable from the cluster over wss."
+        installUrl: https://docs.betterdb.com/install/openeverest

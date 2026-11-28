@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
 import { Agent, AgentConfig } from './agent';
+import { runOpenEverest } from './openeverest';
 
-function parseArgs(): AgentConfig {
+function parseArgv(): Record<string, string> {
   const args = process.argv.slice(2);
   const parsed: Record<string, string> = {};
 
@@ -13,6 +14,11 @@ function parseArgs(): AgentConfig {
       parsed[key] = args[++i];
     }
   }
+  return parsed;
+}
+
+function parseArgs(): AgentConfig {
+  const parsed = parseArgv();
 
   const token = parsed['token'] || process.env.BETTERDB_TOKEN || '';
   const cloudUrl = parsed['cloud-url'] || process.env.BETTERDB_CLOUD_URL || '';
@@ -73,6 +79,23 @@ function parseArgs(): AgentConfig {
 }
 
 async function main(): Promise<void> {
+  // The OpenEverest mode runs many targets from Kubernetes state instead of
+  // the single target the flags below describe.
+  const mode = parseArgv()['mode'] || process.env.BETTERDB_AGENT_MODE || 'single';
+  if (mode === 'openeverest') {
+    try {
+      await runOpenEverest();
+    } catch (err: any) {
+      console.error(`Failed to start OpenEverest mode: ${err.message}`);
+      process.exit(1);
+    }
+    return;
+  }
+  if (mode !== 'single') {
+    console.error(`Error: invalid --mode "${mode}". Must be "single" or "openeverest".`);
+    process.exit(1);
+  }
+
   const config = parseArgs();
   const agent = new Agent(config);
 

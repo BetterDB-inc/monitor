@@ -1,0 +1,132 @@
+# Pushes a chart to the OCI registry at oci://ghcr.io/betterdb/charts, next to
+# the classic repo helm-publish.yml maintains at https://docs.betterdb.com/charts.
+# The OpenEverest hub only resolves OCI references (its verify-charts.sh runs
+# `helm show chart oci://... --version`), so the betterdb-openeverest chart must
+# be here; betterdb-monitor is pushed too since it costs nothing.
+#
+# Three ways in:
+#   - helm-publish.yml calls it (workflow_call) for betterdb-monitor after the
+#     classic publish of a v* release, so both channels carry the same version.
+#   - A tag `betterdb-openeverest-v<chart version>` publishes that chart. Its
+#     version is independent of the Monitor release: the chart ships the
+#     betterdb/agent image and follows packages/agent.
+#   - workflow_dispatch with a chart name and ref, to re-publish by hand.
+#
+# A version already in the registry is a no-op (`helm show chart` on it
+# succeeds), so a rerun never overwrites a published tarball. The push uses
+# GITHUB_TOKEN with packages: write; the package must be public on ghcr once,
+# by hand, after the first push.
+name: Publish Helm Chart (OCI)
+
+on:
+  workflow_call:
+    inputs:
+      chart:
+        description: 'Chart directory under charts/ to push'
+        required: true
+        type: string
+      ref:
+        description: 'Git ref to package the chart from'
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      chart:
+        description: 'Chart to push'
+        required: true
+        type: choice
+        options:
+          - betterdb-openeverest
+          - betterdb-monitor
+      ref:
+        description: 'Git ref (tag) to package the chart from'
+        required: true
+        type: string
+  push:
+    tags:
+      - 'betterdb-openeverest-v*'
+
+permissions:
+  contents: read
+
+env:
+  OCI_REPO: oci://ghcr.io/betterdb/charts
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    # One group per chart and source ref: a newer pending run only replaces
+    # an older one for the same ref (the same version), never another
+    # version's push. The push itself is idempotent.
+    concurrency:
+      group: helm-publish-oci-${{ inputs.chart || 'betterdb-openeverest' }}-${{ inputs.ref || github.ref }}
+      cancel-in-progress: false
+    env:
+      # A tag push carries no inputs: the tag names the chart.
+      CHART: ${{ inputs.chart || 'betterdb-openeverest' }}
+      SOURCE_REF: ${{ inputs.ref || github.ref }}
+    steps:
+      - name: Checkout chart source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Lint chart
+        run: helm lint "charts/${CHART}"
+
+      # The tag `betterdb-openeverest-v1.2.3` must match the chart's version,
+      # so a bump that skips Chart.yaml fails here instead of publishing the
+      # wrong version under the tag's name.
+      - name: Read chart version and check the tag
+        id: chart
+        run: |
+          version=$(grep '^version:' "charts/${CHART}/Chart.yaml" | head -n1 | sed 's/.*: *//; s/"//g')
+          app_version=$(grep '^appVersion:' "charts/${CHART}/Chart.yaml" | head -n1 | sed 's/.*: *//; s/"//g')
+          tag="${SOURCE_REF#refs/tags/}"
+          if [[ "$tag" == "${CHART}-v"* && "$tag" != "${CHART}-v${version}" ]]; then
+            echo "::error::tag ${tag} does not match charts/${CHART}/Chart.yaml version ${version}."
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "app_version=${app_version}" >> "$GITHUB_OUTPUT"
+
+      # betterdb-openeverest defaults to betterdb/agent:<appVersion>; publishing
+      # it before that image exists would leave `helm install` in ImagePullBackOff.
+      - name: Check the agent image exists on Docker Hub
+        if: env.CHART == 'betterdb-openeverest'
+        env:
+          APP_VERSION: ${{ steps.chart.outputs.app_version }}
+        run: |
+          image="betterdb/agent:${APP_VERSION}"
+          if ! docker manifest inspect "$image" > /dev/null; then
+            echo "::error::${image} is not on Docker Hub. Publish the agent first (agent-release.yml, tag agent-v${APP_VERSION}), then rerun."
+            exit 1
+          fi
+          echo "${image} exists"
+
+      - name: Log in to ghcr.io
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GHCR_TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Package and push
+        env:
+          VERSION: ${{ steps.chart.outputs.version }}
+        run: |
+          if helm show chart "${OCI_REPO}/${CHART}" --version "$VERSION" > /dev/null 2>&1; then
+            echo "${CHART} ${VERSION} is already in ${OCI_REPO} — nothing to do."
+            exit 0
+          fi
+          out="$RUNNER_TEMP/charts"
+          mkdir -p "$out"
+          helm package "charts/${CHART}" -d "$out"
+          helm push "${out}/${CHART}-${VERSION}.tgz" "$OCI_REPO"
+          echo "Pushed ${OCI_REPO}/${CHART}:${VERSION}"

@@ -1,0 +1,135 @@
+{{- if .Values.rbac.create -}}
+{{- $fullname := include "betterdb-openeverest.fullname" . -}}
+{{- $sa := include "betterdb-openeverest.serviceAccountName" . -}}
+{{- /*
+What the backend reads through its ServiceAccount: Instances (to follow
+status.connectionSecretRef and drop deleted instances) and the connection
+Secrets the instances point at. No write access to any database CR. With
+watchNamespaces empty this is cluster-wide, the plugin-user-management model;
+with a list it becomes one Role per namespace. The kube-system namespace is
+readable only to take its UID as the cluster id BetterDB keys history on.
+*/ -}}
+{{- $readRules := list
+  (dict "apiGroups" (list "core.openeverest.io") "resources" (list "instances") "verbs" (list "get" "list" "watch"))
+  (dict "apiGroups" (list "") "resources" (list "secrets") "verbs" (list "get" "list" "watch"))
+-}}
+{{- if .Values.watchNamespaces }}
+{{- range .Values.watchNamespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-reader
+  namespace: {{ . }}
+  labels:
+    {{- include "betterdb-openeverest.labels" $ | nindent 4 }}
+rules:
+  {{- toYaml $readRules | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-reader
+  namespace: {{ . }}
+  labels:
+    {{- include "betterdb-openeverest.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fullname }}-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ $sa }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "betterdb-openeverest.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames: ["kube-system"]
+    verbs: ["get"]
+{{- else }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "betterdb-openeverest.labels" . | nindent 4 }}
+rules:
+  {{- toYaml $readRules | nindent 2 }}
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames: ["kube-system"]
+    verbs: ["get"]
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "betterdb-openeverest.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullname }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $sa }}
+    namespace: {{ .Release.Namespace }}
+---
+{{- /*
+The plugin's own state, in its own namespace: the opt-in ConfigMap it creates
+and updates, and the settings and fingerprint-key Secrets it reads (never
+writes: both come from the Helm release). `create` cannot be limited by
+resourceNames, so it is granted on configmaps only; every other verb is pinned
+by name. It is never granted on secrets: together with the secret read it
+would let the ServiceAccount mint a token for any ServiceAccount here.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-state
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "betterdb-openeverest.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: [{{ include "betterdb-openeverest.targetsConfigMapName" . | quote }}]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ include "betterdb-openeverest.settingsSecretName" . | quote }}]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ include "betterdb-openeverest.fingerprintSecretName" . | quote }}]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-state
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "betterdb-openeverest.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fullname }}-state
+subjects:
+  - kind: ServiceAccount
+    name: {{ $sa }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

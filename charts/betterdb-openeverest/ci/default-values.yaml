@@ -1,0 +1,5 @@
+# CI render matrix: the defaults with BetterDB configured inline, so the
+# settings Secret renders too. Cluster-wide read access.
+betterdb:
+  url: wss://acme.app.betterdb.com/agent/ws
+  token: ci-token

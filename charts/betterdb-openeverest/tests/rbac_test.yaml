@@ -1,0 +1,145 @@
+suite: rbac
+templates:
+  - templates/rbac.yaml
+tests:
+  - it: grants cluster-wide read on instances and secrets by default, and nothing else cluster-wide
+    documentIndex: 0
+    asserts:
+      - isKind:
+          of: ClusterRole
+      - equal:
+          path: rules[0]
+          value:
+            apiGroups: [core.openeverest.io]
+            resources: [instances]
+            verbs: [get, list, watch]
+      - equal:
+          path: rules[1]
+          value:
+            apiGroups: [""]
+            resources: [secrets]
+            verbs: [get, list, watch]
+      - equal:
+          path: rules[2]
+          value:
+            apiGroups: [""]
+            resources: [namespaces]
+            resourceNames: [kube-system]
+            verbs: [get]
+      - lengthEqual:
+          path: rules
+          count: 3
+
+  - it: never grants a write verb cluster-wide, and names no database CR group
+    documentIndex: 0
+    asserts:
+      - notContains:
+          path: rules[0].verbs
+          content: create
+      - notContains:
+          path: rules[0].verbs
+          content: update
+      - notContains:
+          path: rules[0].verbs
+          content: patch
+      - notContains:
+          path: rules[0].verbs
+          content: delete
+      - notContains:
+          path: rules[1].verbs
+          content: update
+      - notContains:
+          path: rules[1].verbs
+          content: delete
+      - notContains:
+          path: rules[0].apiGroups
+          content: valkey.io
+      - notContains:
+          path: rules[1].apiGroups
+          content: valkey.io
+
+  - it: binds the ClusterRole to the chart ServiceAccount in the release namespace
+    documentIndex: 1
+    release:
+      namespace: everest-system
+    asserts:
+      - isKind:
+          of: ClusterRoleBinding
+      - equal:
+          path: roleRef.name
+          value: RELEASE-NAME-betterdb-openeverest
+      - equal:
+          path: subjects[0]
+          value:
+            kind: ServiceAccount
+            name: RELEASE-NAME-betterdb-openeverest
+            namespace: everest-system
+
+  - it: keeps the plugin state writable only in its own namespace, by name
+    documentIndex: 2
+    release:
+      namespace: everest-system
+    asserts:
+      - isKind:
+          of: Role
+      - equal:
+          path: metadata.namespace
+          value: everest-system
+      - equal:
+          path: rules[0].resourceNames
+          value: [RELEASE-NAME-betterdb-openeverest-targets]
+      - equal:
+          path: rules[1].resourceNames
+          value: [RELEASE-NAME-betterdb-openeverest-settings]
+      - equal:
+          path: rules[1].verbs
+          value: [get, list, watch]
+      - equal:
+          path: rules[2]
+          value:
+            apiGroups: [""]
+            resources: [configmaps]
+            verbs: [create]
+
+  - it: narrows reads to Roles in watchNamespaces and strips them from the ClusterRole
+    set:
+      watchNamespaces: [databases, staging]
+    asserts:
+      - hasDocuments:
+          count: 8
+      - isKind:
+          of: Role
+        documentIndex: 0
+      - equal:
+          path: metadata.namespace
+          value: databases
+        documentIndex: 0
+      - equal:
+          path: rules[0].resources
+          value: [instances]
+        documentIndex: 0
+      - isKind:
+          of: RoleBinding
+        documentIndex: 1
+      - equal:
+          path: metadata.namespace
+          value: staging
+        documentIndex: 2
+      - isKind:
+          of: ClusterRole
+        documentIndex: 4
+      - lengthEqual:
+          path: rules
+          count: 1
+        documentIndex: 4
+      - equal:
+          path: rules[0].resources
+          value: [namespaces]
+        documentIndex: 4
+
+  - it: renders nothing when rbac.create is off
+    set:
+      rbac.create: false
+    asserts:
+      - hasDocuments:
+          count: 0

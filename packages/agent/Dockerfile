@@ -40,6 +40,23 @@ RUN sed -i 's|"workspace:\*"|"file:/build/shared"|' package.json \
 COPY packages/agent/src ./src
 RUN npm run build
 
+# ---- Build the OpenEverest plugin UI ----
+# The agent's `openeverest` mode is the backend of the BetterDB plugin for
+# OpenEverest and serves the plugin's frontend bundle itself (GET /main.js), so
+# the bundle is built here and copied into the image under /app/ui. It has no
+# workspace dependencies: React comes from the OpenEverest host at runtime.
+FROM node:20-alpine AS plugin-ui-build
+WORKDIR /build
+# pnpm at the version package.json pins, and only this package's dependencies
+# from the workspace lockfile, so the image builds what the repo tests.
+RUN corepack enable
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY packages/openeverest-plugin/package.json packages/openeverest-plugin/
+RUN pnpm install --frozen-lockfile --ignore-scripts --filter @betterdb/openeverest-plugin
+COPY packages/openeverest-plugin/tsconfig.json packages/openeverest-plugin/vite.config.ts packages/openeverest-plugin/
+COPY packages/openeverest-plugin/src packages/openeverest-plugin/src
+RUN pnpm --filter @betterdb/openeverest-plugin build
+
 # ---- Production image ----
 FROM node:20-alpine
 WORKDIR /app
@@ -57,6 +74,10 @@ RUN npm pkg delete devDependencies.@betterdb/shared \
 
 # Bundled agent (shared inlined; runtime deps incl. zod installed above)
 COPY --from=agent-build /build/agent/dist ./dist
+
+# Plugin UI for the openeverest mode (main.js, icon.svg); unused in single mode.
+COPY --from=plugin-ui-build /build/packages/openeverest-plugin/dist ./ui
+ENV PLUGIN_UI_DIR=/app/ui
 
 # Regression guard: run the real entrypoint at build time. If the bundle left any
 # module unresolved — @betterdb/shared not inlined, or a runtime dep missing from

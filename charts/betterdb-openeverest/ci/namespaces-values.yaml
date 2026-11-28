@@ -1,0 +1,11 @@
+# CI render matrix: access narrowed to two namespaces (Roles instead of a
+# cluster-wide ClusterRole), settings from an existing Secret, private CA.
+watchNamespaces:
+  - databases
+  - staging
+betterdb:
+  existingSecret: my-betterdb
+  ca: |
+    -----BEGIN CERTIFICATE-----
+    MIIB
+    -----END CERTIFICATE-----

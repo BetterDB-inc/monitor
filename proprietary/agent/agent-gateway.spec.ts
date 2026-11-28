@@ -2,7 +2,7 @@ jest.mock('../../apps/api/src/database/adapters/unified.adapter');
 
 import { EventEmitter } from 'events';
 import type { WebSocket } from 'ws';
-import { AgentGateway } from './agent-gateway';
+import { AgentGateway, agentConnectionId, agentConnectionName, validateIdentity, MAX_CONNECTIONS_PER_TOKEN } from './agent-gateway';
 import { ConnectionRegistry } from '../../apps/api/src/connections/connection-registry.service';
 import { ExternalMetricsStore } from '../../apps/api/src/external-metrics/external-metrics-store';
 import { DiscoveredInstancesStore } from '../../apps/api/src/external-metrics/discovered-instances.store';
@@ -20,7 +20,7 @@ class FakeSocket extends EventEmitter {
 
   closesAfterPong = false;
 
-  constructor(private readonly answersPings: boolean) {
+  constructor(public answersPings: boolean) {
     super();
   }
 
@@ -356,5 +356,225 @@ describe('AgentGateway reconnects', () => {
     expect(registry.isListed(CONNECTION_ID)).toBe(false);
     expect(gateway.getConnectedAgents()).toHaveLength(0);
     expect(socket.pings()).toBe(0);
+  });
+});
+
+describe('agentConnectionId', () => {
+  const identity = {
+    platform: 'openeverest' as const,
+    clusterId: '7d2c1f0e-k8s-uid',
+    cluster: 'main',
+    namespace: 'databases',
+    instance: 'orders-cache',
+    node: '07c37dfeb235213a872192d90877d0cd55635b91',
+    nodeName: 'valkey-orders-cache-0',
+  };
+
+  it('keeps the token-based id for single-target agents', () => {
+    expect(agentConnectionId('tok-1', 'Agent')).toBe('agent-tok-1');
+    expect(agentConnectionName('Agent')).toBe('Agent');
+  });
+
+  it('derives the same id for the same node across tokens of the same name (rotation)', () => {
+    const a = agentConnectionId('tok-1', 'openeverest', identity);
+    const b = agentConnectionId('tok-2', 'openeverest', { ...identity });
+    expect(a).toBe(b);
+    expect(a).toMatch(/^agent-openeverest-[0-9a-f]{16}$/);
+  });
+
+  it('scopes the id by token name, so a token under another name cannot take a node over', () => {
+    expect(agentConnectionId('tok-1', 'openeverest', identity)).not.toBe(agentConnectionId('tok-1', 'other', identity));
+  });
+
+  it('gives every node, instance, namespace and cluster its own id', () => {
+    const base = agentConnectionId('tok-1', 'openeverest', identity);
+    expect(agentConnectionId('tok-1', 'openeverest', { ...identity, node: 'other-node' })).not.toBe(base);
+    expect(agentConnectionId('tok-1', 'openeverest', { ...identity, instance: 'sessions' })).not.toBe(base);
+    expect(agentConnectionId('tok-1', 'openeverest', { ...identity, namespace: 'staging' })).not.toBe(base);
+    expect(agentConnectionId('tok-1', 'openeverest', { ...identity, clusterId: 'another-cluster' })).not.toBe(base);
+  });
+
+  it('ignores the readable node name and falls back to the cluster name without a cluster id', () => {
+    expect(agentConnectionId('tok-1', 'openeverest', { ...identity, nodeName: 'renamed' })).toBe(agentConnectionId('tok-1', 'openeverest', identity));
+    const { clusterId: _omit, ...unlabelled } = identity;
+    expect(agentConnectionId('tok-1', 'openeverest', unlabelled)).not.toBe(agentConnectionId('tok-1', 'openeverest', identity));
+    expect(agentConnectionId('tok-1', 'openeverest', unlabelled)).toBe(agentConnectionId('tok-9', 'openeverest', { ...unlabelled, cluster: 'main' }));
+  });
+
+  it('names the connection after the namespace, instance and node', () => {
+    expect(agentConnectionName('Agent', identity)).toBe('databases/orders-cache/valkey-orders-cache-0');
+    const { nodeName: _omit, ...unnamed } = identity;
+    expect(agentConnectionName('Agent', unnamed)).toBe(`databases/orders-cache/${identity.node}`);
+  });
+});
+
+describe('validateIdentity', () => {
+  const valid = { platform: 'openeverest', cluster: 'main', namespace: 'db', instance: 'orders', node: 'abc123', nodeName: 'valkey-orders-0', clusterId: '9336879f-70a0-49ff-8b7d-c52428770aa1' };
+
+  it('accepts a well-formed identity and keeps only the known fields', () => {
+    expect(validateIdentity({ ...valid, extra: 'x' })).toEqual(valid);
+    expect(validateIdentity({ platform: 'openeverest', cluster: 'main', namespace: 'db', instance: 'orders', node: '10.0.0.1:6379' }))
+      .toEqual({ platform: 'openeverest', cluster: 'main', namespace: 'db', instance: 'orders', node: '10.0.0.1:6379' });
+  });
+
+  it.each([
+    ['not an object', 'openeverest'],
+    ['unknown platform', { ...valid, platform: 'other' }],
+    ['missing node', { ...valid, node: undefined }],
+    ['missing instance', { ...valid, instance: '' }],
+    ['non-string namespace', { ...valid, namespace: 42 }],
+    ['uppercase namespace', { ...valid, namespace: 'DB' }],
+    ['namespace with a slash', { ...valid, namespace: 'db/x' }],
+    ['node with whitespace', { ...valid, node: 'a b' }],
+    ['over-long instance', { ...valid, instance: 'a'.repeat(254) }],
+    ['bad cluster id', { ...valid, clusterId: 'id with spaces' }],
+    ['bad node name', { ...valid, nodeName: '<script>' }],
+  ])('rejects %s', (_label, raw) => {
+    expect(validateIdentity(raw)).toBeNull();
+  });
+});
+
+describe('AgentGateway identified agents', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  const identity = { platform: 'openeverest', cluster: 'main', namespace: 'db', instance: 'vk', node: 'n1', nodeName: 'vk-0' };
+
+  function connectIdentified(gateway: AgentGateway, tokenId: string, node: string): FakeSocket {
+    const socket = new FakeSocket(true);
+    (gateway as unknown as { onConnection: (ws: WebSocket, id: string, name: string) => void }).onConnection(
+      socket as unknown as WebSocket,
+      tokenId,
+      'OpenEverest',
+    );
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'agent_hello',
+      version: '1.0.0',
+      capabilities: [],
+      valkey: { type: 'valkey', version: '8.0.0', tls: true, cluster: true },
+      identity: { ...identity, node },
+      readOnly: true,
+    })));
+    return socket;
+  }
+
+  it('registers each node under its identity-derived id, read-only, over one token', async () => {
+    const registry = buildRegistry();
+    const gateway = new AgentGateway({} as never, registry);
+    connectIdentified(gateway, TOKEN_ID, 'n1');
+    connectIdentified(gateway, TOKEN_ID, 'n2');
+    await jest.advanceTimersByTimeAsync(0);
+
+    const ids = gateway.getConnectedAgents().map((a) => a.id).sort();
+    expect(ids).toEqual([
+      agentConnectionId(TOKEN_ID, 'OpenEverest', { ...identity, node: 'n1' } as never),
+      agentConnectionId(TOKEN_ID, 'OpenEverest', { ...identity, node: 'n2' } as never),
+    ].sort());
+    expect(registry.isListed(`agent-${TOKEN_ID}`)).toBe(false);
+    const listed = registry.list().filter((c) => ids.includes(c.id));
+    expect(listed.map((c) => c.readOnly)).toEqual([true, true]);
+    expect(listed.map((c) => c.name)).toEqual(['db/vk/vk-0', 'db/vk/vk-0']);
+  });
+
+  it('closes an agent whose identity is malformed before registering anything', async () => {
+    const registry = buildRegistry();
+    const gateway = new AgentGateway({} as never, registry);
+    const socket = new FakeSocket(true);
+    (gateway as unknown as { onConnection: (ws: WebSocket, id: string, name: string) => void }).onConnection(
+      socket as unknown as WebSocket, TOKEN_ID, 'OpenEverest',
+    );
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'agent_hello', version: '1.0.0', capabilities: [],
+      valkey: { type: 'valkey', version: '8.0.0', tls: true, cluster: true },
+      identity: { platform: 'evil', cluster: 'main', namespace: 'db', instance: 'vk', node: 'n1' },
+    })));
+    await jest.advanceTimersByTimeAsync(0);
+
+    expect(socket.closes).toEqual([{ code: 4004, reason: 'Invalid identity' }]);
+    expect(gateway.getConnectedAgents()).toHaveLength(0);
+    expect(registry.list()).toHaveLength(0);
+  });
+
+  it('caps identified connections per token, counting hellos whose registration is still pending', async () => {
+    const registry = buildRegistry();
+    const gateway = new AgentGateway({} as never, registry);
+    // All at once, before any registration settles: the cap must hold anyway.
+    const sockets = Array.from({ length: MAX_CONNECTIONS_PER_TOKEN + 3 }, (_, i) => connectIdentified(gateway, TOKEN_ID, `n${i}`));
+    const otherToken = connectIdentified(gateway, 'tok-other', 'other-n0');
+    await jest.advanceTimersByTimeAsync(0);
+
+    const refused = sockets.filter((s) => s.closes.some((c) => c.code === 4005));
+    expect(refused).toHaveLength(3);
+    expect(otherToken.closes).toHaveLength(0);
+    expect(gateway.getConnectedAgents()).toHaveLength(MAX_CONNECTIONS_PER_TOKEN + 1);
+  });
+
+  it('lets a node reconnect at the cap, since it replaces its own entry', async () => {
+    const registry = buildRegistry();
+    const gateway = new AgentGateway({} as never, registry);
+    const first = Array.from({ length: MAX_CONNECTIONS_PER_TOKEN }, (_, i) => connectIdentified(gateway, TOKEN_ID, `n${i}`));
+    await jest.advanceTimersByTimeAsync(0);
+    expect(gateway.getConnectedAgents()).toHaveLength(MAX_CONNECTIONS_PER_TOKEN);
+
+    // n0's socket went silent; its replacement must not be turned away as a 513th.
+    first[0].answersPings = false;
+    const again = connectIdentified(gateway, TOKEN_ID, 'n0');
+    await jest.advanceTimersByTimeAsync(CHECK_MS);
+
+    expect(again.closes).toHaveLength(0);
+    expect(first[0].terminated).toBe(true);
+    expect(gateway.getConnectedAgents()).toHaveLength(MAX_CONNECTIONS_PER_TOKEN);
+  });
+
+  it('frees a reserved slot when the socket closes before registration finishes', async () => {
+    const registry = buildRegistry();
+    const gateway = new AgentGateway({} as never, registry);
+    const sockets = Array.from({ length: MAX_CONNECTIONS_PER_TOKEN }, (_, i) => connectIdentified(gateway, TOKEN_ID, `n${i}`));
+    // Drop one before its registration settled.
+    sockets[0].drop();
+    await jest.advanceTimersByTimeAsync(0);
+
+    const next = connectIdentified(gateway, TOKEN_ID, 'late');
+    await jest.advanceTimersByTimeAsync(0);
+
+    expect(next.closes).toHaveLength(0);
+    expect(gateway.getConnectedAgents()).toHaveLength(MAX_CONNECTIONS_PER_TOKEN);
+  });
+
+  it('welcomes a registered agent, saying whether its identity was understood', async () => {
+    const registry = buildRegistry();
+    const gateway = new AgentGateway({} as never, registry);
+    const identified = connectIdentified(gateway, TOKEN_ID, 'n1');
+    const plain = new FakeSocket(true);
+    (gateway as unknown as { onConnection: (ws: WebSocket, id: string, name: string) => void }).onConnection(
+      plain as unknown as WebSocket, 'tok-plain', 'Agent',
+    );
+    plain.hello();
+    await jest.advanceTimersByTimeAsync(0);
+
+    const welcome = (socket: FakeSocket) => socket.sent.find((m) => m.type === 'welcome') as unknown as { identity: boolean; readOnly: boolean; serverVersion: string };
+    expect(welcome(identified)).toMatchObject({ identity: true, readOnly: true });
+    expect(welcome(plain)).toMatchObject({ identity: false, readOnly: false });
+    expect(typeof welcome(plain).serverVersion).toBe('string');
+  });
+
+  it('lets a restarted agent on a new token of the same name take over the same node id', async () => {
+    const registry = buildRegistry();
+    const gateway = new AgentGateway({} as never, registry);
+    const first = connectIdentified(gateway, 'tok-a', 'n1');
+    await jest.advanceTimersByTimeAsync(0);
+    const id = gateway.getConnectedAgents()[0].id;
+    first.drop();
+
+    connectIdentified(gateway, 'tok-b', 'n1');
+    await jest.advanceTimersByTimeAsync(0);
+
+    expect(gateway.getConnectedAgents().map((a) => a.id)).toEqual([id]);
+    expect(registry.isListed(id)).toBe(true);
   });
 });

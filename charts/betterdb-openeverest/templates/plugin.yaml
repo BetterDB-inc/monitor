@@ -1,0 +1,41 @@
+{{- /*
+The Plugin CR OpenEverest discovers the plugin from. Cluster-scoped and keyed
+by plugin.name (the proxy path is /v1/clusters/{cluster}/plugins/<name>), so
+it does not follow the release name. The frontend bundle is served by the
+backend itself at bundlePath; the host resolves it to
+/v1/clusters/{cluster}/plugins/<name>/main.js.
+*/ -}}
+apiVersion: extensions.openeverest.io/v1alpha1
+kind: Plugin
+metadata:
+  name: {{ .Values.plugin.name }}
+  labels:
+    {{- include "betterdb-openeverest.labels" . | nindent 4 }}
+spec:
+  displayName: {{ .Values.plugin.displayName | quote }}
+  description: {{ .Values.plugin.description | quote }}
+  version: {{ .Chart.Version | quote }}
+  vendor: {{ .Values.plugin.vendor | quote }}
+  icon: "/icon.svg"
+  enabled: {{ .Values.plugin.enabled }}
+  {{- with .Values.plugin.compatibleHostVersions }}
+  compatibleHostVersions: {{ . | quote }}
+  {{- end }}
+  compatibleUiContractVersions: {{ .Values.plugin.compatibleUiContractVersions | quote }}
+  backend:
+    serviceRef:
+      namespace: {{ .Release.Namespace }}
+      name: {{ include "betterdb-openeverest.fullname" . }}
+      port: {{ .Values.service.port }}
+  frontend:
+    bundlePath: "/main.js"
+    extensionPoints:
+      {{- toYaml .Values.plugin.extensionPoints | nindent 6 }}
+  # Declarative: what the plugin asks of the user who enables monitoring. The
+  # backend enforces read-connection by calling the connection endpoint with
+  # the user's own token.
+  permissions:
+    - verb: read
+      resource: database-clusters
+    - verb: read-connection
+      resource: database-clusters

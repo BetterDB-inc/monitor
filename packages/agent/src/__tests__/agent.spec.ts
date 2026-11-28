@@ -17,7 +17,14 @@ jest.mock('iovalkey', () => ({
 }));
 
 jest.mock('../ws-client', () => ({
-  WsClient: jest.fn(() => ({ connect: jest.fn(), close: jest.fn(), send: jest.fn() })),
+  WsClient: jest.fn(() => ({
+    connect: jest.fn(),
+    close: jest.fn(),
+    dropConnection: jest.fn(),
+    markHealthy: jest.fn(),
+    send: jest.fn(),
+    isOpen: jest.fn(() => true),
+  })),
 }));
 
 jest.mock('../command-executor', () => ({
@@ -155,6 +162,273 @@ describe('Agent.reconnectWithFreshToken', () => {
   });
 });
 
+describe('Agent.stop', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockQuit.mockResolvedValue(undefined);
+  });
+
+  it('disconnects a client whose connect() failed, so it stops retrying', async () => {
+    mockConnect.mockRejectedValueOnce(new Error('ECONNREFUSED'));
+    const agent = new Agent({ ...IAM_CONFIG, authMode: 'password', valkeyPassword: 'p', valkeyTls: false });
+
+    await expect(agent.start()).rejects.toThrow('ECONNREFUSED');
+    // The failed start() already drops the client; stop() disconnects again,
+    // which is harmless.
+    expect(mockDisconnect).toHaveBeenCalled();
+    await agent.stop();
+
+    expect(mockQuit).not.toHaveBeenCalled();
+  });
+
+  it('gives up on a node that accepts the connection but never answers, and stop() interrupts the wait', async () => {
+    jest.useFakeTimers();
+    try {
+      mockConnect.mockReturnValueOnce(new Promise(() => {}));
+      const silent = new Agent({ ...IAM_CONFIG, authMode: 'password', valkeyPassword: 'p', valkeyTls: false });
+      const started = silent.start();
+      const outcome = expect(started).rejects.toThrow(/connect timed out/);
+      await jest.advanceTimersByTimeAsync(15_000);
+      await outcome;
+
+      mockConnect.mockReturnValueOnce(new Promise(() => {}));
+      const stopping = new Agent({ ...IAM_CONFIG, authMode: 'password', valkeyPassword: 'p', valkeyTls: false });
+      const pending = stopping.start();
+      const stoppedOutcome = expect(pending).rejects.toThrow(/stopped during connect/);
+      await stopping.stop();
+      await stoppedOutcome;
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('quits and then disconnects a connected client', async () => {
+    mockConnect.mockResolvedValue(undefined);
+    const agent = new Agent({ ...IAM_CONFIG, authMode: 'password', valkeyPassword: 'p', valkeyTls: false }) as any;
+    agent.client = new (Valkey as any)();
+    agent.valkeyConnected = true;
+
+    await agent.stop();
+
+    expect(mockQuit).toHaveBeenCalledTimes(1);
+    expect(mockDisconnect).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Agent on the cloud side', () => {
+  const PASSWORD_CONFIG: AgentConfig = { ...IAM_CONFIG, authMode: 'password', valkeyPassword: 'p', valkeyTls: false };
+  const identity = { platform: 'openeverest' as const, cluster: 'main', namespace: 'db', instance: 'vk', node: 'n1' };
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.clearAllMocks();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  function wsOf(agent: Agent) {
+    return (agent as any).wsClient as { close: jest.Mock; dropConnection: jest.Mock; markHealthy: jest.Mock; send: jest.Mock; isOpen?: jest.Mock };
+  }
+
+  it('reconnects when an identified hello is not acknowledged in time, and says so in its status', async () => {
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const agent = new Agent({ ...PASSWORD_CONFIG, identity }) as any;
+    agent.onWsOpen();
+
+    await jest.advanceTimersByTimeAsync(14_999);
+    expect(agent.getStatus().cloudError).toBeUndefined();
+    await jest.advanceTimersByTimeAsync(1);
+
+    expect(agent.getStatus().cloudError).toMatch(/did not acknowledge.*0\.57\.0/);
+    expect(wsOf(agent).dropConnection).toHaveBeenCalledTimes(1);
+    expect(wsOf(agent).close).not.toHaveBeenCalled();
+  });
+
+  it('streams again once a reconnect after a late welcome is welcomed', async () => {
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const agent = new Agent({ ...PASSWORD_CONFIG, identity }) as any;
+    agent.onWsOpen();
+    await jest.advanceTimersByTimeAsync(15_000);
+    agent.onWsClose(4000, 'Welcome timeout');
+
+    agent.onWsOpen();
+    await agent.onWsMessage(JSON.stringify({ type: 'welcome', serverVersion: '0.57.0', identity: true, readOnly: true }));
+
+    expect(agent.getStatus().cloudError).toBeUndefined();
+    expect(agent.getStatus().cloudConnected).toBe(true);
+    await jest.advanceTimersByTimeAsync(60_000);
+    expect(wsOf(agent).dropConnection).toHaveBeenCalledTimes(1);
+    expect(wsOf(agent).close).not.toHaveBeenCalled();
+  });
+
+  it('answers no command before the welcome, then runs the held ones once welcomed', async () => {
+    const agent = new Agent({ ...PASSWORD_CONFIG, identity }) as any;
+    agent.valkeyConnected = true;
+    const execute = jest.fn().mockResolvedValue('PONG');
+    agent.executor = { execute };
+    agent.onWsOpen();
+    wsOf(agent).send.mockClear();
+
+    await agent.onWsMessage(JSON.stringify({ id: 'c1', type: 'command', cmd: 'PING' }));
+    expect(execute).not.toHaveBeenCalled();
+    expect(wsOf(agent).send).not.toHaveBeenCalled();
+
+    await agent.onWsMessage(JSON.stringify({ type: 'welcome', serverVersion: '0.57.0', identity: true, readOnly: true }));
+    await jest.advanceTimersByTimeAsync(0);
+
+    expect(execute).toHaveBeenCalledWith('PING', undefined, undefined);
+    expect(JSON.parse(wsOf(agent).send.mock.calls[0][0])).toMatchObject({ id: 'c1', type: 'response', data: 'PONG' });
+    expect(wsOf(agent).markHealthy).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives an old Monitor that never welcomes no node data, and drops what it asked for', async () => {
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const agent = new Agent({ ...PASSWORD_CONFIG, identity }) as any;
+    agent.valkeyConnected = true;
+    const execute = jest.fn().mockResolvedValue('PONG');
+    agent.executor = { execute };
+    agent.onWsOpen();
+    wsOf(agent).send.mockClear();
+
+    await agent.onWsMessage(JSON.stringify({ id: 'c1', type: 'command', cmd: 'INFO' }));
+    await jest.advanceTimersByTimeAsync(15_000);
+    agent.onWsClose(4000, 'Welcome timeout');
+    agent.onWsOpen();
+    await agent.onWsMessage(JSON.stringify({ type: 'welcome', serverVersion: '0.57.0', identity: true, readOnly: true }));
+    await jest.advanceTimersByTimeAsync(0);
+
+    // The command from the unacknowledged socket is never run, even later.
+    expect(execute).not.toHaveBeenCalled();
+    expect(wsOf(agent).markHealthy).toHaveBeenCalledTimes(1);
+  });
+
+  it('says the server is likely too old after a few unacknowledged connections, but keeps retrying', async () => {
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const agent = new Agent({ ...PASSWORD_CONFIG, identity }) as any;
+    for (let i = 0; i < 3; i++) {
+      agent.onWsOpen();
+      await jest.advanceTimersByTimeAsync(15_000);
+      agent.onWsClose(4000, 'Welcome timeout');
+    }
+
+    expect(agent.getStatus().cloudError).toMatch(/too old.*after 3 connections; still retrying/);
+    expect(wsOf(agent).dropConnection).toHaveBeenCalledTimes(3);
+    expect(wsOf(agent).close).not.toHaveBeenCalled();
+    expect(wsOf(agent).markHealthy).not.toHaveBeenCalled();
+
+    // A Monitor that was only slow clears it as soon as it welcomes.
+    agent.onWsOpen();
+    await agent.onWsMessage(JSON.stringify({ type: 'welcome', serverVersion: '0.57.0', identity: true, readOnly: true }));
+    expect(agent.getStatus().cloudError).toBeUndefined();
+  });
+
+  it('backs off identified nodes until welcomed and lets classic agents reset on open', () => {
+    const { WsClient } = jest.requireMock('../ws-client') as { WsClient: jest.Mock };
+    WsClient.mockClear();
+    new Agent({ ...PASSWORD_CONFIG, identity });
+    new Agent(PASSWORD_CONFIG);
+
+    expect(WsClient.mock.calls[0][0]).toMatchObject({ resetBackoffOnOpen: false, maxReconnectDelayMs: 300_000 });
+    expect(WsClient.mock.calls[1][0].resetBackoffOnOpen).toBeUndefined();
+  });
+
+  it('is content once the server welcomes the identity', async () => {
+    const agent = new Agent({ ...PASSWORD_CONFIG, identity }) as any;
+    agent.onWsOpen();
+    await agent.onWsMessage(JSON.stringify({ type: 'welcome', serverVersion: '0.57.0', identity: true, readOnly: true }));
+
+    await jest.advanceTimersByTimeAsync(60_000);
+    expect(agent.getStatus().cloudError).toBeUndefined();
+    expect(wsOf(agent).close).not.toHaveBeenCalled();
+  });
+
+  it('treats a welcome that disowns the identity like an old server', async () => {
+    const agent = new Agent({ ...PASSWORD_CONFIG, identity }) as any;
+    agent.onWsOpen();
+    await agent.onWsMessage(JSON.stringify({ type: 'welcome', serverVersion: '0.57.0', identity: false, readOnly: false }));
+
+    expect(agent.getStatus().cloudError).toMatch(/too old/);
+    expect(wsOf(agent).close).toHaveBeenCalledTimes(1);
+    expect(wsOf(agent).dropConnection).not.toHaveBeenCalled();
+  });
+
+  it('does not wait for a welcome without an identity (classic single-target agents)', async () => {
+    const agent = new Agent(PASSWORD_CONFIG) as any;
+    agent.onWsOpen();
+    await jest.advanceTimersByTimeAsync(60_000);
+    expect(agent.getStatus().cloudError).toBeUndefined();
+    expect(wsOf(agent).close).not.toHaveBeenCalled();
+  });
+
+  it('reports a 4003 close on an identified node as another agent holding it', () => {
+    const agent = new Agent({ ...PASSWORD_CONFIG, identity }) as any;
+    agent.onWsClose(4003, 'Another agent is connected with this token');
+    expect(agent.getStatus().cloudError).toMatch(/another agent already streams this node/);
+
+    const plain = new Agent(PASSWORD_CONFIG) as any;
+    plain.onWsClose(4003, 'Another agent is connected with this token');
+    expect(plain.getStatus().cloudError).toBeUndefined();
+  });
+});
+
+describe('Agent Valkey client options', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockConnect.mockResolvedValue(undefined);
+  });
+
+  it('asks iovalkey for READONLY on a cluster replica, for the polling and the CLI client alike', async () => {
+    const agent = new Agent({ ...IAM_CONFIG, authMode: 'password', valkeyPassword: 'p', valkeyTls: false, clusterReplica: true }) as any;
+    await agent.createValkeyClient('BetterDB-Agent');
+    await agent.createValkeyClient('BetterDB-Agent-CLI');
+
+    expect(MockValkey).toHaveBeenCalledTimes(2);
+    expect(MockValkey.mock.calls[0][0]).toMatchObject({ readOnly: true, connectionName: 'BetterDB-Agent' });
+    expect(MockValkey.mock.calls[1][0]).toMatchObject({ readOnly: true, connectionName: 'BetterDB-Agent-CLI' });
+  });
+
+  it('leaves READONLY off for primaries and standalone servers', async () => {
+    const agent = new Agent({ ...IAM_CONFIG, authMode: 'password', valkeyPassword: 'p', valkeyTls: false }) as any;
+    await agent.createValkeyClient('BetterDB-Agent');
+    expect(MockValkey.mock.calls[0][0]).toMatchObject({ readOnly: false });
+  });
+});
+
+describe('Agent CLI client lifecycle', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockConnect.mockResolvedValue(undefined);
+    mockQuit.mockResolvedValue(undefined);
+  });
+
+  it('keeps a password-mode CLI client through a close (iovalkey reconnects it) and disconnects it on stop', async () => {
+    const agent = new Agent({ ...IAM_CONFIG, authMode: 'password', valkeyPassword: 'p', valkeyTls: false }) as any;
+    agent.valkeyConnected = true;
+    await agent.getCliExecutor();
+    const closeHandler = mockOn.mock.calls.find(([event]) => event === 'close')?.[1] as () => void;
+
+    closeHandler();
+    expect(agent.cliClient).not.toBeNull();
+    expect(agent.cliExecutor).not.toBeNull();
+
+    await agent.stop();
+    expect(mockDisconnect).toHaveBeenCalled();
+  });
+
+  it('drops an IAM-mode CLI client on close, since it cannot reconnect without a fresh token', async () => {
+    const agent = new Agent(IAM_CONFIG) as any;
+    await agent.getCliExecutor();
+    const closeHandler = mockOn.mock.calls.find(([event]) => event === 'close')?.[1] as () => void;
+
+    closeHandler();
+
+    expect(agent.cliClient).toBeNull();
+    expect(mockDisconnect).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('Agent.createValkeyClient - retryStrategy', () => {
   beforeEach(() => jest.clearAllMocks());
 
@@ -210,5 +484,20 @@ describe('Agent.onWsOpen - hello', () => {
   it('defaults serverless to false when the flag is unset', () => {
     const hello = sentHello({ ...IAM_CONFIG, authMode: 'password' });
     expect(hello.valkey.serverless).toBe(false);
+  });
+});
+
+describe('secretFingerprint', () => {
+  it('is stable for one key, differs per secret and per key, and hides the secret', () => {
+    const { secretFingerprint } = jest.requireActual('../agent') as typeof import('../agent');
+    const a = secretFingerprint(Buffer.alloc(32, 1))!;
+    const b = secretFingerprint(Buffer.alloc(32, 2))!;
+
+    expect(a('hash-1')).toBe(a('hash-1'));
+    expect(a('hash-1')).toMatch(/^[0-9a-f]{8}$/);
+    expect(a('hash-1')).not.toBe(a('hash-2'));
+    expect(a('hash-1')).not.toBe(b('hash-1'));
+    expect(secretFingerprint(undefined)).toBeUndefined();
+    expect(secretFingerprint(Buffer.alloc(0))).toBeUndefined();
   });
 });

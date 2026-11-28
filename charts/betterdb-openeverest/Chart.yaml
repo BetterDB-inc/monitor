@@ -1,0 +1,31 @@
+apiVersion: v2
+name: betterdb-openeverest
+description: BetterDB plugin for OpenEverest - monitoring, slow commands and keyspace analytics for Valkey instances, streamed to BetterDB Cloud or a self-hosted BetterDB
+type: application
+# Chart version. Independent of the Monitor release cycle: this chart ships
+# the agent image, so appVersion follows packages/agent (the betterdb/agent
+# tag that carries the `openeverest` mode).
+version: 0.1.0
+appVersion: "1.9.0"
+icon: https://docs.betterdb.com/assets/images/favicon.svg
+keywords:
+  - valkey
+  - redis
+  - monitoring
+  - observability
+  - openeverest
+home: https://betterdb.com
+sources:
+  - https://github.com/BetterDB-inc/monitor
+maintainers:
+  - name: BetterDB
+    url: https://betterdb.com
+annotations:
+  artifacthub.io/links: |
+    - name: Documentation
+      url: https://docs.betterdb.com/install/openeverest
+    - name: Source
+      url: https://github.com/BetterDB-inc/monitor
+  artifacthub.io/images: |
+    - name: agent
+      image: betterdb/agent:1.9.0

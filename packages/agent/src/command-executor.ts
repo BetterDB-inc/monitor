@@ -1,11 +1,32 @@
 import Valkey from 'iovalkey';
 import type { KeyAnalyticsOptions, KeyDetail, KeyPatternData } from '@betterdb/shared';
-import { extractPattern, checkBlocked, checkSafeMode, pruneKeyDetails, KEY_DETAILS_PRUNE_AT, STALE_KEY_IDLE_SECONDS } from '@betterdb/shared';
+import { extractPattern, checkAgentReadOnly, checkBlocked, checkSafeMode, pruneKeyDetails, redactSensitiveReply, KEY_DETAILS_PRUNE_AT, STALE_KEY_IDLE_SECONDS } from '@betterdb/shared';
+import type { SecretFingerprint } from '@betterdb/shared';
 
 // OBJECT IDLETIME is rejected under an LFU maxmemory-policy and OBJECT FREQ
 // under any other; both errors name the LFU policy.
 function isLfuPolicyMismatch(error: Error | null | undefined): boolean {
   return !!error && /LFU maxmemory policy/i.test(error.message);
+}
+
+// Stands in for binary operands in the refusal message only; the checks
+// themselves see the decoded bytes.
+const BINARY_OPERAND = '<binary>';
+
+/**
+ * Replaces placeholder arguments with their binary payloads. The first
+ * argument is the sub-command for every command that has one, so it is never
+ * substituted: a placeholder there is passed through as the literal string
+ * and judged by the safety checks as such.
+ */
+export function substituteBinaryArgs(args?: string[], binaryArgs?: Record<string, Buffer>): (string | Buffer)[] | undefined {
+  if (!args) return undefined;
+  if (!binaryArgs) return [...args];
+  // Own properties only: an argument named "constructor" or "toString" is
+  // not a placeholder.
+  return args.map((arg, index) =>
+    index > 0 && Object.prototype.hasOwnProperty.call(binaryArgs, arg) ? binaryArgs[arg] : arg,
+  );
 }
 
 const SIZE_COMMAND_BY_TYPE = new Map<string, string>([
@@ -19,15 +40,23 @@ const SIZE_COMMAND_BY_TYPE = new Map<string, string>([
 
 export class CommandExecutor {
   private readonly unsafeMode: boolean;
+  // Read-only is enforced here as well as in the Monitor: the OpenEverest mode
+  // holds the admin password, and a compromised or impersonated server must
+  // not be able to turn that into a mutation. It overrides unsafeMode.
+  private readonly readOnly: boolean;
+  // Tags each redacted secret so a change still shows (see SecretFingerprint).
+  private readonly fingerprint: SecretFingerprint | undefined;
   // Which OBJECT probe the key scan sends; flips when the server's eviction
   // policy rejects the current one (see isLfuPolicyMismatch).
   private keyScanUsesLfu = false;
 
   constructor(
     private readonly client: Valkey,
-    options?: { unsafeMode?: boolean },
+    options?: { unsafeMode?: boolean; readOnly?: boolean; fingerprint?: SecretFingerprint },
   ) {
     this.unsafeMode = options?.unsafeMode ?? false;
+    this.readOnly = options?.readOnly ?? false;
+    this.fingerprint = options?.fingerprint;
   }
 
   isAllowed(cmd: string, args?: string[]): boolean {
@@ -35,6 +64,10 @@ export class CommandExecutor {
     const subCommand = args?.[0]?.toUpperCase();
 
     if (checkBlocked(upperCmd, subCommand)) {
+      return false;
+    }
+
+    if (this.readOnly && checkAgentReadOnly(upperCmd, args) !== null) {
       return false;
     }
 
@@ -52,11 +85,27 @@ export class CommandExecutor {
   ): Promise<unknown> {
     const upperCmd = cmd.toUpperCase();
 
-    if (!this.isAllowed(upperCmd, args)) {
-      const full = args ? `${upperCmd} ${args.join(' ')}` : upperCmd;
+    // Binary placeholders are resolved first and the checks run on what will
+    // actually reach the server, decoded: a binary operand that spells RESET
+    // is judged as RESET (ACL LOG RESET), and a placeholder never stands for
+    // the sub-command slot.
+    const effective = substituteBinaryArgs(args, binaryArgs);
+    const checked = effective?.map((arg) => (typeof arg === 'string' ? arg : arg.toString('utf8')));
+    if (!this.isAllowed(upperCmd, checked)) {
+      const shown = effective?.map((arg) => (typeof arg === 'string' ? arg : BINARY_OPERAND));
+      const full = shown ? `${upperCmd} ${shown.join(' ')}` : upperCmd;
       throw new Error(`Command not allowed: ${full}`);
     }
 
+    const reply = await this.run(upperCmd, effective);
+    // Read-only holds the admin user: never ship its password or hashes out.
+    return this.readOnly ? redactSensitiveReply(upperCmd, checked, reply, this.fingerprint) : reply;
+  }
+
+  private async run(upperCmd: string, effective?: (string | Buffer)[]): Promise<unknown> {
+    // The handlers below want plain strings; a Buffer only occurs where the
+    // command takes binary data (FT, and the generic path).
+    const args = effective?.map((arg) => (typeof arg === 'string' ? arg : arg.toString('binary')));
     if (upperCmd === 'PING') {
       return this.client.ping();
     }
@@ -86,30 +135,14 @@ export class CommandExecutor {
     }
 
     // For FT commands, join command with subcommand using dot notation
-    if (upperCmd === 'FT' && args && args.length > 0) {
-      const ftCmd = `FT.${args[0].toUpperCase()}`;
-      const ftArgs: (string | Buffer)[] = [...args.slice(1)];
-      if (binaryArgs) {
-        for (let i = 0; i < ftArgs.length; i++) {
-          const key = ftArgs[i];
-          if (typeof key === 'string' && key in binaryArgs) {
-            ftArgs[i] = binaryArgs[key];
-          }
-        }
-      }
+    if (upperCmd === 'FT' && effective && effective.length > 0) {
+      const ftCmd = `FT.${String(effective[0]).toUpperCase()}`;
+      const ftArgs = effective.slice(1);
       return this.client.call(ftCmd, ...(ftArgs as [string, ...(string | Buffer)[]]));
     }
 
     // For all other commands, use call()
-    const callArgs: (string | Buffer)[] = args ? [upperCmd, ...args] : [upperCmd];
-    if (binaryArgs) {
-      for (let i = 1; i < callArgs.length; i++) {
-        const key = callArgs[i];
-        if (typeof key === 'string' && key in binaryArgs) {
-          callArgs[i] = binaryArgs[key];
-        }
-      }
-    }
+    const callArgs: (string | Buffer)[] = effective ? [upperCmd, ...effective] : [upperCmd];
     return this.client.call(...(callArgs as [string, ...(string | Buffer)[]]));
   }
 
