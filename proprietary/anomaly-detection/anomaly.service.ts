@@ -827,7 +827,15 @@ interface IncidentScanCut {
   cutAt: number | null;
 }
 
-type IncidentReadMode = boolean | IncidentScanCut;
+interface CountedPlacementIncident {
+  startedAt: number;
+  lastEventAt: number;
+  anomalyIds: string[];
+  openIds: string[];
+  incident: PlacementGateIncident;
+}
+
+type IncidentReadMode = false | IncidentScanCut;
 const MAX_INCIDENT_EVENTS_PER_CONNECTION = 200;
 const RETRY_AMP_ATTRIBUTION_TIMEOUT_MS = 5_000;
 const CORRELATION_ID_CHUNK_SIZE = 500;
@@ -1026,8 +1034,15 @@ export class AnomalyService
   private replacedRebalanceRuns = new Map<string, RebalanceRun[]>();
   private placementIncidentReads = new Map<
     string,
-    { since: number | null; historyFrom: number | null; scope: string[] }
+    {
+      since: number | null;
+      historyFrom: number | null;
+      readAt: number;
+      scope: string[];
+      counted: CountedPlacementIncident[];
+    }
   >();
+  private placementIncidentsReading = new Map<string, Promise<PlacementIncidentsRead>>();
   private clusterNodesObserver:
     | ((connectionId: string, nodes: readonly ClusterNode[], at: number) => void)
     | null = null;
@@ -1754,6 +1769,7 @@ export class AnomalyService
     this.rebalanceRuns.delete(connectionId);
     this.replacedRebalanceRuns.delete(connectionId);
     this.placementIncidentReads.delete(connectionId);
+    this.placementIncidentsReading.delete(connectionId);
     this.rebalanceFollowedAt.delete(connectionId);
     this.slotMigrationReadOnPoll.delete(connectionId);
     this.hotKeyNoteLogged.delete(connectionId);
@@ -7559,33 +7575,12 @@ export class AnomalyService
     const signals: PlacementGateSignal[] = [];
     for (const source of this.scopeConnectionIds(connectionId)) {
       const observed = this.observedNodeOf(source);
-      const stored: StoredAnomalyEvent[] = [];
-      let after: AnomalyEventCursor | undefined;
-      for (;;) {
-        const page = await this.storage.getAnomalyEvents({
-          connectionId: source,
-          resolved: false,
-          limit: OPEN_EVENT_PAGE_SIZE,
-          after,
-        });
-        stored.push(...page.filter((event) => wanted.has(event.metricType)));
-        if (page.length < OPEN_EVENT_PAGE_SIZE) break;
-        after = page[page.length - 1];
-      }
-      const saved = new Set(stored.map((event) => event.id));
-      const held = new Map(
-        [...this.recentAnomalies, ...this.persistenceOutbox.unsavedAnomalies()].map((event) => [
-          event.id,
-          event,
-        ]),
+      const stored = (await this.storedUnresolvedEvents(source)).filter((event) =>
+        wanted.has(event.metricType),
       );
-      const unsaved = [...held.values()].filter(
-        (event) =>
-          !event.persisted &&
-          !event.resolved &&
-          event.connectionId === source &&
-          wanted.has(event.metricType) &&
-          !saved.has(event.id),
+      const saved = new Set(stored.map((event) => event.id));
+      const unsaved = this.unsavedUnresolvedEvents(source).filter(
+        (event) => wanted.has(event.metricType) && !saved.has(event.id),
       );
       const open = [...stored, ...unsaved];
       const recoveredAt = Math.max(
@@ -7616,7 +7611,47 @@ export class AnomalyService
     return signals;
   }
 
-  async placementIncidents(connectionId: string): Promise<PlacementIncidentsRead> {
+  private async storedUnresolvedEvents(source: string): Promise<StoredAnomalyEvent[]> {
+    const stored: StoredAnomalyEvent[] = [];
+    let after: AnomalyEventCursor | undefined;
+    for (;;) {
+      const page = await this.storage.getAnomalyEvents({
+        connectionId: source,
+        resolved: false,
+        limit: OPEN_EVENT_PAGE_SIZE,
+        after,
+      });
+      stored.push(...page);
+      if (page.length < OPEN_EVENT_PAGE_SIZE) return stored;
+      after = page[page.length - 1];
+    }
+  }
+
+  private unsavedUnresolvedEvents(source: string): AnomalyEvent[] {
+    const held = new Map(
+      [...this.recentAnomalies, ...this.persistenceOutbox.unsavedAnomalies()].map((event) => [
+        event.id,
+        event,
+      ]),
+    );
+    return [...held.values()].filter(
+      (event) => !event.persisted && !event.resolved && event.connectionId === source,
+    );
+  }
+
+  placementIncidents(connectionId: string): Promise<PlacementIncidentsRead> {
+    const reading = this.placementIncidentsReading.get(connectionId);
+    if (reading) return reading;
+    const read = this.readPlacementIncidents(connectionId).finally(() => {
+      if (this.placementIncidentsReading.get(connectionId) === read) {
+        this.placementIncidentsReading.delete(connectionId);
+      }
+    });
+    this.placementIncidentsReading.set(connectionId, read);
+    return read;
+  }
+
+  private async readPlacementIncidents(connectionId: string): Promise<PlacementIncidentsRead> {
     const now = Date.now();
     const hourAgo = now - 60 * 60_000;
     const monthAgo = now - MAX_INCIDENT_LOOKBACK_MS;
@@ -7630,21 +7665,76 @@ export class AnomalyService
       earlier ? Math.max(monthAgo, Math.min(hourAgo, earlier.since ?? hourAgo)) : monthAgo,
       undefined,
       Number.MAX_SAFE_INTEGER,
-      earlier ? true : scan,
+      scan,
     );
-    const open = incidents.filter(
-      (incident) =>
-        incident.recovery.status !== 'recovered' &&
-        (incident.recovery.openSignals.length > 0 || incident.lastEventAt >= hourAgo),
-    );
-    const lasting = open.filter((incident) => incident.recovery.openSignals.length > 0);
-    const historyFrom = earlier ? earlier.historyFrom : scan.cutAt;
+    const visible = incidents
+      .filter(
+        (incident) =>
+          incident.recovery.status !== 'recovered' &&
+          (incident.recovery.openSignals.length > 0 || incident.lastEventAt >= hourAgo),
+      )
+      .map((incident) => this.countedPlacementIncident(incident));
+    const hidden =
+      earlier && scan.cutAt !== null
+        ? await this.placementIncidentsCutOff(earlier.counted, scan.cutAt, visible, scope, hourAgo)
+        : [];
+    const counted = [...visible, ...hidden];
+    const cutSince = earlier
+      ? scan.cutAt !== null && scan.cutAt > earlier.readAt
+        ? scan.cutAt
+        : null
+      : scan.cutAt;
+    const cuts = [
+      earlier?.historyFrom != null && earlier.historyFrom >= monthAgo ? earlier.historyFrom : null,
+      cutSince,
+    ].filter((at): at is number => at !== null);
+    const historyFrom = cuts.length > 0 ? Math.max(...cuts) : null;
     this.placementIncidentReads.set(connectionId, {
-      since: lasting.length > 0 ? Math.min(...lasting.map((incident) => incident.startedAt)) : null,
+      since: counted.length > 0 ? Math.min(...counted.map((each) => each.startedAt)) : null,
       historyFrom,
+      readAt: now,
       scope,
+      counted,
     });
-    return { incidents: open.map((incident) => this.placementIncidentOf(incident)), historyFrom };
+    return { incidents: counted.map((each) => each.incident), historyFrom };
+  }
+
+  private countedPlacementIncident(incident: IncidentTimeline): CountedPlacementIncident {
+    return {
+      startedAt: incident.startedAt,
+      lastEventAt: incident.lastEventAt,
+      anomalyIds: incident.entries.map((entry) => entry.anomalyId).filter(Boolean),
+      openIds: incident.entries
+        .filter((entry) => entry.recoveryState === 'open' && entry.anomalyId)
+        .map((entry) => entry.anomalyId),
+      incident: this.placementIncidentOf(incident),
+    };
+  }
+
+  private async placementIncidentsCutOff(
+    earlier: readonly CountedPlacementIncident[],
+    cutAt: number,
+    visible: readonly CountedPlacementIncident[],
+    scope: readonly string[],
+    hourAgo: number,
+  ): Promise<CountedPlacementIncident[]> {
+    const seen = new Set(visible.flatMap((each) => each.anomalyIds));
+    const candidates = earlier.filter(
+      (each) => each.startedAt < cutAt && !each.anomalyIds.some((id) => seen.has(id)),
+    );
+    if (candidates.length === 0) return [];
+    const unresolved = new Set<string>();
+    if (candidates.some((each) => each.openIds.length > 0)) {
+      for (const source of scope) {
+        for (const event of await this.storedUnresolvedEvents(source)) unresolved.add(event.id);
+        for (const event of this.unsavedUnresolvedEvents(source)) unresolved.add(event.id);
+      }
+    }
+    return candidates.filter((each) =>
+      each.openIds.length > 0
+        ? each.openIds.some((id) => unresolved.has(id))
+        : each.lastEventAt >= hourAgo,
+    );
   }
 
   private placementIncidentOf(incident: IncidentTimeline): PlacementGateIncident {
@@ -7656,14 +7746,19 @@ export class AnomalyService
       ],
       signals: incident.entries
         .filter((entry) => entry.recoveryState !== 'recovered')
-        .map((entry) => ({
-          metricType: entry.metricType,
-          nodeId:
-            entry.node?.nodeId ??
-            (entry.nodeAddr ? null : this.observedNodeOf(entry.connectionId)),
-          ...(entry.nodeAddr ? { address: entry.nodeAddr } : {}),
-          openedAt: entry.timestamp,
-        })),
+        .map((entry) => {
+          const address =
+            entry.metricType === MetricType.REPLICATION_DIVERGENCE && !entry.node
+              ? (entry.replicaAddr ?? entry.nodeAddr)
+              : entry.nodeAddr;
+          return {
+            metricType: entry.metricType,
+            nodeId:
+              entry.node?.nodeId ?? (address ? null : this.observedNodeOf(entry.connectionId)),
+            ...(address ? { address } : {}),
+            openedAt: entry.timestamp,
+          };
+        }),
     };
   }
 
@@ -12221,9 +12316,6 @@ export class AnomalyService
       events.push(...page.map((s) => this.storedToAnomalyEvent(s)));
       if (page.length < INCIDENT_HISTORY_PAGE_SIZE) return events;
       after = page[page.length - 1];
-    }
-    if (strict === true) {
-      throw new Error(`the incident history stopped at ${events.length} events`);
     }
     if (strict) {
       strict.cutAt = Math.max(

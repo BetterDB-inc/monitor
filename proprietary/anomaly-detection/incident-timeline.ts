@@ -18,6 +18,7 @@ export interface IncidentTimelineEntry {
   anomalyId: string;
   connectionId: string;
   nodeAddr?: string;
+  replicaAddr?: string;
   node?: ClusterNodeRef | ServedClusterNodeRef;
   timestamp: number;
   metricType: MetricType;
@@ -340,6 +341,7 @@ export function toTimelineEntry(event: AnomalyEvent): IncidentTimelineEntry {
     anomalyId: event.id,
     connectionId: event.connectionId ?? '',
     ...(event.nodeAddr ? { nodeAddr: event.nodeAddr } : {}),
+    ...(event.replicaAddr ? { replicaAddr: event.replicaAddr } : {}),
     ...(event.node ? { node: event.node } : {}),
     timestamp: event.timestamp,
     metricType: event.metricType,
