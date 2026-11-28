@@ -489,6 +489,30 @@ describe('RebalanceSuggestion', () => {
       expect(within(dialog).getByRole('button', { name: 'Start the migration' })).toBeEnabled();
     });
 
+    it('says nothing of the checks allowing a refused start until a later verdict lands', async () => {
+      runRebalance.mockRejectedValue(
+        new ApiError('Forbidden', 403, { blockedBy: 'gate', blockers: [fork] }),
+      );
+      await show([hotShard(runnable())]);
+      fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+      let land: (shards: HotShardDetail[]) => void = () => undefined;
+      getHotShards.mockImplementation(() => new Promise((resolve) => (land = resolve)));
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Start the migration' }));
+
+      const alert = await within(dialog).findByRole('alert');
+      expect(alert.textContent).toBe(`The last start waited for: ${fork.detail}`);
+
+      await act(async () => land([hotShard(runnable())]));
+
+      await waitFor(() =>
+        expect(within(dialog).getByRole('alert').textContent).toBe(
+          `The last start waited for: ${fork.detail} The safety checks allow it now.`,
+        ),
+      );
+    });
+
     it('calls a gate refusal the last start once a later verdict waits for something else', async () => {
       const failover = {
         kind: 'failover' as const,
