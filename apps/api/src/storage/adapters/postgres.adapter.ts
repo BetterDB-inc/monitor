@@ -5018,20 +5018,20 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         const action = placementFromRow<PlacementAction>(PLACEMENT_ACTION_COLUMNS, result.rows[0]);
         if (action.state === 'running') {
           const nodeIds = placementNodesToLock(action);
-          if (action.rollbackOf !== null) {
-            await client.query(
-              `UPDATE placement_locks SET action_id = $1
-               WHERE node_id IN (
-                 SELECT node_id FROM placement_locks WHERE action_id = $2 ORDER BY node_id FOR UPDATE
-               )`,
-              [id, action.rollbackOf],
-            );
-          }
+          const rolledBack =
+            action.rollbackOf === null
+              ? null
+              : await client.query('SELECT state FROM placement_actions WHERE id = $1 FOR UPDATE', [
+                  action.rollbackOf,
+                ]);
+          const handedFrom =
+            rolledBack?.rows[0]?.state === 'rolling_back' ? action.rollbackOf : null;
           await client.query(
             `INSERT INTO placement_locks (node_id, action_id, acquired_at)
              SELECT node_id, $2, $3 FROM UNNEST($1::text[]) AS node_id ORDER BY node_id
-             ON CONFLICT (node_id) DO NOTHING`,
-            [nodeIds, id, action.startedAt ?? Date.now()],
+             ON CONFLICT (node_id) DO UPDATE SET action_id = EXCLUDED.action_id
+             WHERE placement_locks.action_id = $4::text`,
+            [nodeIds, id, action.startedAt ?? Date.now(), handedFrom],
           );
           const taken = await client.query(
             'SELECT 1 FROM placement_locks WHERE node_id = ANY($1::text[]) AND action_id <> $2 LIMIT 1',

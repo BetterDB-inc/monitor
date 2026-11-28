@@ -423,6 +423,26 @@ describe.each([
     expect(await storage.freeOrphanedPlacementLocks()).toBe(0);
   });
 
+  it.each(['running', 'verifying'] as const)(
+    'gives a rollback none of the locks of the action it rolls back while that is still %s',
+    async (state) => {
+      await approved('x', ['n1', 'n2']);
+      await start('x');
+      if (state === 'verifying') {
+        await storage.transitionPlacementAction('x', ['running'], { state: 'verifying' });
+      }
+      await rollback('r', 'x', ['n1', 'n2']);
+
+      expect(await start('r')).toBeNull();
+      expect(await stateOf('r')).toBe('approved');
+      await approved('other', ['n2']);
+      expect(await start('other')).toBeNull();
+
+      await storage.transitionPlacementAction('x', [state], { state: 'failed', endedAt: 9 });
+      expect(await start('r')).toMatchObject({ state: 'running' });
+    },
+  );
+
   it('keeps the locks of a rollback when the action it rolls back ends', async () => {
     await rollingBack('x', ['n1', 'n2']);
     await rollback('r', 'x', ['n1', 'n2']);

@@ -1615,22 +1615,24 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     };
     if (next.state === 'running') {
       const nodeIds = [...new Set(next.clusterNodes)];
+      const handedFrom =
+        next.rollbackOf !== null &&
+        this.placementActions.get(next.rollbackOf)?.state === 'rolling_back'
+          ? next.rollbackOf
+          : null;
       const free = (holder: string | undefined) =>
-        holder === undefined || holder === id || holder === next.rollbackOf;
+        holder === undefined || holder === id || holder === handedFrom;
       if (
         nodeIds.length === 0 ||
         nodeIds.some((nodeId) => !free(this.placementLocks.get(nodeId)?.actionId))
       ) {
         return null;
       }
-      for (const lock of this.placementLocks.values()) {
-        if (next.rollbackOf !== null && lock.actionId === next.rollbackOf) lock.actionId = id;
-      }
       const acquiredAt = next.startedAt ?? Date.now();
       for (const nodeId of nodeIds) {
-        if (!this.placementLocks.has(nodeId)) {
-          this.placementLocks.set(nodeId, { actionId: id, acquiredAt });
-        }
+        const lock = this.placementLocks.get(nodeId);
+        if (lock) lock.actionId = id;
+        else this.placementLocks.set(nodeId, { actionId: id, acquiredAt });
       }
     }
     this.placementActions.set(id, next);

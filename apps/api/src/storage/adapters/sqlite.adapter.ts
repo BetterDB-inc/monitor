@@ -5062,17 +5062,20 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         const action = placementFromRow<PlacementAction>(PLACEMENT_ACTION_COLUMNS, row);
         if (action.state === 'running') {
           const nodeIds = placementNodesToLock(action);
-          if (action.rollbackOf !== null) {
-            db.prepare('UPDATE placement_locks SET action_id = ? WHERE action_id = ?').run(
-              id,
-              action.rollbackOf,
-            );
-          }
+          const rolledBack =
+            action.rollbackOf === null
+              ? undefined
+              : (db
+                  .prepare('SELECT state FROM placement_actions WHERE id = ?')
+                  .get(action.rollbackOf) as { state: string } | undefined);
+          const handedFrom = rolledBack?.state === 'rolling_back' ? action.rollbackOf : null;
           const acquiredAt = action.startedAt ?? Date.now();
           for (const nodeId of nodeIds) {
             db.prepare(
-              'INSERT INTO placement_locks (node_id, action_id, acquired_at) VALUES (?, ?, ?) ON CONFLICT(node_id) DO NOTHING',
-            ).run(nodeId, id, acquiredAt);
+              `INSERT INTO placement_locks (node_id, action_id, acquired_at) VALUES (?, ?, ?)
+               ON CONFLICT(node_id) DO UPDATE SET action_id = excluded.action_id
+               WHERE placement_locks.action_id = ?`,
+            ).run(nodeId, id, acquiredAt, handedFrom);
             const holder = db
               .prepare('SELECT action_id FROM placement_locks WHERE node_id = ?')
               .get(nodeId) as { action_id: string };

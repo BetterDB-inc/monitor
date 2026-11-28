@@ -335,7 +335,7 @@ Retention: `PLACEMENT_ACTION_RETENTION_DAYS`, default 90, pruned with the activi
 
 - Starting an action inserts one row per primary node id in one transaction. A primary key conflict means an action on an overlapping cluster holds the lock, so the start is refused; this works across connections (a cluster added twice) and API instances on one database.
 - The lock is released in the same transaction that moves the action to a terminal state. After a restart, rows whose action is terminal are freed.
-- A rollback takes over the lock of the action it rolls back. That action stays `rolling_back` while its rollback runs, so starting the rollback hands it that action's rows in the same transaction; ending the rolled-back action later frees nothing the rollback holds.
+- A rollback takes over the lock of the action it rolls back, but only while that action is `rolling_back`. That action stays `rolling_back` while its rollback runs, so starting the rollback hands it that action's rows for the rollback's nodes in the same transaction, which reads the rolled-back action's row first and then takes every node in node order; ending the rolled-back action later frees nothing the rollback holds. While the action is still running or verifying its locks stay held, and its rollback cannot start.
 - An action is never created in a state that holds the lock (`running`, `verifying`, `rolling_back`, `aborted_pending`), and one with no node ids can't start, so nothing runs without the lock.
 - Memory adapter: a map with the same semantics, which covers one process.
 - There is no lease. Auto's tick loop on several instances is safe because starting an action already takes the lock. **My call.**
