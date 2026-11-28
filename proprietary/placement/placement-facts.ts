@@ -200,21 +200,7 @@ function withNodeIds(
   );
 }
 
-async function attempt<T>(
-  read: () => Promise<T>,
-  name: string,
-  unreadable: string[],
-): Promise<T | null> {
-  try {
-    return await read();
-  } catch {
-    unreadable.push(name);
-    return null;
-  }
-}
-
 export interface PlacementClusterRead {
-  shardIds: readonly string[];
   openEvents: PlacementGateSignal[] | null;
   incidents: PlacementIncidentsRead | null;
   nodeFacts: PlacementNodeFacts | null;
@@ -225,15 +211,27 @@ export async function readPlacementCluster(
   port: PlacementFactsPort,
   seedId: string,
   shardIds: readonly string[],
+  warn: (message: string) => void,
 ): Promise<PlacementClusterRead> {
   const unreadable: string[] = [];
   const wanted = [...new Set(shardIds)];
+  const attempt = async <T>(name: string, read: () => Promise<T>): Promise<T | null> => {
+    try {
+      return await read();
+    } catch (err) {
+      warn(
+        `Could not read ${name} of ${seedId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      unreadable.push(name);
+      return null;
+    }
+  };
   const [openEvents, incidents, nodeFacts] = await Promise.all([
-    attempt(() => port.placementOpenEvents(seedId), 'the open events', unreadable),
-    attempt(() => port.placementIncidents(seedId), 'the open incidents', unreadable),
-    attempt(() => port.readPlacementNodeFacts(seedId, wanted), 'the cluster nodes', unreadable),
+    attempt('the open events', () => port.placementOpenEvents(seedId)),
+    attempt('the open incidents', () => port.placementIncidents(seedId)),
+    attempt('the cluster nodes', () => port.readPlacementNodeFacts(seedId, wanted)),
   ]);
-  return { shardIds: wanted, openEvents, incidents, nodeFacts, unreadable };
+  return { openEvents, incidents, nodeFacts, unreadable };
 }
 
 export async function readPlacementGateFacts(
@@ -242,11 +240,14 @@ export async function readPlacementGateFacts(
   seedId: string,
   context: PlacementFactsContext,
   now: number,
+  warn: (message: string) => void = () => undefined,
 ): Promise<PlacementGateFacts> {
-  const read = await readPlacementCluster(port, seedId, [
-    context.sourceShardId,
-    ...context.targetShardIds,
-  ]);
+  const read = await readPlacementCluster(
+    port,
+    seedId,
+    [context.sourceShardId, ...context.targetShardIds],
+    warn,
+  );
   return placementGateFactsOf(read, epochs, seedId, context, now);
 }
 

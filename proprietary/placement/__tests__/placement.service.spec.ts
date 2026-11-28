@@ -782,6 +782,35 @@ describe('PlacementService', () => {
       });
     });
 
+    it.each([
+      [2, 2],
+      [10, DEFAULT_REBALANCE_POLICY.maxTargets],
+      [0, 1],
+    ])(
+      'plans for at most as many targets as an hourly budget of %d moves, %d',
+      (maxMigrationsPerHour, maxTargets) => {
+        expect(
+          rebalancePolicyOf({ ...DEFAULT_PLACEMENT_SETTINGS, maxMigrationsPerHour }).maxTargets,
+        ).toBe(maxTargets);
+      },
+    );
+
+    it('plans for no more targets than the hourly budget has left', async () => {
+      const { service, storage, anomaly } = await setup();
+      await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+      anomaly.placementJobsSince.mockReturnValue(
+        DEFAULT_PLACEMENT_SETTINGS.maxMigrationsPerHour - 1,
+      );
+      expect((await service.rebalancePolicyFor('seed')).maxTargets).toBe(1);
+      const [seedId, since] = anomaly.placementJobsSince.mock.calls.at(-1) as unknown as [
+        string,
+        number,
+      ];
+      expect(seedId).toBe('seed');
+      expect(Date.now() - since).toBeGreaterThanOrEqual(60 * 60_000);
+      expect(Date.now() - since).toBeLessThan(61 * 60_000);
+    });
+
     it('maps the settings the planner uses over the planner defaults', () => {
       expect(rebalancePolicyOf({ ...tighter, resolveRatio: 1.5 })).toEqual({
         ...DEFAULT_REBALANCE_POLICY,
@@ -1135,10 +1164,10 @@ describe('PlacementService', () => {
       it('answers an unknown gate and runs nothing when the safety checks cannot be read', async () => {
         const { service, storage, anomaly } = await setup();
         await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
-        jest
-          .spyOn(storage, 'getPlacementPolicy')
-          .mockResolvedValueOnce(await storage.getPlacementPolicy('seed'))
-          .mockRejectedValue(new Error('db down'));
+        const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+        anomaly.placementJobsSince.mockImplementation(() => {
+          throw new Error('db down');
+        });
         await expect(service.runRebalance('seed', 'a', moves, actor)).resolves.toEqual({
           status: 'blocked',
           blockedBy: 'gate',
@@ -1146,6 +1175,26 @@ describe('PlacementService', () => {
             { kind: 'unknown', scope: 'cluster', detail: 'Could not run the safety checks.' },
           ],
         });
+        expect(anomaly.runRebalance).not.toHaveBeenCalled();
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('db down'));
+      });
+
+      it('reads the placement policy once for a run', async () => {
+        const { service, storage, anomaly } = await setup();
+        await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+        anomaly.runRebalance.mockResolvedValue({ status: 'started', run: {} });
+        const read = jest.spyOn(storage, 'getPlacementPolicy');
+        await expect(service.runRebalance('seed', 'a', moves, actor)).resolves.toMatchObject({
+          status: 'started',
+        });
+        expect(read).toHaveBeenCalledTimes(1);
+      });
+
+      it('refuses a run without a gate when the placement policy cannot be read', async () => {
+        const { service, storage, anomaly } = await setup();
+        jest.spyOn(storage, 'getPlacementPolicy').mockRejectedValue(new Error('db down'));
+        await expect(service.runRebalance('seed', 'a', moves, actor)).rejects.toThrow('db down');
+        expect(anomaly.readPlacementNodeFacts).not.toHaveBeenCalled();
         expect(anomaly.runRebalance).not.toHaveBeenCalled();
       });
 
@@ -1568,10 +1617,12 @@ describe('PlacementService', () => {
         mode: 'recommend',
         updatedAt: 1,
       });
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
       later.anomaly.placementJobsSince.mockImplementation(() => {
         throw new Error('storage is down');
       });
       const [marked] = await later.service.withPlacementBlocker('seed', shards);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('storage is down'));
       expect(marked.rebalance).toMatchObject({
         execution: { available: false, blockedBy: 'gate' },
         gate: {
