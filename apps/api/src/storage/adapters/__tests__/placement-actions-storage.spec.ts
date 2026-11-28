@@ -34,13 +34,14 @@ const inProcess =
     return { storage, cleanup: () => storage.close() };
   };
 
-function statementsOf(storage: StoragePort): () => string[] {
+async function statementsOf(storage: StoragePort): Promise<() => string[]> {
   if (storage instanceof SqliteAdapter) {
     const db = (storage as unknown as { db: { prepare: (sql: string) => unknown } }).db;
     const prepare = jest.spyOn(db, 'prepare');
     return () => prepare.mock.calls.map(([sql]) => String(sql));
   }
   if (storage instanceof PostgresAdapter) {
+    await (storage as unknown as { indexBuild: Promise<void> | null }).indexBuild;
     const query = jest.spyOn(Client.prototype, 'query');
     return () => query.mock.calls.map(([sql]) => String(sql));
   }
@@ -518,7 +519,7 @@ describe.each([
   });
 
   it('answers a create, a transition and a step update from the write, with no read after it', async () => {
-    const statements = statementsOf(storage);
+    const statements = await statementsOf(storage);
     const read = jest.spyOn(storage, 'getPlacementAction');
 
     await storage.createPlacementAction(action('a1'), [step('a1', 0)]);
