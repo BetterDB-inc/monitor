@@ -45,6 +45,15 @@ import type {
   PlacementPolicy,
   PlacementModeWrite,
   PlacementSettingsWrite,
+  PlacementAction,
+  PlacementActionListParams,
+  PlacementActionPage,
+  PlacementActionPatch,
+  PlacementActionState,
+  PlacementStep,
+  PlacementStepPatch,
+  PlacementStepState,
+  PlacementStepRead,
   SessionNamespace,
   KvCacheEngineSample,
   KvCacheEngineSource,
@@ -861,11 +870,35 @@ export interface StoragePort {
   saveScalingReadinessSettings(settings: ScalingReadinessSettings): Promise<ScalingReadinessSettings>;
 
   getPlacementPolicy(connectionId: string): Promise<PlacementPolicy | null>;
+  listPlacementPolicies(): Promise<PlacementPolicy[]>;
   savePlacementMode(write: PlacementModeWrite): Promise<PlacementPolicy>;
   savePlacementSettings(
     write: PlacementSettingsWrite,
     expectedVersion: number,
   ): Promise<PlacementPolicy | null>;
+  createPlacementAction(action: PlacementAction, steps: PlacementStep[]): Promise<PlacementAction>;
+  getPlacementAction(
+    id: string,
+  ): Promise<{ action: PlacementAction; steps: PlacementStep[] } | null>;
+  listPlacementActions(
+    connectionId: string,
+    params: PlacementActionListParams,
+  ): Promise<PlacementActionPage>;
+  listOpenPlacementActions(): Promise<PlacementAction[]>;
+  transitionPlacementAction(
+    id: string,
+    from: readonly PlacementActionState[],
+    patch: PlacementActionPatch,
+  ): Promise<PlacementAction | null>;
+  updatePlacementStep(
+    actionId: string,
+    index: number,
+    from: readonly PlacementStepState[] | null,
+    patch: PlacementStepPatch,
+  ): Promise<PlacementStep | null>;
+  freeOrphanedPlacementLocks(): Promise<number>;
+  placementStepsSince(connectionId: string, since: number): Promise<PlacementStepRead[]>;
+  prunePlacementActions(before: number): Promise<number>;
   saveKvCacheFootprintSnapshot(snapshot: KvCacheFootprintSnapshot): Promise<void>;
   getKvCacheFootprintSnapshots(query: KvCacheFootprintQuery): Promise<KvCacheFootprintSnapshot[]>;
   pruneOldKvCacheFootprintSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number>;

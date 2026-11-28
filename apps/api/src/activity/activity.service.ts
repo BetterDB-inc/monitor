@@ -1,6 +1,6 @@
 import { BadRequestException, Inject, Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'crypto';
-import type { Actor, ActorVia } from '@betterdb/shared';
+import { DEFAULT_PLACEMENT_SETTINGS, type Actor, type ActorVia } from '@betterdb/shared';
 import type {
   ActivityCursor,
   ActivityRecord,
@@ -8,8 +8,9 @@ import type {
 import type { StoragePort } from '../common/interfaces/storage-port.interface';
 import { ACTIVITY_CONFIG, ActivityConfig } from './activity-config';
 import { decodeActivityCursor, encodeActivityCursor } from './activity-cursor';
+import { INVALID_CURSOR_MESSAGE } from '../common/utils/keyset-cursor';
 
-export const INVALID_CURSOR_MESSAGE = 'Invalid cursor';
+export { INVALID_CURSOR_MESSAGE };
 export const MAX_PAGE_SIZE = 100;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -118,5 +119,16 @@ export class ActivityService {
   async prune(now: number = Date.now()): Promise<number> {
     const boundary = now - this.config.retentionDays * DAY_MS;
     return this.storage.getActivityRepository().prune(boundary);
+  }
+
+  async prunePlacementActions(now: number = Date.now()): Promise<number> {
+    const policies = await this.storage.listPlacementPolicies();
+    const days = Math.max(
+      this.config.placementActionRetentionDays,
+      ...[DEFAULT_PLACEMENT_SETTINGS, ...policies.map((policy) => policy.settings)].flatMap(
+        (settings) => [settings.slotCooldownDays, settings.noReturnDays],
+      ),
+    );
+    return this.storage.prunePlacementActions(now - days * DAY_MS);
   }
 }

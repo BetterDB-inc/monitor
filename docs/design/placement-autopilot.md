@@ -323,7 +323,7 @@ Four new tables and one changed table, each in the memory, sqlite and postgres a
 | `bytes_estimated` / `keys_moved` / `slots_moved` | integer | Budgets |
 | `sending_at`, `started_at`, `ended_at` | integer | `sending_at` indexed for the hourly budget |
 
-Retention: `PLACEMENT_ACTION_RETENTION_DAYS`, default 90, pruned with the activity job. Today's in-memory `RebalanceRun` becomes a view over the rows, surviving a restart. The cooldown and no-return rules (2.4) read the `done` steps of the last `max(slotCooldownDays, noReturnDays)`.
+Retention: `PLACEMENT_ACTION_RETENTION_DAYS`, default 90, pruned with the activity job. Today's in-memory `RebalanceRun` becomes a view over the rows, surviving a restart. The cooldown and no-return rules (2.4) read the `done` steps of the last `max(slotCooldownDays, noReturnDays)`, so pruning never goes past the longest of those windows in any stored policy or the defaults.
 
 ### 3.3 `placement_locks` (phase 3)
 
@@ -335,8 +335,10 @@ Retention: `PLACEMENT_ACTION_RETENTION_DAYS`, default 90, pruned with the activi
 
 - Starting an action inserts one row per primary node id in one transaction. A primary key conflict means an action on an overlapping cluster holds the lock, so the start is refused; this works across connections (a cluster added twice) and API instances on one database.
 - The lock is released in the same transaction that moves the action to a terminal state. After a restart, rows whose action is terminal are freed.
+- A rollback takes over the lock of the action it rolls back, but only while that action is `rolling_back`. That action stays `rolling_back` while its rollback runs, so starting the rollback hands it that action's rows for the rollback's nodes in the same transaction, which reads the rolled-back action's row first and then takes every node in node order; ending the rolled-back action later frees nothing the rollback holds. While the action is still running or verifying its locks stay held, and its rollback cannot start.
+- An action is never created in a state that holds the lock (`running`, `verifying`, `rolling_back`, `aborted_pending`), and one with no node ids can't start, so nothing runs without the lock.
 - Memory adapter: a map with the same semantics, which covers one process.
-- There is no lease. Auto's tick loop on several instances is safe because creating an action already takes the lock. **My call.**
+- There is no lease. Auto's tick loop on several instances is safe because starting an action already takes the lock. **My call.**
 - **Nobody owns a held lock.** The lock belongs to the action, not an instance. Any instance advances the action through the compare-and-set (2.5), so the lock is released when the action ends, whoever ends it. No heartbeat expires.
 
 ### 3.4 `activity_events.actor_via` adds `system` (phase 3)

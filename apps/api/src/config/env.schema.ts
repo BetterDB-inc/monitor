@@ -151,6 +151,12 @@ export const envSchema = z
       .refine((v) => v === undefined || v.trim() === '' || parseActivityRetentionDays(v) !== null, {
         message: 'ACTIVITY_RETENTION_DAYS must be a positive whole number of days',
       }),
+    PLACEMENT_ACTION_RETENTION_DAYS: z
+      .string()
+      .optional()
+      .refine((v) => v === undefined || v.trim() === '' || parseActivityRetentionDays(v) !== null, {
+        message: 'PLACEMENT_ACTION_RETENTION_DAYS must be a positive whole number of days',
+      }),
 
     // Self-hosted data retention: days of monitoring history to keep. Seeds
     // the localRetentionDays app setting when the settings row is first

@@ -3,6 +3,7 @@ export const DEFAULT_RETENTION_DAYS = 90;
 
 export interface ActivityConfig {
   retentionDays: number;
+  placementActionRetentionDays: number;
 }
 
 export function parseActivityRetentionDays(raw: string | undefined): number | null {
@@ -21,5 +22,7 @@ export function resolveActivityConfig(env: NodeJS.ProcessEnv): ActivityConfig {
   return {
     retentionDays:
       parseActivityRetentionDays(env.ACTIVITY_RETENTION_DAYS) ?? DEFAULT_RETENTION_DAYS,
+    placementActionRetentionDays:
+      parseActivityRetentionDays(env.PLACEMENT_ACTION_RETENTION_DAYS) ?? DEFAULT_RETENTION_DAYS,
   };
 }

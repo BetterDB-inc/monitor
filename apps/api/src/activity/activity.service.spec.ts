@@ -1,4 +1,5 @@
 import { BadRequestException, Logger } from '@nestjs/common';
+import { defaultPlacementSettings } from '@betterdb/shared';
 import { MemoryAdapter } from '../storage/adapters/memory.adapter';
 import { encodeActivityCursor } from './activity-cursor';
 import { ActivityService, INVALID_CURSOR_MESSAGE, toActivityActor } from './activity.service';
@@ -19,7 +20,7 @@ describe('ActivityService', () => {
   beforeEach(async () => {
     storage = new MemoryAdapter();
     await storage.initialize();
-    service = new ActivityService(storage, { retentionDays: 90 });
+    service = new ActivityService(storage, { retentionDays: 90, placementActionRetentionDays: 30 });
   });
 
   afterEach(async () => {
@@ -120,5 +121,44 @@ describe('ActivityService', () => {
     const now = 100 * 24 * 60 * 60 * 1000;
     expect(await service.prune(now)).toBe(3);
     expect(prune).toHaveBeenCalledWith(now - 90 * 24 * 60 * 60 * 1000);
+  });
+
+  it.each([
+    ['a slot cooldown', { slotCooldownDays: 30 }, 30],
+    ['a no-return window', { noReturnDays: 40 }, 40],
+    ['the default policy of a cluster without one', null, 7],
+  ])(
+    'keeps placement actions for %s longer than their retention',
+    async (_label, settings, days) => {
+      if (settings) {
+        await storage.savePlacementSettings(
+          {
+            connectionId: 'conn-a',
+            settings: { ...defaultPlacementSettings(), ...settings },
+            updatedAt: 1,
+            modeIfNew: 'recommend',
+          },
+          0,
+        );
+        await storage.savePlacementMode({ connectionId: 'conn-b', mode: 'observe', updatedAt: 1 });
+      }
+      const short = new ActivityService(storage, {
+        retentionDays: 90,
+        placementActionRetentionDays: 1,
+      });
+      const prune = jest.spyOn(storage, 'prunePlacementActions').mockResolvedValue(0);
+      const now = 100 * 24 * 60 * 60 * 1000;
+
+      await short.prunePlacementActions(now);
+
+      expect(prune).toHaveBeenCalledWith(now - days * 24 * 60 * 60 * 1000);
+    },
+  );
+
+  it('prunes placement actions older than their own retention window', async () => {
+    const prune = jest.spyOn(storage, 'prunePlacementActions').mockResolvedValue(2);
+    const now = 100 * 24 * 60 * 60 * 1000;
+    expect(await service.prunePlacementActions(now)).toBe(2);
+    expect(prune).toHaveBeenCalledWith(now - 30 * 24 * 60 * 60 * 1000);
   });
 });
