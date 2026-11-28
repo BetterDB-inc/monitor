@@ -7625,7 +7625,11 @@ export class AnomalyService
       Number.MAX_SAFE_INTEGER,
       earlier ? true : scan,
     );
-    const open = incidents.filter((incident) => incident.recovery.status !== 'recovered');
+    const open = incidents.filter(
+      (incident) =>
+        incident.recovery.status !== 'recovered' &&
+        (incident.recovery.openSignals.length > 0 || incident.lastEventAt >= hourAgo),
+    );
     const lasting = open.filter((incident) => incident.recovery.openSignals.length > 0);
     const historyFrom = earlier ? earlier.historyFrom : scan.cutAt;
     this.placementIncidentReads.set(connectionId, {
