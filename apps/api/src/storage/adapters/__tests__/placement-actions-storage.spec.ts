@@ -7,12 +7,14 @@ import {
   type PlacementActionState,
   type PlacementStep,
 } from '@betterdb/shared';
+import { BadRequestException } from '@nestjs/common';
 import { Client } from 'pg';
 import { SqliteAdapter } from '../sqlite.adapter';
 import { MemoryAdapter } from '../memory.adapter';
 import { PostgresAdapter } from '../postgres.adapter';
 import { adapters, type AdapterFactory } from './anomaly-storage-adapters';
 import type { StoragePort } from '../../../common/interfaces/storage-port.interface';
+import { encodeKeysetCursor, INVALID_CURSOR_MESSAGE } from '../../../common/utils/keyset-cursor';
 
 const tempDirs: string[] = [];
 
@@ -440,6 +442,32 @@ describe.each([
       to: 103,
     });
     expect(filtered.items.map((each) => each.id)).toEqual(['a3', 'a1']);
+  });
+
+  it.each([
+    ['not base64url', 'zzz!'],
+    ['without an id', Buffer.from('100:').toString('base64url')],
+    ['with a time that is not a whole number', Buffer.from('x:a1').toString('base64url')],
+  ])('answers a cursor %s as a bad request', async (_label, cursor) => {
+    const listing = storage.listPlacementActions('conn-a', { cursor });
+
+    await expect(listing).rejects.toBeInstanceOf(BadRequestException);
+    await expect(listing).rejects.toThrow(INVALID_CURSOR_MESSAGE);
+  });
+
+  it('pages with the cursor the activity log uses', async () => {
+    for (const id of ['a0', 'a1']) {
+      await storage.createPlacementAction(action(id, { createdAt: 100 }), []);
+    }
+
+    const first = await storage.listPlacementActions('conn-a', { limit: 1 });
+
+    expect(first.nextCursor).toBe(encodeKeysetCursor(100, 'a1'));
+    expect(
+      (
+        await storage.listPlacementActions('conn-a', { cursor: encodeKeysetCursor(100, 'a1') })
+      ).items.map((each) => each.id),
+    ).toEqual(['a0']);
   });
 
   it('pages actions created in the same millisecond without skipping one', async () => {

@@ -8,8 +8,9 @@ import type {
 import type { StoragePort } from '../common/interfaces/storage-port.interface';
 import { ACTIVITY_CONFIG, ActivityConfig } from './activity-config';
 import { decodeActivityCursor, encodeActivityCursor } from './activity-cursor';
+import { INVALID_CURSOR_MESSAGE } from '../common/utils/keyset-cursor';
 
-export const INVALID_CURSOR_MESSAGE = 'Invalid cursor';
+export { INVALID_CURSOR_MESSAGE };
 export const MAX_PAGE_SIZE = 100;
 const DAY_MS = 24 * 60 * 60 * 1000;
 

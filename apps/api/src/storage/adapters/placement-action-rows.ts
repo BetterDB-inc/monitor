@@ -1,3 +1,4 @@
+import { BadRequestException } from '@nestjs/common';
 import {
   PLACEMENT_TERMINAL_STATES,
   type PlacementAction,
@@ -5,6 +6,11 @@ import {
   type PlacementStep,
   type PlacementStepRead,
 } from '@betterdb/shared';
+import {
+  decodeKeysetCursor,
+  encodeKeysetCursor,
+  INVALID_CURSOR_MESSAGE,
+} from '../../common/utils/keyset-cursor';
 
 type ColumnKind = 'text' | 'nullableText' | 'json' | 'number' | 'nullableNumber';
 
@@ -146,26 +152,13 @@ export function placementPageLimit(limit: number | undefined): number {
 }
 
 export function placementCursor(action: Pick<PlacementAction, 'createdAt' | 'id'>): string {
-  return Buffer.from(JSON.stringify([action.createdAt, action.id])).toString('base64url');
-}
-
-function decodeCursor(cursor: string): unknown {
-  try {
-    return JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
-  } catch {
-    return null;
-  }
+  return encodeKeysetCursor(action.createdAt, action.id);
 }
 
 export function parsePlacementCursor(cursor: string): { createdAt: number; id: string } {
-  const decoded = decodeCursor(cursor);
-  if (Array.isArray(decoded)) {
-    const [createdAt, id] = decoded;
-    if (typeof createdAt === 'number' && Number.isFinite(createdAt) && typeof id === 'string') {
-      return { createdAt, id };
-    }
-  }
-  throw new Error('Invalid placement action cursor');
+  const decoded = decodeKeysetCursor(cursor);
+  if (!decoded) throw new BadRequestException(INVALID_CURSOR_MESSAGE);
+  return { createdAt: decoded.at, id: decoded.id };
 }
 
 export class PlacementLockTaken extends Error {}
