@@ -126,7 +126,7 @@ describe('readPlacementGateFacts', () => {
       warn,
     );
     expect(facts.unreadable).toEqual([name]);
-    expect(warn).toHaveBeenCalledWith(`Could not read ${name} of seed: timed out`);
+    expect(warn).toHaveBeenCalledWith(`Could not read ${name} of seed: timed out`, name);
     const result = placementGate(facts, defaultPlacementSettings(), NOW, 'approve');
     expect(result.allowed).toBe(false);
     expect(result.blockers[0]).toMatchObject({ kind: 'unknown', scope: 'cluster' });

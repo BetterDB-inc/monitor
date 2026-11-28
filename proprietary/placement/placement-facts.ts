@@ -211,7 +211,7 @@ export async function readPlacementCluster(
   port: PlacementFactsPort,
   seedId: string,
   shardIds: readonly string[],
-  warn: (message: string) => void,
+  warn: (message: string, read: string) => void,
 ): Promise<PlacementClusterRead> {
   const unreadable: string[] = [];
   const wanted = [...new Set(shardIds)];
@@ -221,6 +221,7 @@ export async function readPlacementCluster(
     } catch (err) {
       warn(
         `Could not read ${name} of ${seedId}: ${err instanceof Error ? err.message : String(err)}`,
+        name,
       );
       unreadable.push(name);
       return null;
