@@ -1251,6 +1251,25 @@ describe('PlacementService', () => {
         }
       });
 
+      it('warns of each unreadable part of the cluster on its own', async () => {
+        const { service, storage, anomaly } = await setup();
+        await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+        const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+        anomaly.placementOpenEvents.mockRejectedValue(new Error('timed out'));
+        anomaly.readPlacementNodeFacts.mockRejectedValue(new Error('refused'));
+        try {
+          await service.runRebalance('seed', 'a', moves, actor);
+          expect(warn.mock.calls.map(([message]) => message)).toEqual(
+            expect.arrayContaining([
+              'Could not read the open events of seed: timed out',
+              'Could not read the cluster nodes of seed: refused',
+            ]),
+          );
+        } finally {
+          warn.mockRestore();
+        }
+      });
+
       it('reads the placement policy once for a run', async () => {
         const { service, storage, anomaly } = await setup();
         await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });

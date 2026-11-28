@@ -607,8 +607,8 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
     return unreadableGate();
   }
 
-  private warnReadOf(connectionId: string): (message: string) => void {
-    return (message) => this.warnSparingly(`${connectionId}\u0000read`, message);
+  private warnReadOf(connectionId: string): (message: string, read: string) => void {
+    return (message, read) => this.warnSparingly(`${connectionId}\u0000${read}`, message);
   }
 
   private warnSparingly(key: string, message: string): void {
