@@ -836,6 +836,46 @@ interface CountedPlacementIncident {
 }
 
 type IncidentReadMode = false | IncidentScanCut;
+
+interface PlacementHistoryGap {
+  from: number;
+  to: number;
+}
+
+interface PlacementIncidentMemory {
+  since: number | null;
+  historyGap: PlacementHistoryGap | null;
+  readAt: number;
+  scope: string[];
+  counted: CountedPlacementIncident[];
+}
+
+type PlacementUnresolvedEvent = (StoredAnomalyEvent | AnomalyEvent) & { connectionId: string };
+
+interface PlacementSignalSource {
+  metricType: string;
+  connectionId: string;
+  timestamp: number;
+  node?: { nodeId: string } | null;
+  nodeAddr?: string | null;
+  replicaAddr?: string | null;
+}
+
+function withoutRecoveredClusterState<
+  T extends { metricType: string; value?: number; timestamp: number },
+>(events: readonly T[]): T[] {
+  const recoveredAt = Math.max(
+    Number.NEGATIVE_INFINITY,
+    ...events
+      .filter((event) => event.metricType === MetricType.CLUSTER_STATE && event.value === 1)
+      .map((event) => event.timestamp),
+  );
+  return events.filter(
+    (event) =>
+      event.metricType !== MetricType.CLUSTER_STATE ||
+      (event.value !== 1 && event.timestamp > recoveredAt),
+  );
+}
 const MAX_INCIDENT_EVENTS_PER_CONNECTION = 200;
 const RETRY_AMP_ATTRIBUTION_TIMEOUT_MS = 5_000;
 const CORRELATION_ID_CHUNK_SIZE = 500;
@@ -1032,17 +1072,9 @@ export class AnomalyService
   private rebalancePolicyWarned = new Map<string, string>();
   private rebalanceRuns = new Map<string, Map<string, RebalanceRun>>();
   private replacedRebalanceRuns = new Map<string, RebalanceRun[]>();
-  private placementIncidentReads = new Map<
-    string,
-    {
-      since: number | null;
-      historyFrom: number | null;
-      readAt: number;
-      scope: string[];
-      counted: CountedPlacementIncident[];
-    }
-  >();
+  private placementIncidentReads = new Map<string, PlacementIncidentMemory>();
   private placementIncidentsReading = new Map<string, Promise<PlacementIncidentsRead>>();
+  private placementUnresolvedReading = new Map<string, Promise<PlacementUnresolvedEvent[]>>();
   private clusterNodesObserver:
     | ((connectionId: string, nodes: readonly ClusterNode[], at: number) => void)
     | null = null;
@@ -7571,44 +7603,55 @@ export class AnomalyService
   }
 
   async placementOpenEvents(connectionId: string): Promise<PlacementGateSignal[]> {
-    const wanted = new Set(PLACEMENT_GATE_EVENT_TYPES);
-    const signals: PlacementGateSignal[] = [];
-    for (const source of this.scopeConnectionIds(connectionId)) {
-      const observed = this.observedNodeOf(source);
-      const stored = (await this.storedUnresolvedEvents(source)).filter((event) =>
-        wanted.has(event.metricType),
-      );
-      const saved = new Set(stored.map((event) => event.id));
-      const unsaved = this.unsavedUnresolvedEvents(source).filter(
-        (event) => wanted.has(event.metricType) && !saved.has(event.id),
-      );
-      const open = [...stored, ...unsaved];
-      const recoveredAt = Math.max(
-        Number.NEGATIVE_INFINITY,
-        ...open
-          .filter((event) => event.metricType === MetricType.CLUSTER_STATE && event.value === 1)
-          .map((event) => event.timestamp),
-      );
-      for (const event of open) {
-        if (
-          event.metricType === MetricType.CLUSTER_STATE &&
-          (event.value === 1 || event.timestamp <= recoveredAt)
-        ) {
-          continue;
+    const wanted = new Set<string>(PLACEMENT_GATE_EVENT_TYPES);
+    const reads = await Promise.all(
+      this.scopeConnectionIds(connectionId).map((source) => this.placementUnresolvedOf(source)),
+    );
+    return reads.flatMap((events) =>
+      withoutRecoveredClusterState(events.filter((event) => wanted.has(event.metricType))).map(
+        (event) => this.placementSignalOf(event),
+      ),
+    );
+  }
+
+  private placementUnresolvedOf(source: string): Promise<PlacementUnresolvedEvent[]> {
+    const reading = this.placementUnresolvedReading.get(source);
+    if (reading) return reading;
+    const unsavedBefore = this.unsavedUnresolvedEvents(source);
+    const read: Promise<PlacementUnresolvedEvent[]> = this.storedUnresolvedEvents(source)
+      .then((stored) => {
+        const held = new Set(stored.map((event) => event.id));
+        const events: PlacementUnresolvedEvent[] = stored.map((event) => ({
+          ...event,
+          connectionId: source,
+        }));
+        for (const event of [...unsavedBefore, ...this.unsavedUnresolvedEvents(source)]) {
+          if (held.has(event.id)) continue;
+          held.add(event.id);
+          events.push({ ...event, connectionId: source });
         }
-        const address =
-          event.metricType === MetricType.REPLICATION_DIVERGENCE && !event.node
-            ? (event.replicaAddr ?? event.nodeAddr)
-            : event.nodeAddr;
-        signals.push({
-          metricType: event.metricType,
-          nodeId: event.node?.nodeId ?? (address ? null : observed),
-          ...(address ? { address } : {}),
-          openedAt: event.timestamp,
-        });
-      }
-    }
-    return signals;
+        return events;
+      })
+      .finally(() => {
+        if (this.placementUnresolvedReading.get(source) === read) {
+          this.placementUnresolvedReading.delete(source);
+        }
+      });
+    this.placementUnresolvedReading.set(source, read);
+    return read;
+  }
+
+  private placementSignalOf(event: PlacementSignalSource): PlacementGateSignal {
+    const address =
+      event.metricType === MetricType.REPLICATION_DIVERGENCE && !event.node
+        ? (event.replicaAddr ?? event.nodeAddr)
+        : event.nodeAddr;
+    return {
+      metricType: event.metricType,
+      nodeId: event.node?.nodeId ?? (address ? null : this.observedNodeOf(event.connectionId)),
+      ...(address ? { address } : {}),
+      openedAt: event.timestamp,
+    };
   }
 
   private async storedUnresolvedEvents(source: string): Promise<StoredAnomalyEvent[]> {
@@ -7642,16 +7685,25 @@ export class AnomalyService
   placementIncidents(connectionId: string): Promise<PlacementIncidentsRead> {
     const reading = this.placementIncidentsReading.get(connectionId);
     if (reading) return reading;
-    const read = this.readPlacementIncidents(connectionId).finally(() => {
-      if (this.placementIncidentsReading.get(connectionId) === read) {
-        this.placementIncidentsReading.delete(connectionId);
-      }
-    });
+    const read: Promise<PlacementIncidentsRead> = this.readPlacementIncidents(connectionId)
+      .then(({ incidents, memory }) => {
+        if (this.placementIncidentsReading.get(connectionId) === read) {
+          this.placementIncidentReads.set(connectionId, memory);
+        }
+        return incidents;
+      })
+      .finally(() => {
+        if (this.placementIncidentsReading.get(connectionId) === read) {
+          this.placementIncidentsReading.delete(connectionId);
+        }
+      });
     this.placementIncidentsReading.set(connectionId, read);
     return read;
   }
 
-  private async readPlacementIncidents(connectionId: string): Promise<PlacementIncidentsRead> {
+  private async readPlacementIncidents(
+    connectionId: string,
+  ): Promise<{ incidents: PlacementIncidentsRead; memory: PlacementIncidentMemory }> {
     const now = Date.now();
     const hourAgo = now - 60 * 60_000;
     const monthAgo = now - MAX_INCIDENT_LOOKBACK_MS;
@@ -7659,10 +7711,15 @@ export class AnomalyService
     const remembered = this.placementIncidentReads.get(connectionId);
     const earlier =
       remembered && scope.every((id) => remembered.scope.includes(id)) ? remembered : undefined;
+    const unresolved = Promise.all(scope.map((source) => this.placementUnresolvedOf(source)));
+    unresolved.catch(() => undefined);
+    const from = earlier
+      ? Math.max(monthAgo, Math.min(hourAgo, earlier.since ?? hourAgo))
+      : monthAgo;
     const scan: IncidentScanCut = { cutAt: null };
     const incidents = await this.readIncidentTimelines(
       connectionId,
-      earlier ? Math.max(monthAgo, Math.min(hourAgo, earlier.since ?? hourAgo)) : monthAgo,
+      from,
       undefined,
       Number.MAX_SAFE_INTEGER,
       scan,
@@ -7675,28 +7732,47 @@ export class AnomalyService
       )
       .map((incident) => this.countedPlacementIncident(incident));
     const hidden =
-      earlier && scan.cutAt !== null
-        ? await this.placementIncidentsCutOff(earlier.counted, scan.cutAt, visible, scope, hourAgo)
+      scan.cutAt !== null
+        ? this.placementIncidentsCutOff(
+            earlier?.counted ?? [],
+            scan.cutAt,
+            visible,
+            await unresolved,
+            hourAgo,
+          )
         : [];
     const counted = [...visible, ...hidden];
-    const cutSince = earlier
-      ? scan.cutAt !== null && scan.cutAt > earlier.readAt
-        ? scan.cutAt
-        : null
-      : scan.cutAt;
-    const cuts = [
-      earlier?.historyFrom != null && earlier.historyFrom >= monthAgo ? earlier.historyFrom : null,
-      cutSince,
-    ].filter((at): at is number => at !== null);
-    const historyFrom = cuts.length > 0 ? Math.max(...cuts) : null;
-    this.placementIncidentReads.set(connectionId, {
-      since: counted.length > 0 ? Math.min(...counted.map((each) => each.startedAt)) : null,
-      historyFrom,
-      readAt: now,
-      scope,
-      counted,
-    });
-    return { incidents: counted.map((each) => each.incident), historyFrom };
+    const kept =
+      earlier?.historyGap &&
+      earlier.historyGap.to >= monthAgo &&
+      (scan.cutAt !== null || from > earlier.historyGap.from)
+        ? earlier.historyGap
+        : null;
+    const raised =
+      scan.cutAt === null
+        ? null
+        : !earlier
+          ? { from: monthAgo, to: scan.cutAt }
+          : scan.cutAt > earlier.readAt
+            ? { from: earlier.readAt, to: scan.cutAt }
+            : null;
+    const historyGap =
+      kept && raised
+        ? { from: Math.min(kept.from, raised.from), to: Math.max(kept.to, raised.to) }
+        : (kept ?? raised);
+    return {
+      incidents: {
+        incidents: counted.map((each) => each.incident),
+        historyFrom: historyGap?.to ?? null,
+      },
+      memory: {
+        since: counted.length > 0 ? Math.min(...counted.map((each) => each.startedAt)) : null,
+        historyGap,
+        readAt: now,
+        scope,
+        counted,
+      },
+    };
   }
 
   private countedPlacementIncident(incident: IncidentTimeline): CountedPlacementIncident {
@@ -7711,30 +7787,36 @@ export class AnomalyService
     };
   }
 
-  private async placementIncidentsCutOff(
+  private placementIncidentsCutOff(
     earlier: readonly CountedPlacementIncident[],
     cutAt: number,
     visible: readonly CountedPlacementIncident[],
-    scope: readonly string[],
+    unresolved: readonly PlacementUnresolvedEvent[][],
     hourAgo: number,
-  ): Promise<CountedPlacementIncident[]> {
+  ): CountedPlacementIncident[] {
     const seen = new Set(visible.flatMap((each) => each.anomalyIds));
-    const candidates = earlier.filter(
-      (each) => each.startedAt < cutAt && !each.anomalyIds.some((id) => seen.has(id)),
+    const open = new Set(unresolved.flat().map((event) => event.id));
+    const rescued = earlier.filter(
+      (each) =>
+        each.startedAt < cutAt &&
+        (each.openIds.length > 0
+          ? each.openIds.some((id) => !seen.has(id) && open.has(id))
+          : !each.anomalyIds.some((id) => seen.has(id)) && each.lastEventAt >= hourAgo),
     );
-    if (candidates.length === 0) return [];
-    const unresolved = new Set<string>();
-    if (candidates.some((each) => each.openIds.length > 0)) {
-      for (const source of scope) {
-        for (const event of await this.storedUnresolvedEvents(source)) unresolved.add(event.id);
-        for (const event of this.unsavedUnresolvedEvents(source)) unresolved.add(event.id);
-      }
-    }
-    return candidates.filter((each) =>
-      each.openIds.length > 0
-        ? each.openIds.some((id) => unresolved.has(id))
-        : each.lastEventAt >= hourAgo,
-    );
+    const counted = new Set([...seen, ...rescued.flatMap((each) => each.anomalyIds)]);
+    const loose = unresolved
+      .flatMap((events) => withoutRecoveredClusterState(events))
+      .filter((event) => event.timestamp < cutAt && !counted.has(event.id));
+    return [
+      ...rescued,
+      ...loose.map((event) => ({
+        startedAt: event.timestamp,
+        lastEventAt: event.timestamp,
+        anomalyIds: [event.id],
+        openIds: [event.id],
+        incident: { recovery: 'unknown', patterns: [], signals: [this.placementSignalOf(event)] },
+      })),
+    ];
   }
 
   private placementIncidentOf(incident: IncidentTimeline): PlacementGateIncident {
@@ -7746,19 +7828,7 @@ export class AnomalyService
       ],
       signals: incident.entries
         .filter((entry) => entry.recoveryState !== 'recovered')
-        .map((entry) => {
-          const address =
-            entry.metricType === MetricType.REPLICATION_DIVERGENCE && !entry.node
-              ? (entry.replicaAddr ?? entry.nodeAddr)
-              : entry.nodeAddr;
-          return {
-            metricType: entry.metricType,
-            nodeId:
-              entry.node?.nodeId ?? (address ? null : this.observedNodeOf(entry.connectionId)),
-            ...(address ? { address } : {}),
-            openedAt: entry.timestamp,
-          };
-        }),
+        .map((entry) => this.placementSignalOf(entry)),
     };
   }
 
