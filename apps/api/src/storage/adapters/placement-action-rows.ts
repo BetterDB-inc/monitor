@@ -113,6 +113,24 @@ export function placementStepReadOf(row: Record<string, unknown>): PlacementStep
   };
 }
 
+export function assertPlacementSteps(
+  action: Pick<PlacementAction, 'id'>,
+  steps: readonly Pick<PlacementStep, 'actionId' | 'index'>[],
+): void {
+  const seen = new Set<number>();
+  for (const step of steps) {
+    if (step.actionId !== action.id) {
+      throw new Error(
+        `Placement step ${step.index} belongs to action ${step.actionId}, not ${action.id}`,
+      );
+    }
+    if (seen.has(step.index)) {
+      throw new Error(`Placement action ${action.id} has step ${step.index} twice`);
+    }
+    seen.add(step.index);
+  }
+}
+
 export function placementPatchEnding(
   patch: PlacementActionPatch,
   now: number,

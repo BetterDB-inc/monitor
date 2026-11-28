@@ -27,6 +27,7 @@ import type {
   PlacementStepRead,
 } from '@betterdb/shared';
 import {
+  assertPlacementSteps,
   PLACEMENT_ACTION_COLUMNS,
   PLACEMENT_STEP_COLUMNS,
   parsePlacementCursor,
@@ -4915,6 +4916,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     action: PlacementAction,
     steps: PlacementStep[],
   ): Promise<PlacementAction> {
+    assertPlacementSteps(action, steps);
     return this.inPlacementTransaction(async (client) => {
       const row = await insertPlacementRow(
         client,

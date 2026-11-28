@@ -330,6 +330,23 @@ describe.each([
     expect(await start('blocked')).toBeNull();
   });
 
+  it('refuses a step of another action, storing nothing', async () => {
+    await expect(
+      storage.createPlacementAction(action('a1'), [step('a1', 0), step('a2', 1)]),
+    ).rejects.toThrow('Placement step 1 belongs to action a2, not a1');
+
+    expect(await storage.getPlacementAction('a1')).toBeNull();
+    expect(await storage.getPlacementAction('a2')).toBeNull();
+  });
+
+  it('refuses two steps with one index, storing nothing', async () => {
+    await expect(
+      storage.createPlacementAction(action('a1'), [step('a1', 0), step('a1', 0)]),
+    ).rejects.toThrow('Placement action a1 has step 0 twice');
+
+    expect(await storage.getPlacementAction('a1')).toBeNull();
+  });
+
   it('updates a step from a state it is in, or without a check', async () => {
     await storage.createPlacementAction(action('a1'), [step('a1', 0), step('a1', 1)]);
 

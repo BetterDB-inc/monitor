@@ -27,6 +27,7 @@ import type {
   PlacementStepRead,
 } from '@betterdb/shared';
 import {
+  assertPlacementSteps,
   PLACEMENT_ACTION_COLUMNS,
   PLACEMENT_STEP_COLUMNS,
   parsePlacementCursor,
@@ -4948,6 +4949,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
   ): Promise<PlacementAction> {
     const db = this.db;
     if (!db) throw new Error('Database not initialized');
+    assertPlacementSteps(action, steps);
     return db.transaction(() => {
       const row = insertPlacementRow(
         db,

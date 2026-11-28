@@ -99,6 +99,7 @@ import type {
   AppendProposalAuditInput,
 } from '@betterdb/shared';
 import {
+  assertPlacementSteps,
   parsePlacementCursor,
   placementCursor,
   placementPageLimit,
@@ -1544,6 +1545,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (this.placementActions.has(action.id)) {
       throw new Error(`Placement action ${action.id} already exists`);
     }
+    assertPlacementSteps(action, steps);
     this.placementActions.set(action.id, structuredClone(action));
     this.placementSteps.set(
       action.id,
