@@ -413,7 +413,11 @@ export class DivergenceTracker {
       const answeringSides = entry.positions.filter((position) =>
         position.observers.some((observer) => !unanswered.has(observer)),
       ).length;
-      const unseeable = !comparable || answeringSides < 2 || this.holdsUnreadGap(entry, round, unanswered);
+      const holdsUnansweredRole =
+        entry.kind === 'role' &&
+        entry.subjectIds.some((subject) => unanswered.has(subject) && !round.failing?.has(subject));
+      const unseeable =
+        !comparable || answeringSides < 2 || this.holdsUnreadGap(entry, round, unanswered) || holdsUnansweredRole;
       if (!unseeable || round.at - entry.lastSeenAt > TOPOLOGY_DIVERGENCE_BLIND_MS) this.entries.delete(key);
       else if (entry.gapStreaks) this.entries.set(key, { ...entry, gapStreaks: this.streaksThroughHold(entry, round) });
     }
@@ -647,8 +651,10 @@ export function settleOpenDivergences(input: {
       kept.add(signature);
       continue;
     }
-    const hasRole = entry.group?.disagreements.some((d) => d.kind === 'role') ?? false;
-    const recoveryRounds = hasRole ? ROLE_RECOVERY_ROUNDS : input.minRounds;
+    const roleOnly =
+      (entry.group?.disagreements.length ?? 0) > 0 &&
+      entry.group!.disagreements.every((d) => d.kind === 'role');
+    const recoveryRounds = roleOnly ? ROLE_RECOVERY_ROUNDS : input.minRounds;
     entry.clean += 1;
     if (entry.clean < recoveryRounds) kept.add(signature);
   }

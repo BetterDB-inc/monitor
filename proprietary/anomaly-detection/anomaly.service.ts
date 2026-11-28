@@ -878,6 +878,7 @@ export class AnomalyService
   private topologyDivergenceEventOwners = new Map<string, string>();
   private topologyDivergenceEventSeverity = new Map<string, AnomalySeverity>();
   private topologyDivergenceEventKinds = new Map<string, Set<string>>();
+  private topologyDivergenceSeverityFloor = new Map<string, AnomalySeverity>();
   private topologyDivergenceOpen = new Map<string, Map<string, OpenDivergence>>();
   private topologyDivergenceAnchors = new Map<string, string>();
   private topologyDivergenceNodeTimeouts = new Map<string, { ms: number; readAt: number }>();
@@ -7618,6 +7619,9 @@ export class AnomalyService
         group.disagreements.some((d) => d.kind === 'role');
       const escalated = !!raised && outranksSeverity(divergenceSeverity(group), raised);
       if (!eventId || (!escalated && !roleConfirmed)) continue;
+      if (raised && outranksSeverity(raised, divergenceSeverity(group))) {
+        this.topologyDivergenceSeverityFloor.set(group.signature, raised);
+      }
       eventIds.delete(group.signature);
       this.activeTopologyDivergences.get(connectionId)?.delete(group.signature);
       try {
@@ -7783,7 +7787,10 @@ export class AnomalyService
   ): AnomalyEvent {
     const nodeAddr = this.topologyDivergenceNodeAddr(round, group);
     const id = randomUUID();
-    const severity = divergenceSeverity(group);
+    const computedSeverity = divergenceSeverity(group);
+    const floor = this.topologyDivergenceSeverityFloor.get(group.signature);
+    this.topologyDivergenceSeverityFloor.delete(group.signature);
+    const severity = floor && outranksSeverity(floor, computedSeverity) ? floor : computedSeverity;
     this.topologyDivergenceEventOwners.set(id, ctx.connectionId);
     this.topologyDivergenceEventSeverity.set(id, severity);
     this.topologyDivergenceEventKinds.set(id, new Set(group.disagreements.map((d) => d.kind)));

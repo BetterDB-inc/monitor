@@ -1484,5 +1484,84 @@ describe('role divergence', () => {
         minRounds: 1,
       }).has(roleGroup.signature),
     ).toBe(false);
+
+    // Mixed config_epoch + role group must respect minRounds (3), not lower to ROLE_RECOVERY_ROUNDS (2)
+    const mixedGroup = {
+      ...roleGroup,
+      signature: 'topology_divergence:mixed',
+      disagreements: [
+        ...roleGroup.disagreements,
+        {
+          key: 'config_epoch:a',
+          kind: 'config_epoch' as const,
+          subjectIds: ['a'],
+          positions: [
+            { value: '1', observers: ['a'] },
+            { value: '2', observers: ['b', 'c'] },
+          ],
+          firstSeenAt: 0,
+          lastSeenAt: 120_000,
+          rounds: 25,
+        },
+      ],
+    };
+    const openMixed = new Map<string, OpenDivergence>();
+    settleOpenDivergences({
+      open: openMixed,
+      openSignatures: [mixedGroup.signature],
+      confirmed: [mixedGroup],
+      pendingSignatures: new Set(),
+      comparable: true,
+      at: 120_000,
+      minRounds: 3,
+    });
+    for (const at of [125_000, 130_000]) {
+      expect(
+        settleOpenDivergences({
+          open: openMixed,
+          openSignatures: [mixedGroup.signature],
+          confirmed: [],
+          pendingSignatures: new Set(),
+          comparable: true,
+          at,
+          minRounds: 3,
+        }).has(mixedGroup.signature),
+      ).toBe(true);
+    }
+    expect(
+      settleOpenDivergences({
+        open: openMixed,
+        openSignatures: [mixedGroup.signature],
+        confirmed: [],
+        pendingSignatures: new Set(),
+        comparable: true,
+        at: 135_000,
+        minRounds: 3,
+      }).has(mixedGroup.signature),
+    ).toBe(false);
+  });
+
+  it('holds an open role finding when the subject stops answering until the blind limit', () => {
+    const tracker = new DivergenceTracker();
+    const roleDisagreement: TopologyDisagreement = {
+      key: 'role:a',
+      kind: 'role',
+      subjectIds: ['a'],
+      positions: [
+        { value: 'master', observers: ['a'] },
+        { value: 'replica', observers: ['b', 'c'] },
+      ],
+    };
+
+    tracker.observe({ at: 1000, disagreements: [roleDisagreement], unanswered: [], views: 3 });
+    expect(tracker.tracked().map((d) => d.key)).toEqual(['role:a']);
+
+    // Subject 'a' stops answering -> role disagreement is not emitted, but held within blind limit
+    tracker.observe({ at: 60_000, disagreements: [], unanswered: ['a'], views: 2 });
+    expect(tracker.tracked().map((d) => d.key)).toEqual(['role:a']);
+
+    // Past TOPOLOGY_DIVERGENCE_BLIND_MS without subject answering -> dropped
+    tracker.observe({ at: 1000 + TOPOLOGY_DIVERGENCE_BLIND_MS + 1, disagreements: [], unanswered: ['a'], views: 2 });
+    expect(tracker.tracked()).toEqual([]);
   });
 });
