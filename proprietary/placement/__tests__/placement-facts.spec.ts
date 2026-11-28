@@ -342,6 +342,16 @@ describe('PlacementEpochs', () => {
     expect(epochs.observe('seed', [read('b', 'b', false, 2)], NOW, ['b']).get('b')).toBe(false);
   });
 
+  it('keeps the shard of the latest observation when an older read raising the epoch comes in later', () => {
+    const epochs = new PlacementEpochs();
+    epochs.observe('seed', [read('b', 'b', false, 1)], NOW - 10 * MINUTE);
+    epochs.observe('seed', [read('b', 'b', false, 1)], NOW - MINUTE);
+    epochs.observe('seed', [read('b', 'b2', false, 2)], NOW - 2 * MINUTE);
+    expect(
+      epochs.observe('seed', [read('b', 'b', false, 3)], NOW + 3.5 * MINUTE, ['b']).get('b'),
+    ).toBe(false);
+  });
+
   it('takes the shard of the later of two reads made at the same time', () => {
     const epochs = new PlacementEpochs();
     epochs.observe('seed', [read('b', 'b2', false, 1)], NOW - 10 * MINUTE);

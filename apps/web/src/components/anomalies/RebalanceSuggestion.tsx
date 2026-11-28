@@ -399,7 +399,10 @@ function RunDialog({
 }) {
   const queryClient = useQueryClient();
   const [sending, setSending] = useState(false);
-  const [refused, setRefused] = useState<Refusal | null>(null);
+  const [refused, setRefused] = useState<(Refusal & { verdicts: number }) | null>(null);
+  const verdicts = () =>
+    queryClient.getQueryState(['open-hot-shards', connectionId])?.dataUpdateCount ?? 0;
+  const verdictSinceRefusal = refused !== null && verdicts() > refused.verdicts;
   const source = shown.projection.find((row) => row.role === 'source');
   const changed = current !== undefined && movesKey(current) !== movesKey(shown);
   const blockedBy = current?.execution?.available === false ? current.execution.blockedBy : undefined;
@@ -410,9 +413,11 @@ function RunDialog({
       : blockedBy === 'gate' && current?.gate?.blockers.length
         ? `Waits for: ${current.gate.blockers.map((blocker) => blocker.detail).join(' ')}`
         : blockedBy && REBALANCE_BLOCKED[blockedBy];
-  const allowedNow = !changed && current?.execution?.available === true;
+  const allowedNow = !changed && current?.execution?.available === true && verdictSinceRefusal;
   const error =
-    refused?.waitedFor && (allowedNow || current?.gate) && refused.message !== notice
+    refused?.waitedFor &&
+    (!verdictSinceRefusal || allowedNow || current?.gate) &&
+    refused.message !== notice
       ? `The last start waited for: ${refused.waitedFor}${allowedNow ? ' The safety checks allow it now.' : ''}`
       : refused?.message;
   const refresh = () =>
@@ -431,7 +436,7 @@ function RunDialog({
       );
       started = true;
     } catch (err) {
-      setRefused(refusal(err));
+      setRefused({ ...refusal(err), verdicts: verdicts() });
     } finally {
       setSending(false);
       await refresh();
