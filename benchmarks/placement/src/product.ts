@@ -37,6 +37,20 @@ export { placementBalance } from '../../../proprietary/placement/placement-balan
 export { PlacementTriggers } from '../../../proprietary/placement/placement-trigger';
 export { placementPrimaryFacts } from '../../../proprietary/placement/placement-primaries';
 export {
+  type PlacementGateFacts,
+  type PlacementGateIncident,
+  type PlacementGateSignal,
+  insideMaintenanceWindow,
+  placementGate,
+} from '../../../proprietary/placement/placement-gate';
+export {
+  type PlacementFactsPort,
+  type PlacementNodeFacts,
+  type PlacementNodeRead,
+  PlacementEpochs,
+  readPlacementGateFacts,
+} from '../../../proprietary/placement/placement-facts';
+export {
   type PlacementSupportFacts,
   isAclRefusal,
   judgePlacementSupport,
@@ -56,6 +70,8 @@ export const PINNED_FILES = [
   'proprietary/anomaly-detection/hot-shard-keys.ts',
   'proprietary/anomaly-detection/rebalance-planner.ts',
   'proprietary/placement/placement-balance.ts',
+  'proprietary/placement/placement-facts.ts',
+  'proprietary/placement/placement-gate.ts',
   'proprietary/placement/placement-primaries.ts',
   'proprietary/placement/placement-support.ts',
   'proprietary/placement/placement-trigger.ts',

@@ -152,6 +152,20 @@ describe('ShardLoadService listeners and sustain minutes', () => {
     expect(listener.reset).toHaveBeenCalledWith('conn-a');
   });
 
+  it('tells a listener each time tracking starts, and not for a reading that cannot track', () => {
+    const service = new ShardLoadService();
+    const { listener } = listen(service);
+    const untracked = [{ nodeId: 'n1', address: '10.0.0.1:6379', stats: { 0: { key_count: 1 } } }];
+    service.record('conn-a', untracked, 0);
+    expect(listener.tracking).not.toHaveBeenCalled();
+
+    service.record('conn-a', reading({ 0: 0 }), 1_000);
+    service.record('conn-a', untracked, 2_000);
+    service.record('conn-a', reading({ 0: 0 }), 3_000);
+
+    expect(listener.tracking).toHaveBeenCalledTimes(2);
+  });
+
   it('tells a listener when a connection is forgotten or removed', () => {
     const service = new ShardLoadService();
     const { listener } = listen(service);

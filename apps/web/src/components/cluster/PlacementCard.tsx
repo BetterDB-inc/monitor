@@ -2,6 +2,7 @@ import {
   PLACEMENT_MODES,
   type PlacementBalance,
   type PlacementMode,
+  type PlacementBlocker,
   type PlacementPolicyInvalid,
   type PlacementSettings,
   type PlacementStatus,
@@ -10,7 +11,8 @@ import { useState } from 'react';
 import { useCanMutate } from '../../hooks/useCanMutate';
 import { usePlacement } from '../../hooks/usePlacement';
 import { RebalanceSuggestion } from '../anomalies/RebalanceSuggestion';
-import { formatRatio } from '../anomalies/anomaly-display';
+import { REBALANCE_BLOCKED, formatRatio } from '../anomalies/anomaly-display';
+import type { RebalanceExecutionBlocker } from '../../types/anomaly';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
@@ -211,6 +213,81 @@ function PolicyInvalid({ invalid }: { invalid: PlacementPolicyInvalid | null }) 
   );
 }
 
+function BlockerList({
+  label,
+  items,
+  className,
+}: {
+  label: string;
+  items: PlacementBlocker[];
+  className: string;
+}) {
+  if (items.length === 0) return null;
+  return (
+    <ul aria-label={label} className={`list-disc pl-5 ${className}`}>
+      {items.map((item) => (
+        <li key={`${item.kind} ${item.scope} ${item.nodeId ?? ''} ${item.detail}`}>
+          {item.detail}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function Recommendations({ status, stale }: { status: PlacementStatus; stale: boolean }) {
+  if (status.recommendations.length === 0) return null;
+  const address = (shardId: string) =>
+    status.balance?.shards.find((shard) => shard.shardId === shardId)?.address ?? shardId;
+  return (
+    <>
+      {stale && (
+        <p className="text-muted-foreground">
+          The placement status could not be read again, so these checks may be out of date.
+        </p>
+      )}
+      <ul aria-label="Suggested slot moves" className="space-y-2">
+        {status.recommendations.map((recommendation) => {
+          const { execution, gate } = recommendation;
+          const waitsFor = execution.available
+            ? gate.blockers
+            : gate.blockers.filter((blocker) => blocker.kind !== execution.blockedBy);
+          return (
+            <li key={recommendation.sourceShardId} className="space-y-1">
+              <p>
+                {`Move slots from ${address(recommendation.sourceShardId)} to ${recommendation.targetShardIds.map(address).join(', ')}.`}
+              </p>
+              {!execution.available && (
+                <p className="text-muted-foreground">
+                  {REBALANCE_BLOCKED[execution.blockedBy as RebalanceExecutionBlocker] ??
+                    'Cannot run from this monitor.'}
+                </p>
+              )}
+              {gate.allowed
+                ? execution.available &&
+                  !stale && <p className="text-muted-foreground">Would run now.</p>
+                : waitsFor.length > 0 && (
+                    <>
+                      <p className="text-muted-foreground">Waits for:</p>
+                      <BlockerList
+                        label="Placement blockers"
+                        items={waitsFor}
+                        className="text-muted-foreground"
+                      />
+                    </>
+                  )}
+              <BlockerList
+                label="Placement warnings"
+                items={gate.warnings}
+                className="text-yellow-600 dark:text-yellow-500"
+              />
+            </li>
+          );
+        })}
+      </ul>
+    </>
+  );
+}
+
 export function PlacementCard({ connectionId }: { connectionId: string | undefined }) {
   return <ClusterPlacementCard key={connectionId ?? ''} connectionId={connectionId} />;
 }
@@ -251,6 +328,7 @@ function ClusterPlacementCard({ connectionId }: { connectionId: string | undefin
               <EffectiveMode status={status} />
               <Support status={status} />
               <BalanceBars balance={status.balance} settings={status.settings} />
+              <Recommendations status={status} stale={!!error} />
               <Button size="sm" variant="outline" onClick={() => setPolicyOpen(true)}>
                 {canMutate ? 'Edit policy' : 'View policy'}
               </Button>

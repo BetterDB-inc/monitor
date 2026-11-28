@@ -693,6 +693,14 @@ function toAgentToken(row: AgentTokenRow): AgentToken {
   };
 }
 
+interface PlacementPolicyRow {
+  connection_id: string;
+  mode: PlacementMode;
+  policy: string | null;
+  version: number;
+  updated_at: number;
+}
+
 export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
   private db: Database.Database | null = null;
   private ready: boolean = false;
@@ -4726,16 +4734,11 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       .prepare(
         'SELECT connection_id, mode, policy, version, updated_at FROM placement_policies WHERE connection_id = ?',
       )
-      .get(connectionId) as
-      | {
-          connection_id: string;
-          mode: PlacementMode;
-          policy: string | null;
-          version: number;
-          updated_at: number;
-        }
-      | undefined;
-    if (!row) return null;
+      .get(connectionId) as PlacementPolicyRow | undefined;
+    return row ? this.placementPolicyOfRow(row) : null;
+  }
+
+  private placementPolicyOfRow(row: PlacementPolicyRow): PlacementPolicy {
     const { settings, invalid } = readStoredPlacementSettings(row.policy);
     return {
       connectionId: row.connection_id,
@@ -4769,7 +4772,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
   ): Promise<PlacementPolicy | null> {
     if (!this.db) throw new Error('Database not initialized');
     const policy = JSON.stringify(write.settings);
-    const result =
+    const row = (
       expectedVersion === 0
         ? this.db
             .prepare(
@@ -4779,17 +4782,19 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
                  policy = excluded.policy,
                  version = 1,
                  updated_at = excluded.updated_at
-               WHERE placement_policies.version = 0`,
+               WHERE placement_policies.version = 0
+               RETURNING connection_id, mode, policy, version, updated_at`,
             )
-            .run(write.connectionId, write.modeIfNew, policy, write.updatedAt)
+            .get(write.connectionId, write.modeIfNew, policy, write.updatedAt)
         : this.db
             .prepare(
               `UPDATE placement_policies SET policy = ?, version = version + 1, updated_at = ?
-               WHERE connection_id = ? AND version = ?`,
+               WHERE connection_id = ? AND version = ?
+               RETURNING connection_id, mode, policy, version, updated_at`,
             )
-            .run(policy, write.updatedAt, write.connectionId, expectedVersion);
-    if (result.changes === 0) return null;
-    return this.readPlacementPolicy(write.connectionId);
+            .get(policy, write.updatedAt, write.connectionId, expectedVersion)
+    ) as PlacementPolicyRow | undefined;
+    return row ? this.placementPolicyOfRow(row) : null;
   }
 
   private kvCacheSnapshotFromRow(r: Record<string, any>): KvCacheFootprintSnapshot {

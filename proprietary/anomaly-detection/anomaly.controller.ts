@@ -216,7 +216,10 @@ export class AnomalyController {
       case 'started':
         return result.run;
       case 'blocked':
-        throw new ForbiddenException({ blockedBy: result.blockedBy });
+        throw new ForbiddenException({
+          blockedBy: result.blockedBy,
+          ...(result.blockers ? { blockers: result.blockers } : {}),
+        });
       case 'changed':
         throw new ConflictException({ reason: result.reason, rebalance: result.rebalance });
       case 'refused':

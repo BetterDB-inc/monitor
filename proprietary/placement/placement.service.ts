@@ -15,10 +15,13 @@ import {
   PLACEMENT_SETTABLE_MODES,
   excludedShardNodeIds,
   validatePlacementSettings,
+  type PlacementGatePurpose,
+  type PlacementGateResult,
   type PlacementMode,
   type PlacementPolicy,
   type PlacementPolicyInvalid,
   type PlacementPolicySaved,
+  type PlacementRecommendation,
   type PlacementSettings,
   type PlacementStatus,
   type PlacementSupport,
@@ -35,12 +38,14 @@ import { ClusterMetricsService } from '@app/cluster/cluster-metrics.service';
 import { WORKSPACE_CONFIG, type WorkspaceConfig } from '@app/auth/workspace-config';
 import { isManagedProviderBuild } from '@app/monitor/provider-detector';
 import { withTimeout } from '@app/common/utils/with-timeout';
+import type { ClusterNode } from '@app/common/types/metrics.types';
 import { AnomalyService } from '../anomaly-detection/anomaly.service';
 import type { ServedHotShardDetail } from '../anomaly-detection/hot-shard-detector';
 import {
   DEFAULT_REBALANCE_POLICY,
   PlacementPolicyUnreadableError,
   type RebalanceExecution,
+  type RebalancePlan,
   type RebalancePolicy,
 } from '../anomaly-detection/rebalance-planner';
 import type {
@@ -57,10 +62,20 @@ import {
 } from './placement-support';
 import { placementBalance } from './placement-balance';
 import { PlacementTriggers } from './placement-trigger';
+import { PLACEMENT_EPOCH_WINDOW_MS, placementGate } from './placement-gate';
+import {
+  PlacementEpochs,
+  placementGateFactsOf,
+  readPlacementCluster,
+  type PlacementClusterRead,
+} from './placement-facts';
 
 const SUPPORT_CACHE_MS = 30_000;
 const POLICY_CACHE_MS = 30_000;
 const SHARD_NODES_TIMEOUT_MS = 2_000;
+const GATE_CACHE_MS = 10_000;
+const WARN_EVERY_MS = 60_000;
+const BUDGET_WINDOW_MS = 60 * 60_000;
 
 export class PlacementModeError extends Error {
   constructor(
@@ -85,19 +100,35 @@ export class PlacementPolicyConflictError extends Error {
 
 export { PlacementPolicyUnreadableError };
 
+export interface PlacementGateSubject {
+  sourceShardId: string;
+  targetShardIds: readonly string[];
+  moveCount: number;
+}
+
+export interface PlacementGateOptions {
+  now?: number;
+  sourceTriggerFiredAt?: number | null;
+  policy?: PlacementSettingsRead;
+}
+
 export interface PlacementSettingsRead {
   settings: PlacementSettings;
   version: number;
   invalid: PlacementPolicyInvalid | null;
 }
 
-export function rebalancePolicyOf(settings: PlacementSettings): RebalancePolicy {
+export function rebalancePolicyOf(settings: PlacementSettings, jobsUsed = 0): RebalancePolicy {
   return {
     ...DEFAULT_REBALANCE_POLICY,
     nodeCpuLimitUsecPerSecond: settings.nodeCpuLimitUsecPerSecond,
     resolveRatio: settings.resolveRatio,
     excludedShardIds: settings.excludedShardIds,
     excludedSlots: settings.excludedSlots,
+    maxTargets: Math.max(
+      1,
+      Math.min(DEFAULT_REBALANCE_POLICY.maxTargets, settings.maxMigrationsPerHour - jobsUsed),
+    ),
   };
 }
 
@@ -112,6 +143,7 @@ function settingsReadOf(policy: PlacementPolicy | null): PlacementSettingsRead {
 @Injectable()
 export class PlacementService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PlacementService.name);
+  private readonly warnedAt = new Map<string, number>();
   private readonly invalidWarned = new Map<string, string>();
   private readonly policyCache = new Map<string, { at: number; policy: PlacementPolicy | null }>();
   private readonly policyGeneration = new Map<string, number>();
@@ -120,6 +152,15 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
   private readonly aclDenied = new Map<string, string | null>();
   private readonly triggers = new PlacementTriggers();
   private readonly policyRefreshes = new Map<string, Promise<unknown>>();
+  private readonly epochs = new PlacementEpochs();
+  private readonly gateCache = new Map<
+    string,
+    { at: number; key: string; shardIds: string[]; gate: PlacementGateResult }
+  >();
+  private readonly gateReads = new Map<
+    string,
+    { key: string; shardIds: string[]; read: Promise<PlacementGateResult> }
+  >();
   private stopListening: (() => void) | null = null;
 
   constructor(
@@ -135,6 +176,9 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
 
   onModuleInit(): void {
     this.anomaly.setRebalancePolicyResolver((seedId) => this.rebalancePolicyFor(seedId));
+    this.anomaly.setClusterNodesObserver((connectionId, nodes, at) =>
+      this.observeEpochs(connectionId, nodes, at),
+    );
     this.stopListening?.();
     this.stopListening =
       this.shardLoad?.addListener({
@@ -147,6 +191,26 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
   onModuleDestroy(): void {
     this.stopListening?.();
     this.stopListening = null;
+    this.anomaly.setClusterNodesObserver(null);
+  }
+
+  private observeEpochs(connectionId: string, nodes: readonly ClusterNode[], at: number): void {
+    if (!this.epochs.has(connectionId)) return;
+    const reads = nodes.flatMap((node) => {
+      if (node.flags.includes('master')) {
+        return [{ id: node.id, shardId: node.id, configEpoch: node.configEpoch }];
+      }
+      if (node.flags.includes('slave') || node.flags.includes('replica')) {
+        return [{ id: node.id, shardId: node.master, configEpoch: node.configEpoch }];
+      }
+      return [];
+    });
+    this.epochs.observe(
+      connectionId,
+      reads,
+      at,
+      this.anomaly.placementMovedShardsSince(connectionId, at - PLACEMENT_EPOCH_WINDOW_MS),
+    );
   }
 
   private observeSample(seedId: string, sample: ShardLoadSample): void {
@@ -166,10 +230,18 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
 
   async getStatus(connectionId: string): Promise<PlacementStatus> {
     const seedId = this.seedOf(connectionId);
-    const [policy, support] = await Promise.all([this.readPolicy(seedId), this.support(seedId)]);
+    return this.statusOf(seedId, this.readPolicy(seedId));
+  }
+
+  private async statusOf(
+    seedId: string,
+    policyRead: Promise<PlacementPolicy | null> | PlacementPolicy,
+  ): Promise<PlacementStatus> {
+    const [policy, support] = await Promise.all([policyRead, this.support(seedId)]);
     const mode = this.modeOf(policy, seedId);
     const { settings, version, invalid } = settingsReadOf(policy);
     const selectableModes = PLACEMENT_SETTABLE_MODES.filter((each) => support.modes[each].available);
+    const recommendations = mode === 'observe' ? [] : await this.recommendationsOf(seedId);
     return {
       connectionId: seedId,
       mode,
@@ -182,7 +254,19 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
       settings,
       policyVersion: version,
       policyInvalid: invalid,
+      recommendations,
     };
+  }
+
+  private async recommendationsOf(seedId: string): Promise<PlacementRecommendation[]> {
+    const plans = this.anomaly.placementPlans(seedId);
+    const gates = await this.cachedGates(seedId, plans);
+    return plans.map((plan, index) => ({
+      sourceShardId: plan.sourceShardId,
+      targetShardIds: targetsOf(plan.moves),
+      gate: gates[index],
+      execution: plan.execution ?? { available: false },
+    }));
   }
 
   async setSettings(
@@ -214,7 +298,7 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
     this.policyCache.set(seedId, { at: Date.now(), policy: saved });
     this.applyTriggerSettings(seedId, saved.settings);
     return {
-      ...(await this.getStatus(seedId)),
+      ...(await this.statusOf(seedId, saved)),
       exclusionsExpanded: expansion.problem === null,
       exclusionsExpandProblem: expansion.problem,
     };
@@ -251,13 +335,19 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
     const { settings, invalid } = await this.settingsOf(seedId);
     if (invalid && !invalid.exclusionsReadable)
       throw new PlacementPolicyUnreadableError(invalid.problems);
-    return rebalancePolicyOf(settings);
+    return rebalancePolicyOf(
+      settings,
+      this.anomaly.placementJobsSince(seedId, Date.now() - BUDGET_WINDOW_MS),
+    );
   }
 
   private async readPolicy(seedId: string): Promise<PlacementPolicy | null> {
     const generation = this.policyGeneration.get(seedId) ?? 0;
     const policy = await this.storage.getPlacementPolicy(seedId);
-    if ((this.policyGeneration.get(seedId) ?? 0) === generation) {
+    if (
+      this.registry.getConfig(seedId) &&
+      (this.policyGeneration.get(seedId) ?? 0) === generation
+    ) {
       this.policyCache.set(seedId, { at: Date.now(), policy });
       this.applyTriggerSettings(seedId, settingsReadOf(policy).settings);
     }
@@ -328,12 +418,23 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
     confirmed: readonly ConfirmedMove[],
     startedBy: RebalanceRunActor,
   ): Promise<RebalanceRunResult> {
-    if (!(await this.allowsRun(connectionId))) {
+    const seedId = this.seedOf(connectionId);
+    const policy = await this.readPolicy(seedId);
+    if ((await this.runningMode(seedId, policy)) === 'observe') {
       return { status: 'blocked', blockedBy: 'observe_mode' };
+    }
+    const gate = await this.gateFor(
+      connectionId,
+      { sourceShardId: shardId, targetShardIds: targetsOf(confirmed), moveCount: confirmed.length },
+      'approve',
+      { policy: settingsReadOf(policy) },
+    ).catch((err: unknown) => this.unreadableGate(connectionId, err));
+    if (!gate.allowed) {
+      this.forgetGates(connectionId, [shardId, ...targetsOf(confirmed)]);
+      return { status: 'blocked', blockedBy: 'gate', blockers: gate.blockers };
     }
     const result = await this.anomaly.runRebalance(connectionId, shardId, confirmed, startedBy);
     if (result.status === 'refused' && result.serverReply && isAclRefusal(result.message)) {
-      const seedId = this.seedOf(connectionId);
       this.aclDenied.set(seedId, null);
       this.supportCache.delete(seedId);
       this.supportReads.delete(seedId);
@@ -352,13 +453,193 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
         namesAPlan(shard.rebalance) ? { ...shard, rebalance: undefined } : shard,
       );
     }
-    if (mode !== null) return shards;
+    if (mode !== null) {
+      const runnable = shards.flatMap((shard) =>
+        shard.rebalance?.kind === 'plan' && shard.rebalance.execution?.available === true
+          ? [shard.rebalance]
+          : [],
+      );
+      const gates = await this.cachedGates(connectionId, runnable);
+      return shards.map((shard) => {
+        const plan = shard.rebalance;
+        const index = runnable.findIndex((each) => each === plan);
+        if (plan?.kind !== 'plan' || index === -1) return shard;
+        const gate = gates[index];
+        const execution: RebalanceExecution = gate.allowed
+          ? { available: true }
+          : { available: false, blockedBy: 'gate' };
+        return { ...shard, rebalance: { ...plan, execution, gate } };
+      });
+    }
     const execution: RebalanceExecution = { available: false };
     return shards.map((shard) =>
       shard.rebalance?.kind === 'plan' && shard.rebalance.execution?.available === true
         ? { ...shard, rebalance: { ...shard.rebalance, execution } }
         : shard,
     );
+  }
+
+  async gateFor(
+    connectionId: string,
+    subject: PlacementGateSubject,
+    purpose: PlacementGatePurpose,
+    options: PlacementGateOptions = {},
+  ): Promise<PlacementGateResult> {
+    const seedId = this.seedOf(connectionId);
+    const read = await readPlacementCluster(
+      this.anomaly,
+      seedId,
+      [subject.sourceShardId, ...subject.targetShardIds],
+      this.warnReadOf(seedId),
+    );
+    return this.judgeGate(connectionId, subject, purpose, read, options);
+  }
+
+  private async judgeGate(
+    connectionId: string,
+    subject: PlacementGateSubject,
+    purpose: PlacementGatePurpose,
+    read: PlacementClusterRead,
+    { now = Date.now(), policy, ...options }: PlacementGateOptions = {},
+  ): Promise<PlacementGateResult> {
+    const seedId = this.seedOf(connectionId);
+    const [{ settings, invalid }, support] = await Promise.all([
+      policy ?? this.settingsOf(seedId),
+      this.readOnlySupport(seedId),
+    ]);
+    const facts = placementGateFactsOf(
+      read,
+      this.epochs,
+      seedId,
+      {
+        budget: {
+          jobsUsed: this.anomaly.placementJobsSince(seedId, now - BUDGET_WINDOW_MS),
+          bytesUsed: 0,
+        },
+        paused: false,
+        supported: support.modes[purpose === 'auto' ? 'auto' : 'recommend'].available,
+        sourceShardId: subject.sourceShardId,
+        targetShardIds: [...subject.targetShardIds],
+        moveCount: subject.moveCount,
+        sourceTriggerFiredAt:
+          options.sourceTriggerFiredAt !== undefined
+            ? options.sourceTriggerFiredAt
+            : (this.triggerOf(seedId, subject.sourceShardId, now)?.firedAt ?? null),
+        quarantinedShardIds: [],
+        cooldownLeftSlots: null,
+        movedShardIds: this.anomaly.placementMovedShardsSince(
+          seedId,
+          now - PLACEMENT_EPOCH_WINDOW_MS,
+        ),
+      },
+      now,
+    );
+    const unreadable = invalid ? [...facts.unreadable, 'the placement policy'] : facts.unreadable;
+    return placementGate({ ...facts, unreadable }, settings, now, purpose);
+  }
+
+  private cachedGates(
+    connectionId: string,
+    plans: readonly RebalancePlan[],
+  ): Promise<PlacementGateResult[]> {
+    const now = Date.now();
+    const known = (plan: RebalancePlan): Promise<PlacementGateResult> | null => {
+      const key = this.gateKeyFor(connectionId, plan);
+      const cacheKey = `${connectionId}\u0000${plan.sourceShardId}`;
+      const cached = this.gateCache.get(cacheKey);
+      if (cached && cached.key === key && now - cached.at < GATE_CACHE_MS) {
+        return Promise.resolve(cached.gate);
+      }
+      const reading = this.gateReads.get(cacheKey);
+      return reading && reading.key === key ? reading.read : null;
+    };
+    const gates = plans.map(known);
+    const missing = plans.filter((_, index) => gates[index] === null);
+    if (missing.length === 0) return Promise.all(gates as Promise<PlacementGateResult>[]);
+    const clusterId = this.clusterOf(connectionId);
+    const cluster = readPlacementCluster(
+      this.anomaly,
+      clusterId,
+      missing.flatMap((plan) => [plan.sourceShardId, ...targetsOf(plan.moves)]),
+      this.warnReadOf(clusterId),
+    );
+    return Promise.all(
+      plans.map((plan, index) => gates[index] ?? this.gateFromCluster(connectionId, plan, cluster)),
+    );
+  }
+
+  private gateFromCluster(
+    connectionId: string,
+    plan: RebalancePlan,
+    cluster: Promise<PlacementClusterRead>,
+  ): Promise<PlacementGateResult> {
+    const key = this.gateKeyFor(connectionId, plan);
+    const cacheKey = `${connectionId}\u0000${plan.sourceShardId}`;
+    const subject = {
+      sourceShardId: plan.sourceShardId,
+      targetShardIds: targetsOf(plan.moves),
+      moveCount: plan.moves.length,
+    };
+    const shardIds = [subject.sourceShardId, ...subject.targetShardIds];
+    const owns = () => this.gateReads.get(cacheKey)?.read === read;
+    const read = cluster
+      .then((shared) => this.judgeGate(connectionId, subject, 'approve', shared))
+      .then((gate) => {
+        if (owns()) this.gateCache.set(cacheKey, { at: Date.now(), key, shardIds, gate });
+        return gate;
+      })
+      .catch((err: unknown): PlacementGateResult => {
+        if (owns()) this.gateCache.delete(cacheKey);
+        return this.unreadableGate(connectionId, err);
+      })
+      .finally(() => {
+        if (this.gateReads.get(cacheKey)?.read === read) this.gateReads.delete(cacheKey);
+      });
+    this.gateReads.set(cacheKey, { key, shardIds, read });
+    return read;
+  }
+
+  private unreadableGate(connectionId: string, err: unknown): PlacementGateResult {
+    this.warnSparingly(
+      `${connectionId}\u0000gate`,
+      `Could not run the placement safety checks of ${connectionId}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return unreadableGate();
+  }
+
+  private warnReadOf(connectionId: string): (message: string, read: string) => void {
+    return (message, read) => this.warnSparingly(`${connectionId}\u0000${read}`, message);
+  }
+
+  private warnSparingly(key: string, message: string): void {
+    const now = Date.now();
+    const last = this.warnedAt.get(key);
+    if (last !== undefined && now - last < WARN_EVERY_MS) return;
+    this.warnedAt.set(key, now);
+    this.logger.warn(message);
+  }
+
+  private forgetGates(connectionId: string, shardIds: readonly string[]): void {
+    const cluster = this.clusterOf(connectionId);
+    for (const cache of [this.gateCache, this.gateReads]) {
+      for (const [cacheKey, entry] of cache) {
+        const [listedThrough] = cacheKey.split('\u0000');
+        if (
+          entry.shardIds.some((shardId) => shardIds.includes(shardId)) &&
+          this.clusterOf(listedThrough) === cluster
+        ) {
+          cache.delete(cacheKey);
+        }
+      }
+    }
+  }
+
+  private gateKeyFor(connectionId: string, plan: RebalancePlan): string {
+    return `${this.policyGeneration.get(this.clusterOf(connectionId)) ?? 0}\u0000${gateKeyOf(plan)}`;
+  }
+
+  private clusterOf(connectionId: string): string {
+    return this.registry.getConfig(connectionId)?.membership?.seedId ?? connectionId;
   }
 
   private seedOf(connectionId: string): string {
@@ -381,8 +662,11 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async runningMode(seedId: string): Promise<PlacementMode> {
-    const mode = await this.storedMode(seedId);
+  private async runningMode(
+    seedId: string,
+    policy?: PlacementPolicy | null,
+  ): Promise<PlacementMode> {
+    const mode = policy === undefined ? await this.storedMode(seedId) : this.modeOf(policy, seedId);
     if (mode === 'observe') return 'observe';
     const support =
       mode === 'recommend' ? await this.readOnlySupport(seedId) : await this.support(seedId);
@@ -445,6 +729,14 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
     }
     for (const seedId of this.triggers.seeds()) {
       if (!this.registry.getConfig(seedId)) this.triggers.forget(seedId);
+    }
+    for (const connectionId of this.epochs.seeds()) {
+      if (!this.registry.getConfig(connectionId)) this.epochs.forget(connectionId);
+    }
+    for (const cache of [this.gateCache, this.gateReads, this.warnedAt]) {
+      for (const cacheKey of cache.keys()) {
+        if (!this.registry.getConfig(cacheKey.split('\u0000')[0])) cache.delete(cacheKey);
+      }
     }
   }
 
@@ -512,6 +804,22 @@ function namesAPlan(rebalance: ServedHotShardDetail['rebalance']): boolean {
     (rebalance.reason === 'covered_by_other_plan' ||
       rebalance.reason === 'conflicts_with_other_plan')
   );
+}
+
+function targetsOf(moves: readonly { targetShardId: string }[]): string[] {
+  return [...new Set(moves.map((move) => move.targetShardId))];
+}
+
+function unreadableGate(): PlacementGateResult {
+  return {
+    allowed: false,
+    blockers: [{ kind: 'unknown', scope: 'cluster', detail: 'Could not run the safety checks.' }],
+    warnings: [],
+  };
+}
+
+function gateKeyOf(plan: RebalancePlan): string {
+  return JSON.stringify(plan.moves.map((move) => [move.targetShardId, move.ranges]));
 }
 
 function effectiveModeOf(mode: PlacementMode, support: PlacementSupport): PlacementMode {

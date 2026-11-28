@@ -7,6 +7,7 @@ import {
   type PlacementSettings,
   type PlacementStatus,
 } from '@betterdb/shared';
+import { ApiError } from '../api/client';
 import { placementApi } from '../api/placement';
 import { useLicense } from './useLicense';
 import { usePolling } from './usePolling';
@@ -50,6 +51,11 @@ export function usePlacement(connectionId: string | undefined, enabled = true) {
       await queryClient.cancelQueries({ queryKey: placementQueryKey(connectionId) });
       queryClient.setQueryData<PlacementStatus>(placementQueryKey(connectionId), status);
       await queryClient.invalidateQueries({ queryKey: ['open-hot-shards', connectionId] });
+    },
+    onError: async (err) => {
+      if (err instanceof ApiError && err.status === 409) {
+        await queryClient.invalidateQueries({ queryKey: placementQueryKey(connectionId) });
+      }
     },
   });
 

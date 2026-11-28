@@ -190,6 +190,18 @@ describe('PlacementTriggers', () => {
     });
   });
 
+  it('latches the fire time anew after samples stopped longer than the staleness bound', () => {
+    const triggers = configured({ ...DEFAULT_PLACEMENT_SETTINGS, sustainMinutes: 10 });
+    feed(triggers, 0, 30, 5, () => ({ ratio: 3 }));
+    const firedAt = triggers.read('seed', 'a', 30 * MINUTE, STALE_MS).firedAt;
+    expect(firedAt).toBe(8 * MINUTE);
+
+    feed(triggers, 31, 60, 5, () => ({ ratio: 3 }));
+    const resumed = triggers.read('seed', 'a', 60 * MINUTE, STALE_MS);
+    expect(resumed.state).toBe('over');
+    expect(resumed.firedAt).toBe(31 * MINUTE);
+  });
+
   it('starts a shard over when its primary restarted', () => {
     const triggers = configured();
     feed(triggers, 0, 30, 5, () => ({ ratio: 3 }));

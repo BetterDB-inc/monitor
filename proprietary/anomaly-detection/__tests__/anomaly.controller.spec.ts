@@ -442,6 +442,19 @@ describe('AnomalyController rebalance and the placement mode', () => {
     expect(service.runRebalance).not.toHaveBeenCalled();
   });
 
+  it('answers a plan the gate blocks with 403 and the blockers', async () => {
+    const blockers = [
+      { kind: 'failover', scope: 'target', nodeId: 't1', detail: 'An open failover_churn event.' },
+    ];
+    const placement = {
+      runRebalance: jest.fn().mockResolvedValue({ status: 'blocked', blockedBy: 'gate', blockers }),
+    };
+    const controller = new AnomalyController({} as AnomalyService, placement as never);
+    await expect(controller.runRebalance('c1', 'src', moves, admin)).rejects.toMatchObject({
+      response: { blockedBy: 'gate', blockers },
+    });
+  });
+
   it('answers a refused run with 502', async () => {
     const placement = {
       runRebalance: jest.fn().mockResolvedValue({ status: 'refused', message: 'NOPERM no' }),

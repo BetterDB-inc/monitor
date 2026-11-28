@@ -2,7 +2,7 @@
 // cannot import from the optional proprietary module, so the response shapes
 // are duplicated here. metricType/pattern stay open strings: the server-side
 // enums grow without lockstep frontend releases.
-import type { ServedClusterNodeRef } from '@betterdb/shared';
+import type { PlacementGateResult, ServedClusterNodeRef } from '@betterdb/shared';
 
 export type AnomalySeverity = 'info' | 'warning' | 'critical';
 export type AnomalyType = 'spike' | 'drop';
@@ -201,6 +201,7 @@ export interface RebalancePlan {
   support?: RebalanceSupport;
   commands?: RebalanceCommand[];
   execution?: RebalanceExecution;
+  gate?: PlacementGateResult;
 }
 
 export type RebalanceExecutionBlocker =
@@ -211,7 +212,8 @@ export type RebalanceExecutionBlocker =
   | 'migration_running'
   | 'plan_outdated'
   | 'server_refused'
-  | 'observe_mode';
+  | 'observe_mode'
+  | 'gate';
 
 export interface RebalanceExecution {
   available: boolean;

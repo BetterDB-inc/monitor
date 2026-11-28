@@ -149,6 +149,7 @@ export class PlacementTriggers {
         shards.set(shard.nodeId, shardTrack);
       }
       const weight = Math.min(sample.timestamp - shardTrack.lastAt, staleMs);
+      if (sample.timestamp - shardTrack.lastAt > staleMs) shardTrack.firedAt = null;
       if (!sample.settling && weight > 0) {
         const over = isOver(shard, owning, sustainMedian, sustainTotal, settings);
         addSpan(shardTrack.buckets, sample.timestamp - weight, sample.timestamp, over);

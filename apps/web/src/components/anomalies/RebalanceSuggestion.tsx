@@ -1,7 +1,12 @@
 import { useState } from 'react';
 import { Check, Copy } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
-import { displayKeyName, type PlacementMode } from '@betterdb/shared';
+import {
+  displayKeyName,
+  type PlacementBlocker,
+  type PlacementGateResult,
+  type PlacementMode,
+} from '@betterdb/shared';
 import { ApiError } from '../../api/client';
 import { metricsApi } from '../../api/metrics';
 import { useCanMutate } from '../../hooks/useCanMutate';
@@ -282,31 +287,95 @@ const REFUSED: Record<RebalanceRecheckFailure | 'plan_changed' | 'no_plan', stri
     'The placement policy now excludes a shard or a slot of this suggestion. A new suggestion follows.',
 };
 
-function refusal(err: unknown): string {
-  if (!(err instanceof ApiError)) return err instanceof Error ? err.message : String(err);
-  const payload = (err.payload ?? {}) as { reason?: string; blockedBy?: string; message?: string };
+interface Refusal {
+  message: string;
+  waitedFor?: string;
+}
+
+function refusal(err: unknown): Refusal {
+  if (!(err instanceof ApiError)) {
+    return { message: err instanceof Error ? err.message : String(err) };
+  }
+  const payload = (err.payload ?? {}) as {
+    reason?: string;
+    blockedBy?: string;
+    message?: string;
+    blockers?: PlacementBlocker[];
+  };
   const reason = payload.reason as keyof typeof REFUSED | undefined;
   const blockedBy = payload.blockedBy as RebalanceExecutionBlocker | undefined;
+  if (blockedBy === 'gate' && payload.blockers?.length) {
+    const waitedFor = payload.blockers.map((blocker) => blocker.detail).join(' ');
+    return { message: `Waits for: ${waitedFor}`, waitedFor };
+  }
+  return {
+    message:
+      (reason && REFUSED[reason]) ||
+      (blockedBy && REBALANCE_BLOCKED[blockedBy]) ||
+      payload.message ||
+      err.message,
+  };
+}
+
+function GateWarnings({ gate }: { gate: PlacementGateResult | undefined }) {
+  if (!gate || gate.warnings.length === 0) return null;
   return (
-    (reason && REFUSED[reason]) ||
-    (blockedBy && REBALANCE_BLOCKED[blockedBy]) ||
-    payload.message ||
-    err.message
+    <ul
+      aria-label="Placement warnings"
+      className="list-disc pl-5 text-yellow-600 dark:text-yellow-500"
+    >
+      {gate.warnings.map((warning) => (
+        <li key={`${warning.kind} ${warning.scope} ${warning.nodeId ?? ''} ${warning.detail}`}>
+          {warning.detail}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function WaitsFor({ gate }: { gate: PlacementGateResult }) {
+  return (
+    <div className="space-y-1">
+      <p className="text-muted-foreground">Waits for:</p>
+      <ul aria-label="Placement blockers" className="list-disc pl-5 text-muted-foreground">
+        {gate.blockers.map((blocker) => (
+          <li key={`${blocker.kind} ${blocker.scope} ${blocker.nodeId ?? ''} ${blocker.detail}`}>
+            {blocker.detail}
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
 function RunPlan({ plan, onRun }: { plan: RebalancePlan; onRun: (plan: RebalancePlan) => void }) {
   const canMutate = useCanMutate();
   const execution = plan.execution;
-  if (!execution || !canMutate) return null;
+  if (!execution) return null;
   if (!execution.available) {
     if (!execution.blockedBy || plan.support !== 'valkey_atomic') return null;
+    if (execution.blockedBy === 'gate' && plan.gate?.blockers.length) {
+      return (
+        <div className="space-y-2">
+          <WaitsFor gate={plan.gate} />
+          <GateWarnings gate={plan.gate} />
+        </div>
+      );
+    }
+    if (!canMutate) return null;
     return <p className="text-muted-foreground">{REBALANCE_BLOCKED[execution.blockedBy]}</p>;
   }
+  if (!canMutate && !plan.gate) return null;
   return (
-    <Button size="sm" onClick={() => onRun(plan)}>
-      Run this plan
-    </Button>
+    <div className="space-y-2">
+      {plan.gate?.allowed && <p className="text-muted-foreground">Would run now.</p>}
+      <GateWarnings gate={plan.gate} />
+      {canMutate && (
+        <Button size="sm" onClick={() => onRun(plan)}>
+          Run this plan
+        </Button>
+      )}
+    </div>
   );
 }
 
@@ -330,7 +399,10 @@ function RunDialog({
 }) {
   const queryClient = useQueryClient();
   const [sending, setSending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [refused, setRefused] = useState<(Refusal & { verdicts: number }) | null>(null);
+  const verdicts = () =>
+    queryClient.getQueryState(['open-hot-shards', connectionId])?.dataUpdateCount ?? 0;
+  const verdictSinceRefusal = refused !== null && verdicts() > refused.verdicts;
   const source = shown.projection.find((row) => row.role === 'source');
   const changed = current !== undefined && movesKey(current) !== movesKey(shown);
   const blockedBy = current?.execution?.available === false ? current.execution.blockedBy : undefined;
@@ -338,7 +410,16 @@ function RunDialog({
     ? REFUSED.no_plan
     : changed
       ? REFUSED.plan_changed
-      : blockedBy && REBALANCE_BLOCKED[blockedBy];
+      : blockedBy === 'gate' && current?.gate?.blockers.length
+        ? `Waits for: ${current.gate.blockers.map((blocker) => blocker.detail).join(' ')}`
+        : blockedBy && REBALANCE_BLOCKED[blockedBy];
+  const allowedNow = !changed && current?.execution?.available === true && verdictSinceRefusal;
+  const error =
+    refused?.waitedFor &&
+    (!verdictSinceRefusal || allowedNow || current?.gate) &&
+    refused.message !== notice
+      ? `The last start waited for: ${refused.waitedFor}${allowedNow ? ' The safety checks allow it now.' : ''}`
+      : refused?.message;
   const refresh = () =>
     Promise.all([
       queryClient.invalidateQueries({ queryKey: ['open-hot-shards', connectionId] }),
@@ -346,7 +427,7 @@ function RunDialog({
     ]);
   const run = async () => {
     setSending(true);
-    setError(null);
+    setRefused(null);
     let started = false;
     try {
       await metricsApi.runRebalance(
@@ -355,7 +436,7 @@ function RunDialog({
       );
       started = true;
     } catch (err) {
-      setError(refusal(err));
+      setRefused({ ...refusal(err), verdicts: verdicts() });
     } finally {
       setSending(false);
       await refresh();
@@ -385,6 +466,7 @@ function RunDialog({
               ))}
             </ul>
           )}
+          <GateWarnings gate={changed ? shown.gate : (current?.gate ?? shown.gate)} />
           <p className="text-muted-foreground">
             Cancel stops every slot migration on the hot shard, not only these. Slots already moved
             stay on their target.

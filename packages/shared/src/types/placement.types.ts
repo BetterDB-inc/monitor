@@ -162,8 +162,57 @@ export interface PlacementStatus {
   settings: PlacementSettings;
   policyVersion: number;
   policyInvalid: PlacementPolicyInvalid | null;
+  recommendations: PlacementRecommendation[];
 }
 
+export interface PlacementRecommendation {
+  sourceShardId: string;
+  targetShardIds: string[];
+  gate: PlacementGateResult;
+  execution: { available: boolean; blockedBy?: string };
+}
+
+export type PlacementBlockerKind =
+  | 'unhealthy_node'
+  | 'migration_running'
+  | 'cluster_state'
+  | 'topology_divergence'
+  | 'slot_migration_stuck'
+  | 'orphaned_slot_keys'
+  | 'ghost_membership'
+  | 'budget'
+  | 'paused'
+  | 'unsupported'
+  | 'failover'
+  | 'fork'
+  | 'replication_divergence'
+  | 'latency'
+  | 'incident'
+  | 'excluded'
+  | 'cooldown'
+  | 'no_return'
+  | 'quarantined'
+  | 'outside_window'
+  | 'coverage'
+  | 'incident_history'
+  | 'unknown';
+
+export type PlacementBlockerScope = 'cluster' | 'source' | 'target';
+
+export interface PlacementBlocker {
+  kind: PlacementBlockerKind;
+  scope: PlacementBlockerScope;
+  nodeId?: string;
+  detail: string;
+}
+
+export interface PlacementGateResult {
+  allowed: boolean;
+  blockers: PlacementBlocker[];
+  warnings: PlacementBlocker[];
+}
+
+export type PlacementGatePurpose = 'approve' | 'auto' | 'rollback';
 export interface PlacementPolicySaved extends PlacementStatus {
   exclusionsExpanded: boolean;
   exclusionsExpandProblem: string | null;

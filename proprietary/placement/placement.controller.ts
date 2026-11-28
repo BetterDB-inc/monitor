@@ -29,11 +29,20 @@ function parseMode(body: unknown): PlacementMode | null {
   return PLACEMENT_MODES.includes(mode as PlacementMode) ? (mode as PlacementMode) : null;
 }
 
+const MAX_POLICY_VERSION = 2_147_483_647;
+
 function parsePolicyBody(body: unknown): { policy: unknown; version: number } | null {
   if (typeof body !== 'object' || body === null) return null;
   const { policy, version } = body as { policy?: unknown; version?: unknown };
   if (policy === undefined) return null;
-  if (typeof version !== 'number' || !Number.isInteger(version) || version < 0) return null;
+  if (
+    typeof version !== 'number' ||
+    !Number.isInteger(version) ||
+    version < 0 ||
+    version > MAX_POLICY_VERSION
+  ) {
+    return null;
+  }
   return { policy, version };
 }
 
@@ -65,7 +74,9 @@ export class PlacementController {
   ): Promise<PlacementPolicySaved> {
     const parsed = parsePolicyBody(body);
     if (!parsed) {
-      throw new BadRequestException('policy and a whole version number of 0 or more are required');
+      throw new BadRequestException(
+        'policy and a whole version number from 0 to 2147483647 are required',
+      );
     }
     try {
       return await this.placement.setSettings(connectionId, parsed.policy, parsed.version);

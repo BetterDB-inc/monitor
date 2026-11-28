@@ -152,6 +152,15 @@ import {
   type PlacementPrimaryRead,
 } from '../placement/placement-support';
 import { readPlacementPrimaryFacts } from '../placement/placement-primaries';
+import type { PlacementGateIncident, PlacementGateSignal } from '../placement/placement-gate';
+import type { PlacementIncidentsRead } from '../placement/placement-facts';
+import {
+  PLACEMENT_GATE_EVENT_TYPES,
+  forkOf,
+  pingP50,
+  replicasInSyncOf,
+  type PlacementNodeFacts,
+} from '../placement/placement-facts';
 import {
   type ConfirmedMove,
   type RebalanceCancelResult,
@@ -813,6 +822,60 @@ const NEXT_FIRING_BUDGET_EXHAUSTED = 'lookup budget exhausted';
 const NEXT_FIRING_MIN_REMAINING_MS = 250;
 const NEXT_FIRING_MAX_OUTSTANDING = 5;
 const MAX_INCIDENT_LOOKBACK_MS = INCIDENT_LOOKBACK_MS;
+
+interface IncidentScanCut {
+  cutAt: number | null;
+}
+
+interface CountedPlacementIncident {
+  startedAt: number;
+  lastEventAt: number;
+  anomalyIds: string[];
+  openIds: string[];
+  incident: PlacementGateIncident;
+}
+
+type IncidentReadMode = false | IncidentScanCut;
+
+interface PlacementHistoryGap {
+  from: number;
+  to: number;
+}
+
+interface PlacementIncidentMemory {
+  since: number | null;
+  historyGap: PlacementHistoryGap | null;
+  readAt: number;
+  scope: string[];
+  counted: CountedPlacementIncident[];
+}
+
+type PlacementUnresolvedEvent = (StoredAnomalyEvent | AnomalyEvent) & { connectionId: string };
+
+interface PlacementSignalSource {
+  metricType: string;
+  connectionId: string;
+  timestamp: number;
+  node?: { nodeId: string } | null;
+  nodeAddr?: string | null;
+  replicaAddr?: string | null;
+}
+
+function withoutRecoveredClusterState<
+  T extends { metricType: string; value?: number; timestamp: number },
+>(events: readonly T[]): T[] {
+  const recoveredAt = Math.max(
+    Number.NEGATIVE_INFINITY,
+    ...events
+      .filter((event) => event.metricType === MetricType.CLUSTER_STATE && event.value === 1)
+      .map((event) => event.timestamp),
+  );
+  return events.filter(
+    (event) =>
+      event.metricType !== MetricType.CLUSTER_STATE ||
+      (event.value !== 1 && event.timestamp > recoveredAt),
+  );
+}
 const MAX_INCIDENT_EVENTS_PER_CONNECTION = 200;
 const RETRY_AMP_ATTRIBUTION_TIMEOUT_MS = 5_000;
 const CORRELATION_ID_CHUNK_SIZE = 500;
@@ -1008,6 +1071,13 @@ export class AnomalyService
   private rebalancePolicyResolver: ((seedId: string) => Promise<RebalancePolicy>) | null = null;
   private rebalancePolicyWarned = new Map<string, string>();
   private rebalanceRuns = new Map<string, Map<string, RebalanceRun>>();
+  private replacedRebalanceRuns = new Map<string, RebalanceRun[]>();
+  private placementIncidentReads = new Map<string, PlacementIncidentMemory>();
+  private placementIncidentsReading = new Map<string, Promise<PlacementIncidentsRead>>();
+  private placementUnresolvedReading = new Map<string, Promise<PlacementUnresolvedEvent[]>>();
+  private clusterNodesObserver:
+    | ((connectionId: string, nodes: readonly ClusterNode[], at: number) => void)
+    | null = null;
   private rebalanceStarting = new Set<string>();
   private rebalanceFollowedAt = new Map<string, number>();
   private cancelsInFlight = new Map<string, { count: number; requestedBefore?: number }>();
@@ -1729,6 +1799,9 @@ export class AnomalyService
     this.hotShardRebalance.delete(connectionId);
     this.rebalancePolicyWarned.delete(connectionId);
     this.rebalanceRuns.delete(connectionId);
+    this.replacedRebalanceRuns.delete(connectionId);
+    this.placementIncidentReads.delete(connectionId);
+    this.placementIncidentsReading.delete(connectionId);
     this.rebalanceFollowedAt.delete(connectionId);
     this.slotMigrationReadOnPoll.delete(connectionId);
     this.hotKeyNoteLogged.delete(connectionId);
@@ -2570,6 +2643,15 @@ export class AnomalyService
         }
         if (nodes || !readsTopology) await this.detectSlotMigrations(ctx, timestamp);
         await this.followRebalanceRunsOnPoll(ctx.connectionId, timestamp, nodes);
+        if (nodes) {
+          try {
+            this.clusterNodesObserver?.(ctx.connectionId, nodes, timestamp);
+          } catch (error) {
+            this.logger.warn(
+              `Cluster nodes observer failed for ${ctx.connectionName}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
         if (nodes) {
           // A slot-owning primary with no synced replica (#714). Runs in both
           // topology modes, and is not held back during a rolling update: that
@@ -7192,6 +7274,12 @@ export class AnomalyService
     this.rebalancePolicyResolver = resolve;
   }
 
+  setClusterNodesObserver(
+    observe: ((connectionId: string, nodes: readonly ClusterNode[], at: number) => void) | null,
+  ): void {
+    this.clusterNodesObserver = observe;
+  }
+
   private async rebalancePolicyFor(connectionId: string): Promise<RebalancePolicy> {
     if (!this.rebalancePolicyResolver) return DEFAULT_REBALANCE_POLICY;
     return this.rebalancePolicyResolver(this.seedIdOf(connectionId) ?? connectionId);
@@ -7469,6 +7557,381 @@ export class AnomalyService
           (client) => client.call('COMMAND', 'INFO', 'CLUSTER|MIGRATESLOTS'),
         ),
     });
+  }
+
+  placementPlans(connectionId: string): RebalancePlan[] {
+    return [...(this.hotShardRebalance.get(connectionId)?.values() ?? [])].flatMap((kept) =>
+      kept.verdict.kind === 'plan'
+        ? [{ ...kept.verdict, execution: this.rebalanceExecution(connectionId, kept.verdict) }]
+        : [],
+    );
+  }
+
+  private placementRunsOf(connectionId: string, now: number): RebalanceRun[] {
+    const replaced = (this.replacedRebalanceRuns.get(connectionId) ?? []).filter((run) =>
+      isRunKept(run, now),
+    );
+    if (replaced.length > 0) this.replacedRebalanceRuns.set(connectionId, replaced);
+    else this.replacedRebalanceRuns.delete(connectionId);
+    return [...replaced, ...(this.rebalanceRuns.get(connectionId)?.values() ?? [])];
+  }
+
+  placementMovedShardsSince(connectionId: string, since: number): string[] {
+    const runs = this.placementRunsOf(connectionId, Date.now());
+    return [
+      ...new Set(
+        runs
+          .filter((run) => (run.endedAt ?? Infinity) >= since)
+          .flatMap((run) => [run.sourceShardId, ...run.jobs.map((job) => job.targetShardId)]),
+      ),
+    ];
+  }
+
+  private observedNodeOf(connectionId: string): string | null {
+    return (
+      this.connectionRegistry.getObservedNodeId(connectionId) ??
+      this.connectionRegistry.getConfig(connectionId)?.membership?.nodeId ??
+      null
+    );
+  }
+
+  placementJobsSince(connectionId: string, since: number): number {
+    return this.placementRunsOf(connectionId, Date.now()).reduce(
+      (total, run) => total + (run.startedAt >= since ? run.jobs.length : 0),
+      0,
+    );
+  }
+
+  async placementOpenEvents(connectionId: string): Promise<PlacementGateSignal[]> {
+    const wanted = new Set<string>(PLACEMENT_GATE_EVENT_TYPES);
+    const reads = await Promise.all(
+      this.scopeConnectionIds(connectionId).map((source) => this.placementUnresolvedOf(source)),
+    );
+    return reads.flatMap((events) =>
+      withoutRecoveredClusterState(events.filter((event) => wanted.has(event.metricType))).map(
+        (event) => this.placementSignalOf(event),
+      ),
+    );
+  }
+
+  private placementUnresolvedOf(source: string): Promise<PlacementUnresolvedEvent[]> {
+    const reading = this.placementUnresolvedReading.get(source);
+    if (reading) return reading;
+    const unsavedBefore = this.unsavedUnresolvedEvents(source);
+    const read: Promise<PlacementUnresolvedEvent[]> = this.storedUnresolvedEvents(source)
+      .then((stored) => {
+        const held = new Set(stored.map((event) => event.id));
+        const events: PlacementUnresolvedEvent[] = stored.map((event) => ({
+          ...event,
+          connectionId: source,
+        }));
+        for (const event of [...unsavedBefore, ...this.unsavedUnresolvedEvents(source)]) {
+          if (held.has(event.id)) continue;
+          held.add(event.id);
+          events.push({ ...event, connectionId: source });
+        }
+        return events;
+      })
+      .finally(() => {
+        if (this.placementUnresolvedReading.get(source) === read) {
+          this.placementUnresolvedReading.delete(source);
+        }
+      });
+    this.placementUnresolvedReading.set(source, read);
+    return read;
+  }
+
+  private placementSignalOf(event: PlacementSignalSource): PlacementGateSignal {
+    const address =
+      event.metricType === MetricType.REPLICATION_DIVERGENCE && !event.node
+        ? (event.replicaAddr ?? event.nodeAddr)
+        : event.nodeAddr;
+    return {
+      metricType: event.metricType,
+      nodeId: event.node?.nodeId ?? (address ? null : this.observedNodeOf(event.connectionId)),
+      ...(address ? { address } : {}),
+      openedAt: event.timestamp,
+    };
+  }
+
+  private async storedUnresolvedEvents(source: string): Promise<StoredAnomalyEvent[]> {
+    const stored: StoredAnomalyEvent[] = [];
+    let after: AnomalyEventCursor | undefined;
+    for (;;) {
+      const page = await this.storage.getAnomalyEvents({
+        connectionId: source,
+        resolved: false,
+        limit: OPEN_EVENT_PAGE_SIZE,
+        after,
+      });
+      stored.push(...page);
+      if (page.length < OPEN_EVENT_PAGE_SIZE) return stored;
+      after = page[page.length - 1];
+    }
+  }
+
+  private unsavedUnresolvedEvents(source: string): AnomalyEvent[] {
+    const held = new Map(
+      [...this.recentAnomalies, ...this.persistenceOutbox.unsavedAnomalies()].map((event) => [
+        event.id,
+        event,
+      ]),
+    );
+    return [...held.values()].filter(
+      (event) => !event.persisted && !event.resolved && event.connectionId === source,
+    );
+  }
+
+  placementIncidents(connectionId: string): Promise<PlacementIncidentsRead> {
+    const reading = this.placementIncidentsReading.get(connectionId);
+    if (reading) return reading;
+    const read: Promise<PlacementIncidentsRead> = this.readPlacementIncidents(connectionId)
+      .then(({ incidents, memory }) => {
+        if (this.placementIncidentsReading.get(connectionId) === read) {
+          this.placementIncidentReads.set(connectionId, memory);
+        }
+        return incidents;
+      })
+      .finally(() => {
+        if (this.placementIncidentsReading.get(connectionId) === read) {
+          this.placementIncidentsReading.delete(connectionId);
+        }
+      });
+    this.placementIncidentsReading.set(connectionId, read);
+    return read;
+  }
+
+  private async readPlacementIncidents(
+    connectionId: string,
+  ): Promise<{ incidents: PlacementIncidentsRead; memory: PlacementIncidentMemory }> {
+    const now = Date.now();
+    const hourAgo = now - 60 * 60_000;
+    const monthAgo = now - MAX_INCIDENT_LOOKBACK_MS;
+    const scope = this.scopeConnectionIds(connectionId);
+    const remembered = this.placementIncidentReads.get(connectionId);
+    const earlier =
+      remembered && scope.every((id) => remembered.scope.includes(id)) ? remembered : undefined;
+    const unresolved = Promise.all(scope.map((source) => this.placementUnresolvedOf(source)));
+    unresolved.catch(() => undefined);
+    const from = earlier
+      ? Math.max(monthAgo, Math.min(hourAgo, earlier.since ?? hourAgo))
+      : monthAgo;
+    const scan: IncidentScanCut = { cutAt: null };
+    const incidents = await this.readIncidentTimelines(
+      connectionId,
+      from,
+      undefined,
+      Number.MAX_SAFE_INTEGER,
+      scan,
+    );
+    const visible = incidents
+      .filter(
+        (incident) =>
+          incident.recovery.status !== 'recovered' &&
+          (incident.recovery.openSignals.length > 0 || incident.lastEventAt >= hourAgo),
+      )
+      .map((incident) => this.countedPlacementIncident(incident));
+    const readFrom = scan.cutAt ?? (from > monthAgo ? from : null);
+    const events = readFrom !== null ? await unresolved : [];
+    const rescued =
+      scan.cutAt !== null
+        ? this.placementIncidentsRescued(
+            earlier?.counted ?? [],
+            scan.cutAt,
+            visible,
+            events,
+            hourAgo,
+          )
+        : [];
+    const counted = [...visible, ...rescued];
+    const loose =
+      readFrom !== null
+        ? this.placementLooseIncidents(events, readFrom, counted, { now, hourAgo, monthAgo })
+        : [];
+    const kept =
+      earlier?.historyGap &&
+      earlier.historyGap.to >= monthAgo &&
+      (scan.cutAt !== null || from > earlier.historyGap.from)
+        ? earlier.historyGap
+        : null;
+    const raised =
+      scan.cutAt === null
+        ? null
+        : !earlier
+          ? { from: monthAgo, to: scan.cutAt }
+          : scan.cutAt > earlier.readAt
+            ? { from: earlier.readAt, to: scan.cutAt }
+            : null;
+    const historyGap =
+      kept && raised
+        ? { from: Math.min(kept.from, raised.from), to: Math.max(kept.to, raised.to) }
+        : (kept ?? raised);
+    return {
+      incidents: {
+        incidents: [...counted.map((each) => each.incident), ...loose],
+        historyFrom: historyGap?.to ?? null,
+      },
+      memory: {
+        since: counted.length > 0 ? Math.min(...counted.map((each) => each.startedAt)) : null,
+        historyGap,
+        readAt: now,
+        scope,
+        counted,
+      },
+    };
+  }
+
+  private countedPlacementIncident(incident: IncidentTimeline): CountedPlacementIncident {
+    return {
+      startedAt: incident.startedAt,
+      lastEventAt: incident.lastEventAt,
+      anomalyIds: incident.entries.map((entry) => entry.anomalyId).filter(Boolean),
+      openIds: incident.entries
+        .filter((entry) => entry.recoveryState === 'open' && entry.anomalyId)
+        .map((entry) => entry.anomalyId),
+      incident: this.placementIncidentOf(incident),
+    };
+  }
+
+  private placementIncidentsRescued(
+    earlier: readonly CountedPlacementIncident[],
+    cutAt: number,
+    visible: readonly CountedPlacementIncident[],
+    unresolved: readonly PlacementUnresolvedEvent[][],
+    hourAgo: number,
+  ): CountedPlacementIncident[] {
+    const seen = new Set(visible.flatMap((each) => each.anomalyIds));
+    const open = new Set(unresolved.flat().map((event) => event.id));
+    return earlier.filter(
+      (each) =>
+        each.startedAt < cutAt &&
+        (each.openIds.length > 0
+          ? each.openIds.some((id) => !seen.has(id) && open.has(id))
+          : !each.anomalyIds.some((id) => seen.has(id)) && each.lastEventAt >= hourAgo),
+    );
+  }
+
+  private placementLooseIncidents(
+    unresolved: readonly PlacementUnresolvedEvent[][],
+    readFrom: number,
+    counted: readonly CountedPlacementIncident[],
+    at: { now: number; hourAgo: number; monthAgo: number },
+  ): PlacementGateIncident[] {
+    const seen = new Set(counted.flatMap((each) => each.anomalyIds));
+    return unresolved
+      .flatMap((events) => withoutRecoveredClusterState(events))
+      .filter(
+        (event) =>
+          event.timestamp >= at.monthAgo &&
+          event.timestamp < readFrom &&
+          !seen.has(event.id) &&
+          (event.timestamp >= at.hourAgo ||
+            this.incidentHistoryProbe({
+              connectionId: event.connectionId,
+              metricType: event.metricType as MetricType,
+              since: event.timestamp,
+              until: null,
+              baseline: event.baseline,
+              stdDev: event.stdDev,
+              threshold: event.threshold,
+              now: at.now,
+              kind: event.kind,
+            }) === null),
+      )
+      .map((event) => ({
+        recovery: 'unknown',
+        patterns: [],
+        signals: [this.placementSignalOf(event)],
+      }));
+  }
+
+  private placementIncidentOf(incident: IncidentTimeline): PlacementGateIncident {
+    return {
+      recovery: incident.recovery.status,
+      patterns: [
+        ...incident.matchedPatterns,
+        ...incident.sequenceMatches.map((match) => match.pattern),
+      ],
+      signals: incident.entries
+        .filter((entry) => entry.recoveryState !== 'recovered')
+        .map((entry) => this.placementSignalOf(entry)),
+    };
+  }
+
+  async readPlacementNodeFacts(
+    connectionId: string,
+    shardIds: string[],
+  ): Promise<PlacementNodeFacts> {
+    const discovery = this.clusterDiscovery;
+    if (!discovery || !this.dialsDataNodes(connectionId)) {
+      throw new Error('the monitor does not connect to the cluster nodes directly');
+    }
+    const timeout = AnomalyService.FANOUT_COMMAND_TIMEOUT_MS;
+    const [discovered, report, clusterInfo] = await Promise.all([
+      discovery.discoverNodesIsolated(connectionId, timeout),
+      this.clusterMetrics?.readSlotMigrations(connectionId).catch(() => null) ??
+        Promise.resolve(null),
+      withTimeout(
+        this.connectionRegistry.get(connectionId).getClusterInfo(),
+        timeout,
+        'CLUSTER INFO timed out',
+      ).catch(() => null),
+    ]);
+    const nodes = discovered.map((node) => {
+      const observer = this.connectionRegistry.findIdObservingNode(node.id);
+      return {
+        id: node.id,
+        address: node.address,
+        role: node.role,
+        state: node.state,
+        shardId: node.role === 'master' ? node.id : (node.masterId ?? node.id),
+        collected: observer !== null && !this.connectionRegistry.isOutsideCluster(observer),
+        configEpoch: node.configEpoch,
+      };
+    });
+    const wanted = new Set(shardIds);
+    const read = nodes.filter((node) => wanted.has(node.shardId));
+    const persistence: PlacementNodeFacts['persistence'] = {};
+    const replication: PlacementNodeFacts['replication'] = {};
+    const pingP50Ms: PlacementNodeFacts['pingP50Ms'] = {};
+    await Promise.all(
+      read.map(async (node) => {
+        const [info, ping] = await Promise.all([
+          this.readShard(connectionId, node.id, 'reading INFO on the node timed out', (client) =>
+            client.info('persistence', 'replication'),
+          )
+            .then(
+              (raw) => InfoParser.parse(raw) as Record<string, Record<string, string> | undefined>,
+            )
+            .catch(() => null),
+          this.readShard(connectionId, node.id, 'PING on the node timed out', (client) =>
+            pingP50(client),
+          ).catch(() => null),
+        ]);
+        pingP50Ms[node.id] = ping;
+        persistence[node.id] = info ? forkOf(info.persistence) : null;
+        if (node.role === 'master') {
+          const listed = nodes.filter(
+            (each) => each.role === 'replica' && each.shardId === node.id,
+          ).length;
+          replication[node.id] = info ? replicasInSyncOf(info.replication, listed) : null;
+        }
+      }),
+    );
+    const running =
+      this.rebalanceStarting.has(connectionId) ||
+      [...(this.rebalanceRuns.get(connectionId)?.values() ?? [])].some(
+        (run) => run.state === 'running',
+      );
+    const migration = report ? this.slotMigrationStateOf(connectionId, report) : 'unknown';
+    return {
+      nodes,
+      clusterStateOk: clusterInfo ? clusterInfo.cluster_state === 'ok' : null,
+      migrations: running ? 'running' : migration,
+      persistence,
+      replication,
+      pingP50Ms,
+    };
   }
 
   private async readShardInfo(
@@ -11526,6 +11989,7 @@ export class AnomalyService
     startTime: number | undefined,
     endTime: number | undefined,
     limit: number,
+    strict: IncidentReadMode = false,
   ): Promise<IncidentTimeline[]> {
     const now = Date.now();
     const { maxSpanMs } = DEFAULT_INCIDENT_TIMELINE_OPTIONS;
@@ -11533,7 +11997,12 @@ export class AnomalyService
       startTime ?? (endTime ?? now) - 24 * 60 * 60_000,
       now - MAX_INCIDENT_LOOKBACK_MS,
     );
-    const window = await this.loadIncidentWindow(connectionId, from - 2 * maxSpanMs, endTime);
+    const window = await this.loadIncidentWindow(
+      connectionId,
+      from - 2 * maxSpanMs,
+      endTime,
+      strict,
+    );
     return this.incidentsOf(window, (all) =>
       all
         .filter((t) => t.lastEventAt >= from && (endTime === undefined || t.startedAt <= endTime))
@@ -11587,26 +12056,33 @@ export class AnomalyService
     connectionId: string | undefined,
     rangeStart: number,
     rangeEnd: number | undefined,
+    strict: IncidentReadMode = false,
   ): Promise<IncidentWindow> {
     const now = Date.now();
     const reach = 2 * DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs;
     const end = rangeEnd === undefined ? now : rangeEnd + reach;
     const openEnded = end >= now;
     const endTime = openEnded ? undefined : end;
-    const own = await this.readIncidentBoundaries(connectionId, rangeStart - reach, endTime);
+    const own = await this.readIncidentBoundaries(
+      connectionId,
+      rangeStart - reach,
+      endTime,
+      strict,
+    );
     const earliest = this.earliestCutoff(own, own, rangeStart);
-    const loaded = await this.loadIncidentEvents(connectionId, earliest, endTime);
+    const loaded = await this.loadIncidentEvents(connectionId, earliest, endTime, strict);
     const earlier = await this.earlierScopeBoundaries(
       connectionId,
       loaded,
       rangeStart - reach,
       endTime,
+      strict,
     );
     const boundaries = [...own, ...earlier];
     const earlierFrom = this.earliestCutoff(boundaries, earlier, rangeStart);
     const before =
       earlierFrom < earliest
-        ? await this.loadIncidentEvents(connectionId, earlierFrom, earliest - 1)
+        ? await this.loadIncidentEvents(connectionId, earlierFrom, earliest - 1, strict)
         : [];
     const cutoffs = this.incidentCutoffs(boundaries, rangeStart);
     const events = [...new Map([...before, ...loaded].map((e) => [e.id, e])).values()].filter(
@@ -11634,13 +12110,16 @@ export class AnomalyService
     events: AnomalyEvent[],
     startTime: number,
     endTime: number | undefined,
+    strict: IncidentReadMode = false,
   ): Promise<StoredIncidentBoundary[]> {
     if (!connectionId) return [];
     const scope = this.correlationScopeOf(connectionId);
     const earlierScopes = [...new Set(events.map((e) => e.scopeId))].filter(
       (id): id is string => id !== undefined && id !== scope,
     );
-    return earlierScopes.length > 0 ? this.readBoundariesOf(earlierScopes, startTime, endTime) : [];
+    return earlierScopes.length > 0
+      ? this.readBoundariesOf(earlierScopes, startTime, endTime, strict)
+      : [];
   }
 
   private incidentCutoffs(
@@ -11840,11 +12319,13 @@ export class AnomalyService
     connectionId: string | undefined,
     startTime: number,
     endTime: number | undefined,
+    strict: IncidentReadMode = false,
   ): Promise<StoredIncidentBoundary[]> {
     return this.readBoundariesOf(
       connectionId ? [this.correlationScopeOf(connectionId)] : undefined,
       startTime,
       endTime,
+      strict,
     );
   }
 
@@ -11852,10 +12333,12 @@ export class AnomalyService
     scopeIds: string[] | undefined,
     startTime: number,
     endTime: number | undefined,
+    strict: IncidentReadMode = false,
   ): Promise<StoredIncidentBoundary[]> {
     try {
       return await this.storage.getIncidentBoundaries({ scopeIds, startTime, endTime });
     } catch (err) {
+      if (strict) throw err;
       this.logger.warn(`Failed to read incident boundaries: ${err}`);
       return [];
     }
@@ -11865,9 +12348,10 @@ export class AnomalyService
     connectionId: string | undefined,
     loadFrom: number,
     endTime: number | undefined,
+    strict: IncidentReadMode = false,
   ): Promise<AnomalyEvent[]> {
     const scope = connectionId ? this.scopeFilter(connectionId) : undefined;
-    const stored = await this.storedAnomaliesInRange(scope, loadFrom, endTime);
+    const stored = await this.storedAnomaliesInRange(scope, loadFrom, endTime, strict);
     const members = new Set(scope?.connectionIds);
     const cached = this.recentAnomalies.filter(
       (e) =>
@@ -11913,6 +12397,7 @@ export class AnomalyService
     scope: AnomalyScopeFilter | undefined,
     startTime: number,
     endTime: number | undefined,
+    strict: IncidentReadMode = false,
   ): Promise<AnomalyEvent[]> {
     const events: AnomalyEvent[] = [];
     let after: AnomalyEventCursor | undefined;
@@ -11927,6 +12412,12 @@ export class AnomalyService
       events.push(...page.map((s) => this.storedToAnomalyEvent(s)));
       if (page.length < INCIDENT_HISTORY_PAGE_SIZE) return events;
       after = page[page.length - 1];
+    }
+    if (strict) {
+      strict.cutAt = Math.max(
+        strict.cutAt ?? Number.NEGATIVE_INFINITY,
+        events[events.length - 1].timestamp,
+      );
     }
     this.logger.warn(
       `Incident history for ${scope?.id ?? 'all connections'} stopped at ${events.length} events`,
@@ -12129,6 +12620,15 @@ export class AnomalyService
       const record = () => {
         const run = startRun(plan, startedBy, Date.now(), jobsBefore);
         const runs = this.rebalanceRuns.get(connectionId) ?? new Map<string, RebalanceRun>();
+        const replaced = runs.get(plan.sourceShardId);
+        if (replaced) {
+          this.replacedRebalanceRuns.set(connectionId, [
+            ...(this.replacedRebalanceRuns.get(connectionId) ?? []).filter((each) =>
+              isRunKept(each, run.startedAt),
+            ),
+            { ...replaced, endedAt: replaced.endedAt ?? run.startedAt },
+          ]);
+        }
         runs.set(plan.sourceShardId, run);
         this.rebalanceRuns.set(connectionId, runs);
         this.slotMigrationCheckedAt.delete(connectionId);

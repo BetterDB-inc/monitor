@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import type { PlacementMode } from '@betterdb/shared';
+import type { PlacementBlocker, PlacementMode } from '@betterdb/shared';
 import type {
   HotShardDetail,
   RebalanceNoPlanReason,
@@ -372,6 +372,225 @@ describe('RebalanceSuggestion', () => {
       expect(within(dialog).getByRole('button', { name: 'Start the migration' })).toBeEnabled();
     });
 
+    const fork = {
+      kind: 'fork' as const,
+      scope: 'source' as const,
+      nodeId: SOURCE,
+      detail: '10.0.0.1:6379 is saving to disk in a fork.',
+    };
+    const coverage = {
+      kind: 'coverage' as const,
+      scope: 'target' as const,
+      nodeId: TARGET,
+      detail: 'The monitor does not connect to 10.0.0.4:6379.',
+    };
+
+    it('says the plan would run now and lists the warnings of the gate', async () => {
+      await show([
+        hotShard(
+          plan({
+            execution: { available: true },
+            gate: { allowed: true, blockers: [], warnings: [coverage] },
+          }),
+        ),
+      ]);
+
+      const region = await panel();
+      expect(region).toHaveTextContent('Would run now.');
+      expect(within(region).getByRole('list', { name: 'Placement warnings' })).toHaveTextContent(
+        coverage.detail,
+      );
+      expect(within(region).getByRole('button', { name: 'Run this plan' })).toBeEnabled();
+
+      fireEvent.click(within(region).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+      expect(within(dialog).getByRole('list', { name: 'Placement warnings' })).toHaveTextContent(
+        coverage.detail,
+      );
+    });
+
+    it('lists what the plan waits for while the gate blocks it', async () => {
+      await show([
+        hotShard(
+          plan({
+            execution: { available: false, blockedBy: 'gate' },
+            gate: { allowed: false, blockers: [fork], warnings: [] },
+          }),
+        ),
+      ]);
+
+      const region = await panel();
+      expect(within(region).queryByRole('button', { name: 'Run this plan' })).toBeNull();
+      expect(region).toHaveTextContent('Waits for:');
+      expect(within(region).getByRole('list', { name: 'Placement blockers' })).toHaveTextContent(
+        fork.detail,
+      );
+      expect(region).not.toHaveTextContent('Would run now.');
+    });
+
+    it('names the blockers when the server refuses the start on the gate', async () => {
+      runRebalance.mockRejectedValue(
+        new ApiError('Forbidden', 403, { blockedBy: 'gate', blockers: [fork] }),
+      );
+      await show([hotShard(runnable())]);
+      fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+      getHotShards.mockResolvedValue([
+        hotShard(
+          plan({
+            execution: { available: false, blockedBy: 'gate' },
+            gate: { allowed: false, blockers: [fork], warnings: [] },
+          }),
+        ),
+      ]);
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Start the migration' }));
+
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+        `Waits for: ${fork.detail}`,
+      );
+    });
+
+    const blockedBy = (...blockers: PlacementBlocker[]) =>
+      hotShard(
+        plan({
+          execution: { available: false, blockedBy: 'gate' },
+          gate: { allowed: false, blockers, warnings: [] },
+        }),
+      );
+
+    it('calls a gate refusal the last start once a later verdict allows the plan', async () => {
+      runRebalance.mockRejectedValue(
+        new ApiError('Forbidden', 403, { blockedBy: 'gate', blockers: [fork] }),
+      );
+      const client = await show([hotShard(runnable())]);
+      fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+      getHotShards.mockResolvedValue([blockedBy(fork)]);
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Start the migration' }));
+
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+        `Waits for: ${fork.detail}`,
+      );
+      expect(within(dialog).getByRole('button', { name: 'Start the migration' })).toBeDisabled();
+
+      getHotShards.mockResolvedValue([hotShard(runnable())]);
+      await act(async () => {
+        await client.invalidateQueries();
+      });
+
+      await waitFor(() =>
+        expect(within(dialog).getByRole('alert')).toHaveTextContent(
+          `The last start waited for: ${fork.detail} The safety checks allow it now.`,
+        ),
+      );
+      expect(within(dialog).getByRole('alert')).not.toHaveTextContent(/^Waits for/);
+      expect(within(dialog).getByRole('button', { name: 'Start the migration' })).toBeEnabled();
+    });
+
+    it('says nothing of the checks allowing a refused start until a later verdict lands', async () => {
+      runRebalance.mockRejectedValue(
+        new ApiError('Forbidden', 403, { blockedBy: 'gate', blockers: [fork] }),
+      );
+      await show([hotShard(runnable())]);
+      fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+      let land: (shards: HotShardDetail[]) => void = () => undefined;
+      getHotShards.mockImplementation(() => new Promise((resolve) => (land = resolve)));
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Start the migration' }));
+
+      const alert = await within(dialog).findByRole('alert');
+      expect(alert.textContent).toBe(`The last start waited for: ${fork.detail}`);
+
+      await act(async () => land([hotShard(runnable())]));
+
+      await waitFor(() =>
+        expect(within(dialog).getByRole('alert').textContent).toBe(
+          `The last start waited for: ${fork.detail} The safety checks allow it now.`,
+        ),
+      );
+    });
+
+    it('calls a gate refusal the last start once a later verdict waits for something else', async () => {
+      const failover = {
+        kind: 'failover' as const,
+        scope: 'target' as const,
+        nodeId: TARGET,
+        detail: '10.0.0.4:6379 is failing over.',
+      };
+      runRebalance.mockRejectedValue(
+        new ApiError('Forbidden', 403, { blockedBy: 'gate', blockers: [fork] }),
+      );
+      await show([hotShard(runnable())]);
+      fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+      getHotShards.mockResolvedValue([blockedBy(failover)]);
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Start the migration' }));
+
+      const alert = await within(dialog).findByRole('alert');
+      expect(alert.textContent).toBe(`The last start waited for: ${fork.detail}`);
+      expect(within(dialog).getAllByText(/^Waits for:/)).toHaveLength(1);
+      expect(within(dialog).getByText(`Waits for: ${failover.detail}`)).toBeInTheDocument();
+    });
+
+    it('shows the latest gate warnings while the moves still match', async () => {
+      const client = await show([hotShard(runnable())]);
+      fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+      expect(within(dialog).queryByRole('list', { name: 'Placement warnings' })).toBeNull();
+
+      getHotShards.mockResolvedValue([
+        hotShard(
+          plan({
+            execution: { available: true },
+            gate: { allowed: true, blockers: [], warnings: [coverage] },
+          }),
+        ),
+      ]);
+      await act(async () => {
+        await client.invalidateQueries();
+      });
+
+      expect(
+        await within(dialog).findByRole('list', { name: 'Placement warnings' }),
+      ).toHaveTextContent(coverage.detail);
+    });
+
+    it('keeps the gate warnings of the plan the dialog shows once the plan is replaced', async () => {
+      const elsewhere = { ...coverage, detail: 'The monitor does not connect to 10.0.0.9:6379.' };
+      const client = await show([
+        hotShard(
+          plan({
+            execution: { available: true },
+            gate: { allowed: true, blockers: [], warnings: [coverage] },
+          }),
+        ),
+      ]);
+      fireEvent.click(within(await panel()).getByRole('button', { name: 'Run this plan' }));
+      const dialog = await screen.findByRole('dialog');
+
+      getHotShards.mockResolvedValue([
+        hotShard(
+          plan({
+            execution: { available: true },
+            moves: [{ ...plan().moves[0], ranges: [[5000, 6000]] }],
+            gate: { allowed: true, blockers: [], warnings: [elsewhere] },
+          }),
+        ),
+      ]);
+      await act(async () => {
+        await client.invalidateQueries();
+      });
+
+      await within(dialog).findByRole('button', { name: 'Review the new plan' });
+      const warnings = within(dialog).getByRole('list', { name: 'Placement warnings' });
+      expect(warnings).toHaveTextContent(coverage.detail);
+      expect(warnings).not.toHaveTextContent(elsewhere.detail);
+    });
+
     it('says a running migration holds the plan back', async () => {
       await show([hotShard(plan({ execution: { available: false, blockedBy: 'migration_running' } }))]);
 
@@ -387,6 +606,42 @@ describe('RebalanceSuggestion', () => {
       const region = await panel();
       expect(within(region).queryByRole('button', { name: 'Run this plan' })).toBeNull();
       expect(region).toHaveTextContent('BetterDB does not run it.');
+    });
+
+    it('shows a read-only member the safety checks without a run button', async () => {
+      canMutate.mockReturnValue(false);
+      await show([
+        hotShard(
+          plan({
+            execution: { available: false, blockedBy: 'gate' },
+            gate: { allowed: false, blockers: [fork], warnings: [coverage] },
+          }),
+        ),
+      ]);
+
+      const blocked = await panel();
+      expect(within(blocked).getByRole('list', { name: 'Placement blockers' })).toHaveTextContent(
+        fork.detail,
+      );
+      expect(within(blocked).getByRole('list', { name: 'Placement warnings' })).toHaveTextContent(
+        coverage.detail,
+      );
+      cleanup();
+
+      await show([
+        hotShard(
+          plan({
+            execution: { available: true },
+            gate: { allowed: true, blockers: [], warnings: [coverage] },
+          }),
+        ),
+      ]);
+
+      const runnable = await panel();
+      expect(within(runnable).getByRole('list', { name: 'Placement warnings' })).toHaveTextContent(
+        coverage.detail,
+      );
+      expect(within(runnable).queryByRole('button', { name: 'Run this plan' })).toBeNull();
     });
 
     it('says how to turn running on for a Valkey 9 plan', async () => {

@@ -141,6 +141,7 @@ function status(overrides: Partial<PlacementStatus> = {}): PlacementStatus {
     settings: DEFAULT_PLACEMENT_SETTINGS,
     policyVersion: 3,
     policyInvalid: null,
+    recommendations: [],
     ...overrides,
   };
 }
@@ -478,6 +479,85 @@ describe('PlacementCard', () => {
     );
   });
 
+  it('says whether each suggested move would run now or what it waits for', async () => {
+    const fork = {
+      kind: 'fork' as const,
+      scope: 'target' as const,
+      nodeId: 'c3',
+      detail: '10.0.0.3:6379 is saving to disk in a fork.',
+    };
+    const window = {
+      kind: 'outside_window' as const,
+      scope: 'cluster' as const,
+      detail: 'Outside every maintenance window.',
+    };
+    await show(
+      status({
+        recommendations: [
+          {
+            sourceShardId: 'a1',
+            targetShardIds: ['b2'],
+            gate: { allowed: true, blockers: [], warnings: [window] },
+            execution: { available: true },
+          },
+          {
+            sourceShardId: 'b2',
+            targetShardIds: ['c3'],
+            gate: { allowed: false, blockers: [fork], warnings: [] },
+            execution: { available: true },
+          },
+          {
+            sourceShardId: 'c3',
+            targetShardIds: ['a1'],
+            gate: { allowed: true, blockers: [], warnings: [] },
+            execution: { available: false, blockedBy: 'plan_outdated' },
+          },
+        ],
+      }),
+    );
+
+    const moves = within(await card()).getByRole('list', { name: 'Suggested slot moves' });
+    const [ready, waiting, outdated] = [...moves.children] as HTMLElement[];
+    expect(ready).toHaveTextContent('Move slots from 10.0.0.1:6379 to 10.0.0.2:6379.');
+    expect(ready).toHaveTextContent('Would run now.');
+    expect(within(ready).getByRole('list', { name: 'Placement warnings' })).toHaveTextContent(
+      'Outside every maintenance window.',
+    );
+    expect(waiting).toHaveTextContent('Waits for:');
+    expect(within(waiting).getByRole('list', { name: 'Placement blockers' })).toHaveTextContent(
+      '10.0.0.3:6379 is saving to disk in a fork.',
+    );
+    expect(waiting).not.toHaveTextContent('Would run now.');
+    expect(outdated).toHaveTextContent(
+      'The slots or the nodes changed since this suggestion was made. A new one follows.',
+    );
+    expect(outdated).not.toHaveTextContent('Would run now.');
+  });
+
+  it('names a running slot migration once when the run and the gate both wait for it', async () => {
+    const migrating = {
+      kind: 'migration_running' as const,
+      scope: 'cluster' as const,
+      detail: 'A slot migration is running.',
+    };
+    await show(
+      status({
+        recommendations: [
+          {
+            sourceShardId: 'a1',
+            targetShardIds: ['b2'],
+            gate: { allowed: false, blockers: [migrating], warnings: [] },
+            execution: { available: false, blockedBy: 'migration_running' },
+          },
+        ],
+      }),
+    );
+
+    const moves = within(await card()).getByRole('list', { name: 'Suggested slot moves' });
+    expect(moves.textContent?.match(/A slot migration is running/g)).toHaveLength(1);
+    expect(moves).not.toHaveTextContent('Waits for:');
+  });
+
   it('says when no load has been sampled yet', async () => {
     await show(status({ balance: null }));
 
@@ -506,6 +586,36 @@ describe('PlacementCard', () => {
         timeout: 3000,
       }),
     ).toBeInTheDocument();
+  });
+
+  it('says no move would run now while a refresh fails', async () => {
+    const client = await show(
+      status({
+        recommendations: [
+          {
+            sourceShardId: 'a1',
+            targetShardIds: ['b2'],
+            gate: { allowed: true, blockers: [], warnings: [] },
+            execution: { available: true },
+          },
+        ],
+      }),
+    );
+    expect(await card()).toHaveTextContent('Would run now.');
+
+    get.mockRejectedValue(new ApiError('boom', 500));
+    await act(async () => {
+      await client.invalidateQueries();
+    });
+
+    await screen.findByText('Suggestions in recommend mode, not runnable', undefined, {
+      timeout: 3000,
+    });
+    const region = await card();
+    expect(region).not.toHaveTextContent('Would run now.');
+    expect(region).toHaveTextContent(
+      'The placement status could not be read again, so these checks may be out of date.',
+    );
   });
 
   it('renders nothing without the license or a connection', async () => {

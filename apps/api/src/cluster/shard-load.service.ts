@@ -32,11 +32,13 @@ export class ShardLoadService {
       const minutes = this.sustainMinutes.get(connectionId);
       if (minutes !== undefined) tracker.setSustainMinutes(minutes);
       this.trackers.set(connectionId, tracker);
-      this.notify((listener) => listener.tracking(connectionId));
     }
     const wasTracking = tracker.tracking;
     const sample = tracker.observe(nodes, timestamp);
     this.usage.set(connectionId, tracker.tracking);
+    if (!wasTracking && tracker.tracking) {
+      this.notify((listener) => listener.tracking(connectionId));
+    }
     if (sample) {
       this.latest.set(connectionId, sample);
       this.notify((listener) => listener.sample(connectionId, sample));
