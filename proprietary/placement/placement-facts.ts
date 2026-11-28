@@ -103,7 +103,7 @@ export class PlacementEpochs {
           }
         : node.configEpoch > before.epoch
           ? {
-              shardId: node.shardId,
+              shardId: now >= before.seenAt ? node.shardId : before.shardId,
               epoch: node.configEpoch,
               since: before.since,
               changedAt: ours ? before.changedAt : now,

@@ -1059,6 +1059,31 @@ describe('PlacementService', () => {
         expect(anomaly.readPlacementNodeFacts).toHaveBeenCalledTimes(reads);
       });
 
+      it.each([
+        ['moves to the refused target', 'c', 'b'],
+        ['moves from the refused target', 'b', 'c'],
+        ['moves to the refused source', 'c', 'a'],
+      ])(
+        'drops the listed gate of a plan that %s once a run is refused',
+        async (_, sourceShardId, targetShardId) => {
+          const { service, storage, anomaly } = await setup();
+          await storage.savePlacementMode({
+            connectionId: 'seed',
+            mode: 'recommend',
+            updatedAt: 1,
+          });
+          const listed = listing(sourceShardId, targetShardId);
+          await service.withPlacementBlocker('seed', listed);
+          anomaly.placementOpenEvents.mockResolvedValue([failover]);
+          await service.runRebalance('seed', 'a', moves, actor);
+          const reads = anomaly.readPlacementNodeFacts.mock.calls.length;
+
+          await service.withPlacementBlocker('seed', listed);
+
+          expect(anomaly.readPlacementNodeFacts).toHaveBeenCalledTimes(reads + 1);
+        },
+      );
+
       it('keeps a list read that started before a refused run out of the cache', async () => {
         const { service, storage, anomaly } = await setup();
         await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
@@ -1177,6 +1202,53 @@ describe('PlacementService', () => {
         });
         expect(anomaly.runRebalance).not.toHaveBeenCalled();
         expect(warn).toHaveBeenCalledWith(expect.stringContaining('db down'));
+      });
+
+      it.each([
+        [
+          'an unreadable part of the cluster',
+          (anomaly: Awaited<ReturnType<typeof setup>>['anomaly']) =>
+            anomaly.placementIncidents.mockRejectedValue(new Error('timed out')),
+          'Could not read the open incidents of',
+        ],
+        [
+          'safety checks that cannot run',
+          (anomaly: Awaited<ReturnType<typeof setup>>['anomaly']) =>
+            anomaly.placementJobsSince.mockImplementation(() => {
+              throw new Error('db down');
+            }),
+          'Could not run the placement safety checks of',
+        ],
+      ])('warns of %s at most once a minute for each connection', async (_, fail, prefix) => {
+        const { service, storage, anomaly } = await setup({
+          configs: { ...withMember, other: { id: 'other', host: '10.0.0.9', port: 7009 } },
+        });
+        await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+        await storage.savePlacementMode({ connectionId: 'other', mode: 'recommend', updatedAt: 1 });
+        const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+        fail(anomaly);
+        const warned = () =>
+          warn.mock.calls.map(([message]) => String(message)).filter((m) => m.startsWith(prefix));
+        jest.useFakeTimers({ now: Date.now(), doNotFake: ['nextTick', 'setImmediate'] });
+        try {
+          await service.runRebalance('seed', 'a', moves, actor);
+          await service.runRebalance('seed', 'a', moves, actor);
+          await service.runRebalance('other', 'a', moves, actor);
+          expect(warned()).toEqual([
+            expect.stringContaining(' seed: '),
+            expect.stringContaining(' other: '),
+          ]);
+
+          jest.setSystemTime(Date.now() + 59_999);
+          await service.runRebalance('seed', 'a', moves, actor);
+          expect(warned()).toHaveLength(2);
+          jest.setSystemTime(Date.now() + 1);
+          await service.runRebalance('seed', 'a', moves, actor);
+          expect(warned()).toHaveLength(3);
+        } finally {
+          jest.useRealTimers();
+          warn.mockRestore();
+        }
       });
 
       it('reads the placement policy once for a run', async () => {
@@ -1477,6 +1549,34 @@ describe('PlacementService', () => {
     configs.seed = { id: 'seed', host: '10.0.0.1', port: 7001 };
     await service.getStatus('seed');
     expect(anomaly.readPlacementPrimaries).toHaveBeenCalledTimes(3);
+  });
+
+  it('warns again for a connection removed and added back within the minute', async () => {
+    const { service, storage, anomaly, configs } = await setup({
+      configs: {
+        seed: { id: 'seed', host: '10.0.0.1', port: 7001 },
+        other: { id: 'other', host: '10.0.0.9' },
+      },
+    });
+    await storage.savePlacementMode({ connectionId: 'seed', mode: 'recommend', updatedAt: 1 });
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    anomaly.placementJobsSince.mockImplementation(() => {
+      throw new Error('db down');
+    });
+    const moves = [{ targetShardId: 'b', ranges: [[0, 10]] as [number, number][] }];
+    const actor = { userId: 'u1', email: null };
+    try {
+      await service.runRebalance('seed', 'a', moves, actor);
+      delete configs.seed;
+      await service.getStatus('other');
+      configs.seed = { id: 'seed', host: '10.0.0.1', port: 7001 };
+      await service.runRebalance('seed', 'a', moves, actor);
+      expect(
+        warn.mock.calls.filter(([message]) => String(message).includes('db down')),
+      ).toHaveLength(2);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('caches the node reads for a short while', async () => {

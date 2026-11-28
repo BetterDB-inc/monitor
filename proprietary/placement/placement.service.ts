@@ -74,6 +74,7 @@ const SUPPORT_CACHE_MS = 30_000;
 const POLICY_CACHE_MS = 30_000;
 const SHARD_NODES_TIMEOUT_MS = 2_000;
 const GATE_CACHE_MS = 10_000;
+const WARN_EVERY_MS = 60_000;
 const BUDGET_WINDOW_MS = 60 * 60_000;
 
 export class PlacementModeError extends Error {
@@ -142,7 +143,7 @@ function settingsReadOf(policy: PlacementPolicy | null): PlacementSettingsRead {
 @Injectable()
 export class PlacementService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PlacementService.name);
-  private readonly warnRead = (message: string): void => this.logger.warn(message);
+  private readonly warnedAt = new Map<string, number>();
   private readonly invalidWarned = new Map<string, string>();
   private readonly policyCache = new Map<string, { at: number; policy: PlacementPolicy | null }>();
   private readonly policyGeneration = new Map<string, number>();
@@ -154,11 +155,11 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
   private readonly epochs = new PlacementEpochs();
   private readonly gateCache = new Map<
     string,
-    { at: number; key: string; gate: PlacementGateResult }
+    { at: number; key: string; shardIds: string[]; gate: PlacementGateResult }
   >();
   private readonly gateReads = new Map<
     string,
-    { key: string; read: Promise<PlacementGateResult> }
+    { key: string; shardIds: string[]; read: Promise<PlacementGateResult> }
   >();
   private stopListening: (() => void) | null = null;
 
@@ -429,7 +430,7 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
       { policy: settingsReadOf(policy) },
     ).catch((err: unknown) => this.unreadableGate(connectionId, err));
     if (!gate.allowed) {
-      this.forgetGates(connectionId, shardId);
+      this.forgetGates(connectionId, [shardId, ...targetsOf(confirmed)]);
       return { status: 'blocked', blockedBy: 'gate', blockers: gate.blockers };
     }
     const result = await this.anomaly.runRebalance(connectionId, shardId, confirmed, startedBy);
@@ -484,11 +485,12 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
     purpose: PlacementGatePurpose,
     options: PlacementGateOptions = {},
   ): Promise<PlacementGateResult> {
+    const seedId = this.seedOf(connectionId);
     const read = await readPlacementCluster(
       this.anomaly,
-      this.seedOf(connectionId),
+      seedId,
       [subject.sourceShardId, ...subject.targetShardIds],
-      this.warnRead,
+      this.warnReadOf(seedId),
     );
     return this.judgeGate(connectionId, subject, purpose, read, options);
   }
@@ -554,11 +556,12 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
     const gates = plans.map(known);
     const missing = plans.filter((_, index) => gates[index] === null);
     if (missing.length === 0) return Promise.all(gates as Promise<PlacementGateResult>[]);
+    const clusterId = this.clusterOf(connectionId);
     const cluster = readPlacementCluster(
       this.anomaly,
-      this.clusterOf(connectionId),
+      clusterId,
       missing.flatMap((plan) => [plan.sourceShardId, ...targetsOf(plan.moves)]),
-      this.warnRead,
+      this.warnReadOf(clusterId),
     );
     return Promise.all(
       plans.map((plan, index) => gates[index] ?? this.gateFromCluster(connectionId, plan, cluster)),
@@ -577,11 +580,12 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
       targetShardIds: targetsOf(plan.moves),
       moveCount: plan.moves.length,
     };
+    const shardIds = [subject.sourceShardId, ...subject.targetShardIds];
     const owns = () => this.gateReads.get(cacheKey)?.read === read;
     const read = cluster
       .then((shared) => this.judgeGate(connectionId, subject, 'approve', shared))
       .then((gate) => {
-        if (owns()) this.gateCache.set(cacheKey, { at: Date.now(), key, gate });
+        if (owns()) this.gateCache.set(cacheKey, { at: Date.now(), key, shardIds, gate });
         return gate;
       })
       .catch((err: unknown): PlacementGateResult => {
@@ -591,23 +595,39 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
       .finally(() => {
         if (this.gateReads.get(cacheKey)?.read === read) this.gateReads.delete(cacheKey);
       });
-    this.gateReads.set(cacheKey, { key, read });
+    this.gateReads.set(cacheKey, { key, shardIds, read });
     return read;
   }
 
   private unreadableGate(connectionId: string, err: unknown): PlacementGateResult {
-    this.logger.warn(
+    this.warnSparingly(
+      `${connectionId}\u0000gate`,
       `Could not run the placement safety checks of ${connectionId}: ${err instanceof Error ? err.message : String(err)}`,
     );
     return unreadableGate();
   }
 
-  private forgetGates(connectionId: string, shardId: string): void {
+  private warnReadOf(connectionId: string): (message: string) => void {
+    return (message) => this.warnSparingly(`${connectionId}\u0000read`, message);
+  }
+
+  private warnSparingly(key: string, message: string): void {
+    const now = Date.now();
+    const last = this.warnedAt.get(key);
+    if (last !== undefined && now - last < WARN_EVERY_MS) return;
+    this.warnedAt.set(key, now);
+    this.logger.warn(message);
+  }
+
+  private forgetGates(connectionId: string, shardIds: readonly string[]): void {
     const cluster = this.clusterOf(connectionId);
     for (const cache of [this.gateCache, this.gateReads]) {
-      for (const cacheKey of cache.keys()) {
-        const [listedThrough, sourceShardId] = cacheKey.split('\u0000');
-        if (sourceShardId === shardId && this.clusterOf(listedThrough) === cluster) {
+      for (const [cacheKey, entry] of cache) {
+        const [listedThrough] = cacheKey.split('\u0000');
+        if (
+          entry.shardIds.some((shardId) => shardIds.includes(shardId)) &&
+          this.clusterOf(listedThrough) === cluster
+        ) {
           cache.delete(cacheKey);
         }
       }
@@ -713,7 +733,7 @@ export class PlacementService implements OnModuleInit, OnModuleDestroy {
     for (const connectionId of this.epochs.seeds()) {
       if (!this.registry.getConfig(connectionId)) this.epochs.forget(connectionId);
     }
-    for (const cache of [this.gateCache, this.gateReads]) {
+    for (const cache of [this.gateCache, this.gateReads, this.warnedAt]) {
       for (const cacheKey of cache.keys()) {
         if (!this.registry.getConfig(cacheKey.split('\u0000')[0])) cache.delete(cacheKey);
       }
