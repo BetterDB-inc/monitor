@@ -1680,7 +1680,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   private async ensureActivityActorVia(): Promise<void> {
     if (!this.pool) return;
-    await this.inPlacementTransaction(async (client) => {
+    await this.inTransaction(async (client) => {
       const checks = await client.query(
         `SELECT c.conname, pg_get_constraintdef(c.oid) AS def
          FROM pg_constraint c
@@ -1700,7 +1700,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     });
   }
 
-  private async inPlacementTransaction<T>(work: (client: PoolClient) => Promise<T>): Promise<T> {
+  private async inTransaction<T>(work: (client: PoolClient) => Promise<T>): Promise<T> {
     if (!this.pool) throw new Error('Database not initialized');
     const client = await this.pool.connect();
     try {
@@ -1718,9 +1718,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   private async ensurePlacementPolicies(): Promise<void> {
     if (!this.pool) return;
-    const client = await this.pool.connect();
-    try {
-      await client.query('BEGIN');
+    await this.inTransaction(async (client) => {
       const existed = await client.query(
         `SELECT 1 FROM information_schema.tables
          WHERE table_schema = current_schema() AND table_name = 'placement_policies'`,
@@ -1747,13 +1745,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
           [Date.now()],
         );
       }
-      await client.query('COMMIT');
-    } catch (error) {
-      await client.query('ROLLBACK').catch(() => undefined);
-      throw error;
-    } finally {
-      client.release();
-    }
+    });
   }
 
   private async createSchema(): Promise<void> {
@@ -4917,7 +4909,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     steps: PlacementStep[],
   ): Promise<PlacementAction> {
     assertPlacementSteps(action, steps);
-    return this.inPlacementTransaction(async (client) => {
+    return this.inTransaction(async (client) => {
       const row = await insertPlacementRow(
         client,
         'placement_actions',
@@ -5010,7 +5002,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       ['id', 'connectionId'],
     );
     try {
-      return await this.inPlacementTransaction(async (client) => {
+      return await this.inTransaction(async (client) => {
         const assignments = set.columns.map((column, index) => `${column} = $${index + 1}`);
         const result = await client.query(
           `UPDATE placement_actions SET ${assignments.join(', ')}
@@ -5098,7 +5090,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   async prunePlacementActions(before: number): Promise<number> {
-    return this.inPlacementTransaction(async (client) => {
+    return this.inTransaction(async (client) => {
       const ended = await client.query(
         `DELETE FROM placement_actions
          WHERE state = ANY($1::text[]) AND ended_at IS NOT NULL AND ended_at < $2
