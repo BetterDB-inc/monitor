@@ -103,6 +103,7 @@ import {
   parsePlacementCursor,
   placementCursor,
   placementPageLimit,
+  placementActionToCreate,
   placementPatchEnding,
 } from './placement-action-rows';
 import {
@@ -1546,12 +1547,13 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       throw new Error(`Placement action ${action.id} already exists`);
     }
     assertPlacementSteps(action, steps);
-    this.placementActions.set(action.id, structuredClone(action));
+    const stored = placementActionToCreate(action, Date.now());
+    this.placementActions.set(action.id, structuredClone(stored));
     this.placementSteps.set(
       action.id,
       structuredClone(steps).sort((a, b) => a.index - b.index),
     );
-    return structuredClone(action);
+    return structuredClone(stored);
   }
 
   async getPlacementAction(
@@ -1613,8 +1615,16 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     };
     if (next.state === 'running') {
       const nodeIds = [...new Set(next.clusterNodes)];
-      if (nodeIds.some((nodeId) => (this.placementLocks.get(nodeId)?.actionId ?? id) !== id)) {
+      const free = (holder: string | undefined) =>
+        holder === undefined || holder === id || holder === next.rollbackOf;
+      if (
+        nodeIds.length === 0 ||
+        nodeIds.some((nodeId) => !free(this.placementLocks.get(nodeId)?.actionId))
+      ) {
         return null;
+      }
+      for (const lock of this.placementLocks.values()) {
+        if (next.rollbackOf !== null && lock.actionId === next.rollbackOf) lock.actionId = id;
       }
       const acquiredAt = next.startedAt ?? Date.now();
       for (const nodeId of nodeIds) {

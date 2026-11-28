@@ -36,6 +36,9 @@ import {
   placementFromRow,
   placementStepReadOf,
   placementPageLimit,
+  lostPlacementStart,
+  placementActionToCreate,
+  placementNodesToLock,
   placementPatchEnding,
   PlacementLockTaken,
 } from './placement-action-rows';
@@ -4950,11 +4953,12 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const db = this.db;
     if (!db) throw new Error('Database not initialized');
     assertPlacementSteps(action, steps);
+    const stored = placementActionToCreate(action, Date.now());
     return db.transaction(() => {
       const row = insertPlacementRow(
         db,
         'placement_actions',
-        placementColumns(PLACEMENT_ACTION_COLUMNS, action),
+        placementColumns(PLACEMENT_ACTION_COLUMNS, stored),
       );
       for (const step of steps) {
         insertPlacementRow(db, 'placement_steps', placementColumns(PLACEMENT_STEP_COLUMNS, step));
@@ -5057,8 +5061,15 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         if (!row) return null;
         const action = placementFromRow<PlacementAction>(PLACEMENT_ACTION_COLUMNS, row);
         if (action.state === 'running') {
+          const nodeIds = placementNodesToLock(action);
+          if (action.rollbackOf !== null) {
+            db.prepare('UPDATE placement_locks SET action_id = ? WHERE action_id = ?').run(
+              id,
+              action.rollbackOf,
+            );
+          }
           const acquiredAt = action.startedAt ?? Date.now();
-          for (const nodeId of [...new Set(action.clusterNodes)].sort()) {
+          for (const nodeId of nodeIds) {
             db.prepare(
               'INSERT INTO placement_locks (node_id, action_id, acquired_at) VALUES (?, ?, ?) ON CONFLICT(node_id) DO NOTHING',
             ).run(nodeId, id, acquiredAt);
@@ -5074,7 +5085,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         return action;
       })();
     } catch (error) {
-      if (error instanceof PlacementLockTaken) return null;
+      if (lostPlacementStart(error, patch.state)) return null;
       throw error;
     }
   }

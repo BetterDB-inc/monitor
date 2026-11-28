@@ -36,6 +36,9 @@ import {
   placementFromRow,
   placementStepReadOf,
   placementPageLimit,
+  lostPlacementStart,
+  placementActionToCreate,
+  placementNodesToLock,
   placementPatchEnding,
   PlacementLockTaken,
 } from './placement-action-rows';
@@ -4909,11 +4912,12 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     steps: PlacementStep[],
   ): Promise<PlacementAction> {
     assertPlacementSteps(action, steps);
+    const stored = placementActionToCreate(action, Date.now());
     return this.inTransaction(async (client) => {
       const row = await insertPlacementRow(
         client,
         'placement_actions',
-        placementColumns(PLACEMENT_ACTION_COLUMNS, action),
+        placementColumns(PLACEMENT_ACTION_COLUMNS, stored),
       );
       for (const step of steps) {
         await insertPlacementRow(
@@ -5013,24 +5017,41 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         if (result.rowCount === 0) return null;
         const action = placementFromRow<PlacementAction>(PLACEMENT_ACTION_COLUMNS, result.rows[0]);
         if (action.state === 'running') {
-          const locked = await client.query(
+          const nodeIds = placementNodesToLock(action);
+          if (action.rollbackOf !== null) {
+            await client.query(
+              `UPDATE placement_locks SET action_id = $1
+               WHERE node_id IN (
+                 SELECT node_id FROM placement_locks WHERE action_id = $2 ORDER BY node_id FOR UPDATE
+               )`,
+              [id, action.rollbackOf],
+            );
+          }
+          await client.query(
             `INSERT INTO placement_locks (node_id, action_id, acquired_at)
              SELECT node_id, $2, $3 FROM UNNEST($1::text[]) AS node_id ORDER BY node_id
-             ON CONFLICT (node_id) DO UPDATE SET node_id = EXCLUDED.node_id
-             RETURNING action_id`,
-            [[...new Set(action.clusterNodes)].sort(), id, action.startedAt ?? Date.now()],
+             ON CONFLICT (node_id) DO NOTHING`,
+            [nodeIds, id, action.startedAt ?? Date.now()],
           );
-          if (locked.rows.some((row) => row.action_id !== id)) throw new PlacementLockTaken();
+          const taken = await client.query(
+            'SELECT 1 FROM placement_locks WHERE node_id = ANY($1::text[]) AND action_id <> $2 LIMIT 1',
+            [nodeIds, id],
+          );
+          if ((taken.rowCount ?? 0) > 0) throw new PlacementLockTaken();
         }
         if (PLACEMENT_TERMINAL_STATES.includes(action.state)) {
-          await client.query('DELETE FROM placement_locks WHERE action_id = $1', [id]);
+          await client.query(
+            `DELETE FROM placement_locks
+             WHERE node_id IN (
+               SELECT node_id FROM placement_locks WHERE action_id = $1 ORDER BY node_id FOR UPDATE
+             )`,
+            [id],
+          );
         }
         return action;
       });
     } catch (error) {
-      if (error instanceof PlacementLockTaken || (error as { code?: string }).code === '40P01') {
-        return null;
-      }
+      if (lostPlacementStart(error, patch.state)) return null;
       throw error;
     }
   }

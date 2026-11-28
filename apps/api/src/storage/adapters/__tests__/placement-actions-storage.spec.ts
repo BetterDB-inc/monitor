@@ -50,6 +50,32 @@ async function statementsOf(storage: StoragePort): Promise<() => string[]> {
   return () => [];
 }
 
+async function failStatement(storage: StoragePort, match: string, code: string): Promise<boolean> {
+  const failure = Object.assign(new Error(code), { code });
+  if (storage instanceof SqliteAdapter) {
+    const db = (storage as unknown as { db: { prepare: (sql: string) => unknown } }).db;
+    const prepare = db.prepare.bind(db);
+    jest.spyOn(db, 'prepare').mockImplementation((sql: string) => {
+      if (sql.includes(match)) throw failure;
+      return prepare(sql);
+    });
+    return true;
+  }
+  if (storage instanceof PostgresAdapter) {
+    await (storage as unknown as { indexBuild: Promise<void> | null }).indexBuild;
+    const query = Client.prototype.query;
+    jest.spyOn(Client.prototype, 'query').mockImplementation(function (
+      this: Client,
+      ...args: unknown[]
+    ) {
+      if (String(args[0]).includes(match)) return Promise.reject(failure);
+      return (query as (...each: unknown[]) => unknown).apply(this, args);
+    } as never);
+    return true;
+  }
+  return false;
+}
+
 async function plantLock(storage: StoragePort, nodeId: string, actionId: string): Promise<void> {
   if (storage instanceof SqliteAdapter) {
     const db = (
@@ -332,6 +358,104 @@ describe.each([
     expect(await start('blocked')).toBeNull();
   });
 
+  it.each(['running', 'verifying', 'rolling_back', 'aborted_pending'] as const)(
+    'refuses to create an action already %s, storing nothing',
+    async (state) => {
+      await expect(storage.createPlacementAction(action('a1', { state }), [])).rejects.toThrow(
+        /a1/,
+      );
+      expect(await storage.getPlacementAction('a1')).toBeNull();
+    },
+  );
+
+  it('refuses to start an action with no nodes to lock, so it never runs unlocked', async () => {
+    await approved('a1', []);
+    await approved('a2', []);
+
+    expect(await start('a1')).toBeNull();
+    expect(await stateOf('a1')).toBe('approved');
+    expect(await start('a2')).toBeNull();
+  });
+
+  it('answers a start that loses the lock race to the database with null, keeping it approved', async () => {
+    await approved('a1', ['n1']);
+    const busy = storage instanceof PostgresAdapter ? '40P01' : 'SQLITE_BUSY';
+    if (!(await failStatement(storage, 'INSERT INTO placement_locks', busy))) return;
+
+    expect(await start('a1')).toBeNull();
+    jest.restoreAllMocks();
+    expect(await stateOf('a1')).toBe('approved');
+  });
+
+  it('throws when the database fails any move other than a start', async () => {
+    await approved('a1', ['n1']);
+    await start('a1');
+    const busy = storage instanceof PostgresAdapter ? '40P01' : 'SQLITE_BUSY';
+    if (!(await failStatement(storage, 'placement_locks', busy))) return;
+
+    await expect(
+      storage.transitionPlacementAction('a1', ['running'], { state: 'failed', endedAt: 9 }),
+    ).rejects.toMatchObject({ code: busy });
+    jest.restoreAllMocks();
+    expect(await stateOf('a1')).toBe('running');
+  });
+
+  const rollingBack = async (id: string, clusterNodes: string[]) => {
+    await approved(id, clusterNodes);
+    await start(id);
+    await storage.transitionPlacementAction(id, ['running'], { state: 'verifying' });
+    await storage.transitionPlacementAction(id, ['verifying'], { state: 'rolling_back' });
+  };
+  const rollback = (id: string, of: string, clusterNodes: string[]) =>
+    storage.createPlacementAction(
+      action(id, { kind: 'rollback', state: 'approved', rollbackOf: of, clusterNodes }),
+      [],
+    );
+
+  it('hands the locks of the action being rolled back to its rollback as it starts', async () => {
+    await rollingBack('x', ['n1', 'n2']);
+    await rollback('r', 'x', ['n2', 'n1', 'n3']);
+    await approved('other', ['n1']);
+
+    expect(await start('r')).toMatchObject({ state: 'running' });
+    expect(await stateOf('x')).toBe('rolling_back');
+    expect(await start('other')).toBeNull();
+    expect(await storage.freeOrphanedPlacementLocks()).toBe(0);
+  });
+
+  it('keeps the locks of a rollback when the action it rolls back ends', async () => {
+    await rollingBack('x', ['n1', 'n2']);
+    await rollback('r', 'x', ['n1', 'n2']);
+    await start('r');
+    await approved('other', ['n2']);
+
+    await storage.transitionPlacementAction('x', ['rolling_back'], {
+      state: 'rolled_back',
+      endedAt: 9,
+    });
+    expect(await start('other')).toBeNull();
+
+    await storage.transitionPlacementAction('r', ['running'], { state: 'succeeded', endedAt: 10 });
+    expect(await start('other')).toMatchObject({ state: 'running' });
+  });
+
+  it('takes no locks of another action for a rollback of a different one', async () => {
+    await rollingBack('x', ['n1']);
+    await approved('y', ['n2']);
+    await start('y');
+    await rollback('r', 'x', ['n1', 'n2']);
+
+    expect(await start('r')).toBeNull();
+    expect(await stateOf('r')).toBe('approved');
+    await approved('other', ['n1']);
+    expect(await start('other')).toBeNull();
+    await storage.transitionPlacementAction('x', ['rolling_back'], {
+      state: 'rolled_back',
+      endedAt: 9,
+    });
+    expect(await start('other')).toMatchObject({ state: 'running' });
+  });
+
   it('refuses a step of another action, storing nothing', async () => {
     await expect(
       storage.createPlacementAction(action('a1'), [step('a1', 0), step('a2', 1)]),
@@ -383,9 +507,9 @@ describe.each([
   it('lists the open actions of every connection', async () => {
     const states: PlacementActionState[] = [
       'proposed',
-      'running',
+      'approved',
       'succeeded',
-      'rolling_back',
+      'approved',
       'rejected',
     ];
     for (const [index, state] of states.entries()) {
@@ -394,6 +518,7 @@ describe.each([
         [],
       );
     }
+    await storage.transitionPlacementAction('a3', ['approved'], { state: 'running' });
     const open = await storage.listOpenPlacementActions();
     expect(open.map((each) => each.id).sort()).toEqual(['a0', 'a1', 'a3']);
   });
@@ -531,7 +656,7 @@ describe.each([
       ],
     );
     await storage.createPlacementAction(
-      action('active', { state: 'running', startedAt: hourAgo + 500 }),
+      action('active', { state: 'approved', startedAt: hourAgo + 500 }),
       [step('active', 0, { state: 'running', sendingAt: hourAgo + 500 }), step('active', 1)],
     );
     await storage.createPlacementAction(
@@ -609,6 +734,28 @@ describe.each([
     expect(await storage.prunePlacementActions(Date.now() + 1)).toBe(1);
   });
 
+  it.each(['rejected', 'expired'] as const)(
+    'stamps the end of an action created already %s, so it can be pruned',
+    async (state) => {
+      const before = Date.now();
+
+      const created = await storage.createPlacementAction(action('a1', { state }), []);
+
+      expect(created.endedAt).toBeGreaterThanOrEqual(before);
+      expect(created.endedAt).toBeLessThanOrEqual(Date.now());
+      expect((await storage.getPlacementAction('a1'))?.action.endedAt).toBe(created.endedAt);
+      expect(await storage.prunePlacementActions(Date.now() + 1)).toBe(1);
+    },
+  );
+
+  it('keeps the end an ended action is created with, and stamps none on an open one', async () => {
+    expect(
+      (await storage.createPlacementAction(action('a1', { state: 'failed', endedAt: 7 }), []))
+        .endedAt,
+    ).toBe(7);
+    expect((await storage.createPlacementAction(action('a2'), [])).endedAt).toBeNull();
+  });
+
   it('keeps the end a terminal move gives, and stamps none on an open move', async () => {
     await storage.createPlacementAction(action('a1'), []);
 
@@ -624,7 +771,7 @@ describe.each([
     await storage.createPlacementAction(action('old', { state: 'succeeded', endedAt: 100 }), [
       step('old', 0, { state: 'done', sendingAt: 50, endedAt: 90 }),
     ]);
-    await storage.createPlacementAction(action('open', { state: 'running', createdAt: 10 }), [
+    await storage.createPlacementAction(action('open', { state: 'approved', createdAt: 10 }), [
       step('open', 0, { state: 'sending', sendingAt: 20 }),
     ]);
     await storage.createPlacementAction(action('recent', { state: 'failed', endedAt: 900 }), []);

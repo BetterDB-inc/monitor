@@ -3,6 +3,7 @@ import {
   PLACEMENT_TERMINAL_STATES,
   type PlacementAction,
   type PlacementActionPatch,
+  type PlacementActionState,
   type PlacementStep,
   type PlacementStepRead,
 } from '@betterdb/shared';
@@ -162,3 +163,35 @@ export function parsePlacementCursor(cursor: string): { createdAt: number; id: s
 }
 
 export class PlacementLockTaken extends Error {}
+
+const PLACEMENT_LOCKING_STATES: readonly PlacementActionState[] = [
+  'running',
+  'verifying',
+  'rolling_back',
+  'aborted_pending',
+];
+
+export function placementActionToCreate(action: PlacementAction, now: number): PlacementAction {
+  if (PLACEMENT_LOCKING_STATES.includes(action.state)) {
+    throw new Error(
+      `Placement action ${action.id} cannot be created ${action.state}: only starting it takes its node locks`,
+    );
+  }
+  return { ...action, ...placementPatchEnding(action, now) };
+}
+
+export function placementNodesToLock(action: Pick<PlacementAction, 'clusterNodes'>): string[] {
+  const nodeIds = [...new Set(action.clusterNodes)].sort();
+  if (nodeIds.length === 0) throw new PlacementLockTaken();
+  return nodeIds;
+}
+
+export function lostPlacementStart(error: unknown, state: PlacementActionState): boolean {
+  if (error instanceof PlacementLockTaken) return true;
+  const code = (error as { code?: unknown } | null)?.code;
+  return (
+    state === 'running' &&
+    typeof code === 'string' &&
+    (code === '40P01' || code.startsWith('SQLITE_BUSY'))
+  );
+}
